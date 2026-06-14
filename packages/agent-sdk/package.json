@@ -1,0 +1,46 @@
+{
+  "name": "@modelstat/agent-sdk",
+  "version": "0.0.1",
+  "description": "Sanitize, compact, and upload AI session data to modelstat — privacy-first SDK + CLI for the @modelstat/agent daemon and any third-party tool.",
+  "keywords": ["modelstat", "ai", "llm", "observability", "redact", "pii", "telemetry", "agent"],
+  "homepage": "https://modelstat.ai/docs/agent-quickstart",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/modelstat/modelstat.git",
+    "directory": "packages/agent-sdk"
+  },
+  "bugs": "https://github.com/modelstat/modelstat/issues",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs"
+    },
+    "./redact": {
+      "types": "./dist/redact.d.ts",
+      "import": "./dist/redact.mjs"
+    },
+    "./compact": {
+      "types": "./dist/compact.d.ts",
+      "import": "./dist/compact.mjs"
+    }
+  },
+  "bin": {
+    "modelstat-agent": "./dist/cli.mjs"
+  },
+  "files": ["dist/**/*", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsup src/index.ts src/redact.ts src/compact.ts src/cli.ts --format esm --out-dir dist --clean --dts",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

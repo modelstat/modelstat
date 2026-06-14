@@ -1,0 +1,24 @@
+{
+  "name": "status-code-fix",
+  "tool": "claude_code",
+  "git_remote_slug": "acme-co/vortex-router",
+  "git_branch": "claude/safe-meadow",
+  "excerpts": [
+    "please check that we're not sending non-200 status codes for protocol calls — downstream indexers never expect them unless 5xx; i remember we already solved this but maybe one slipped through; if you need access to the endpoint for test calls let me know",
+    "found the issue: ErrPayloadTooLarge (triggered by error_normalizer detecting 'window over max' in the upstream's -50301 message) is mapped to HTTP 413 in two places in api/server.ts",
+    "this is wrong because window-too-wide is an application error not a transport error — the upstream returns HTTP 200 with the error in the body, the gateway should do the same; downstream indexer sees HTTP 413 and treats it as a transport failure instead of parsing the error and retrying with a smaller window",
+    "removed the 413 mapping from determineResponseStatus (line 612) and handleErrorResponse (line 871) in api/server.ts; verified no tests pin the 413 behaviour and the existing split-on-error path already expects HTTP 200",
+    "tsc --noEmit passes clean; committing as 'fix: return HTTP 200 for application-level payload-too-large errors' and pushing claude/safe-meadow, then opening PR via gh pr create",
+    "PR #214 opened on github.com/acme-co/vortex-router with the fix"
+  ],
+  "reference_summary": "Fixed vortex-router bug where ErrPayloadTooLarge was mapped to HTTP 413 in two spots in api/server.ts (determineResponseStatus + handleErrorResponse), causing downstream indexers to treat the application-level window-too-wide error as a transport failure instead of parsing it and retrying with a smaller window; removed both 413 mappings, build clean, opened PR #214 on the claude/safe-meadow branch.",
+  "expected_keywords": [
+    "vortex-router",
+    "HTTP 413",
+    "api/server.ts",
+    "PayloadTooLarge",
+    "indexer",
+    "PR"
+  ],
+  "notes": "Synthetic fixture inspired by a real status-code bug. Names (vortex-router, ErrPayloadTooLarge, safe-meadow branch) are invented."
+}

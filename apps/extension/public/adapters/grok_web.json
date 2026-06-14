@@ -1,0 +1,58 @@
+{
+  "protocol_version": 1,
+  "provider": "grok_web",
+  "vendor": "xai",
+  "adapter_version": 1,
+  "match": ["https://grok.com/*", "https://x.com/i/grok/*"],
+  "default_model": "grok-3",
+  "extractors": {
+    "conversation_id": [
+      { "kind": "url.regexGroup", "pattern": "/chat/([A-Za-z0-9_-]+)", "group": 1 },
+      { "kind": "url.regexGroup", "pattern": "conversation=([A-Za-z0-9_-]+)", "group": 1 }
+    ],
+    "model": [
+      {
+        "kind": "network.requestJsonPath",
+        "urlPattern": ".*/conversation.*",
+        "method": "POST",
+        "path": "$.modelName"
+      },
+      {
+        "kind": "network.responseJsonPath",
+        "urlPattern": ".*/conversation.*",
+        "sse": true,
+        "path": "$.result.response.modelName"
+      }
+    ],
+    "messages": [
+      {
+        "kind": "network.responseJsonPath",
+        "urlPattern": ".*/conversation.*",
+        "sse": true,
+        "messageIdPath": "$.result.response.messageId",
+        "rolePath": "$.result.response.sender",
+        "textPath": "$.result.response.token",
+        "usageFields": {
+          "input": "$.result.response.finalMetadata.inputTokens",
+          "output": "$.result.response.finalMetadata.outputTokens"
+        }
+      },
+      {
+        "kind": "dom.observe",
+        "selector": "[data-testid='messageBubble']",
+        "idAttr": "data-message-id",
+        "roleAttr": "data-sender",
+        "roleDefault": "assistant"
+      }
+    ]
+  },
+  "tokenizer": {
+    "default": "grok/heuristic",
+    "byModel": {
+      "grok-*": "grok/heuristic"
+    }
+  },
+  "invariants": [
+    { "kind": "dom.minCount", "selector": "main", "min": 1 }
+  ]
+}

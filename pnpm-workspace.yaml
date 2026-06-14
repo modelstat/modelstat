@@ -1,0 +1,16 @@
+packages:
+  - "apps/agent-dev"
+  - "apps/extension"
+  - "packages/adapters-protocol"
+  - "packages/agent-sdk"
+  - "packages/companion-core"
+  - "packages/core"
+  - "packages/mcp"
+  - "packages/parsers"
+  - "packages/pricing"
+
+onlyBuiltDependencies:
+  - "better-sqlite3"
+  - "esbuild"
+  - "@biomejs/biome"
+  - "@tailwindcss/oxide"

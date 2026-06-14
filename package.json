@@ -1,0 +1,74 @@
+{
+  "name": "modelstat",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Companion source for modelstat — the Node CLI, Chrome extension, macOS tray, and shared packages that produce the binaries published to npm, the Chrome Web Store, and Homebrew. Build from source if you prefer to audit what runs on your machine.",
+  "homepage": "https://modelstat.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/modelstat/modelstat.git"
+  },
+  "bugs": "https://github.com/modelstat/modelstat/issues",
+  "license": "SEE LICENSE IN LICENSE",
+  "keywords": [
+    "ai-cost-tracking",
+    "llm-observability",
+    "token-tracking",
+    "claude-code",
+    "cursor",
+    "codex",
+    "aider",
+    "copilot",
+    "cline",
+    "continue",
+    "modelstat",
+    "mcp",
+    "mcp-server",
+    "finops",
+    "chrome-extension"
+  ],
+  "packageManager": "pnpm@10.7.1",
+  "engines": {
+    "node": ">=20.18.0",
+    "pnpm": ">=10.7.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rm -rf node_modules .turbo",
+    "agent:build": "pnpm --filter @modelstat/agent build",
+    "agent:pack": "pnpm --filter @modelstat/agent pack:tarball",
+    "agent:install-local": "pnpm --filter @modelstat/agent install:local",
+    "extension:dev": "pnpm --filter @modelstat/extension dev",
+    "extension:build": "pnpm --filter @modelstat/extension build",
+    "extension:typecheck": "pnpm --filter @modelstat/extension typecheck",
+    "extension:test": "pnpm --filter @modelstat/extension test",
+    "extension:zip": "pnpm --filter @modelstat/extension build && pnpm --filter @modelstat/extension zip",
+    "mcp:build": "pnpm --filter @modelstat/mcp build",
+    "mcp:dev": "pnpm --filter @modelstat/mcp dev",
+    "tray-mac:build": "cd apps/tray-mac && swift build -c release"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@biomejs/biome",
+      "@tailwindcss/oxide",
+      "node-llama-cpp"
+    ],
+    "peerDependencyRules": {
+      "ignoreMissing": [
+        "better-sqlite3"
+      ]
+    }
+  }
+}

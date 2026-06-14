@@ -1,0 +1,10 @@
+{
+  "name": "modelstat",
+  "version": "0.1.0",
+  "description": "/stat — charts of your AI usage (spend, tokens, models, current session) powered by modelstat. Bundles the modelstat MCP server.",
+  "author": { "name": "modelstat", "url": "https://modelstat.ai" },
+  "homepage": "https://modelstat.ai/dashboard/mcp",
+  "repository": "https://github.com/modelstat/modelstat",
+  "license": "MIT",
+  "keywords": ["usage", "tokens", "cost", "analytics", "charts", "mcp"]
+}

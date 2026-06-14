@@ -1,0 +1,51 @@
+{
+  "name": "@modelstat/mcp",
+  "version": "0.0.2",
+  "description": "MCP server for modelstat — ask any MCP-compatible AI tool about your token spend.",
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "modelstat",
+    "ai",
+    "observability",
+    "token-tracking"
+  ],
+  "homepage": "https://modelstat.ai/mcp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/modelstat/modelstat.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": "https://github.com/modelstat/modelstat/issues",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "modelstat-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --out-dir dist --clean --no-splitting --minify",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "prepack": "pnpm build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

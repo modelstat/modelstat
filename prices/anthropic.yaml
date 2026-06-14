@@ -1,0 +1,34 @@
+# Placeholder Anthropic price table. Numbers are fake round values.
+# See prices/README.md — real rates live elsewhere and will be
+# redesigned before shipping.
+
+provider: anthropic
+models:
+  - id: claude-opus-4-6
+    aliases:
+      - claude-opus-4-6-20251007
+      - "claude-opus-4-6[1m]"
+    history:
+      - effective_date: 2025-01-01
+        input: 1.00
+        output: 5.00
+        cache_read: 0.10
+        cache_write: 1.25
+  - id: claude-sonnet-4-6
+    aliases:
+      - claude-sonnet-4-6-20251015
+      - "claude-sonnet-4-6[1m]"
+    history:
+      - effective_date: 2025-01-01
+        input: 1.00
+        output: 5.00
+        cache_read: 0.10
+        cache_write: 1.25
+  - id: claude-haiku-4-5
+    aliases: [claude-haiku-4-5-20251001]
+    history:
+      - effective_date: 2025-01-01
+        input: 1.00
+        output: 5.00
+        cache_read: 0.10
+        cache_write: 1.25

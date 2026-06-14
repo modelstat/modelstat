@@ -1,0 +1,20 @@
+{
+  "name": "modelstat",
+  "owner": { "name": "modelstat", "url": "https://modelstat.ai" },
+  "metadata": {
+    "description": "Usage analytics for your AI tools — charts and session insights inside Claude Code.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "modelstat",
+      "source": "./apps/claude-plugin",
+      "description": "/stat — charts of your AI usage (spend, tokens, models, current session) powered by modelstat. Bundles the modelstat MCP server.",
+      "author": { "name": "modelstat", "url": "https://modelstat.ai" },
+      "homepage": "https://modelstat.ai/dashboard/mcp",
+      "license": "MIT",
+      "keywords": ["usage", "tokens", "cost", "analytics", "charts", "mcp"],
+      "category": "productivity"
+    }
+  ]
+}

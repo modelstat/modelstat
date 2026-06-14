@@ -1,0 +1,28 @@
+{
+  "name": "cache-redis-replace",
+  "tool": "claude_code",
+  "git_remote_slug": "acme-co/blockcache-deployments",
+  "git_branch": "main",
+  "excerpts": [
+    "let's actually dig into this redis issue — i don't expect so many failures; what is the bottleneck and why can't redis keep up — code, config, or trade-off",
+    "Render.io logs show blockcache machines restarting with Node panics (exit_code=1); CoordinationLock shows ~62 of every 100 log lines failing on distributed locks coordinating cursor/checkpoint across 9 blockcache instances",
+    "RemoteRedis writes are landing in the 180-310ms range, well past the lockMaxWait default of 80ms in /Users/jane/work/blockcache/protocol/defaults.ts; throttle timeouts (40ms) are firing on 88 of 100 lines",
+    "doesn't option 1 already have defaults in blockcache source code? — checking protocol/defaults.ts for lockTtl/lockMaxWait/updateMaxWait values that we can override per environment",
+    "what would be a good machine size to test this redis type theory? which region has the highest command/second so we get a real signal — standard-3 (3 CPU 6GB) in FRA and PDX for a real A/B against RemoteRedis",
+    "deploy a dedicated blockcache-redis app on Render: redis 7 alpine, redis.conf binds 0.0.0.0 and ::, no persistence (save=\"\", appendonly no), maxmemory 4gb with LRU eviction; DB 0 for CoordinationLock and DB 1 for throttle",
+    "Render internal DNS returns all machines' v6 addrs but the node-redis client picks one and caches; with single-family bind all 9 blockcache instances ended up routed to the FRA Redis only — fix is to bind both v4 and v6, then consolidate to FRA+PDX",
+    "after the cutover CoordinationLock failures went 62→0 and throttle timeouts 88→48 (residual is cross-region latency over the 40ms threshold); destroying the old blockcache-shared-state app and tightening lockTtl=25s, lockMaxWait=180ms, updateMaxWait=1.5s in edge-prod-multi-region.ts so instances fail fast and fall back to local state on Redis unavailability"
+  ],
+  "reference_summary": "Replaced RemoteRedis (180-310ms writes were exceeding blockcache's 80ms lockMaxWait, panicking 9 instances on CoordinationLock contention) with a dedicated blockcache-redis Render app — standard-3 in FRA+PDX, redis.conf bound to v4+v6, no persistence, DB 0 for shared state and DB 1 for throttle — and rewired edge-prod-multi-region.ts; CoordinationLock failures dropped 62→0/100 lines and the old blockcache-shared-state app was destroyed.",
+  "expected_keywords": [
+    "blockcache",
+    "Redis",
+    "Render",
+    "lockMaxWait",
+    "CoordinationLock",
+    "throttle",
+    "FRA",
+    "standard-3"
+  ],
+  "notes": "Synthetic fixture inspired by a real Redis-bottleneck remediation. Names (blockcache, Render, RemoteRedis, FRA/PDX, standard-3) are invented."
+}

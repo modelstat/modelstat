@@ -1,0 +1,58 @@
+{
+  "protocol_version": 1,
+  "provider": "claude_web",
+  "vendor": "anthropic",
+  "adapter_version": 1,
+  "match": ["https://claude.ai/*"],
+  "default_model": "claude-sonnet-4-6",
+  "extractors": {
+    "conversation_id": [
+      { "kind": "url.regexGroup", "pattern": "/chat/([a-f0-9-]+)", "group": 1 }
+    ],
+    "model": [
+      {
+        "kind": "network.responseJsonPath",
+        "urlPattern": ".*/completion.*",
+        "sse": true,
+        "path": "$.model"
+      },
+      {
+        "kind": "network.requestJsonPath",
+        "urlPattern": ".*/completion.*",
+        "method": "POST",
+        "path": "$.model"
+      },
+      {
+        "kind": "dom.selector.text",
+        "selector": "[data-testid='model-selector-dropdown'] span"
+      }
+    ],
+    "messages": [
+      {
+        "kind": "network.responseJsonPath",
+        "urlPattern": ".*/completion.*",
+        "sse": true,
+        "messageIdPath": "$.message.uuid",
+        "rolePath": "$.message.sender",
+        "textPath": "$.completion",
+        "usagePath": "$.message.usage"
+      },
+      {
+        "kind": "dom.observe",
+        "selector": "[data-test-render-count]",
+        "idAttr": "data-test-render-count",
+        "roleDefault": "assistant",
+        "textSelector": "div.prose, div[class*=prose], div"
+      }
+    ]
+  },
+  "tokenizer": {
+    "default": "anthropic/approx",
+    "byModel": {
+      "claude-*": "anthropic/approx"
+    }
+  },
+  "invariants": [
+    { "kind": "dom.minCount", "selector": "main", "min": 1 }
+  ]
+}

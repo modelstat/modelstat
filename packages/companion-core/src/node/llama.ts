@@ -1,0 +1,464 @@
+/**
+ * Bundled local-LLM summariser for the Node CLI — runs a local Qwen3
+ * GGUF via `node-llama-cpp` so the agent produces real content
+ * abstracts even when the user has no Ollama installed.
+ *
+ *   model       : Qwen3.5-4B-Q4_K_M.gguf (~2.7 GB, 4-bit quantised) — the
+ *                 most capable Qwen that ships to a laptop (~2 GB class);
+ *                 lands near Qwen2.5-32B on summarisation.
+ *   download    : lazy on first call → cached at ~/.modelstat/models/
+ *   inference   : ~0.5–3 s / segment (Metal/CPU-dependent; 4B is heavier
+ *                 than the old 0.6B but far higher quality)
+ *   contract    : same Summarizer signature as ollamaSummarize
+ *
+ * `node-llama-cpp` ships prebuilt native binaries per platform via npm,
+ * so we declare it as an optional peerDependency here and a real
+ * dependency in the agent CLI. Imports are dynamic so a companion that
+ * doesn't have the package installed (e.g. the bundled service when
+ * node_modules isn't beside the bundle) silently falls through to the
+ * next adapter in the chain — see apps/agent-dev/src/pipeline.ts.
+ */
+import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import {
+  SUMMARISER_SYSTEM_PROMPT,
+  SUMMARISER_TEMPERATURE,
+} from "../pipeline/prompts.js";
+import {
+  buildCognitionUserPrompt,
+  COGNITION_MAX_TOKENS,
+  COGNITION_SYSTEM_PROMPT,
+  COGNITION_TEMPERATURE,
+  parseCognitionReply,
+  type Cognizer,
+} from "../pipeline/cognition.js";
+import {
+  buildTitleUserPrompt,
+  TITLER_MAX_TOKENS,
+  TITLER_SYSTEM_PROMPT,
+  TITLER_TEMPERATURE,
+  type Entitler,
+} from "../pipeline/title.js";
+
+export interface LlamaConfig {
+  /** Filesystem path to a GGUF model. If absent, we download `modelUrl`
+   * to `<modelsDir>/<basename(modelUrl)>` on first use. */
+  modelPath?: string;
+  /** Remote URL to download the GGUF from when `modelPath` isn't set
+   * or doesn't exist on disk. */
+  modelUrl?: string;
+  /** Where to cache downloaded models. Default: `~/.modelstat/models`. */
+  modelsDir?: string;
+  /** Llama context window — kept small since prompts are bounded. */
+  contextSize?: number;
+}
+
+/**
+ * Default bundled-summariser model — Qwen3.5-4B Q4_K_M GGUF (~2.7 GB).
+ *
+ * Selection rationale (April 2026):
+ *   - Latest dense Qwen at the size we can ship to a laptop. Qwen3.6
+ *     only exists at 27B+ which is too large.
+ *   - Hybrid-thinking: the model writes `<think>…</think>` reasoning
+ *     before the answer, which materially improves "describe what the
+ *     human was building" outputs over non-thinking small models. The
+ *     adapter strips the thinking block before returning.
+ *   - Q4_K_M strikes the right quality/size balance for a one-shot
+ *     ~240-char summary task; smaller quants (Q3) start fumbling
+ *     instruction-following at this size.
+ *   - lmstudio-community is the trusted re-quantiser used by LM Studio
+ *     itself, so the URL is stable and the templates baked into the
+ *     GGUF metadata are correct (node-llama-cpp auto-detects them).
+ *
+ * The first scan on a fresh machine downloads ~2.7 GB; subsequent
+ * scans are instant. Override with `MODELSTAT_LLAMA_MODEL_URL` (and
+ * `MODELSTAT_LLAMA_MODEL_PATH`) to point at a different GGUF — useful
+ * for testing or for users who already have a quant on disk.
+ */
+export const DEFAULT_LLAMA_MODEL_URL =
+  "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf";
+
+/** Token budget for one summarise call. The Qwen3.5 thinking pass
+ * routinely uses 400-800 tokens before producing the answer; ceil at
+ * 1024 so we have ~200 tokens left for the actual sentence. The
+ * pipeline still slices the post-`<think>` text to 240 chars. */
+const LLAMA_MAX_TOKENS = 1024;
+
+export function defaultLlamaConfig(): Required<LlamaConfig> {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env ?? {};
+  const modelsDir =
+    env.MODELSTAT_MODELS_DIR ?? join(homedir(), ".modelstat", "models");
+  const modelUrl = env.MODELSTAT_LLAMA_MODEL_URL ?? DEFAULT_LLAMA_MODEL_URL;
+  const modelPath =
+    env.MODELSTAT_LLAMA_MODEL_PATH ?? join(modelsDir, basenameFromUrl(modelUrl));
+  return {
+    modelPath,
+    modelUrl,
+    modelsDir,
+    // Qwen3.5-4B has a 128K native context; we only need enough to
+    // fit our prompt (~2 KB) plus thinking budget plus answer.
+    // 4096 is plenty and keeps memory footprint reasonable on
+    // older machines.
+    contextSize: Number(env.MODELSTAT_LLAMA_CONTEXT ?? 4096),
+  };
+}
+
+/** Strip `<think>...</think>` reasoning blocks from a Qwen3.5 chat
+ * response. The model emits its scratchpad first, then the actual
+ * answer. node-llama-cpp v3's chat session returns both verbatim;
+ * we want only the answer. Tolerates malformed/unclosed tags by
+ * removing trailing open tags too. */
+function stripThinking(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/i, "")
+    .trim();
+}
+
+function basenameFromUrl(url: string): string {
+  // Strip query/fragment and grab the trailing filename.
+  const clean = url.split("?")[0]!.split("#")[0]!;
+  const parts = clean.split("/");
+  return parts[parts.length - 1] || "model.gguf";
+}
+
+/* ─── Singleton model + serialised inference ─────────────────────── */
+
+// Loading is expensive (model file mmap + warm-up): hold onto the
+// sessions for the life of the process. Inference is single-threaded
+// per llama context, so callers are queued through `inflight`.
+//
+// Three LlamaChatSessions share the same loaded model but each has its
+// own context sequence with a different system prompt:
+//   - summarizer:  SUMMARISER_SYSTEM_PROMPT — primary scan-time work
+//   - cognizer:    COGNITION_SYSTEM_PROMPT  — best-effort mood/mode pass
+//   - entitler:    TITLER_SYSTEM_PROMPT     — best-effort per-session title
+// Each context's KV-cache is small (≤4K tokens) compared to the model
+// weights (~2.7GB), so the extra contexts are cheap. We still serialise
+// all calls through one `inflight` queue — llama.cpp can technically
+// run two contexts in parallel but it competes for the same CPU/GPU
+// and the auxiliary passes are fast enough that interleaving isn't
+// worth the complexity.
+type Session = {
+  // Kept loosely typed — actual class shapes come from a dynamic import
+  // so we don't drag node-llama-cpp's types into this file.
+  prompt: (p: string, o: unknown) => Promise<string>;
+  resetChatHistory: () => void;
+};
+type Loaded = {
+  summarizer: Session;
+  cognizer: Session;
+  entitler: Session;
+};
+let loaded: Loaded | null = null;
+let loadPromise: Promise<Loaded> | null = null;
+let inflight: Promise<unknown> = Promise.resolve();
+
+/**
+ * Download the summariser GGUF to disk if it isn't already there.
+ * Exported so the agent CLI can call it in two places:
+ *   1. npm `postinstall` — pull the model right after `npm install`
+ *      so the user sees the long download attached to the install
+ *      they just kicked off, not as a surprise mid-`scan`.
+ *   2. `npx modelstat@latest` step 2.5 — guarantee the model is on
+ *      disk BEFORE installing the background service, so the
+ *      service's first preflight succeeds and real abstracts start
+ *      streaming immediately rather than after a silent 2.7 GB pull.
+ *
+ * Idempotent: returns the path immediately if the file exists.
+ *
+ * Progress is rendered as either a single redrawing TTY line (when
+ * stdout is a TTY) or as periodic newline-separated lines (in pipes
+ * / log files) so postinstall output reads cleanly in both contexts.
+ */
+export async function ensureLlamaModel(
+  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
+): Promise<string> {
+  if (existsSync(cfg.modelPath)) return cfg.modelPath;
+  await mkdir(dirname(cfg.modelPath), { recursive: true });
+
+  const res = await fetch(cfg.modelUrl);
+  if (!res.ok || !res.body) {
+    throw new Error(
+      `model download failed: ${res.status} ${res.statusText} (${cfg.modelUrl})`,
+    );
+  }
+  const total = Number(res.headers.get("content-length") ?? 0);
+  const totalMb = total > 0 ? (total / (1024 * 1024)).toFixed(0) : "?";
+  // biome-ignore lint/suspicious/noConsole: long download — surface it
+  console.log(
+    `[modelstat] downloading summariser model (~${totalMb} MB) → ${cfg.modelPath}`,
+  );
+  const tmp = `${cfg.modelPath}.partial`;
+  const { createWriteStream } = await import("node:fs");
+  const { Readable } = await import("node:stream");
+  const { rename } = await import("node:fs/promises");
+  const out = createWriteStream(tmp);
+  const isTty = Boolean(
+    (process.stdout as unknown as { isTTY?: boolean }).isTTY,
+  );
+  let received = 0;
+  let lastLog = 0;
+  let lastBytes = 0;
+  let lastTimeForRate = Date.now();
+  const startTime = Date.now();
+  const renderProgress = (final = false) => {
+    const now = Date.now();
+    const dt = (now - lastTimeForRate) / 1000;
+    const dBytes = received - lastBytes;
+    const rateMbps = dt > 0 ? dBytes / 1024 / 1024 / dt : 0;
+    lastBytes = received;
+    lastTimeForRate = now;
+    const mb = (received / (1024 * 1024)).toFixed(1);
+    const pct = total > 0 ? ((received / total) * 100).toFixed(1) : "?";
+    const eta =
+      total > 0 && rateMbps > 0
+        ? Math.max(0, Math.round((total - received) / 1024 / 1024 / rateMbps))
+        : null;
+    const etaStr = eta != null ? ` · ETA ${eta}s` : "";
+    const elapsed = ((now - startTime) / 1000).toFixed(0);
+    const line = `[modelstat]   ${mb} / ${totalMb} MB (${pct}%) · ${rateMbps.toFixed(1)} MB/s${etaStr} · ${elapsed}s`;
+    if (isTty && !final) {
+      process.stdout.write(`\r${line}\x1b[K`);
+    } else {
+      // biome-ignore lint/suspicious/noConsole: progress
+      console.log(line);
+    }
+  };
+
+  const nodeStream = Readable.fromWeb(
+    res.body as unknown as Parameters<typeof Readable.fromWeb>[0],
+  );
+  nodeStream.on("data", (chunk: Buffer) => {
+    received += chunk.length;
+    const now = Date.now();
+    if (now - lastLog > (isTty ? 200 : 2000)) {
+      renderProgress();
+      lastLog = now;
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    nodeStream.pipe(out);
+    out.on("finish", () => resolve());
+    out.on("error", reject);
+    nodeStream.on("error", reject);
+  });
+  renderProgress(true);
+  if (isTty) process.stdout.write("\n");
+  await rename(tmp, cfg.modelPath);
+  // biome-ignore lint/suspicious/noConsole: completion
+  console.log(`[modelstat] summariser model ready (${cfg.modelPath})`);
+  return cfg.modelPath;
+}
+
+async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
+  if (loaded) return loaded;
+  if (loadPromise) return loadPromise;
+  loadPromise = (async () => {
+    // Dynamic import so the rest of companion-core stays usable when
+    // `node-llama-cpp` isn't installed (browser, server, slimmed
+    // bundles). Failure here is the caller's signal to fall through.
+    // Optional peerDependency — typed as `unknown` from this side so
+    // companion-core typechecks even when the consumer hasn't pulled
+    // the package in. Agent CLI declares `node-llama-cpp` as a real
+    // dep so the import resolves at runtime there.
+    // @ts-expect-error — optional peer; resolved at runtime
+    const llamaMod = (await import("node-llama-cpp")) as {
+      getLlama: () => Promise<unknown>;
+      LlamaChatSession: new (opts: unknown) => Session;
+    };
+    const modelPath = await ensureLlamaModel(cfg);
+    const llama = (await llamaMod.getLlama()) as {
+      loadModel: (o: { modelPath: string }) => Promise<{
+        createContext: (o: { contextSize: number }) => Promise<{
+          getSequence: () => unknown;
+        }>;
+      }>;
+    };
+    const model = await llama.loadModel({ modelPath });
+    // Two contexts off the same model — one per chat session. The
+    // cognition context can be smaller since its prompt + answer are
+    // both short, but llama.cpp rounds context sizes up to its block
+    // size internally so going below ~1024 saves nothing meaningful.
+    const summariserContext = await model.createContext({
+      contextSize: cfg.contextSize,
+    });
+    const cognizerContext = await model.createContext({
+      contextSize: Math.min(cfg.contextSize, 2048),
+    });
+    // Title prompts carry up to ~10 sampled abstracts (~2.5 KB) plus
+    // the thinking budget — the same envelope as the summariser, so
+    // reuse the full configured context size rather than the small one.
+    const entitlerContext = await model.createContext({
+      contextSize: cfg.contextSize,
+    });
+    const summarizer = new llamaMod.LlamaChatSession({
+      contextSequence: summariserContext.getSequence(),
+      systemPrompt: SUMMARISER_SYSTEM_PROMPT,
+    });
+    const cognizer = new llamaMod.LlamaChatSession({
+      contextSequence: cognizerContext.getSequence(),
+      systemPrompt: COGNITION_SYSTEM_PROMPT,
+    });
+    const entitler = new llamaMod.LlamaChatSession({
+      contextSequence: entitlerContext.getSequence(),
+      systemPrompt: TITLER_SYSTEM_PROMPT,
+    });
+    loaded = { summarizer, cognizer, entitler };
+    return loaded;
+  })();
+  try {
+    return await loadPromise;
+  } catch (err) {
+    loadPromise = null;
+    throw err;
+  }
+}
+
+/**
+ * Summariser adapter — drop-in for `ollamaSummarize`. Same prompt
+ * contract, same output cap (≤240 chars). On first call, pulls the
+ * GGUF model to disk and warms up the llama context; subsequent calls
+ * are queued through a single in-process serialiser.
+ */
+export function llamaSummarize(
+  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
+): (input: { prompt: string; maxTokens: number }) => Promise<string> {
+  return async ({ prompt, maxTokens }) => {
+    const { summarizer } = await loadOnce(cfg);
+    // Serialise: the chat session has one context sequence and
+    // concurrent prompts would interleave. Replace `inflight` with
+    // this call's promise so the next caller awaits us, not the one
+    // before us.
+    const run = inflight.then(async () => {
+      summarizer.resetChatHistory();
+      // Ignore the caller's tiny `maxTokens` (≈80) when running the
+      // bundled thinking model — it'd starve the reasoning pass and
+      // we'd ship empty abstracts. The sentence cap is enforced by
+      // the post-strip slice below, not the token budget.
+      void maxTokens;
+      const raw = await summarizer.prompt(prompt, {
+        temperature: SUMMARISER_TEMPERATURE,
+        maxTokens: LLAMA_MAX_TOKENS,
+      });
+      const stripped = stripThinking(raw ?? "");
+      if (stripped.length === 0) {
+        // Either the model produced only thinking and ran out of
+        // budget, or the chat template isn't recognised and we got
+        // garbage. Either way the caller (companion-core/pipeline)
+        // throws on empty — surface a clearer reason here so the
+        // operator can act on it.
+        throw new Error(
+          `bundled summariser produced no answer text after stripping <think> blocks (raw length=${(raw ?? "").length}). The thinking budget may be too low or the model template is misconfigured.`,
+        );
+      }
+      return stripped.slice(0, 240);
+    });
+    inflight = run.catch(() => undefined);
+    return run;
+  };
+}
+
+/**
+ * Cognition adapter — drop-in for `ollamaCognize`. Reads the post-
+ * redaction abstract and tags `{ emotions, meta }` via the same Qwen
+ * model that did the summarise pass, but on a separate
+ * `LlamaChatSession` whose system prompt is `COGNITION_SYSTEM_PROMPT`.
+ *
+ * Best-effort: any failure (model not loaded, JSON parse fail, empty
+ * answer after stripping <think>) returns null and the segment ships
+ * without a `[Mood: …] [Mind: …]` suffix. The pipeline catches null
+ * and continues — see `companion-core/pipeline/index.ts` for the
+ * append logic.
+ *
+ * Cost: one extra model call per segment, serialised through the same
+ * `inflight` queue as the summariser. Typical latency on Apple Silicon
+ * is 200-500 ms because the answer is tiny (~30 tokens of JSON) and
+ * the thinking budget is capped low. The model itself is already
+ * resident in memory, so the marginal RAM cost is just the second
+ * 2K-token KV-cache (~tens of MB).
+ */
+export function llamaCognize(
+  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
+): Cognizer {
+  return async ({ abstract }) => {
+    if (!abstract || abstract.trim().length < 12) return null;
+    let loadedSessions: Loaded;
+    try {
+      loadedSessions = await loadOnce(cfg);
+    } catch {
+      // If the model isn't loadable here, the summariser would have
+      // raised already and the agent wouldn't be running. Still:
+      // best-effort by contract — fall through to null rather than
+      // throwing during a post-summarise hook.
+      return null;
+    }
+    const { cognizer } = loadedSessions;
+    const run = inflight.then(async () => {
+      cognizer.resetChatHistory();
+      const raw = await cognizer.prompt(buildCognitionUserPrompt(abstract), {
+        temperature: COGNITION_TEMPERATURE,
+        // Qwen3.5 likes to "think" before answering. Give it a small
+        // budget — the JSON answer is ~30 tokens but the thinking can
+        // run 200-400. The strip below removes the <think> block.
+        maxTokens: COGNITION_MAX_TOKENS + 400,
+      });
+      const stripped = stripThinking(raw ?? "");
+      return parseCognitionReply(stripped);
+    });
+    inflight = run.catch(() => undefined);
+    try {
+      return await run;
+    } catch {
+      return null;
+    }
+  };
+}
+
+/**
+ * Session-title adapter — one short call per session per upload, on a
+ * third `LlamaChatSession` whose system prompt is `TITLER_SYSTEM_PROMPT`.
+ * Reads the session's segment abstracts (already produced + redacted by
+ * the summarise pass) and names the session's dominant theme(s).
+ *
+ * Best-effort, same contract as `llamaCognize`: any failure returns
+ * null and the caller (`buildSessionTitles`) falls back to its
+ * deterministic title. The model is already resident, so the marginal
+ * cost is one ~40-token answer plus thinking budget — well under a
+ * second per session on Apple Silicon.
+ */
+export function llamaEntitle(
+  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
+): Entitler {
+  return async (input) => {
+    if (input.abstracts.length === 0) return null;
+    let loadedSessions: Loaded;
+    try {
+      loadedSessions = await loadOnce(cfg);
+    } catch {
+      // Best-effort by contract — if the model can't load here the
+      // summariser already surfaced the failure at startup.
+      return null;
+    }
+    const { entitler } = loadedSessions;
+    const run = inflight.then(async () => {
+      entitler.resetChatHistory();
+      const raw = await entitler.prompt(buildTitleUserPrompt(input), {
+        temperature: TITLER_TEMPERATURE,
+        // Same thinking-budget rationale as the cognition pass: the
+        // answer is tiny but Qwen3.5 reasons first.
+        maxTokens: TITLER_MAX_TOKENS + 400,
+      });
+      return stripThinking(raw ?? "") || null;
+    });
+    inflight = run.catch(() => undefined);
+    try {
+      return await run;
+    } catch {
+      return null;
+    }
+  };
+}

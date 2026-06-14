@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial;
+  --color-accent: oklch(72% 0.13 250);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}

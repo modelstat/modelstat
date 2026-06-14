@@ -1,0 +1,87 @@
+Copyright (c) 2026 ModelState Inc
+
+Source-Available License
+
+1. Grant of Rights
+
+Subject to the terms of this License, you are granted a non-exclusive, worldwide,
+non-transferable, non-sublicensable license to:
+
+- View, read, and inspect the source code
+- Build, modify, and run the software
+- Use the software internally, including in production, solely to access or interact
+  with ModelState Inc’s hosted services
+
+2. Permitted Use
+
+You may use the software as a client, agent, or self-hosted component that connects
+to and depends on ModelState Inc’s cloud or hosted services.
+
+3. Restrictions
+
+You may NOT, without explicit prior written permission from ModelState Inc:
+
+- Use the software to provide a hosted, managed, or SaaS service to third parties
+- Use the software in any product or service that competes with ModelState Inc
+- Use the software to build or operate an alternative to ModelState Inc’s services
+- Redistribute, sublicense, sell, license, or commercially exploit the software
+- Offer the software (modified or unmodified) as part of a commercial offering
+- Make the software available to third parties as a service
+- Use the software for the benefit of third parties (including multi-tenant or shared environments)
+- Circumvent or attempt to circumvent the limitations of this License
+- Remove or alter any licensing, copyright, or attribution notices
+
+4. Definition of Competing Service
+
+“Competing Service” means any product or service that provides substantially similar
+functionality to ModelState Inc’s offerings, including but not limited to:
+
+- AI or LLM usage tracking, monitoring, or observability systems
+- Model analytics platforms or dashboards
+- Inference tracking, logging, or telemetry pipelines
+- Evaluation, benchmarking, or quality analysis systems for AI/ML models
+- Cost tracking, performance tracking, or optimization systems for model inference
+- Any system that collects, processes, analyzes, or visualizes usage or behavior of AI or machine learning models, including large language models (LLMs), when offered as a product or service
+
+5. Internal Use
+
+Use of the software is permitted only for your internal business or personal use,
+and not for the benefit of third parties.
+
+6. Network Use Restriction
+
+You may not use the software to expose APIs, endpoints, dashboards, or services to external
+users except as part of accessing ModelState Inc’s services.
+
+7. Data Extraction Restriction
+
+You may not use the software to replicate, extract, reverse engineer, or reconstruct
+ModelState Inc’s service behavior, APIs, data models, or system design for the purpose
+of building, improving, or operating a competing system or service.
+
+8. Ownership
+
+All rights, title, and interest in the software remain exclusively with ModelState Inc.
+The software is licensed, not sold.
+
+9. Contributions
+
+Unless explicitly agreed otherwise in writing, any contributions submitted to the software
+grant ModelState Inc a perpetual, irrevocable, worldwide, royalty-free license to use,
+modify, and distribute those contributions.
+
+10. Termination
+
+This License terminates automatically if you violate any of its terms.
+Upon termination, you must immediately cease all use and delete all copies of the software.
+
+11. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED.
+
+12. Limitation of Liability
+
+IN NO EVENT SHALL MODELSTATE INC BE LIABLE FOR ANY CLAIM, DAMAGES,
+OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE
+OR ITS USE OR OTHER DEALINGS IN THE SOFTWARE.

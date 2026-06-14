@@ -1,0 +1,10 @@
+# Placeholder Cursor price table. Numbers are fake round values.
+# See prices/README.md.
+
+provider: cursor
+models:
+  - id: cursor-default
+    history:
+      - effective_date: 2025-01-01
+        input: 1.00
+        output: 5.00

@@ -1,0 +1,68 @@
+{
+  "protocol_version": 1,
+  "provider": "chatgpt_web",
+  "vendor": "openai",
+  "adapter_version": 1,
+  "match": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+  "default_model": "gpt-4o",
+  "extractors": {
+    "conversation_id": [
+      { "kind": "url.regexGroup", "pattern": "/c/([a-f0-9-]+)", "group": 1 },
+      {
+        "kind": "network.responseJsonPath",
+        "urlPattern": ".*/(conversation|backend-api/f/conversation|backend-anon/conversation).*",
+        "sse": true,
+        "path": "$.conversation_id"
+      }
+    ],
+    "model": [
+      {
+        "kind": "network.responseJsonPath",
+        "urlPattern": ".*/(conversation|backend-api/f/conversation|backend-anon/conversation).*",
+        "sse": true,
+        "path": "$.message.metadata.model_slug"
+      },
+      {
+        "kind": "network.requestJsonPath",
+        "urlPattern": ".*/(conversation|backend-api/f/conversation|backend-anon/conversation).*",
+        "method": "POST",
+        "path": "$.model"
+      },
+      {
+        "kind": "dom.selector.text",
+        "selector": "button[aria-haspopup='listbox'] span"
+      }
+    ],
+    "messages": [
+      {
+        "kind": "network.responseJsonPath",
+        "urlPattern": ".*/(conversation|backend-api/f/conversation|backend-anon/conversation).*",
+        "sse": true,
+        "messageIdPath": "$.message.id",
+        "rolePath": "$.message.author.role",
+        "textPath": "$.message.content.parts[*]",
+        "usagePath": "$.message.metadata.finish_details.usage"
+      },
+      {
+        "kind": "dom.observe",
+        "selector": "[data-message-id]",
+        "idAttr": "data-message-id",
+        "roleAttr": "data-message-author-role",
+        "textSelector": ".markdown"
+      }
+    ]
+  },
+  "tokenizer": {
+    "default": "tiktoken/o200k_base",
+    "byModel": {
+      "gpt-5*": "tiktoken/o200k_base",
+      "gpt-4o*": "tiktoken/o200k_base",
+      "gpt-4*": "tiktoken/cl100k_base",
+      "o1*": "tiktoken/o200k_base",
+      "o3*": "tiktoken/o200k_base"
+    }
+  },
+  "invariants": [
+    { "kind": "dom.minCount", "selector": "[data-message-author-role]", "min": 1 }
+  ]
+}

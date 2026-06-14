@@ -1,0 +1,76 @@
+{
+  "name": "modelstat",
+  "version": "0.0.50",
+  "description": "modelstat companion — reads local AI-tool usage and ships tokenised events to modelstat.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/cli.mjs",
+  "bin": {
+    "modelstat": "./dist/cli.mjs"
+  },
+  "files": [
+    "dist",
+    "scripts/postinstall.mjs",
+    "vendor/tray-mac",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev:connect": "tsx ./src/cli.ts connect",
+    "dev:scan": "tsx ./src/cli.ts scan",
+    "dev:watch": "tsx ./src/cli.ts watch",
+    "dev:discover": "tsx ./src/cli.ts discover",
+    "build": "tsup",
+    "build:tray": "bash ./scripts/build-tray.sh",
+    "prepack": "pnpm run build && pnpm run build:tray",
+    "pack:tarball": "pnpm run build && npm pack --pack-destination ../..",
+    "install:local": "bash ./scripts/install-local.sh",
+    "postinstall": "node ./scripts/postinstall.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "conf": "^13.1.0",
+    "dotenv": "^16.4.7",
+    "node-llama-cpp": "^3.18.0",
+    "ulid": "^2.3.0",
+    "undici": "^7.1.0"
+  },
+  "devDependencies": {
+    "@modelstat/companion-core": "workspace:*",
+    "@modelstat/core": "workspace:*",
+    "@modelstat/parsers": "workspace:*",
+    "@types/node": "^22.10.5",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20.18.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "modelstat",
+    "ai-usage",
+    "claude",
+    "codex",
+    "cursor",
+    "tokens",
+    "analytics",
+    "companion",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/modelstat/modelstat.git",
+    "directory": "apps/agent-dev"
+  }
+}

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Modelstat</string>
+  <key>CFBundleExecutable</key>
+  <string>modelstat-tray</string>
+  <key>CFBundleIdentifier</key>
+  <string>ai.modelstat.tray</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Modelstat</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <!-- Agent-style app: no Dock icon, no window at launch, just the
+       menu-bar item. -->
+  <key>LSUIElement</key>
+  <true/>
+  <!-- Launch at login when the installer drops us into
+       ~/Library/LaunchAgents (actually driven by the launchd plist). -->
+  <key>LSBackgroundOnly</key>
+  <false/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSSupportsAutomaticTermination</key>
+  <false/>
+  <key>NSSupportsSuddenTermination</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>© 2026 modelstat</string>
+</dict>
+</plist>
