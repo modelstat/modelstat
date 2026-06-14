@@ -136,3 +136,35 @@ export function segmentId(
   }
   return `seg_${h.toString(36)}`;
 }
+
+/**
+ * Deterministic, value-masked "shape" of a command's arguments — the tier-1
+ * skeleton that may ride the wire. Generic and privacy-first: it keeps
+ * STRUCTURE (flags) and masks every value to `§`, so no raw value can leak.
+ * The executable is NOT part of `args` — the caller passes the command with
+ * the leading program already stripped (it ships separately as `executable`).
+ *
+ * CROSS-REPO CONTRACT: the backend's Rust implementation reproduces this
+ * bit-for-bit — pinned by the golden vectors in ids.test.ts and a matching
+ * backend test. Rules: tokenize on ASCII whitespace; a `-`-leading token is a
+ * flag, kept verbatim except `--key=value` → `--key=§`; every other
+ * (positional/value) token → `§`; join with single spaces.
+ *
+ * NOTE: conservative for now — masks ALL positionals, including leading
+ * subcommands. Whether to keep subcommand keywords is an open policy question
+ * (utility vs. leak risk).
+ */
+export function paramShape(args: string): string {
+  const MASK = "§";
+  return args
+    .split(/[ \t\n\r\f]+/)
+    .filter((t) => t.length > 0)
+    .map((t) => {
+      if (t.startsWith("-")) {
+        const eq = t.indexOf("=");
+        return eq === -1 ? t : `${t.slice(0, eq + 1)}${MASK}`;
+      }
+      return MASK;
+    })
+    .join(" ");
+}

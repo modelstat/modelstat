@@ -55,7 +55,7 @@ function draft(
     args_bytes: 0,
     result_bytes: 0,
     model: null,
-    command_families: [],
+    action: null,
     ...over,
   };
 }

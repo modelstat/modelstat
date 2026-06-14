@@ -260,7 +260,7 @@ test("dynamic hex tails in tool names collapse to <dyn>", async () => {
   assert.deepEqual(events[0]?.tool_calls, { "mcp:linear/subscribe_<dyn>": 1 });
 });
 
-test("Bash gets allowlisted command families; non-shell tools get none", async () => {
+test("tool calls ship action=null in Phase 1; raw command never survives parsing", async () => {
   const file = writeTranscript([
     assistantToolLine("a1", "claude-opus-4-7", [
       toolUseBlock("toolu_01", "Bash", { command: "git status && pnpm -r test | jq .ok" }),
@@ -269,9 +269,15 @@ test("Bash gets allowlisted command families; non-shell tools get none", async (
     ]),
   ]);
   const { toolCalls } = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: file });
-  assert.deepEqual(toolCalls[0]?.command_families, ["git", "pnpm", "jq"]);
-  assert.deepEqual(toolCalls[1]?.command_families, [], "Read is not a shell tool");
-  assert.deepEqual(toolCalls[2]?.command_families, [], "non-allowlisted verbs are dropped");
+  // The wire carries a nested `action`, populated by the on-device extractor
+  // in a later phase. Parsers leave it null for now.
+  assert.equal(toolCalls[0]?.action, null);
+  assert.equal(toolCalls[1]?.action, null);
+  assert.equal(toolCalls[2]?.action, null);
+  // The raw command (incl. the secret script name) is reduced to a hash + size
+  // and discarded — never echoed onto the draft.
+  assert.equal(toolCalls[0]?.args_hash.length, 64);
+  assert.ok((toolCalls[0]?.args_bytes ?? 0) > 0);
 });
 
 test("hashes are stable hex; signature from sorted key names; empty input handled", async () => {
@@ -375,7 +381,7 @@ test("top-level tool_use line yields a draft but no RawEvent", async () => {
   assert.equal(call.model, "claude-opus-4-7", "attributed to the session's last real model");
   assert.equal(call.status, "success", "paired with the later tool_result");
   assert.equal(call.ended_at, "2026-06-01T10:00:04.000Z");
-  assert.deepEqual(call.command_families, ["git"]);
+  assert.equal(call.action, null, "action filled by the extractor later");
   assert.ok(call.source_event_id, "anchored on its own line offset");
   assert.notEqual(call.source_event_id, events[0]?.source_event_id);
 });

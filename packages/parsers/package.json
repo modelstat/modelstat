@@ -11,7 +11,6 @@
     "./codex": "./src/codex/index.ts",
     "./cursor": "./src/cursor/index.ts",
     "./discovery": "./src/discovery/index.ts",
-    "./shell-families": "./src/shell-families/index.ts",
     "./tool-hash": "./src/tool-hash/index.ts"
   },
   "scripts": {

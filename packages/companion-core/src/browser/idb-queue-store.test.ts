@@ -210,7 +210,7 @@ function draft(over: Partial<ToolCallDraft> & { external_call_id: string }): Too
     args_bytes: 0,
     result_bytes: 0,
     model: null,
-    command_families: [],
+    action: null,
     ...over,
   };
 }
@@ -244,7 +244,18 @@ describe("IdbQueueStore tool_calls round-trip", () => {
         call_index: 1,
         server: "mcp:github",
         name: "create_pr",
-        command_families: ["git"],
+        action: {
+          surface: "mcp",
+          executable: "github",
+          action: "create",
+          object: "record",
+          qualifiers: ["remote"],
+          param_shape: null,
+          keywords: ["create", "pr"],
+          abstract: "opening a pull request",
+          confidence: 0.8,
+          extractor: "mcp.generic.v1",
+        },
       }),
     ];
     await store.put(item({ source_event_id: "e1", session_id: "A", tool_calls: calls }));

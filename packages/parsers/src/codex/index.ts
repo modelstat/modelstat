@@ -20,15 +20,14 @@
  * These produce ToolCallDrafts (never RawEvents); the aggregate identity→count
  * map attaches to the next emitted assistant event of the same session.
  * PRIVACY: arguments/outputs are reduced to hashes + byte sizes on this device
- * (see @modelstat/parsers/tool-hash); shell commands are reduced to allowlisted
- * verbs (see @modelstat/parsers/shell-families). Raw payloads never leave.
+ * (see @modelstat/parsers/tool-hash); the action decomposition is filled by
+ * the on-device extractor in a later phase. Raw payloads never leave.
  */
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import type { RawEvent } from "@modelstat/core";
 import { sourceEventId } from "@modelstat/core";
 import { guessRepoSlugFromPath } from "../git.js";
-import { extractCommandFamilies } from "../shell-families/index.js";
 import {
   fallbackCallId,
   hashArgs,
@@ -110,8 +109,8 @@ const TOOL_CALL_OUTPUT_PAYLOAD_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /** Codex names "the shell" differently across versions (exec_command in
- * current CLIs, shell/local_shell_call in older ones). All map to wire
- * name `shell` and get command_families extracted. */
+ * current CLIs, shell/local_shell_call in older ones). All map to the
+ * wire name `shell`. */
 const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
   "shell",
   "local_shell_call",
@@ -119,34 +118,12 @@ const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
   "run_terminal_cmd",
 ]);
 
-/** `["bash", "-lc", "<script>"]` argv wrappers — the verbs live inside the script. */
-const SHELL_WRAPPER_BINARIES: ReadonlySet<string> = new Set(["bash", "sh", "zsh", "dash", "fish"]);
-
 export function deriveSessionIdFromRolloutPath(path: string): string | null {
   const m =
     /rollout-[0-9T-]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(
       path,
     );
   return m ? (m[1] ?? null) : null;
-}
-
-/** Flatten codex's command field (string, or argv array as in
- * local_shell_call's `action.command`) into one string for the family
- * tokenizer. A `["bash", "-lc", "<script>"]` wrapper unwraps to the script
- * itself so its leading verbs are visible to the allowlist. */
-function commandFieldToString(cmd: unknown): string | null {
-  if (typeof cmd === "string") return cmd || null;
-  if (Array.isArray(cmd)) {
-    const parts = cmd.filter((p): p is string => typeof p === "string");
-    if (parts.length === 0) return null;
-    const head = (parts[0] ?? "").split("/").pop() ?? "";
-    const flag = parts[1] ?? "";
-    if (parts.length >= 3 && SHELL_WRAPPER_BINARIES.has(head) && /^-[a-z]*c[a-z]*$/i.test(flag)) {
-      return parts.slice(2).join("\n");
-    }
-    return parts.join(" ");
-  }
-  return null;
 }
 
 interface ExtractedToolCall {
@@ -158,7 +135,6 @@ interface ExtractedToolCall {
   name: string;
   /** What gets hashed as args — parsed object when possible, else raw string. */
   input: unknown;
-  commandFamilies: string[];
   /** The call line itself said it failed (status: "failed"). */
   failed: boolean;
 }
@@ -179,13 +155,11 @@ function extractToolCallPayload(pt: string, p: Record<string, unknown>): Extract
   if (pt === "local_shell_call") {
     const action =
       p.action && typeof p.action === "object" ? (p.action as Record<string, unknown>) : null;
-    const command = commandFieldToString(action?.command);
     return {
       callId,
       server: "builtin",
       name: "shell",
       input: action,
-      commandFamilies: command ? extractCommandFamilies(command) : [],
       failed,
     };
   }
@@ -207,19 +181,11 @@ function extractToolCallPayload(pt: string, p: Record<string, unknown>): Extract
   }
 
   if (SHELL_TOOL_NAMES.has(observed)) {
-    const rec =
-      input && typeof input === "object" && !Array.isArray(input)
-        ? (input as Record<string, unknown>)
-        : null;
-    const command = commandFieldToString(
-      rec?.command ?? rec?.cmd ?? (typeof input === "string" ? input : null),
-    );
     return {
       callId,
       server: "builtin",
       name: "shell",
       input,
-      commandFamilies: command ? extractCommandFamilies(command) : [],
       failed,
     };
   }
@@ -231,7 +197,6 @@ function extractToolCallPayload(pt: string, p: Record<string, unknown>): Extract
       server: `mcp:${normalizeToolName(p.server).slice(0, 116)}`,
       name: normalizeToolName(observed),
       input,
-      commandFamilies: [],
       failed,
     };
   }
@@ -239,7 +204,7 @@ function extractToolCallPayload(pt: string, p: Record<string, unknown>): Extract
   // Handles both plain names (`update_plan` → builtin) and the
   // `mcp__<server>__<tool>` form some function_call lines use.
   const { server, name } = splitObservedToolName(observed);
-  return { callId, server, name, input, commandFamilies: [], failed };
+  return { callId, server, name, input, failed };
 }
 
 /** Best-effort error sniffing on an output payload. Codex outputs are
@@ -384,7 +349,7 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
           args_bytes,
           result_bytes: 0,
           model,
-          command_families: extracted.commandFamilies,
+          action: null,
         };
         toolCalls.push(draft);
         if (extracted.callId) openCalls.set(extracted.callId, draft);

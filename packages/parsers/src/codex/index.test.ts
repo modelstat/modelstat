@@ -83,11 +83,11 @@ test("pairs function_call with its output by call_id", async () => {
   assert.notEqual(call.signature_hash, "none", "object args have a signature");
   assert.ok(call.args_bytes > 0);
   assert.ok(call.result_bytes > 0, "output bytes recorded");
-  assert.deepEqual(call.command_families, [], "no families for non-shell tools");
+  assert.equal(call.action, null, "action filled by the extractor later");
   assert.ok(call.source_event_id.startsWith("evt_"), "source_event_id from line offset");
 });
 
-test("exec_command maps to shell with command families from the cmd string", async () => {
+test("exec_command normalises to the shell wire name; action filled later", async () => {
   const file = writeRollout([
     sessionMeta(),
     turnContext(),
@@ -102,11 +102,13 @@ test("exec_command maps to shell with command families from the cmd string", asy
   assert.ok(call, "draft emitted");
   assert.equal(call.name, "shell", "shell-ish calls are normalised to shell");
   assert.equal(call.server, "builtin");
-  assert.deepEqual(call.command_families, ["git", "cargo"], "allowlisted verbs only");
+  // The action decomposition is filled by the on-device extractor in a later
+  // phase; for now it is null and the raw cmd is reduced to a hash.
+  assert.equal(call.action, null);
   assert.equal(call.status, "success");
 });
 
-test("local_shell_call unwraps the bash -lc argv wrapper for families", async () => {
+test("local_shell_call normalises to the shell wire name; action filled later", async () => {
   const file = writeRollout([
     sessionMeta(),
     turnContext(),
@@ -123,7 +125,9 @@ test("local_shell_call unwraps the bash -lc argv wrapper for families", async ()
   assert.ok(call, "draft emitted");
   assert.equal(call.name, "shell");
   assert.equal(call.server, "builtin");
-  assert.deepEqual(call.command_families, ["npm", "npx", "playwright"]);
+  // action is null (extractor lands later); the bash -lc argv wrapper is no
+  // longer unwrapped at parse time.
+  assert.equal(call.action, null);
   assert.equal(call.status, "success");
   assert.equal(call.ended_at, TS_OUT);
 });

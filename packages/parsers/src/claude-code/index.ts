@@ -31,7 +31,6 @@ import { createInterface } from "node:readline";
 import type { RawEvent } from "@modelstat/core";
 import { redact, sourceEventId } from "@modelstat/core";
 import { guessRepoSlugFromPath } from "../git.js";
-import { extractCommandFamilies } from "../shell-families/index.js";
 import {
   fallbackCallId,
   hashArgs,
@@ -148,32 +147,12 @@ function extractExcerpt(content: ClaudeMessageContent): string | undefined {
   return truncated.length > 0 ? truncated : undefined;
 }
 
-/** Tools whose `input.command` is a shell command line — the only ones
- * that get command_families (spec: execution/shell-classified tools).
- * Claude Code itself only emits `Bash`; the rest keep the set aligned
- * with the shared shell-families contract used by other parsers. */
-const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "Bash",
-  "shell",
-  "local_shell_call",
-  "exec_command",
-  "run_terminal_cmd",
-]);
-
-/** Allowlisted command verbs for shell-ish builtin tools; `[]` for
- * everything else. The raw command string is consumed here and dropped. */
-function commandFamiliesFor(server: string, name: string, input: unknown): string[] {
-  if (server !== "builtin" || !SHELL_TOOL_NAMES.has(name)) return [];
-  if (typeof input !== "object" || input === null) return [];
-  const command = (input as Record<string, unknown>).command;
-  return typeof command === "string" ? extractCommandFamilies(command) : [];
-}
-
 /** Build one ToolCallDraft from an observed tool_use (content block or
  * top-level line form). Starts life unmatched (`status: "unknown"`,
  * `ended_at: null`) — a later tool_result in the same file parse fills
- * those in. PRIVACY: `input` is reduced to sha256 hashes + byte sizes
- * (and allowlisted shell verbs); the raw value is discarded. */
+ * those in. PRIVACY: `input` is reduced to sha256 hashes + byte sizes;
+ * the raw value is discarded. The action decomposition is filled by the
+ * on-device extractor in a later phase — for now `action` ships null. */
 function buildToolCallDraft(opts: {
   observedName: string;
   rawCallId: unknown;
@@ -208,7 +187,7 @@ function buildToolCallDraft(opts: {
     args_bytes: hashes.args_bytes,
     result_bytes: 0,
     model: opts.model,
-    command_families: commandFamiliesFor(server, name, opts.input),
+    action: null,
   };
 }
 

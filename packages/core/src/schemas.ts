@@ -163,6 +163,42 @@ export const Segment = z.object({
 export type Segment = z.infer<typeof Segment>;
 
 /**
+ * On-device action decomposition of a tool call — a nested, additive object so
+ * the top-level ToolCallWire stays stable as attributes grow. Bit-aligned with
+ * the backend's Rust wire schema: the field set, caps, and defaults must match
+ * exactly. Privacy: only governed tokens + the value-masked `param_shape`
+ * (tier ≤ 1) ride this — raw values never do. Produced on-device (the
+ * extractor + local refine).
+ */
+export const ToolAction = z
+  .object({
+    /** Where it ran: `shell`, `mcp`, `builtin`, `browser`. (tier 0) */
+    surface: z.string().max(40),
+    /** Concrete program/operation, or a generic bucket token. (tier 0 | bucket) */
+    executable: z.string().max(80).nullable().default(null),
+    /** Verb/intent (`restart`, `read`, …). (tier 0) */
+    action: z.string().max(40).nullable().default(null),
+    /** What it acts on (`deployment`, `file`, …). (tier 0) */
+    object: z.string().max(60).nullable().default(null),
+    /** Governed safe flags (`destructive`, `remote`, …). (tier 0) */
+    qualifiers: z.array(z.string().max(40)).max(8).default([]),
+    /** Value-masked argument skeleton (every value → `§`). (tier 1) */
+    param_shape: z.string().max(200).nullable().default(null),
+    /** Relevant non-sensitive keywords (e.g. ["rollout","restart","prod"]),
+     * OpenAI-redacted on-device. (tier 0) */
+    keywords: z.array(z.string().max(40)).max(12).default([]),
+    /** Human-readable command summary (e.g. "redeploying service payments-api"),
+     * OpenAI-redacted on-device. (tier 0) */
+    abstract: z.string().max(200).nullable().default(null),
+    /** Extractor confidence in [0, 1]. */
+    confidence: z.number().min(0).max(1).default(0),
+    /** Provenance of the extraction, e.g. `shell.v2`. */
+    extractor: z.string().max(40),
+  })
+  .strict();
+export type ToolAction = z.infer<typeof ToolAction>;
+
+/**
  * One tool invocation made by an agent during a session — the per-call
  * companion to RawEvent.tool_calls (which stays an aggregate count map).
  *
@@ -174,11 +210,12 @@ export type Segment = z.infer<typeof Segment>;
  * PRIVACY CONTRACT: no raw tool arguments, results, file paths, or
  * command text ever ride this wire. The only payload-derived fields
  * are one-way hashes (`args_hash` / `signature_hash`), byte sizes
- * (`args_bytes` / `result_bytes`), and `command_families` — verbs from
- * the fixed allowlist in @modelstat/parsers/shell-families, never the
- * command itself. Tool names ship verbatim: they are vendor
- * identifiers, not user content (dynamic-looking hex/UUID tails are
- * normalised to `<dyn>` at parse time).
+ * (`args_bytes` / `result_bytes`), and the governed, value-masked
+ * `action` decomposition (ToolAction, tier ≤ 1) — governed tokens and
+ * a `§`-masked param skeleton, never the command itself. Tool names
+ * ship verbatim: they are vendor identifiers, not user content
+ * (dynamic-looking hex/UUID tails are normalised to `<dyn>` at parse
+ * time).
  */
 export const ToolCallWire = z.object({
   /** tool_use block `id` / codex `call_id`; parsers fall back to a
@@ -219,9 +256,9 @@ export const ToolCallWire = z.object({
   /** Model of the assistant message that issued the call. `<synthetic>`
    * kept verbatim per the PR #12 attribution rules. */
   model: z.string().max(120).nullable(),
-  /** ONLY for shell-ish tools: command verbs from the fixed allowlist
-   * (@modelstat/parsers/shell-families). Never raw command text. */
-  command_families: z.array(z.string().max(40)).max(3).default([]),
+  /** On-device action decomposition — nested + additive, `null` when nothing
+   * was extracted. Replaces `command_families`. */
+  action: ToolAction.nullable().default(null),
 });
 export type ToolCallWire = z.infer<typeof ToolCallWire>;
 
@@ -240,7 +277,7 @@ export const IngestBatch = z.object({
   segments: z.array(Segment).max(2_000).default([]),
   /** Per-call tool invocations (additive — old agents omit it, old
    * servers ignore it). See ToolCallWire for the privacy contract:
-   * hashes / byte sizes / allowlisted verbs only, never payloads. */
+   * hashes / byte sizes / governed action tokens only, never payloads. */
   tool_calls: z.array(ToolCallWire).max(20_000).default([]),
   /** Optional per-session metadata hint: which installation produced them, etc. */
   session_installs: z
