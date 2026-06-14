@@ -83,7 +83,8 @@ test("pairs function_call with its output by call_id", async () => {
   assert.notEqual(call.signature_hash, "none", "object args have a signature");
   assert.ok(call.args_bytes > 0);
   assert.ok(call.result_bytes > 0, "output bytes recorded");
-  assert.equal(call.action, null, "action filled by the extractor later");
+  assert.equal(call.action?.surface, "builtin", "non-shell tool → builtin surface");
+  assert.equal(call.action?.executable, "update_plan");
   assert.ok(call.source_event_id.startsWith("evt_"), "source_event_id from line offset");
 });
 
@@ -102,9 +103,10 @@ test("exec_command normalises to the shell wire name; action filled later", asyn
   assert.ok(call, "draft emitted");
   assert.equal(call.name, "shell", "shell-ish calls are normalised to shell");
   assert.equal(call.server, "builtin");
-  // The action decomposition is filled by the on-device extractor in a later
-  // phase; for now it is null and the raw cmd is reduced to a hash.
-  assert.equal(call.action, null);
+  // The on-device extractor fills structural facts (surface/executable + a
+  // redacted command); semantics stay server-side.
+  assert.equal(call.action?.surface, "shell");
+  assert.equal(call.action?.executable, "git");
   assert.equal(call.status, "success");
 });
 
@@ -125,9 +127,10 @@ test("local_shell_call normalises to the shell wire name; action filled later", 
   assert.ok(call, "draft emitted");
   assert.equal(call.name, "shell");
   assert.equal(call.server, "builtin");
-  // action is null (extractor lands later); the bash -lc argv wrapper is no
-  // longer unwrapped at parse time.
-  assert.equal(call.action, null);
+  // The extractor takes the leading program as executable (no bash -lc
+  // unwrapping at parse time — semantics are server-side).
+  assert.equal(call.action?.surface, "shell");
+  assert.equal(call.action?.executable, "bash");
   assert.equal(call.status, "success");
   assert.equal(call.ended_at, TS_OUT);
 });

@@ -11,6 +11,7 @@
     "./codex": "./src/codex/index.ts",
     "./cursor": "./src/cursor/index.ts",
     "./discovery": "./src/discovery/index.ts",
+    "./tool-action": "./src/tool-action/index.ts",
     "./tool-hash": "./src/tool-hash/index.ts"
   },
   "scripts": {

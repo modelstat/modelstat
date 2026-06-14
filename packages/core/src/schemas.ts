@@ -166,9 +166,9 @@ export type Segment = z.infer<typeof Segment>;
  * On-device action decomposition of a tool call — a nested, additive object so
  * the top-level ToolCallWire stays stable as attributes grow. Bit-aligned with
  * the backend's Rust wire schema: the field set, caps, and defaults must match
- * exactly. Privacy: only governed tokens + the value-masked `param_shape`
- * (tier ≤ 1) ride this — raw values never do. Produced on-device (the
- * extractor + local refine).
+ * exactly. Privacy: only governed tokens, the value-masked `param_shape`, and
+ * the compliance-redacted command (PII/secrets stripped) ride this —
+ * un-redacted raw never does. Produced on-device.
  */
 export const ToolAction = z
   .object({
@@ -190,6 +190,10 @@ export const ToolAction = z
     /** Human-readable command summary (e.g. "redeploying service payments-api"),
      * OpenAI-redacted on-device. (tier 0) */
     abstract: z.string().max(200).nullable().default(null),
+    /** The compliance-redacted command text — PII/secrets stripped on-device
+     * (SOC2/GDPR), org-internal infra intact; the server derives semantics from
+     * it. Un-redacted raw never ships. (tier 0, post-redaction) */
+    command_redacted: z.string().max(1000).nullable().default(null),
     /** Extractor confidence in [0, 1]. */
     confidence: z.number().min(0).max(1).default(0),
     /** Provenance of the extraction, e.g. `shell.v2`. */

@@ -260,7 +260,7 @@ test("dynamic hex tails in tool names collapse to <dyn>", async () => {
   assert.deepEqual(events[0]?.tool_calls, { "mcp:linear/subscribe_<dyn>": 1 });
 });
 
-test("tool calls ship action=null in Phase 1; raw command never survives parsing", async () => {
+test("tool calls get a structural action on-device; raw command is reduced to facts", async () => {
   const file = writeTranscript([
     assistantToolLine("a1", "claude-opus-4-7", [
       toolUseBlock("toolu_01", "Bash", { command: "git status && pnpm -r test | jq .ok" }),
@@ -269,15 +269,19 @@ test("tool calls ship action=null in Phase 1; raw command never survives parsing
     ]),
   ]);
   const { toolCalls } = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: file });
-  // The wire carries a nested `action`, populated by the on-device extractor
-  // in a later phase. Parsers leave it null for now.
-  assert.equal(toolCalls[0]?.action, null);
-  assert.equal(toolCalls[1]?.action, null);
-  assert.equal(toolCalls[2]?.action, null);
-  // The raw command (incl. the secret script name) is reduced to a hash + size
-  // and discarded — never echoed onto the draft.
+  // The on-device extractor fills `action` with structural facts + a redacted
+  // command; semantics (action/object/keywords/abstract) are server-derived.
+  assert.equal(toolCalls[0]?.action?.surface, "shell");
+  assert.equal(toolCalls[0]?.action?.executable, "git");
+  assert.equal(toolCalls[0]?.action?.action, null, "semantics are server-side");
+  assert.equal(toolCalls[1]?.action?.surface, "builtin");
+  assert.equal(toolCalls[1]?.action?.executable, "Read");
+  assert.equal(toolCalls[2]?.action?.surface, "shell");
+  assert.equal(toolCalls[2]?.action?.executable, "run-my-secret-script.sh");
+  // The raw command is still reduced to a hash; only structural facts + the
+  // redacted command ride the draft.
   assert.equal(toolCalls[0]?.args_hash.length, 64);
-  assert.ok((toolCalls[0]?.args_bytes ?? 0) > 0);
+  assert.ok(toolCalls[0]?.action?.command_redacted?.includes("git"));
 });
 
 test("hashes are stable hex; signature from sorted key names; empty input handled", async () => {
@@ -304,26 +308,32 @@ test("hashes are stable hex; signature from sorted key names; empty input handle
   assert.equal(noInput.args_bytes, 0);
 });
 
-test("no raw input or result text appears anywhere in drafts", async () => {
-  const secretCommand =
-    "curl -H 'Authorization: Bearer sk-VERYSECRET' https://internal.example.com";
-  const secretResult = "token=sk-VERYSECRET ok";
+test("the shipped command is redacted: secrets stripped, raw verbatim never ships", async () => {
+  // A real-format secret (caught by redact's floor) inside a shell command, the
+  // Write content, and the tool result.
+  const secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
+  const command = `curl -H 'Authorization: Bearer ${secret}' https://internal.example.com/deploy`;
   const file = writeTranscript([
     assistantToolLine("a1", "claude-opus-4-7", [
-      toolUseBlock("toolu_01", "Bash", { command: secretCommand }),
-      toolUseBlock("toolu_02", "Write", {
-        file_path: "/Users/dev/.ssh/id_rsa",
-        content: secretResult,
-      }),
+      toolUseBlock("toolu_01", "Bash", { command }),
+      toolUseBlock("toolu_02", "Write", { file_path: "/Users/dev/.ssh/id_rsa", content: `token=${secret}` }),
     ]),
-    toolResultLine("u1", [toolResultBlock("toolu_01", secretResult)]),
+    toolResultLine("u1", [toolResultBlock("toolu_01", `deployed, ${secret}`)]),
   ]);
   const { toolCalls } = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: file });
   const shipped = JSON.stringify(toolCalls);
-  assert.ok(!shipped.includes("VERYSECRET"), "no secret values on the wire");
-  assert.ok(!shipped.includes("internal.example.com"), "no command text on the wire");
-  assert.ok(!shipped.includes("id_rsa"), "no file paths on the wire");
-  assert.ok(!shipped.includes("curl -H"), "no raw command fragments on the wire");
+  // The secret never appears — not from the command, the Write content, or the result.
+  assert.ok(!shipped.includes(secret), "secrets are redacted off the wire");
+  // The raw command verbatim never ships — only its redacted form, with the
+  // secret replaced by a redaction marker.
+  assert.ok(!shipped.includes(command), "raw command verbatim never ships");
+  assert.ok(shipped.includes("[REDACTED:"), "the secret was replaced by a redaction marker");
+  // Non-secret infra IS allowed to ship — it's the org's own data going to the
+  // org's own analytics.
+  assert.ok(shipped.includes("internal.example.com"), "non-secret infra ships");
+  // Non-shell tools (Write) carry no command_redacted; their raw path/content
+  // are reduced to hashes and never echoed onto the draft.
+  assert.ok(!shipped.includes("id_rsa"), "non-shell tool inputs aren't echoed");
 });
 
 test("tool calls on a <synthetic> assistant line keep the model verbatim", async () => {
@@ -381,7 +391,7 @@ test("top-level tool_use line yields a draft but no RawEvent", async () => {
   assert.equal(call.model, "claude-opus-4-7", "attributed to the session's last real model");
   assert.equal(call.status, "success", "paired with the later tool_result");
   assert.equal(call.ended_at, "2026-06-01T10:00:04.000Z");
-  assert.equal(call.action, null, "action filled by the extractor later");
+  assert.ok(call.action, "structural action extracted on-device");
   assert.ok(call.source_event_id, "anchored on its own line offset");
   assert.notEqual(call.source_event_id, events[0]?.source_event_id);
 });

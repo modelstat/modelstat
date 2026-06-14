@@ -28,6 +28,7 @@ import { createInterface } from "node:readline";
 import type { RawEvent } from "@modelstat/core";
 import { sourceEventId } from "@modelstat/core";
 import { guessRepoSlugFromPath } from "../git.js";
+import { extractToolAction } from "../tool-action/index.js";
 import {
   fallbackCallId,
   hashArgs,
@@ -349,7 +350,12 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
           args_bytes,
           result_bytes: 0,
           model,
-          action: null,
+          action: extractToolAction({
+            server: extracted.server,
+            name: extracted.name,
+            input: extracted.input,
+            cwd,
+          }),
         };
         toolCalls.push(draft);
         if (extracted.callId) openCalls.set(extracted.callId, draft);

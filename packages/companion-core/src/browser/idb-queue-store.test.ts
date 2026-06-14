@@ -253,6 +253,7 @@ describe("IdbQueueStore tool_calls round-trip", () => {
           param_shape: null,
           keywords: ["create", "pr"],
           abstract: "opening a pull request",
+          command_redacted: "gh pr create --title 'fix'",
           confidence: 0.8,
           extractor: "mcp.generic.v1",
         },

@@ -31,6 +31,7 @@ import { createInterface } from "node:readline";
 import type { RawEvent } from "@modelstat/core";
 import { redact, sourceEventId } from "@modelstat/core";
 import { guessRepoSlugFromPath } from "../git.js";
+import { extractToolAction } from "../tool-action/index.js";
 import {
   fallbackCallId,
   hashArgs,
@@ -150,9 +151,9 @@ function extractExcerpt(content: ClaudeMessageContent): string | undefined {
 /** Build one ToolCallDraft from an observed tool_use (content block or
  * top-level line form). Starts life unmatched (`status: "unknown"`,
  * `ended_at: null`) — a later tool_result in the same file parse fills
- * those in. PRIVACY: `input` is reduced to sha256 hashes + byte sizes;
- * the raw value is discarded. The action decomposition is filled by the
- * on-device extractor in a later phase — for now `action` ships null. */
+ * those in. PRIVACY: `input` is reduced to sha256 hashes + byte sizes and the
+ * on-device extractor's structural `action` (incl. a value-masked shape and a
+ * redacted command); the raw value is then discarded. */
 function buildToolCallDraft(opts: {
   observedName: string;
   rawCallId: unknown;
@@ -162,6 +163,7 @@ function buildToolCallDraft(opts: {
   callIndex: number;
   startedAt: string;
   model: string | null;
+  cwd?: string | null;
 }): ToolCallDraft {
   const { server, name } = splitObservedToolName(opts.observedName);
   const hashes = hashArgs(opts.input);
@@ -187,7 +189,7 @@ function buildToolCallDraft(opts: {
     args_bytes: hashes.args_bytes,
     result_bytes: 0,
     model: opts.model,
-    action: null,
+    action: extractToolAction({ server, name, input: opts.input, cwd: opts.cwd }),
   };
 }
 
@@ -370,6 +372,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
           // Model verbatim from the issuing assistant message —
           // including "<synthetic>" (same rule as the event below).
           model: a.message?.model ?? null,
+          cwd,
         });
         const identity = toolIdentity(draft.server, draft.name);
         aggregate[identity] = (aggregate[identity] ?? 0) + 1;
@@ -505,6 +508,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         // session's last real model, same as user_message attribution
         // (lastModel never holds "<synthetic>", per the rule above).
         model: lastModel,
+        cwd,
       });
       toolCalls.push(draft);
       if (typeof t.id === "string" && t.id) pendingByCallId.set(t.id, draft);
