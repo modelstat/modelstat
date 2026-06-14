@@ -20,6 +20,7 @@ import {
   SUMMARISER_MAX_TOKENS,
   SUMMARISER_SYSTEM_PROMPT,
   SUMMARISER_TEMPERATURE,
+  SUMMARISER_TOP_K,
 } from "../pipeline/prompts.js";
 import {
   buildCognitionUserPrompt,
@@ -79,7 +80,7 @@ export function promptApiSummarize(): Summarizer {
     const session = await api.languageModel.create({
       systemPrompt: SUMMARISER_SYSTEM_PROMPT,
       temperature: SUMMARISER_TEMPERATURE,
-      topK: 3,
+      topK: SUMMARISER_TOP_K,
     });
     try {
       const out = await session.prompt(prompt, {

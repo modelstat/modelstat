@@ -10,6 +10,7 @@ import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { batchId } from "@modelstat/companion-core";
+import { INGEST_BATCH_MAX_EVENTS } from "@modelstat/companion-core/config";
 import type { SegmentProgressFn } from "@modelstat/companion-core/pipeline";
 import { attachSegmentIdsByMap, type ToolCallDraft } from "@modelstat/companion-core/queue";
 import type { IngestBatch, RawEvent, Segment } from "@modelstat/core";
@@ -23,11 +24,13 @@ import { buildSegments, buildSessionTitles } from "./pipeline.js";
  * (tsx / tests), where the define isn't applied. */
 const AGENT_VERSION =
   typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "agent-dev";
-const BATCH_MAX_EVENTS = 2000;
+// Shared cross-companion batch size — same value the extension uses, so
+// both sides present an identical rate-limit profile to the ingest endpoint.
+const BATCH_MAX_EVENTS = INGEST_BATCH_MAX_EVENTS;
 /** Wire cap on IngestBatch.tool_calls (z.array(ToolCallWire).max(20_000)
  * in @modelstat/core/schemas) — the server 400s anything above it, so
  * the buffer must flush BEFORE crossing it. Never binding in practice
- * (2000 events × typical calls-per-event stays far below), but a
+ * (one event batch × typical calls-per-event stays far below), but a
  * tool-storm session shouldn't be able to sink a whole upload. */
 const BATCH_MAX_TOOL_CALLS = 20_000;
 

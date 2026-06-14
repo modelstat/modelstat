@@ -12,6 +12,7 @@ import { IngestBatch, type RawEvent } from "@modelstat/core/schemas";
 import {
   AGENT_VERSION,
   DEFAULT_API_URL,
+  FORCE_SHIP_THRESHOLD,
   INGEST_BATCH_INTERVAL_MS,
   INGEST_BATCH_MAX_EVENTS,
   SESSION_DEBOUNCE_MS,
@@ -102,11 +103,11 @@ export async function flushQueue(): Promise<{ sent: number; remaining: number }>
     .filter((g) => g.lastTs <= cutoff)
     .sort((a, b) => b.lastTs - a.lastTs);
 
-  // Also let a session ship if it has >100 pending rows — don't hold
-  // back a long-running conversation forever just because it keeps
-  // emitting new messages within the debounce.
+  // Also let a session ship if it has accumulated FORCE_SHIP_THRESHOLD
+  // pending rows — don't hold back a long-running conversation forever
+  // just because it keeps emitting new messages within the debounce.
   for (const g of groups.values()) {
-    if (g.rows.length >= 100 && !ready.includes(g)) ready.push(g);
+    if (g.rows.length >= FORCE_SHIP_THRESHOLD && !ready.includes(g)) ready.push(g);
   }
 
   const rows: StoredEvent[] = [];

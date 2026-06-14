@@ -12,6 +12,11 @@
  * exposes a single uniform interface.
  */
 
+import {
+  SUMMARISER_SYSTEM_PROMPT,
+  SUMMARISER_TEMPERATURE,
+  SUMMARISER_TOP_K,
+} from "@modelstat/companion-core/pipeline";
 import { createLogger } from "@/common/logger.js";
 
 const log = createLogger("prompt-api");
@@ -63,14 +68,18 @@ async function getSession(systemPrompt?: string): Promise<NanoSession> {
   if (sessionPromise) return sessionPromise;
   const ns = resolveNamespace();
   if (!ns) throw new Error("prompt_api_unavailable");
-  sessionPromise = ns.create({ systemPrompt, temperature: 0.3, topK: 40 });
+  sessionPromise = ns.create({
+    systemPrompt,
+    temperature: SUMMARISER_TEMPERATURE,
+    topK: SUMMARISER_TOP_K,
+  });
   return sessionPromise;
 }
 
 export async function promptApiSummarize(text: string): Promise<string> {
-  const session = await getSession(
-    "You are a terse summariser. Output a single 1-2 sentence description of what the user was doing in this chat. No preamble. No greetings.",
-  );
+  // Canonical system prompt — shared with the Ollama / WebLLM summarisers so
+  // every runtime produces near-identical abstracts.
+  const session = await getSession(SUMMARISER_SYSTEM_PROMPT);
   return session.prompt(`Chat excerpt:\n${text}\n\nSummary:`);
 }
 

@@ -3,7 +3,7 @@
  *
  *   summarize: Chrome Prompt API → WebLLM (if user opted in) → null
  *   compact:   Chrome Prompt API → WebLLM (if user opted in) → truncate
- *   categorize: embeddings (always, 25MB MiniLM) → cosine argmax
+ *   categorize: embeddings (always, ~33MB bge-small) → cosine argmax
  *
  * The SW delegates here via offscreen messaging. All work happens in
  * the offscreen document; this module never touches the network.

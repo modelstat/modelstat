@@ -204,8 +204,6 @@ async function cmdAwaitClaim(): Promise<void> {
   }
 }
 
-const DASHBOARD_URL = "https://modelstat.ai/dashboard";
-
 interface ConnectOpts {
   json: boolean;
   noBrowser: boolean;
@@ -328,9 +326,10 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     }
   }
 
+  const apiBase = state.apiUrl.replace(/\/$/, "");
   const claimCode = state.claimCode ?? "(unknown)";
-  const claimUrl = state.claimUrl ?? `https://modelstat.ai/device/${claimCode}`;
-  const agentUrl = `https://modelstat.ai/device/${claimCode}/agent`;
+  const claimUrl = state.claimUrl ?? `${apiBase}/device/${claimCode}`;
+  const agentUrl = `${apiBase}/device/${claimCode}/agent`;
   emitEvent(opts, "registered", {
     device_uuid: state.deviceUuid,
     device_id: state.deviceId,

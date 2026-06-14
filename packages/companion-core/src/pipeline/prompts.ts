@@ -89,6 +89,11 @@ export const SUMMARISER_MAX_TOKENS = 120;
  * replay so our idempotency assertions in tests hold. */
 export const SUMMARISER_TEMPERATURE = 0.2;
 
+/** Low top-k — keep sampling tight so the abstract is stable across
+ * runtimes (Ollama / WebLLM / Chrome Prompt API) and across replays.
+ * Shared so no runtime drifts to a looser value. */
+export const SUMMARISER_TOP_K = 3;
+
 /** Approximate chars-per-token ratio for Qwen-family tokenizers.
  * Used as the cheap tokenizer fallback on both runtimes so spend
  * attribution stays directionally correct even without tiktoken. */

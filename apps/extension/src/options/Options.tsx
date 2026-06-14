@@ -194,9 +194,9 @@ export function Options(): React.JSX.Element {
             description="Zero download. Used when available for conversation summaries."
           />
           <Row
-            label="Embeddings (all-MiniLM-L6-v2)"
+            label="Embeddings (bge-small-en-v1.5)"
             status={aiStatus.embeddingsReady ? "available" : "downloadable"}
-            description="~25 MB. Used to categorize conversations and detect near-duplicates."
+            description="~33 MB. Used to categorize conversations and detect near-duplicates."
           />
           <div>
             <label className="flex items-center justify-between">

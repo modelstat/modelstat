@@ -18,7 +18,10 @@ const log = createLogger("heartbeat");
 
 async function attempt(token: string, deviceId: string, apiUrl: string): Promise<{ ok: true } | { ok: false; status?: number; error: string }> {
   const queueSize = await db().events.where("synced").equals(0 as unknown as number).count();
-  const syncEnabled = await getSetting<boolean>("syncEnabled", false);
+  // Default ON, matching ingest-queue + the background settings reader — a
+  // fresh, claimed device reports "watching" while it's actually syncing,
+  // not "idle".
+  const syncEnabled = await getSetting<boolean>("syncEnabled", true);
   try {
     const res = await fetch(`${apiUrl}/v1/agent/heartbeat`, {
       method: "POST",

@@ -1,8 +1,13 @@
 /**
- * all-MiniLM-L6-v2 embeddings via @huggingface/transformers (ONNX +
- * WebGPU, falls back to WASM). 25MB model weights, cached in OPFS /
- * browser cache by transformers.js; first use downloads, subsequent
+ * BGE-small (bge-small-en-v1.5) embeddings via @huggingface/transformers
+ * (ONNX + WebGPU, falls back to WASM). ~33MB model weights, cached in OPFS
+ * / browser cache by transformers.js; first use downloads, subsequent
  * loads are instant.
+ *
+ * The model id comes from the shared pipeline contract (BROWSER_EMBED_MODEL)
+ * — the browser and the CLI MUST embed into the same 384-dim vector space, or
+ * cross-source cosine similarity is meaningless (vectors from different models
+ * are not comparable).
  *
  * Used for:
  *   - Zero-shot categorization (cosine-sim vs taxonomy prototypes)
@@ -13,6 +18,7 @@
  */
 
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
+import { BROWSER_EMBED_MODEL } from "@modelstat/companion-core/pipeline";
 import { createLogger } from "@/common/logger.js";
 
 const log = createLogger("embed");
@@ -22,13 +28,13 @@ let extractorPromise: Promise<FeatureExtractionPipeline> | null = null;
 export async function getEmbedder(): Promise<FeatureExtractionPipeline> {
   if (extractorPromise) return extractorPromise;
   extractorPromise = (async () => {
-    log.info("loading all-MiniLM-L6-v2 (first run may download ~25MB)");
-    const pipe = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+    log.info(`loading ${BROWSER_EMBED_MODEL} (first run may download ~33MB)`);
+    const pipe = await pipeline("feature-extraction", BROWSER_EMBED_MODEL, {
       // Prefer WebGPU when available; transformers.js auto-falls-back to WASM.
       device: "webgpu",
     }).catch(async () => {
       log.info("webgpu unavailable — using wasm");
-      return pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", { device: "wasm" });
+      return pipeline("feature-extraction", BROWSER_EMBED_MODEL, { device: "wasm" });
     });
     return pipe as FeatureExtractionPipeline;
   })();

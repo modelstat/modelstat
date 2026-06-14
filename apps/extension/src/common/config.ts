@@ -22,9 +22,15 @@ export const ADAPTER_POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 min
 // once that session has been quiet for at least SESSION_DEBOUNCE_MS
 // (5–10 s — user-configurable). Finalised sessions go first, ordered
 // most-recent → oldest, which matches the dashboard's live priority.
-export const INGEST_BATCH_INTERVAL_MS = 5 * 1000;
-export const INGEST_BATCH_MAX_EVENTS = 500;
-export const SESSION_DEBOUNCE_MS = 7 * 1000;
+// Ingest sizing is the shared cross-companion contract — sourced from one
+// place (@modelstat/companion-core/config) so the extension and the CLI use
+// the same batch cadence + size instead of drifting apart.
+export {
+  FORCE_SHIP_THRESHOLD,
+  INGEST_BATCH_INTERVAL_MS,
+  INGEST_BATCH_MAX_EVENTS,
+  SESSION_DEBOUNCE_MS,
+} from "@modelstat/companion-core/config";
 export const MESSAGE_FINALISE_WINDOW_MS = 30_000; // two-phase commit window
 export const MESSAGE_FINALISE_DOM_QUIET_MS = 2_000; // stream-end + DOM stable
 export const SSE_FLUSH_INTERVAL_MS = 50;
