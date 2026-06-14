@@ -8,6 +8,7 @@ packages:
   - "packages/mcp"
   - "packages/parsers"
   - "packages/pricing"
+  - "packages/remote-config"
 
 onlyBuiltDependencies:
   - "better-sqlite3"

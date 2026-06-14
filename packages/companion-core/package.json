@@ -16,7 +16,8 @@
     "./logger": "./src/logger.ts",
     "./node": "./src/node/index.ts",
     "./browser": "./src/browser/index.ts",
-    "./redact/privacy-filter": "./src/redact/privacy-filter.ts"
+    "./redact/privacy-filter": "./src/redact/privacy-filter.ts",
+    "./policies": "./src/policies/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -26,6 +27,7 @@
   },
   "dependencies": {
     "@modelstat/core": "workspace:*",
+    "@modelstat/remote-config": "workspace:*",
     "ulid": "^2.3.0",
     "zod": "^3.24.1"
   },

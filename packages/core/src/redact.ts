@@ -1,9 +1,19 @@
 /**
- * Redaction helpers. The agent runs this BEFORE any content hits the wire.
- * The server may apply its own defence-in-depth checks independently.
+ * Redaction helpers — the wire privacy floor. The agent runs this BEFORE any
+ * content hits the wire. The server may apply its own defence-in-depth checks
+ * independently.
  *
  * Goal: high recall on secrets + PII; minimal false positives on code.
+ *
+ * The secret catalogue lives in `./redact-floor` (the single source of truth,
+ * shared with the agent-sdk redactor so the two can't drift). A signed,
+ * additive `policies` bundle may *union in* extra patterns via
+ * {@link setRemoteRedactionPatterns}; that augment runs AFTER the baseline and
+ * can only ADD redactions. The baseline floor here is unconditional and can
+ * never be removed or disabled by remote config.
  */
+
+import { SECRET_FLOOR } from "./redact-floor.js";
 
 export interface RedactionResult {
   text: string;
@@ -14,21 +24,31 @@ export interface RedactionResult {
   };
 }
 
-const SECRET_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
-  { name: "anthropic_key", pattern: /sk-ant-[A-Za-z0-9_-]{20,}/g },
-  { name: "openai_key", pattern: /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g },
-  { name: "google_api_key", pattern: /AIza[0-9A-Za-z_-]{35}/g },
-  { name: "aws_access_key", pattern: /AKIA[0-9A-Z]{16}/g },
-  { name: "aws_secret_key", pattern: /(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])/g },
-  { name: "github_pat", pattern: /ghp_[A-Za-z0-9]{36}/g },
-  { name: "github_oauth", pattern: /gho_[A-Za-z0-9]{36}/g },
-  { name: "github_app", pattern: /gh[sur]_[A-Za-z0-9]{36}/g },
-  { name: "slack_token", pattern: /xox[baprs]-[A-Za-z0-9-]{10,}/g },
-  { name: "stripe_live_key", pattern: /sk_live_[A-Za-z0-9]{24,}/g },
-  { name: "stripe_test_key", pattern: /sk_test_[A-Za-z0-9]{24,}/g },
-  { name: "jwt", pattern: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
-  { name: "private_key_header", pattern: /-----BEGIN [A-Z ]+PRIVATE KEY-----/g },
-];
+/** A compiled, additive secret pattern delivered by the signed `policies`
+ * augment. Same shape as a floor entry, minus the replacement template (the
+ * wire floor always redacts the whole match). */
+export interface RemoteRedactionPattern {
+  name: string;
+  pattern: RegExp;
+}
+
+// Process-wide additive augment. Empty until a verified `policies` bundle is
+// applied; set by the long-lived daemon after it loads + verifies one. Reading
+// it here (rather than threading a param through every call site) is what lets
+// "the server adds a pattern fleet-wide" take effect with zero changes at the
+// dozens of `redact()` calls.
+let remotePatterns: ReadonlyArray<RemoteRedactionPattern> = [];
+
+/** Apply a verified, additive set of remote secret patterns over the baseline
+ * floor. Additive-only: this cannot remove or weaken the baseline below. */
+export function setRemoteRedactionPatterns(patterns: ReadonlyArray<RemoteRedactionPattern>): void {
+  remotePatterns = patterns;
+}
+
+/** Drop the remote augment back to nothing (the baseline floor still applies). */
+export function clearRemoteRedactionPatterns(): void {
+  remotePatterns = [];
+}
 
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const ABSOLUTE_PATH_MACOS = /\/Users\/[^\s"'`)]+/g;
@@ -59,7 +79,16 @@ export function redact(text: string, repoRootAbs?: string): RedactionResult {
     paths_redacted_absolute: 0,
   };
 
-  for (const { name, pattern } of SECRET_PATTERNS) {
+  // 1. Baseline floor — always applied first, never server-weakenable.
+  for (const { name, pattern } of SECRET_FLOOR) {
+    out = out.replace(pattern, () => {
+      counts.secrets_found += 1;
+      return `[REDACTED:${name}]`;
+    });
+  }
+
+  // 2. Additive signed augment — runs after the floor, can only ADD.
+  for (const { name, pattern } of remotePatterns) {
     out = out.replace(pattern, () => {
       counts.secrets_found += 1;
       return `[REDACTED:${name}]`;

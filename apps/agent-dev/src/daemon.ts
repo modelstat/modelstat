@@ -438,6 +438,18 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   await runDiscovery();
   await requestScan("startup");
 
+  // Signed redaction-policy augment: fetch the additive `policies`
+  // config, verify its Ed25519 signature against the bundled key, and union the
+  // patterns over the local floor — refreshing on its own 15-min timer. Strictly
+  // fail-safe: the compiled-in floor always applies, a forged/stale bundle is
+  // rejected, and an offline boot degrades to floor-only. Never blocks startup.
+  try {
+    const { createPolicyRefresher } = await import("@modelstat/companion-core/policies");
+    await createPolicyRefresher({ apiUrl: state.apiUrl }).start();
+  } catch (err) {
+    setMessage(`policy refresh unavailable: ${(err as Error).message}`);
+  }
+
   // Lazy-load chokidar to keep cold-start fast
   const chokidar = (await import("chokidar")).default;
   const { homedir, platform } = await import("node:os");

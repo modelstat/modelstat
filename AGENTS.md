@@ -36,6 +36,18 @@ Things to know:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
 - The summariser is npm-only, single-path (no Ollama, no fallbacks),
   staged via `installNativeRuntime`/`_setup-runtime`.
+- Redaction has **one floor**. The secret-pattern catalogue lives in
+  `@modelstat/core/redact-floor` (dependency-free) and is the single source of
+  truth for both the wire redactor (`@modelstat/core/redact`) and the published
+  SDK redactor (`@modelstat/agent-sdk`) — add a newly-leaked credential format
+  there, once. The server can *augment* it at runtime via a signed, additive
+  `policies` config: the floor always applies and a signed bundle can only ever
+  add patterns, never remove or weaken them.
+- `@modelstat/remote-config` is the shared signed-config loader (fetch → verify
+  Ed25519 over raw bytes → disk-cache under `~/.modelstat/config/` → fall back
+  memory→disk→bundled). The long-lived daemon refreshes the `policies` kind on a
+  timer; new server-delivered config kinds ride this loader instead of forcing a
+  release.
 
 ## Releasing (npm + Homebrew)
 

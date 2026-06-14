@@ -152,6 +152,9 @@ importers:
 
   packages/agent-sdk:
     devDependencies:
+      '@modelstat/core':
+        specifier: workspace:*
+        version: link:../core
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(jiti@2.6.1)(postcss@8.5.10)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
@@ -167,6 +170,9 @@ importers:
       '@modelstat/core':
         specifier: workspace:*
         version: link:../core
+      '@modelstat/remote-config':
+        specifier: workspace:*
+        version: link:../remote-config
       ulid:
         specifier: ^2.3.0
         version: 2.4.0
@@ -231,6 +237,16 @@ importers:
       yaml:
         specifier: ^2.6.1
         version: 2.8.3
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/remote-config:
+    dependencies:
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.7.3

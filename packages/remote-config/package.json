@@ -1,5 +1,5 @@
 {
-  "name": "@modelstat/core",
+  "name": "@modelstat/remote-config",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,12 +7,9 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./enums": "./src/enums.ts",
-    "./schemas": "./src/schemas.ts",
-    "./ids": "./src/ids.ts",
-    "./redact": "./src/redact.ts",
-    "./redact-floor": "./src/redact-floor.ts",
-    "./policies": "./src/policies.ts"
+    "./schema": "./src/schema.ts",
+    "./node": "./src/node.ts",
+    "./testkit": "./src/testkit.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -21,8 +18,7 @@
     "clean": "rm -rf dist .turbo *.tsbuildinfo"
   },
   "dependencies": {
-    "zod": "^3.24.1",
-    "ulid": "^2.3.0"
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "typescript": "^5.7.3"
