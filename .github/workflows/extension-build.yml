@@ -1,0 +1,71 @@
+name: Extension Build
+
+# Builds the Chrome extension and uploads the packaged .zip as a downloadable
+# artifact whenever the extension — or a workspace package it bundles —
+# changes. The zip is exactly what you upload to the Chrome Web Store; anyone
+# can also grab it from the run's "Artifacts" and load it unpacked.
+#
+# Triggers only on real code paths (below), so docs/CI churn elsewhere doesn't
+# rebuild it. `build` runs `tsc --noEmit` + `vite build`, so a type or build
+# error fails the run — the artifact is always a clean build.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/extension/**"
+      - "packages/core/**"
+      - "packages/companion-core/**"
+      - "packages/adapters-protocol/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/extension-build.yml"
+  pull_request:
+    paths:
+      - "apps/extension/**"
+      - "packages/core/**"
+      - "packages/companion-core/**"
+      - "packages/adapters-protocol/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/extension-build.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: extension-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `build` = prepare-assets + tsc --noEmit + vite build → apps/extension/dist
+      - name: Build extension
+        run: pnpm --filter @modelstat/extension build
+
+      # `zip` packs dist/ → apps/extension/modelstat-extension.zip (store-ready)
+      - name: Package zip
+        run: pnpm --filter @modelstat/extension zip
+
+      - name: Build metadata
+        id: meta
+        run: |
+          echo "version=$(node -p "require('./apps/extension/manifest.json').version")" >> "$GITHUB_OUTPUT"
+          echo "sha7=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload extension zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: modelstat-extension-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha7 }}
+          path: apps/extension/modelstat-extension.zip
+          if-no-files-found: error
