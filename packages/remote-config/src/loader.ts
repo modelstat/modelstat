@@ -3,32 +3,22 @@
  * config kind on both Node and the browser.
  *
  *   loadRemoteConfig(kind, env):
- *     1. read disk cache (re-verified)                       ── cheap, offline-safe
- *     2. GET {api}/v1/config/{kind}/manifest.json            ── cheap pointer
- *     3. if manifest.version <= cached.version → keep cache   ── version gate
- *     4. GET bundle_url → sha256 check → verify Ed25519 over
- *        RAW bytes → JSON.parse → schema → cross-check version
- *     5. write-through to the cache, return the new value
+ *     1. read the disk cache (re-validated)               ── cheap, offline-safe
+ *     2. GET {api}/v1/config/{kind}                        ── the current payload
+ *     3. validate the payload + version-gate vs the cache  ── ignore a stale/older one
+ *     4. write-through to the cache, return the new value
  *
- *   FALLBACK LADDER (any failure — offline / bad-sig / schema-invalid /
- *   sha-mismatch / unknown-version): remote → disk (last verified) →
- *   bundled default. Fail-closed: a failure never clobbers good state.
+ *   FALLBACK LADDER (any failure — offline / schema-invalid / older-version):
+ *   remote → disk (last good) → bundled default. Fail-closed: a failure
+ *   never clobbers good state.
  *
- * `RemoteConfigStore` adds the long-lived-daemon shape on top: seed from
- * disk at startup (instant, no network), then refresh on a timer, always
- * serving the best value held in memory.
+ * Trust is the TLS connection to the modelstat origin; the client only
+ * validates the payload's shape and version. `RemoteConfigStore` adds the
+ * long-lived-daemon shape: seed from disk at startup (instant, no network),
+ * then refresh on a timer, always serving the best value held in memory.
  */
 
-import { base64ToBytes, sha256Hex } from "./crypto.js";
-import { ConfigManifest } from "./schema.js";
-import type {
-  CachedBundle,
-  ConfigKind,
-  ConfigSource,
-  LoadResult,
-  RemoteConfigEnv,
-} from "./types.js";
-import { verifyConfigBytes, verifySignedBundle } from "./verify.js";
+import type { ConfigKind, ConfigSource, LoadResult, RemoteConfigEnv } from "./types.js";
 
 type AnyConfigKind = ConfigKind<{ version: number }>;
 
@@ -36,169 +26,85 @@ function getFetch(env: RemoteConfigEnv): typeof fetch {
   return env.fetch ?? fetch;
 }
 
-function joinUrl(base: string, path: string): string {
-  if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  return `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
-}
-
-/** GET + validate the cheap manifest pointer. Returns null on any failure. */
-async function fetchManifest(
-  kind: AnyConfigKind,
-  env: RemoteConfigEnv,
-): Promise<ConfigManifest | null> {
-  const url = `${env.apiUrl.replace(/\/+$/, "")}/v1/config/${encodeURIComponent(kind.kind)}/manifest.json`;
-  try {
-    const res = await getFetch(env)(url);
-    if (!res.ok) throw new Error(`status ${res.status}`);
-    const parsed = ConfigManifest.safeParse(await res.json());
-    if (!parsed.success) {
-      env.logger?.warn?.(`[remote-config] ${kind.kind} manifest schema invalid`);
-      return null;
-    }
-    if (parsed.data.kind !== kind.kind) {
-      env.logger?.warn?.(`[remote-config] ${kind.kind} manifest kind mismatch`);
-      return null;
-    }
-    return parsed.data;
-  } catch (e) {
-    env.logger?.warn?.(`[remote-config] ${kind.kind} manifest fetch failed`, e);
-    return null;
-  }
-}
-
-/**
- * GET the signed bundle named by a manifest, check its sha256, verify the
- * signature, and validate the payload. Returns the verified value plus
- * the envelope to persist, or null on any failure.
- */
-async function fetchVerifiedBundle<T extends { version: number }>(
+/** GET + validate the current payload for a kind. Null on any failure. */
+async function fetchConfig<T extends { version: number }>(
   kind: ConfigKind<T>,
-  manifest: ConfigManifest,
   env: RemoteConfigEnv,
-): Promise<{ value: T; version: number; cached: CachedBundle } | null> {
-  const url = joinUrl(env.apiUrl, manifest.bundle_url);
-  let bytes: Uint8Array;
-  let envelope: unknown;
+): Promise<{ value: T; version: number } | null> {
+  const url = `${env.apiUrl.replace(/\/+$/, "")}/v1/config/${encodeURIComponent(kind.kind)}`;
+  let body: unknown;
   try {
     const res = await getFetch(env)(url);
     if (!res.ok) throw new Error(`status ${res.status}`);
-    bytes = new Uint8Array(await res.arrayBuffer());
+    body = await res.json();
   } catch (e) {
-    env.logger?.warn?.(`[remote-config] ${kind.kind} bundle fetch failed`, e);
+    env.logger?.warn?.(`[remote-config] ${kind.kind} fetch failed`, e);
     return null;
   }
-
-  // Transport-integrity cross-check against the manifest (the signature
-  // is still the trust anchor; this just catches a truncated/garbled body).
-  const digest = await sha256Hex(bytes);
-  if (digest !== manifest.sha256) {
-    env.logger?.warn?.(`[remote-config] ${kind.kind} bundle sha256 mismatch`);
+  const parsed = kind.schema.safeParse(body);
+  if (!parsed.success) {
+    env.logger?.warn?.(`[remote-config] ${kind.kind} payload schema invalid`);
     return null;
   }
-
-  try {
-    envelope = JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    env.logger?.warn?.(`[remote-config] ${kind.kind} bundle not json`);
-    return null;
-  }
-
-  const verified = await verifySignedBundle({
-    envelope,
-    publicKey: env.publicKey,
-    schema: kind.schema,
-  });
-  if (!verified.ok) {
-    env.logger?.warn?.(`[remote-config] ${kind.kind} bundle rejected: ${verified.reason}`);
-    return null;
-  }
-  if (verified.version !== manifest.version) {
-    env.logger?.warn?.(`[remote-config] ${kind.kind} bundle/manifest version disagree`);
-    return null;
-  }
-
-  const env2 = envelope as { config: string; signature: string; signed_at: string };
-  return {
-    value: verified.value,
-    version: verified.version,
-    cached: {
-      version: verified.version,
-      signed_at: env2.signed_at,
-      config: env2.config,
-      signature: env2.signature,
-    },
-  };
+  return { value: parsed.data, version: parsed.data.version };
 }
 
 /**
- * Read the cache and RE-VERIFY it. We never trust bytes on disk just
- * because we wrote them once — a cache an attacker swapped under us is
- * rejected exactly like a bad network response.
+ * Read the cache and RE-VALIDATE it against the kind schema. We never trust
+ * bytes on disk just because we wrote them once — a torn or tampered file
+ * is rejected exactly like a bad network response, and we fall through.
  */
-async function readVerifiedCache<T extends { version: number }>(
+async function readCachedConfig<T extends { version: number }>(
   kind: ConfigKind<T>,
   env: RemoteConfigEnv,
 ): Promise<{ value: T; version: number } | null> {
   if (!env.cache) return null;
-  let cached: CachedBundle | null;
+  let raw: unknown;
   try {
-    cached = await env.cache.read(kind.kind);
+    raw = await env.cache.read(kind.kind);
   } catch (e) {
     env.logger?.warn?.(`[remote-config] ${kind.kind} cache read failed`, e);
     return null;
   }
-  if (!cached) return null;
-
-  const verified = await verifyConfigBytes({
-    configBytes: base64ToBytes(cached.config),
-    signature: base64ToBytes(cached.signature),
-    publicKey: env.publicKey,
-    schema: kind.schema,
-    expectedVersion: cached.version,
-  });
-  if (!verified.ok) {
-    env.logger?.warn?.(`[remote-config] ${kind.kind} disk cache rejected: ${verified.reason}`);
+  if (raw == null) return null;
+  const parsed = kind.schema.safeParse(raw);
+  if (!parsed.success) {
+    env.logger?.warn?.(`[remote-config] ${kind.kind} disk cache rejected`);
     return null;
   }
-  return { value: verified.value, version: verified.version };
+  return { value: parsed.data, version: parsed.data.version };
 }
 
 async function writeCache(
   kind: AnyConfigKind,
   env: RemoteConfigEnv,
-  cached: CachedBundle,
+  value: unknown,
 ): Promise<void> {
   if (!env.cache) return;
   try {
-    await env.cache.write(kind.kind, cached);
+    await env.cache.write(kind.kind, value);
   } catch (e) {
     env.logger?.warn?.(`[remote-config] ${kind.kind} cache write failed`, e);
   }
 }
 
 /**
- * One-shot load with the full ladder: try remote (version-gated against
- * the disk cache), else the last verified disk cache, else the bundled
- * default. Always resolves to a usable value.
+ * One-shot load with the full ladder: try remote (version-gated against the
+ * disk cache), else the last good disk cache, else the bundled default.
+ * Always resolves to a usable value.
  */
 export async function loadRemoteConfig<T extends { version: number }>(
   kind: ConfigKind<T>,
   env: RemoteConfigEnv,
 ): Promise<LoadResult<T>> {
-  const cached = await readVerifiedCache(kind, env);
-  const manifest = await fetchManifest(kind, env);
+  const cached = await readCachedConfig(kind, env);
+  const fetched = await fetchConfig(kind, env);
 
-  if (manifest) {
-    // Version gate: a manifest no newer than the cache needs no bundle GET.
-    if (!cached || manifest.version > cached.version) {
-      const fetched = await fetchVerifiedBundle(kind, manifest, env);
-      if (fetched) {
-        await writeCache(kind, env, fetched.cached);
-        return result(kind.kind, fetched.value, fetched.version, "remote");
-      }
-    }
+  if (fetched && (!cached || fetched.version >= cached.version)) {
+    // Only touch the disk when the value actually moved forward.
+    if (!cached || fetched.version > cached.version) await writeCache(kind, env, fetched.value);
+    return result(kind.kind, fetched.value, fetched.version, "remote");
   }
-
   if (cached) return result(kind.kind, cached.value, cached.version, "disk");
   return result(kind.kind, kind.bundledFallback, kind.bundledFallback.version, "bundled");
 }
@@ -215,8 +121,8 @@ interface StateEntry {
 
 /**
  * Long-lived in-memory registry over many kinds. Built for the daemon:
- * seed from disk at construction-time intent, expose an instant `get`,
- * and `refresh` on a timer. A failed refresh keeps the current value.
+ * seed from disk at startup, expose an instant `get`, and `refresh` on a
+ * timer. A failed refresh keeps the current value.
  */
 export class RemoteConfigStore {
   private readonly env: RemoteConfigEnv;
@@ -226,8 +132,8 @@ export class RemoteConfigStore {
   constructor(env: RemoteConfigEnv, kinds: readonly AnyConfigKind[]) {
     this.env = env;
     this.kinds = new Map(kinds.map((k) => [k.kind, k]));
-    // Seed every kind with its bundled fallback so `get` is total from
-    // the very first tick, before any disk read or network call.
+    // Seed every kind with its bundled fallback so `get` is total from the
+    // very first tick, before any disk read or network call.
     for (const k of kinds) {
       this.state.set(k.kind, {
         value: k.bundledFallback,
@@ -243,7 +149,7 @@ export class RemoteConfigStore {
   async initFromCache(): Promise<void> {
     await Promise.all(
       [...this.kinds.values()].map(async (k) => {
-        const cached = await readVerifiedCache(k, this.env);
+        const cached = await readCachedConfig(k, this.env);
         const current = this.state.get(k.kind);
         if (cached && (!current || cached.version >= current.version)) {
           this.state.set(k.kind, { value: cached.value, version: cached.version, source: "disk" });
@@ -252,22 +158,19 @@ export class RemoteConfigStore {
     );
   }
 
-  /** Fetch + verify one kind, swapping it in only if strictly newer.
-   * Never throws and never downgrades the held value on failure. */
+  /** Fetch one kind, swapping it in only if strictly newer. Never throws
+   * and never downgrades the held value on failure. */
   async refresh(kindName: string): Promise<void> {
     const kind = this.kinds.get(kindName);
     if (!kind) throw new Error(`unknown config kind: ${kindName}`);
     const current = this.state.get(kindName);
     const currentVersion = current?.version ?? kind.bundledFallback.version;
 
-    const manifest = await fetchManifest(kind, this.env);
-    if (!manifest) return;
-    if (manifest.version <= currentVersion) return; // version gate
-
-    const fetched = await fetchVerifiedBundle(kind, manifest, this.env);
+    const fetched = await fetchConfig(kind, this.env);
     if (!fetched) return;
+    if (fetched.version <= currentVersion) return; // version gate
 
-    await writeCache(kind, this.env, fetched.cached);
+    await writeCache(kind, this.env, fetched.value);
     this.state.set(kindName, { value: fetched.value, version: fetched.version, source: "remote" });
   }
 

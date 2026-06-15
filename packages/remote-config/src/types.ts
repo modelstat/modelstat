@@ -17,7 +17,7 @@ export interface Logger {
 /**
  * One config kind: its name, its payload schema, and the value compiled
  * into the binary that is used when nothing better is available. The
- * payload must be `VersionedConfig` (carry a numeric `version`).
+ * payload must carry a numeric `version`.
  */
 export interface ConfigKind<T extends { version: number }> {
   kind: string;
@@ -25,36 +25,26 @@ export interface ConfigKind<T extends { version: number }> {
   bundledFallback: T;
 }
 
-/** A verified bundle as persisted to — and re-verified from — the cache. */
-export interface CachedBundle {
-  version: number;
-  signed_at: string;
-  /** Base64 of the signed config bytes. */
-  config: string;
-  /** Base64 Ed25519 signature over the config bytes. */
-  signature: string;
-}
-
 /**
- * Pluggable persistence for the last verified bundle, per kind. The
+ * Pluggable persistence for the last good config payload, per kind. The
  * daemon backs this with disk (`./node.ts` — the piece the extension's
  * in-memory-only model lacks); a browser could back it with IndexedDB;
- * tests use the in-memory store.
+ * tests use the in-memory store. The stored value is the raw payload — the
+ * loader re-validates it on read, so a torn or tampered file is simply
+ * rejected and treated as "no cache".
  */
 export interface CacheStore {
-  read(kind: string): Promise<CachedBundle | null>;
-  write(kind: string, bundle: CachedBundle): Promise<void>;
+  read(kind: string): Promise<unknown | null>;
+  write(kind: string, payload: unknown): Promise<void>;
 }
 
 /** Everything the loader needs from its host environment. */
 export interface RemoteConfigEnv {
   /** Base URL for the config API, e.g. `https://modelstat.ai`. */
   apiUrl: string;
-  /** Raw 32-byte Ed25519 public key — the bundled trust root. */
-  publicKey: Uint8Array;
   /** Injectable fetch; defaults to the global `fetch`. */
   fetch?: typeof fetch;
-  /** Persistence for verified bundles; omit for memory-only operation. */
+  /** Persistence for the last good payload; omit for memory-only operation. */
   cache?: CacheStore;
   logger?: Logger;
 }

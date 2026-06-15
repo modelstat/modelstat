@@ -203,21 +203,8 @@ export const AdapterConfig = z.object({
 export type AdapterConfig = z.infer<typeof AdapterConfig>;
 
 // ──────────────────────────────────────────────────────────────────────
-// Signed delivery envelope — what the API actually serves
+// Adapter delivery manifest — what the API serves
 // ──────────────────────────────────────────────────────────────────────
-
-export const SignedAdapter = z.object({
-  /** Base64-encoded canonical JSON of the config (stable key-sorted). */
-  config: z.string().max(200_000),
-  /** Base64 Ed25519 signature over `config`. */
-  signature: z.string().max(200),
-  /** ISO-8601 time the publisher signed this. */
-  signed_at: z.string().datetime({ offset: true }),
-  /** Convenience — equals parsed-config.adapter_version. Duplicated for
-   * cheap manifest-vs-bundle comparisons without a parse step. */
-  adapter_version: z.number().int().nonnegative(),
-});
-export type SignedAdapter = z.infer<typeof SignedAdapter>;
 
 export const ManifestEntry = z.object({
   url: z.string().max(400),

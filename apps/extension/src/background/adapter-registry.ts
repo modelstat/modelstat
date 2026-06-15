@@ -3,9 +3,10 @@
  *
  *   1. On boot, load bundled adapters from extension resources (never
  *      fails — the extension must work offline).
- *   2. On a 15-min alarm, fetch the signed manifest from the API. For
- *      each entry whose version is newer than what we have, fetch the
- *      signed config, verify, and swap it in (per-provider atomic).
+ *   2. On a 15-min alarm, fetch the adapter manifest from the API over
+ *      TLS. For each entry whose version is newer than what we have,
+ *      fetch the config, validate its shape, and swap it in (per-provider
+ *      atomic).
  *   3. Broadcast `adapter-updated` to active content scripts so they
  *      re-install DOM observers.
  *   4. On invariant failure, push a breakage row (drained by the
@@ -16,7 +17,6 @@ import type { AdapterConfig } from "@modelstat/adapters-protocol";
 import { AdapterConfig as AdapterConfigSchema } from "@modelstat/adapters-protocol";
 import { ADAPTER_POLL_INTERVAL_MS, DEFAULT_API_URL } from "@/common/config.js";
 import { createLogger } from "@/common/logger.js";
-import { verifySignedAdapter } from "@/interpreter/signature.js";
 import { db, getSetting } from "@/storage/db.js";
 
 const log = createLogger("adapters");
@@ -85,16 +85,16 @@ export async function refreshAdapters(): Promise<void> {
       const url = entry.url.startsWith("http") ? entry.url : `${apiUrl}${entry.url}`;
       const res = await fetch(url);
       if (!res.ok) continue;
-      const envelope = await res.json();
-      const verified = await verifySignedAdapter(envelope);
-      if (!verified.ok) {
-        log.warn(`${provider} signature check failed: ${verified.reason}`);
+      const parsed = AdapterConfigSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        log.warn(`${provider} adapter schema invalid`, parsed.error.issues);
         continue;
       }
-      state.set(provider, verified.adapter);
-      log.info(`${provider} updated → v${verified.adapter.adapter_version}`);
+      const adapter = parsed.data;
+      state.set(provider, adapter);
+      log.info(`${provider} updated → v${adapter.adapter_version}`);
       // Notify content scripts for hosts this adapter matches.
-      for (const pattern of verified.adapter.match) {
+      for (const pattern of adapter.match) {
         try {
           const host = new URL(pattern.replace(/\*/g, "placeholder")).host;
           chrome.tabs.query({ url: pattern }, (tabs) => {
@@ -104,7 +104,7 @@ export async function refreshAdapters(): Promise<void> {
                 .sendMessage(tab.id, {
                   kind: "adapter-updated",
                   host,
-                  adapter: verified.adapter,
+                  adapter,
                 })
                 .catch(() => {});
             }

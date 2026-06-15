@@ -1,15 +1,14 @@
 /**
- * Wire the signed `policies` augment into the long-lived daemon. Loads the
- * `policies` config kind via `@modelstat/remote-config`
- * (disk-cache-first, Ed25519-verified, additive-only) and applies the verified
- * patterns to the in-process redaction floor.
+ * Wire the `policies` augment into the long-lived daemon. Loads the
+ * `policies` config kind via `@modelstat/remote-config` (disk-cache-first,
+ * additive-only) and applies the patterns to the in-process redaction floor.
  *
  * The floor itself is irreducible and compiled into the binary
  * (`@modelstat/core/redact`); this path can only ever ADD patterns over it. If
  * the network, the disk cache, and the bundled fallback all somehow produced
- * nothing, the floor still applies — fail-closed by construction. A bad
- * signature, a stale/forged bundle, or an offline boot all degrade to "floor
- * only", never to "floor weakened".
+ * nothing, the floor still applies — fail-closed by construction. A malformed
+ * payload, a stale bundle, or an offline boot all degrade to "floor only",
+ * never to "floor weakened".
  */
 
 import {
@@ -19,7 +18,6 @@ import {
   setRemoteRedactionPatterns,
 } from "@modelstat/core";
 import {
-  base64ToBytes,
   type ConfigKind,
   type Logger,
   type RemoteConfigEnv,
@@ -27,20 +25,11 @@ import {
 } from "@modelstat/remote-config";
 import { createNodeDiskCache } from "@modelstat/remote-config/node";
 
-/**
- * The bundled trust root (Ed25519 public key, base64) — the same key the
- * extension bundles. It can only *verify* config bundles the server signed
- * with its private key; publishing it here is safe by design.
- */
-export const BUNDLED_CONFIG_PUBKEY_B64 = "6u06TytcBlX1oAnwc7jGUwi71G4TuXz/D+GqKYuQzTU=";
-
 const DEFAULT_REFRESH_MS = 15 * 60 * 1000;
 
 export interface PolicyRefresherOptions {
   /** API origin, e.g. `https://modelstat.ai`. */
   apiUrl: string;
-  /** Override the bundled trust root (tests). */
-  publicKey?: Uint8Array;
   /** Injectable fetch (tests). Defaults to the global `fetch`. */
   fetch?: typeof fetch;
   /** Override the disk-cache dir (tests). Default `~/.modelstat/config`. */
@@ -69,7 +58,6 @@ const policiesKind: ConfigKind<RedactionPolicyBundle> = POLICIES_CONFIG_KIND;
 export function createPolicyRefresher(opts: PolicyRefresherOptions): PolicyRefresher {
   const env: RemoteConfigEnv = {
     apiUrl: opts.apiUrl,
-    publicKey: opts.publicKey ?? base64ToBytes(BUNDLED_CONFIG_PUBKEY_B64),
     cache: createNodeDiskCache(opts.cacheDir ? { dir: opts.cacheDir } : {}),
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
     ...(opts.logger ? { logger: opts.logger } : {}),

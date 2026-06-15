@@ -1,28 +1,25 @@
 /**
- * Node disk cache — the one piece the extension's adapter loader lacks.
+ * Node disk cache — the one piece the extension's in-memory model lacks.
  *
  * The extension's service worker reboots constantly, so it always
  * re-bootstraps from the bundled default; that is fine for a browser but
- * wrong for a long-lived daemon. A daemon that restarts while offline
- * must come back on the last *verified* bundle it fetched, not the
- * shipped baseline. So we persist each kind to disk, next to identity.json.
+ * wrong for a long-lived daemon. A daemon that restarts while offline must
+ * come back on the last config it fetched, not the shipped baseline. So we
+ * persist each kind's payload to disk, next to identity.json.
  *
  * Layout (`~/.modelstat/config/`):
- *   {kind}.json      the exact signed config bytes (human-readable JSON)
- *   {kind}.sig       base64 Ed25519 signature over those bytes
- *   {kind}.version   { "version": N, "signed_at": "…" }
+ *   {kind}.json   the last good config payload (human-readable JSON)
  *
  * Writes are atomic (tmp + rename), mirroring identity.ts and the daemon
- * status writer. The cache is re-verified on read by the loader, so a
- * torn, missing, or tampered triple simply reads back as "no cache" and
- * the loader falls through to disk-less behavior — never a hard failure.
+ * status writer. The payload is re-validated on read by the loader, so a
+ * torn, missing, or tampered file simply reads back as "no cache" and the
+ * loader falls through — never a hard failure.
  */
 
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { base64ToBytes, bytesToBase64 } from "./crypto.js";
-import type { CachedBundle, CacheStore } from "./types.js";
+import type { CacheStore } from "./types.js";
 
 function defaultRoot(): string {
   return join(homedir(), ".modelstat", "config");
@@ -43,7 +40,7 @@ export interface NodeDiskCacheOptions {
 export function createNodeDiskCache(opts: NodeDiskCacheOptions = {}): CacheStore {
   const dir = opts.dir ?? defaultRoot();
 
-  async function writeAtomic(path: string, data: Uint8Array | string): Promise<void> {
+  async function writeAtomic(path: string, data: string): Promise<void> {
     const tmp = `${path}.${process.pid}.tmp`;
     await writeFile(tmp, data, { mode: 0o600 });
     await rename(tmp, path);
@@ -55,40 +52,20 @@ export function createNodeDiskCache(opts: NodeDiskCacheOptions = {}): CacheStore
   }
 
   return {
-    async read(kind: string): Promise<CachedBundle | null> {
+    async read(kind: string): Promise<unknown | null> {
       const k = safeKind(kind);
       try {
-        const [configBytes, sig, versionRaw] = await Promise.all([
-          readFile(join(dir, `${k}.json`)),
-          readFile(join(dir, `${k}.sig`), "utf8"),
-          readFile(join(dir, `${k}.version`), "utf8"),
-        ]);
-        const meta = JSON.parse(versionRaw) as { version?: unknown; signed_at?: unknown };
-        if (typeof meta.version !== "number" || typeof meta.signed_at !== "string") return null;
-        return {
-          version: meta.version,
-          signed_at: meta.signed_at,
-          // Re-encode the exact on-disk bytes; the loader re-verifies them.
-          config: bytesToBase64(new Uint8Array(configBytes)),
-          signature: sig.trim(),
-        };
+        const raw = await readFile(join(dir, `${k}.json`), "utf8");
+        return JSON.parse(raw);
       } catch {
         return null;
       }
     },
 
-    async write(kind: string, bundle: CachedBundle): Promise<void> {
+    async write(kind: string, payload: unknown): Promise<void> {
       const k = safeKind(kind);
       await mkdir(dir, { recursive: true, mode: 0o700 });
-      // Persist the EXACT signed bytes (not a re-serialization) so the
-      // cache re-verifies byte-for-byte on the next read.
-      const configBytes = base64ToBytes(bundle.config);
-      await writeAtomic(join(dir, `${k}.json`), configBytes);
-      await writeAtomic(join(dir, `${k}.sig`), `${bundle.signature}\n`);
-      await writeAtomic(
-        join(dir, `${k}.version`),
-        `${JSON.stringify({ version: bundle.version, signed_at: bundle.signed_at })}\n`,
-      );
+      await writeAtomic(join(dir, `${k}.json`), `${JSON.stringify(payload)}\n`);
     },
   };
 }
