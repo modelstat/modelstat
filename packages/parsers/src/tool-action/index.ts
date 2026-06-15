@@ -13,6 +13,8 @@
  */
 import { paramShape, redact, type ToolAction } from "@modelstat/core";
 
+export * from "./scripts.js";
+
 /** What the parser has in hand for one observed call at draft-build time
  * (before the args are hashed away). */
 export interface ToolActionInput {
@@ -60,6 +62,7 @@ export function extractToolAction(call: ToolActionInput): ToolAction {
     keywords: [],
     abstract: null,
     command_redacted,
+    scripts: [],
     confidence: 0,
     extractor: `${surface}.v1`,
   };

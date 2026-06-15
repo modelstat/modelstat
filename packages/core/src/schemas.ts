@@ -194,6 +194,15 @@ export const ToolAction = z
      * (SOC2/GDPR), org-internal infra intact; the server derives semantics from
      * it. Un-redacted raw never ships. (tier 0, post-redaction) */
     command_redacted: z.string().max(1000).nullable().default(null),
+    /** Per-script content abstracts for any script/bash FILES the command runs
+     * — summarized on-device by the local model, then redacted. Ordered by
+     * appearance; `token` is the script's token exactly as it appears in
+     * `command_redacted`, so the backend deterministically zips each `summary`
+     * to its place when ingesting the command + its scripts. (tier 0) */
+    scripts: z
+      .array(z.object({ token: z.string().max(200), summary: z.string().max(200) }))
+      .max(8)
+      .default([]),
     /** Extractor confidence in [0, 1]. */
     confidence: z.number().min(0).max(1).default(0),
     /** Provenance of the extraction, e.g. `shell.v2`. */

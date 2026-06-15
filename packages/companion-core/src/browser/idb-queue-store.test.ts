@@ -254,6 +254,7 @@ describe("IdbQueueStore tool_calls round-trip", () => {
           keywords: ["create", "pr"],
           abstract: "opening a pull request",
           command_redacted: "gh pr create --title 'fix'",
+          scripts: [],
           confidence: 0.8,
           extractor: "mcp.generic.v1",
         },
