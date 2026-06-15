@@ -23,6 +23,7 @@ export {
   ensureLlamaModel,
   llamaCognize,
   llamaEntitle,
+  llamaScriptSummarize,
   llamaSummarize,
   DEFAULT_LLAMA_MODEL_URL,
   type LlamaConfig,

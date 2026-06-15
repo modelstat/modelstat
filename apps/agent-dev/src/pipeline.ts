@@ -19,21 +19,28 @@
  *
  * The adapters are built once and cached for the life of the process.
  */
-import type { RawEvent, Segment } from "@modelstat/core";
-import {
-  buildSegmentsForSession,
-  buildSessionTitles as buildSessionTitlesCore,
-  type PipelineAdapters,
-  type SegmentProgressFn,
-} from "@modelstat/companion-core/pipeline";
+import { existsSync } from "node:fs";
+import { readFile as fsReadFile } from "node:fs/promises";
 import {
   createTransformersJsEmbedder,
   defaultLlamaConfig,
   llamaCognize,
   llamaEntitle,
+  llamaScriptSummarize,
   llamaSummarize,
 } from "@modelstat/companion-core/node";
+import {
+  buildSegmentsForSession,
+  buildSessionTitles as buildSessionTitlesCore,
+  type PipelineAdapters,
+  type ScriptSummarizer,
+  type SegmentProgressFn,
+} from "@modelstat/companion-core/pipeline";
+import type { ToolCallDraft } from "@modelstat/companion-core/queue";
 import { createPrivacyFilterRedactor } from "@modelstat/companion-core/redact/privacy-filter";
+import type { RawEvent, Segment } from "@modelstat/core";
+import type { LocalToolContext } from "@modelstat/parsers";
+import { enrichToolCallScripts } from "./enrich-scripts.js";
 
 let adapters: PipelineAdapters | null = null;
 
@@ -96,9 +103,7 @@ async function getAdapters(): Promise<PipelineAdapters> {
     );
   }
   // biome-ignore lint/suspicious/noConsole: one-line startup status
-  console.log(
-    "[modelstat] using bundled local summariser (Qwen3.5-4B, runs on this machine)",
-  );
+  console.log("[modelstat] using bundled local summariser (Qwen3.5-4B, runs on this machine)");
   adapters = await bundledAdapters();
   return adapters;
 }
@@ -116,11 +121,45 @@ export async function buildSegments(
  * see `entitle` above); deterministic fallback inside companion-core
  * means this never throws for healthy segments.
  */
-export async function buildSessionTitles(
-  segments: Segment[],
-): Promise<Record<string, string>> {
+export async function buildSessionTitles(segments: Segment[]): Promise<Record<string, string>> {
   const a = await getAdapters();
   return buildSessionTitlesCore(segments, a.entitle);
+}
+
+/** Max bytes read from any one script before summarising. Scripts are small;
+ * this bounds memory + model input (the prompt builder slices further). */
+const MAX_SCRIPT_READ_BYTES = 64 * 1024;
+
+let scriptSummarizer: ScriptSummarizer | null = null;
+
+/**
+ * Fill each draft's `ToolAction.scripts` with on-device, redacted per-script
+ * content abstracts. Runs the bundled model (fourth chat session)
+ * over the script/bash FILES a command referenced, reading them locally; only
+ * the redacted one-sentence abstracts ship.
+ *
+ * Best-effort + additive: gated on the native runtime being loadable (same as
+ * summarisation, via `getAdapters`); individual script failures are swallowed
+ * inside `enrichToolCallScripts`. Mutates the drafts in place. No-op when there
+ * are no shell contexts (e.g. an MCP-only file).
+ */
+export async function enrichScripts(
+  drafts: readonly ToolCallDraft[],
+  contexts: readonly LocalToolContext[] = [],
+): Promise<void> {
+  if (contexts.length === 0 || drafts.length === 0) return;
+  // Gate on the native runtime being loadable — same requirement as the
+  // summariser. (getAdapters is cached; usually already warm by this point.)
+  await getAdapters();
+  if (!scriptSummarizer) scriptSummarizer = llamaScriptSummarize(defaultLlamaConfig());
+  await enrichToolCallScripts(drafts, contexts, {
+    summarize: scriptSummarizer,
+    exists: existsSync,
+    readFile: async (path) => {
+      const buf = await fsReadFile(path);
+      return buf.subarray(0, MAX_SCRIPT_READ_BYTES).toString("utf8");
+    },
+  });
 }
 
 /**
@@ -138,7 +177,7 @@ export async function preflightSummariser(): Promise<string> {
   const a = await getAdapters();
   const out = await a.summarize({
     prompt:
-      "Session context: smoke test. Sampled excerpts:\n  [turn 1] \"hello world\"\nWrite ONE sentence (≤240 chars) describing what the human was doing.",
+      'Session context: smoke test. Sampled excerpts:\n  [turn 1] "hello world"\nWrite ONE sentence (≤240 chars) describing what the human was doing.',
     maxTokens: 32,
   });
   if (!out || out.trim().length === 0) {

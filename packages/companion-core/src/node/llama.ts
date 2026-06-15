@@ -18,28 +18,34 @@
  * node_modules isn't beside the bundle) silently falls through to the
  * next adapter in the chain — see apps/agent-dev/src/pipeline.ts.
  */
-import { mkdir } from "node:fs/promises";
+
 import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  SUMMARISER_SYSTEM_PROMPT,
-  SUMMARISER_TEMPERATURE,
-} from "../pipeline/prompts.js";
 import {
   buildCognitionUserPrompt,
   COGNITION_MAX_TOKENS,
   COGNITION_SYSTEM_PROMPT,
   COGNITION_TEMPERATURE,
-  parseCognitionReply,
   type Cognizer,
+  parseCognitionReply,
 } from "../pipeline/cognition.js";
+import { SUMMARISER_SYSTEM_PROMPT, SUMMARISER_TEMPERATURE } from "../pipeline/prompts.js";
+import {
+  buildScriptSummaryUserPrompt,
+  SCRIPT_SUMMARY_MAX_TOKENS,
+  SCRIPT_SUMMARY_OUTPUT_MAX_CHARS,
+  SCRIPT_SUMMARY_SYSTEM_PROMPT,
+  SCRIPT_SUMMARY_TEMPERATURE,
+  type ScriptSummarizer,
+} from "../pipeline/script-summary.js";
 import {
   buildTitleUserPrompt,
+  type Entitler,
   TITLER_MAX_TOKENS,
   TITLER_SYSTEM_PROMPT,
   TITLER_TEMPERATURE,
-  type Entitler,
 } from "../pipeline/title.js";
 
 export interface LlamaConfig {
@@ -87,13 +93,11 @@ export const DEFAULT_LLAMA_MODEL_URL =
 const LLAMA_MAX_TOKENS = 1024;
 
 export function defaultLlamaConfig(): Required<LlamaConfig> {
-  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } })
-    .process?.env ?? {};
-  const modelsDir =
-    env.MODELSTAT_MODELS_DIR ?? join(homedir(), ".modelstat", "models");
+  const env =
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+  const modelsDir = env.MODELSTAT_MODELS_DIR ?? join(homedir(), ".modelstat", "models");
   const modelUrl = env.MODELSTAT_LLAMA_MODEL_URL ?? DEFAULT_LLAMA_MODEL_URL;
-  const modelPath =
-    env.MODELSTAT_LLAMA_MODEL_PATH ?? join(modelsDir, basenameFromUrl(modelUrl));
+  const modelPath = env.MODELSTAT_LLAMA_MODEL_PATH ?? join(modelsDir, basenameFromUrl(modelUrl));
   return {
     modelPath,
     modelUrl,
@@ -131,15 +135,16 @@ function basenameFromUrl(url: string): string {
 // sessions for the life of the process. Inference is single-threaded
 // per llama context, so callers are queued through `inflight`.
 //
-// Three LlamaChatSessions share the same loaded model but each has its
+// Four LlamaChatSessions share the same loaded model but each has its
 // own context sequence with a different system prompt:
-//   - summarizer:  SUMMARISER_SYSTEM_PROMPT — primary scan-time work
-//   - cognizer:    COGNITION_SYSTEM_PROMPT  — best-effort mood/mode pass
-//   - entitler:    TITLER_SYSTEM_PROMPT     — best-effort per-session title
+//   - summarizer:      SUMMARISER_SYSTEM_PROMPT     — primary scan-time work
+//   - cognizer:        COGNITION_SYSTEM_PROMPT      — best-effort mood/mode pass
+//   - entitler:        TITLER_SYSTEM_PROMPT         — best-effort per-session title
+//   - scriptSummarizer: SCRIPT_SUMMARY_SYSTEM_PROMPT — best-effort per-script content abstract
 // Each context's KV-cache is small (≤4K tokens) compared to the model
 // weights (~2.7GB), so the extra contexts are cheap. We still serialise
 // all calls through one `inflight` queue — llama.cpp can technically
-// run two contexts in parallel but it competes for the same CPU/GPU
+// run several contexts in parallel but it competes for the same CPU/GPU
 // and the auxiliary passes are fast enough that interleaving isn't
 // worth the complexity.
 type Session = {
@@ -152,6 +157,7 @@ type Loaded = {
   summarizer: Session;
   cognizer: Session;
   entitler: Session;
+  scriptSummarizer: Session;
 };
 let loaded: Loaded | null = null;
 let loadPromise: Promise<Loaded> | null = null;
@@ -182,24 +188,18 @@ export async function ensureLlamaModel(
 
   const res = await fetch(cfg.modelUrl);
   if (!res.ok || !res.body) {
-    throw new Error(
-      `model download failed: ${res.status} ${res.statusText} (${cfg.modelUrl})`,
-    );
+    throw new Error(`model download failed: ${res.status} ${res.statusText} (${cfg.modelUrl})`);
   }
   const total = Number(res.headers.get("content-length") ?? 0);
   const totalMb = total > 0 ? (total / (1024 * 1024)).toFixed(0) : "?";
   // biome-ignore lint/suspicious/noConsole: long download — surface it
-  console.log(
-    `[modelstat] downloading summariser model (~${totalMb} MB) → ${cfg.modelPath}`,
-  );
+  console.log(`[modelstat] downloading summariser model (~${totalMb} MB) → ${cfg.modelPath}`);
   const tmp = `${cfg.modelPath}.partial`;
   const { createWriteStream } = await import("node:fs");
   const { Readable } = await import("node:stream");
   const { rename } = await import("node:fs/promises");
   const out = createWriteStream(tmp);
-  const isTty = Boolean(
-    (process.stdout as unknown as { isTTY?: boolean }).isTTY,
-  );
+  const isTty = Boolean((process.stdout as unknown as { isTTY?: boolean }).isTTY);
   let received = 0;
   let lastLog = 0;
   let lastBytes = 0;
@@ -295,6 +295,11 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
     const entitlerContext = await model.createContext({
       contextSize: cfg.contextSize,
     });
+    // Script-summary prompts carry a (capped) script file body plus the
+    // thinking budget — same envelope as the summariser.
+    const scriptContext = await model.createContext({
+      contextSize: cfg.contextSize,
+    });
     const summarizer = new llamaMod.LlamaChatSession({
       contextSequence: summariserContext.getSequence(),
       systemPrompt: SUMMARISER_SYSTEM_PROMPT,
@@ -307,7 +312,11 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
       contextSequence: entitlerContext.getSequence(),
       systemPrompt: TITLER_SYSTEM_PROMPT,
     });
-    loaded = { summarizer, cognizer, entitler };
+    const scriptSummarizer = new llamaMod.LlamaChatSession({
+      contextSequence: scriptContext.getSequence(),
+      systemPrompt: SCRIPT_SUMMARY_SYSTEM_PROMPT,
+    });
+    loaded = { summarizer, cognizer, entitler, scriptSummarizer };
     return loaded;
   })();
   try {
@@ -381,9 +390,7 @@ export function llamaSummarize(
  * resident in memory, so the marginal RAM cost is just the second
  * 2K-token KV-cache (~tens of MB).
  */
-export function llamaCognize(
-  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
-): Cognizer {
+export function llamaCognize(cfg: Required<LlamaConfig> = defaultLlamaConfig()): Cognizer {
   return async ({ abstract }) => {
     if (!abstract || abstract.trim().length < 12) return null;
     let loadedSessions: Loaded;
@@ -430,9 +437,7 @@ export function llamaCognize(
  * cost is one ~40-token answer plus thinking budget — well under a
  * second per session on Apple Silicon.
  */
-export function llamaEntitle(
-  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
-): Entitler {
+export function llamaEntitle(cfg: Required<LlamaConfig> = defaultLlamaConfig()): Entitler {
   return async (input) => {
     if (input.abstracts.length === 0) return null;
     let loadedSessions: Loaded;
@@ -453,6 +458,54 @@ export function llamaEntitle(
         maxTokens: TITLER_MAX_TOKENS + 400,
       });
       return stripThinking(raw ?? "") || null;
+    });
+    inflight = run.catch(() => undefined);
+    try {
+      return await run;
+    } catch {
+      return null;
+    }
+  };
+}
+
+/**
+ * Per-script content-summary adapter — the fourth chat session, system prompt
+ * `SCRIPT_SUMMARY_SYSTEM_PROMPT`. Reads a script/bash FILE's (capped) contents
+ * and returns one factual sentence (≤200 chars) describing what running it does,
+ * so the backend understands a command's real effect without seeing the file.
+ *
+ * Best-effort, same contract as `llamaCognize`/`llamaEntitle`: any failure
+ * (model not loadable, empty answer after stripping <think>) returns null and
+ * the agent ships that script without an abstract — the call still carries its
+ * redacted command. The agent redacts the returned sentence before it goes on
+ * the wire; the file contents themselves never leave the device.
+ */
+export function llamaScriptSummarize(
+  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
+): ScriptSummarizer {
+  return async ({ ref, content }) => {
+    if (!content || content.trim().length === 0) return null;
+    let loadedSessions: Loaded;
+    try {
+      loadedSessions = await loadOnce(cfg);
+    } catch {
+      // Best-effort by contract — if the model can't load here the
+      // summariser already surfaced the failure at startup.
+      return null;
+    }
+    const { scriptSummarizer } = loadedSessions;
+    const run = inflight.then(async () => {
+      scriptSummarizer.resetChatHistory();
+      const raw = await scriptSummarizer.prompt(buildScriptSummaryUserPrompt({ ref, content }), {
+        temperature: SCRIPT_SUMMARY_TEMPERATURE,
+        // Qwen3.5 reasons before answering — give it room on top of the
+        // one-sentence answer budget; the slice below enforces the cap.
+        maxTokens: SCRIPT_SUMMARY_MAX_TOKENS + 400,
+      });
+      const oneLine = stripThinking(raw ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+      return oneLine ? oneLine.slice(0, SCRIPT_SUMMARY_OUTPUT_MAX_CHARS) : null;
     });
     inflight = run.catch(() => undefined);
     try {

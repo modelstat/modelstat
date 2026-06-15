@@ -68,13 +68,33 @@ export function extractToolAction(call: ToolActionInput): ToolAction {
   };
 }
 
+/**
+ * The local-only context the Node agent needs to read + summarise a shell
+ * call's referenced script files: the RAW command + cwd. Returns null for
+ * non-shell calls (mcp/builtin) — nothing to read.
+ *
+ * This is the ONLY function that surfaces the raw command, and it travels on
+ * `ParseResult.scriptContexts` (local-only), NEVER on the wire — the shipped
+ * `ToolAction` keeps only `command_redacted`. See {@link extractToolAction}.
+ */
+export function extractLocalToolContext(call: ToolActionInput): {
+  command: string;
+  cwd: string | null;
+} | null {
+  if (call.server.startsWith("mcp:")) return null;
+  const command = shellCommandOf(call.input);
+  if (command == null) return null;
+  return { command, cwd: call.cwd ?? null };
+}
+
 /** The shell command string inside a tool input, or null when this isn't a
  * shell-style call. Generic: a string input, or a string/argv `command`/`cmd`
  * field — no tool-name allowlist. */
 function shellCommandOf(input: unknown): string | null {
   if (typeof input === "string") return input.trim() ? input : null;
   if (input && typeof input === "object") {
-    const cmd = (input as Record<string, unknown>).command ?? (input as Record<string, unknown>).cmd;
+    const cmd =
+      (input as Record<string, unknown>).command ?? (input as Record<string, unknown>).cmd;
     if (typeof cmd === "string") return cmd.trim() ? cmd : null;
     if (Array.isArray(cmd)) {
       const parts = cmd.filter((p): p is string => typeof p === "string");

@@ -14,10 +14,15 @@ import { INGEST_BATCH_MAX_EVENTS } from "@modelstat/companion-core/config";
 import type { SegmentProgressFn } from "@modelstat/companion-core/pipeline";
 import { attachSegmentIdsByMap, type ToolCallDraft } from "@modelstat/companion-core/queue";
 import type { IngestBatch, RawEvent, Segment } from "@modelstat/core";
-import { parseClaudeCodeJsonl, parseCodexRollout, quickChecksum } from "@modelstat/parsers";
+import {
+  type LocalToolContext,
+  parseClaudeCodeJsonl,
+  parseCodexRollout,
+  quickChecksum,
+} from "@modelstat/parsers";
 import { uploadBatch } from "./api.js";
 import { state } from "./config.js";
-import { buildSegments, buildSessionTitles } from "./pipeline.js";
+import { buildSegments, buildSessionTitles, enrichScripts } from "./pipeline.js";
 
 /** Substituted by tsup's `define` (see tsup.config.ts) — a string
  * literal in the bundle; falls back to "agent-dev" when run unbundled
@@ -107,7 +112,9 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
   // file's set, which the caller drains into the event stream below.
   type EventSink = (events: RawEvent[]) => Promise<void>;
   const jobs: Array<{
-    parse: (sink: EventSink) => Promise<{ toolCalls: ToolCallDraft[] }>;
+    parse: (
+      sink: EventSink,
+    ) => Promise<{ toolCalls: ToolCallDraft[]; scriptContexts: LocalToolContext[] }>;
     path: string;
   }> = [];
 
@@ -127,7 +134,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
           path: full,
           parse: async (sink) => {
             const r = await parseClaudeCodeJsonl({ deviceId, sourceFile: full, onEvents: sink });
-            return { toolCalls: r.toolCalls ?? [] };
+            return { toolCalls: r.toolCalls ?? [], scriptContexts: r.scriptContexts ?? [] };
           },
         });
       }
@@ -153,7 +160,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
               path: full,
               parse: async (sink) => {
                 const r = await parseCodexRollout({ deviceId, sourceFile: full, onEvents: sink });
-                return { toolCalls: r.toolCalls ?? [] };
+                return { toolCalls: r.toolCalls ?? [], scriptContexts: r.scriptContexts ?? [] };
               },
             });
           }
@@ -311,6 +318,18 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
       // tool drafts come back at the end and join the current batch's
       // tool-call buffer, alongside the events they were extracted from.
       const r = await job.parse(sink);
+      // Summarise the script/bash FILES each command ran, on-device, into the
+      // drafts' redacted ToolAction.scripts. Best-effort + additive:
+      // failures leave the abstracts empty, never blocking the upload. The raw
+      // command + cwd it needs ride r.scriptContexts (local-only, never shipped).
+      try {
+        await enrichScripts(r.toolCalls, r.scriptContexts ?? []);
+      } catch (e) {
+        console.warn(
+          `  ! script-summary enrichment skipped for ${job.path}:`,
+          (e as Error).message,
+        );
+      }
       await bufferToolCalls(r.toolCalls);
       // Queue the cursor advance — it'll be applied by the next
       // successful flushBatch(), not before. If we're offline / the

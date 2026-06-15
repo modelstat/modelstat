@@ -665,3 +665,12 @@ export {
   TITLER_TEMPERATURE,
   type TitleInput,
 } from "./title.js";
+export {
+  buildScriptSummaryUserPrompt,
+  SCRIPT_SUMMARY_INPUT_MAX_CHARS,
+  SCRIPT_SUMMARY_MAX_TOKENS,
+  SCRIPT_SUMMARY_OUTPUT_MAX_CHARS,
+  SCRIPT_SUMMARY_SYSTEM_PROMPT,
+  SCRIPT_SUMMARY_TEMPERATURE,
+  type ScriptSummarizer,
+} from "./script-summary.js";

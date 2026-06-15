@@ -31,7 +31,7 @@ import { createInterface } from "node:readline";
 import type { RawEvent } from "@modelstat/core";
 import { redact, sourceEventId } from "@modelstat/core";
 import { guessRepoSlugFromPath } from "../git.js";
-import { extractToolAction } from "../tool-action/index.js";
+import { extractLocalToolContext, extractToolAction } from "../tool-action/index.js";
 import {
   fallbackCallId,
   hashArgs,
@@ -40,6 +40,7 @@ import {
   toolIdentity,
 } from "../tool-hash/index.js";
 import {
+  type LocalToolContext,
   PARSER_EVENT_CHUNK,
   type ParseResult,
   type ParserContext,
@@ -164,14 +165,25 @@ function buildToolCallDraft(opts: {
   startedAt: string;
   model: string | null;
   cwd?: string | null;
+  /** When provided, the raw command + cwd for this call are pushed here
+   * (local-only) so the agent can summarise its referenced script files. */
+  contexts?: LocalToolContext[];
 }): ToolCallDraft {
   const { server, name } = splitObservedToolName(opts.observedName);
   const hashes = hashArgs(opts.input);
+  const external_call_id =
+    typeof opts.rawCallId === "string" && opts.rawCallId.trim() !== ""
+      ? opts.rawCallId.trim().slice(0, 120)
+      : fallbackCallId(opts.sourceEventId, opts.callIndex);
+  // Stash the raw command + cwd locally (never shipped) so the Node agent can
+  // read + summarise referenced script FILES into ToolAction.scripts. See
+  // ParseResult.scriptContexts / LocalToolContext.
+  if (opts.contexts) {
+    const local = extractLocalToolContext({ server, name, input: opts.input, cwd: opts.cwd });
+    if (local) opts.contexts.push({ external_call_id, ...local });
+  }
   return {
-    external_call_id:
-      typeof opts.rawCallId === "string" && opts.rawCallId.trim() !== ""
-        ? opts.rawCallId.trim().slice(0, 120)
-        : fallbackCallId(opts.sourceEventId, opts.callIndex),
+    external_call_id,
     session_id: opts.sessionId,
     source_event_id: opts.sourceEventId,
     agent: "claude_code",
@@ -200,6 +212,9 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
   // the transcript is. See ParserContext.onEvents.
   const events: RawEvent[] = [];
   const toolCalls: ToolCallDraft[] = [];
+  // Local-only raw command + cwd per shell call, for the agent's script-summary
+  // pass. Never shipped (see LocalToolContext); returned on ParseResult.
+  const scriptContexts: LocalToolContext[] = [];
   /** tool_use id → draft still waiting for its tool_result (pairing is
    * file-local: anything unmatched at EOF stays status "unknown"). */
   const pendingByCallId = new Map<string, ToolCallDraft>();
@@ -373,6 +388,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
           // including "<synthetic>" (same rule as the event below).
           model: a.message?.model ?? null,
           cwd,
+          contexts: scriptContexts,
         });
         const identity = toolIdentity(draft.server, draft.name);
         aggregate[identity] = (aggregate[identity] ?? 0) + 1;
@@ -509,6 +525,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         // (lastModel never holds "<synthetic>", per the rule above).
         model: lastModel,
         cwd,
+        contexts: scriptContexts,
       });
       toolCalls.push(draft);
       if (typeof t.id === "string" && t.id) pendingByCallId.set(t.id, draft);
@@ -522,6 +539,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
   return {
     events,
     toolCalls,
+    scriptContexts,
     stats: { rawLines, emittedEvents: emitted, skipped },
     sourceFile: ctx.sourceFile,
   };
