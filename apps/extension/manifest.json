@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "modelstat — See what your AI chats cost",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Live token & cost counter for ChatGPT, Claude, Gemini, and Grok. See exactly what every chat costs, in real time. Local-first.",
   "minimum_chrome_version": "116",
   "icons": {
