@@ -1,0 +1,134 @@
+name: "Release · 1 · Build"
+
+# Phase 1 of the OTP-gated release. Bumps the version, builds, and packs the
+# chosen package into a tarball artifact — but PUBLISHES NOTHING and touches
+# neither npm nor main. Run this, wait for it to finish, then run
+# "Release · 2 · Publish" with this run's id and a fresh 2FA code.
+#
+#   gh workflow run release-build.yml -f package=agent -f release_type=patch
+#
+# Splitting the slow build from the OTP-gated publish is what lets a live
+# one-time password reach `npm publish` inside its ~30s window (phase 2 does
+# no install/build, so it publishes within seconds of you entering the code).
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package to release"
+        type: choice
+        options: ["agent", "mcp"]
+        default: "agent"
+      release_type:
+        description: "Semver bump (ignored when 'version' is set; 'none' = ship current package.json)"
+        type: choice
+        options: ["patch", "minor", "major", "none"]
+        default: "patch"
+      version:
+        description: "Explicit version X.Y.Z (optional; overrides release_type)"
+        required: false
+        default: ""
+
+concurrency:
+  group: release-${{ github.event.inputs.package }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Resolve target package
+        id: pkg
+        run: |
+          case "${{ github.event.inputs.package }}" in
+            agent)
+              { echo "dir=apps/agent-dev"; echo "name=modelstat";
+                echo "tag_prefix=agent-v"; echo "is_agent=true"; } >> "$GITHUB_OUTPUT" ;;
+            mcp)
+              { echo "dir=packages/mcp"; echo "name=@modelstat/mcp";
+                echo "tag_prefix=mcp-v"; echo "is_agent=false"; } >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::unknown package '${{ github.event.inputs.package }}'"; exit 1 ;;
+          esac
+
+      - name: Compute & write new version
+        id: ver
+        env:
+          RT: ${{ github.event.inputs.release_type }}
+          VER: ${{ github.event.inputs.version }}
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          NEW="$(node -e '
+            const fs = require("fs");
+            const p = process.env.DIR + "/package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            let nv = (process.env.VER || "").trim();
+            if (!nv) {
+              const t = process.env.RT;
+              if (t === "none") { nv = j.version; }
+              else {
+                let [a, b, c] = j.version.split(".").map(Number);
+                if (t === "major") { a++; b = 0; c = 0; }
+                else if (t === "minor") { b++; c = 0; }
+                else { c++; }
+                nv = a + "." + b + "." + c;
+              }
+            }
+            if (!/^[0-9]+\.[0-9]+\.[0-9]+/.test(nv)) { console.error("invalid version: " + nv); process.exit(1); }
+            j.version = nv;
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+            process.stdout.write(nv);
+          ')"
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Pack tarball (workspace deps rewritten, prepack build runs here)
+        id: pack
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/release-dist"
+          ( cd "$DIR" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/release-dist" )
+          TARBALL="$(basename "$(ls "$GITHUB_WORKSPACE"/release-dist/*.tgz | head -1)")"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Write release metadata + summary
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG_PREFIX: ${{ steps.pkg.outputs.tag_prefix }}
+          DIR: ${{ steps.pkg.outputs.dir }}
+          IS_AGENT: ${{ steps.pkg.outputs.is_agent }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          {
+            echo "NAME=$NAME"
+            echo "VERSION=$VERSION"
+            echo "TAG=$TAG_PREFIX$VERSION"
+            echo "DIR=$DIR"
+            echo "IS_AGENT=$IS_AGENT"
+            echo "TARBALL=$TARBALL"
+          } > "$GITHUB_WORKSPACE/release-dist/release-meta.env"
+          {
+            echo "### Built \`$NAME@$VERSION\` 📦 — nothing published yet"
+            echo ""
+            echo "Now run **Release · 2 · Publish (OTP)** with:"
+            echo "- \`build_run_id\` = \`${{ github.run_id }}\`"
+            echo "- \`otp\` = a fresh code from your authenticator"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: release-dist/
+          retention-days: 1

@@ -1,0 +1,119 @@
+name: "Release · 2 · Publish (OTP)"
+
+# Phase 2 of the OTP-gated release. Takes the tarball built by
+# "Release · 1 · Build" and publishes it to npm with a LIVE one-time password,
+# then pushes the version bump, tag, GitHub Release, and (agent) the Homebrew
+# bump. The publish is the FIRST real step so your OTP is still inside its
+# window; everything that mutates npm or main happens only after it succeeds.
+#
+#   gh workflow run release-publish.yml -f build_run_id=<id> -f otp=<code>
+#
+# Why an OTP input is safe here: it is single-use and expires in ~30s, so even
+# if it lands in a log it is worthless the instant npm consumes it (npm rejects
+# any reuse). If a slow runner makes it expire, just re-run with a fresh code —
+# publish is idempotent (it skips a version already on npm), and main is never
+# touched on a failed publish.
+#
+# Auth: NPM_TOKEN repo secret (any publish-capable token; it authenticates the
+# account, the OTP satisfies the 2FA challenge — no Automation token needed).
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Run id of the 'Release · 1 · Build' that produced the tarball"
+        required: true
+      otp:
+        description: "Fresh npm 2FA one-time password (from your authenticator)"
+        required: true
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the bump commit + tag, cut the GitHub Release
+      actions: read # download the build artifact from the other run
+    steps:
+      # Keep everything before `npm publish` minimal — no install, no build —
+      # so the OTP is still valid when the registry receives it.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: release-dist
+          run-id: ${{ github.event.inputs.build_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Load release metadata
+        run: cat release-dist/release-meta.env >> "$GITHUB_ENV"
+
+      - name: Publish to npm (live OTP)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          OTP: ${{ github.event.inputs.otp }}
+        run: |
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION already on npm — skipping publish (recovery re-run)."
+          else
+            npm publish "release-dist/$TARBALL" --access public --otp="$OTP"
+          fi
+
+      # Only AFTER a successful publish do we touch main.
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Commit bump + push tag to main
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node -e '
+            const fs = require("fs");
+            const p = process.env.DIR + "/package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            j.version = process.env.VERSION;
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+          '
+          if git diff --quiet -- "$DIR/package.json"; then
+            echo "No version change to commit (already at $VERSION)."
+          else
+            git add "$DIR/package.json"
+            git commit -m "release: $NAME v$VERSION"
+            git push origin HEAD:main
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$NAME $VERSION" --generate-notes
+
+      - name: Bump Homebrew tap
+        if: ${{ env.IS_AGENT == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_DISPATCH_TOKEN not set — skipping homebrew bump."
+            exit 0
+          fi
+          gh api --method POST -H "Accept: application/vnd.github+json" \
+            /repos/modelstat/homebrew-tap/dispatches \
+            -f "event_type=agent-released" \
+            -f "client_payload[version]=$VERSION"

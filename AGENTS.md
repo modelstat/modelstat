@@ -51,23 +51,37 @@ Things to know:
 
 ## Releasing (npm + Homebrew)
 
-Releases are **manual** — merging to main publishes nothing. The one-click
-`Release` workflow (`.github/workflows/release.yml`) automates the entire
-chain: bump `package.json` → build → npm publish → commit the bump to main
-→ tag `<pkg>-v<version>` → GitHub Release → (agent only) Homebrew tap bump.
+Releases are **manual** and **OTP-gated** — a live 2FA code from the
+maintainer's authenticator is required for every npm publish, so a leaked
+`NPM_TOKEN` alone can't ship a package. It's a two-phase flow: build is slow,
+but the publish must land inside the OTP's ~30s window, so they're separate
+runs.
+
+**1. Build** (`.github/workflows/release-build.yml`) — bumps `package.json`,
+builds, and packs a tarball artifact. Publishes nothing; touches neither npm
+nor main. The run summary prints the run id you need for phase 2.
 
 ```sh
-gh workflow run release.yml -f package=agent -f release_type=patch
+gh workflow run release-build.yml -f package=agent -f release_type=patch
 # package: agent | mcp;  release_type: patch | minor | major | none
 # or -f version=X.Y.Z to pin an exact version
 ```
 
-(or GitHub → Actions → Release → Run workflow.)
+**2. Publish** (`.github/workflows/release-publish.yml`) — downloads that
+tarball and runs `npm publish … --otp=<code>` as its first step, then commits
+the bump to main → tags `<pkg>-v<version>` → GitHub Release → (agent) Homebrew
+tap bump.
+
+```sh
+gh workflow run release-publish.yml -f build_run_id=<id> -f otp=<fresh-code>
+```
+
+(or GitHub → Actions → the two "Release · …" workflows → Run workflow.)
 
 ### Observing a release
 
 ```sh
-gh run list --workflow=release.yml --limit 3
+gh run list --workflow=release-publish.yml --limit 3
 gh run watch <run-id> --exit-status
 ```
 
@@ -80,10 +94,13 @@ GitHub Release/tag exist.
 gh run view <run-id> --log-failed
 ```
 
-- npm `E403` → the `NPM_TOKEN` repo secret lacks publish rights (it must
-  be an npm **Automation** token): `gh secret set NPM_TOKEN`.
-- The workflow publishes to npm BEFORE pushing anything to main, and skips
-  publish if the version already exists — so a failed run leaves main
-  untouched and a re-run recovers cleanly; it will not double-publish.
+- npm `EOTP` → the code expired before the publish step ran (a slow runner).
+  Just re-run phase 2 with a fresh code — publish is idempotent (it skips a
+  version already on npm), so nothing double-publishes and main stays clean.
+- npm `ENEEDAUTH` / `E403` → `NPM_TOKEN` is missing or lacks publish rights:
+  `gh secret set NPM_TOKEN`. It does **not** need to be an Automation token —
+  any publish-capable token plus the OTP is enough.
+- The publish runs BEFORE anything touches main, so a failed publish leaves
+  main untouched.
 - The Homebrew tap bump no-ops when `HOMEBREW_TAP_DISPATCH_TOKEN` is
   absent — a missing tap update with a green run usually means that.
