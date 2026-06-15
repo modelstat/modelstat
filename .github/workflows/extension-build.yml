@@ -1,13 +1,18 @@
 name: Extension Build
 
 # Builds the Chrome extension and uploads the packaged .zip as a downloadable
-# artifact whenever the extension — or a workspace package it bundles —
-# changes. The zip is exactly what you upload to the Chrome Web Store; anyone
-# can also grab it from the run's "Artifacts" and load it unpacked.
+# artifact whenever the extension — or a workspace package it bundles — changes.
+# The zip is exactly what you upload to the Chrome Web Store; anyone can also
+# grab it from the run's "Artifacts" and load it unpacked. `build` runs
+# `tsc --noEmit` + `vite build`, so a type/build error fails the run.
 #
-# Triggers only on real code paths (below), so docs/CI churn elsewhere doesn't
-# rebuild it. `build` runs `tsc --noEmit` + `vite build`, so a type or build
-# error fails the run — the artifact is always a clean build.
+# Auto-version: on a push to main (or a manual run) whose change touched the
+# extension's OWN code, it bumps apps/extension/manifest.json (patch) and
+# commits that bump back to main, so every artifact carries a fresh,
+# Web-Store-submittable version. The bump commit uses the default GITHUB_TOKEN
+# — whose pushes don't re-trigger workflows — plus [skip ci], and the manifest
+# is excluded from change-detection, so it can never loop. Shared-package /
+# lockfile changes still build (CI coverage) but don't bump. PRs only build.
 
 on:
   push:
@@ -30,17 +35,20 @@ on:
   workflow_dispatch:
 
 concurrency:
+  # Serialize per ref — cancel-in-progress would risk killing a run mid-bump.
   group: extension-build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write # commit the manifest bump back to main (main runs only)
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # need history for change-detection diff + rebase
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
@@ -49,23 +57,72 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # `build` = prepare-assets + tsc --noEmit + vite build → apps/extension/dist
+      # Bump the manifest patch IFF this is a main run whose push changed the
+      # extension's own code (manifest.json excluded, so a bump can't re-bump).
+      # The bump lands in the working tree first so the build bakes the new
+      # version into the zip; it is committed to main only after a clean build.
+      - name: Resolve / bump manifest version
+        id: ver
+        run: |
+          bump=false
+          if [ "${{ github.ref_name }}" = "main" ] && [ "${{ github.event_name }}" != "pull_request" ]; then
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              bump=true
+            else
+              before="${{ github.event.before }}"
+              if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+                bump=true
+              elif [ -n "$(git diff --name-only "$before" "${{ github.sha }}" -- apps/extension/ ':(exclude)apps/extension/manifest.json')" ]; then
+                bump=true
+              fi
+            fi
+          fi
+          if [ "$bump" = "true" ]; then
+            new="$(node -e '
+              const fs = require("fs");
+              const p = "apps/extension/manifest.json";
+              const s = fs.readFileSync(p, "utf8");
+              const m = s.match(/"version"\s*:\s*"(\d+)\.(\d+)\.(\d+)"/);
+              if (!m) { console.error("no semver version in manifest"); process.exit(1); }
+              const nv = m[1] + "." + m[2] + "." + (Number(m[3]) + 1);
+              fs.writeFileSync(p, s.replace(/("version"\s*:\s*)"\d+\.\d+\.\d+"/, "$1\"" + nv + "\""));
+              process.stdout.write(nv);
+            ')"
+            echo "version=$new" >> "$GITHUB_OUTPUT"
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "Bumped extension manifest → v$new"
+          else
+            echo "version=$(node -p "require('./apps/extension/manifest.json').version")" >> "$GITHUB_OUTPUT"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha7=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Build extension
         run: pnpm --filter @modelstat/extension build
-
-      # `zip` packs dist/ → apps/extension/modelstat-extension.zip (store-ready)
       - name: Package zip
         run: pnpm --filter @modelstat/extension zip
-
-      - name: Build metadata
-        id: meta
-        run: |
-          echo "version=$(node -p "require('./apps/extension/manifest.json').version")" >> "$GITHUB_OUTPUT"
-          echo "sha7=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Upload extension zip
         uses: actions/upload-artifact@v4
         with:
-          name: modelstat-extension-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha7 }}
+          name: modelstat-extension-v${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.sha7 }}
           path: apps/extension/modelstat-extension.zip
           if-no-files-found: error
+
+      # Commit the bump only after a clean build + uploaded artifact. GITHUB_TOKEN
+      # pushes don't re-trigger workflows; rebase guards against a concurrent
+      # main push causing a non-fast-forward.
+      - name: Commit manifest bump to main
+        if: steps.ver.outputs.bumped == 'true'
+        run: |
+          git add apps/extension/manifest.json
+          if git diff --cached --quiet; then
+            echo "manifest unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(extension): bump manifest to v${{ steps.ver.outputs.version }} [skip ci]"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
