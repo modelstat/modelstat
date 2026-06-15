@@ -63,7 +63,9 @@ jobs:
           if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
             echo "$NAME@$VERSION already on npm — skipping publish (recovery re-run)."
           else
-            npm publish "release-dist/$TARBALL" --access public --otp="$OTP"
+            # Leading ./ so npm treats it as a tarball PATH, not an owner/repo
+            # shorthand (a bare "dir/file.tgz" is parsed as a git dependency).
+            npm publish "./release-dist/$TARBALL" --access public --otp="$OTP"
           fi
 
       # Only AFTER a successful publish do we touch main.
