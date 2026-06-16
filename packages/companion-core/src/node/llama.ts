@@ -41,6 +41,13 @@ import {
   type ScriptSummarizer,
 } from "../pipeline/script-summary.js";
 import {
+  buildLinkExtractUserPrompt,
+  LINK_EXTRACT_MAX_TOKENS,
+  LINK_EXTRACT_SYSTEM_PROMPT,
+  LINK_EXTRACT_TEMPERATURE,
+  type LinkExtractor,
+} from "../pipeline/session-metadata.js";
+import {
   buildTitleUserPrompt,
   type Entitler,
   TITLER_MAX_TOKENS,
@@ -141,6 +148,7 @@ function basenameFromUrl(url: string): string {
 //   - cognizer:        COGNITION_SYSTEM_PROMPT      — best-effort mood/mode pass
 //   - entitler:        TITLER_SYSTEM_PROMPT         — best-effort per-session title
 //   - scriptSummarizer: SCRIPT_SUMMARY_SYSTEM_PROMPT — best-effort per-script content abstract
+//   - linkExtractor:    LINK_EXTRACT_SYSTEM_PROMPT   — best-effort per-session PR/issue/commit refs
 // Each context's KV-cache is small (≤4K tokens) compared to the model
 // weights (~2.7GB), so the extra contexts are cheap. We still serialise
 // all calls through one `inflight` queue — llama.cpp can technically
@@ -158,6 +166,7 @@ type Loaded = {
   cognizer: Session;
   entitler: Session;
   scriptSummarizer: Session;
+  linkExtractor: Session;
 };
 let loaded: Loaded | null = null;
 let loadPromise: Promise<Loaded> | null = null;
@@ -316,7 +325,16 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
       contextSequence: scriptContext.getSequence(),
       systemPrompt: SCRIPT_SUMMARY_SYSTEM_PROMPT,
     });
-    loaded = { summarizer, cognizer, entitler, scriptSummarizer };
+    // Link-extraction prompts carry up to ~12 sampled abstracts — same
+    // envelope as the titler, so reuse the full configured context size.
+    const linkExtractContext = await model.createContext({
+      contextSize: cfg.contextSize,
+    });
+    const linkExtractor = new llamaMod.LlamaChatSession({
+      contextSequence: linkExtractContext.getSequence(),
+      systemPrompt: LINK_EXTRACT_SYSTEM_PROMPT,
+    });
+    loaded = { summarizer, cognizer, entitler, scriptSummarizer, linkExtractor };
     return loaded;
   })();
   try {
@@ -506,6 +524,51 @@ export function llamaScriptSummarize(
         .replace(/\s+/g, " ")
         .trim();
       return oneLine ? oneLine.slice(0, SCRIPT_SUMMARY_OUTPUT_MAX_CHARS) : null;
+    });
+    inflight = run.catch(() => undefined);
+    try {
+      return await run;
+    } catch {
+      return null;
+    }
+  };
+}
+
+/**
+ * Link-extraction adapter — one short call per session, on a fifth
+ * `LlamaChatSession` whose system prompt is `LINK_EXTRACT_SYSTEM_PROMPT`.
+ * Reads the session's redacted abstracts and emits any PR/issue/commit/repo
+ * references it sees as plain text (one per line, or `none`). The caller
+ * (`buildSessionMetadata`) re-parses that text deterministically, so a
+ * hallucinated line that isn't a valid reference is simply dropped.
+ *
+ * This is the provider-agnostic channel: it works for clients whose logs
+ * carry no structured git data (web chat, Cursor), since it reads the same
+ * summarised text the dashboard shows. Best-effort, same contract as
+ * `llamaEntitle`: any failure returns null and detection falls back to the
+ * deterministic git + content channels.
+ */
+export function llamaExtractLinks(
+  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
+): LinkExtractor {
+  return async ({ abstracts }) => {
+    if (abstracts.length === 0) return null;
+    let loadedSessions: Loaded;
+    try {
+      loadedSessions = await loadOnce(cfg);
+    } catch {
+      return null;
+    }
+    const { linkExtractor } = loadedSessions;
+    const run = inflight.then(async () => {
+      linkExtractor.resetChatHistory();
+      const raw = await linkExtractor.prompt(buildLinkExtractUserPrompt(abstracts), {
+        temperature: LINK_EXTRACT_TEMPERATURE,
+        // Same thinking-budget rationale as cognition/title: the answer is a
+        // few short lines but Qwen3.5 reasons first.
+        maxTokens: LINK_EXTRACT_MAX_TOKENS + 400,
+      });
+      return stripThinking(raw ?? "") || null;
     });
     inflight = run.catch(() => undefined);
     try {

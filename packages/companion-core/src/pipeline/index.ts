@@ -21,6 +21,7 @@ import { redact } from "@modelstat/core/redact";
 import type { RawEvent, Segment } from "@modelstat/core/schemas";
 import { type Cognizer, formatCognitionSuffix } from "./cognition.js";
 import { ABSTRACT_OUTPUT_MAX_CHARS, SUMMARISER_MAX_TOKENS } from "./prompts.js";
+import type { LinkExtractor } from "./session-metadata.js";
 import type { Entitler } from "./title.js";
 
 // ── Adapter types ────────────────────────────────────────────────
@@ -66,6 +67,12 @@ export interface PipelineAdapters {
    * absent or failing, titles fall back to a deterministic derivation
    * from the first abstract. See pipeline/title.ts. */
   entitle?: Entitler;
+  /** Optional on-device link-extraction pass — used by
+   * `buildSessionMetadata` (NOT by the per-segment flow) to surface
+   * PR/issue/commit references from a session's redacted abstracts for ANY
+   * provider. Best-effort: when absent or failing, deterministic git +
+   * content detection still runs. See pipeline/session-metadata.ts. */
+  extractLinks?: LinkExtractor;
 }
 
 /**
@@ -650,6 +657,26 @@ export {
   WEBLLM_CHAT_MODEL,
 } from "./prompts.js";
 export {
+  buildScriptSummaryUserPrompt,
+  SCRIPT_SUMMARY_INPUT_MAX_CHARS,
+  SCRIPT_SUMMARY_MAX_TOKENS,
+  SCRIPT_SUMMARY_OUTPUT_MAX_CHARS,
+  SCRIPT_SUMMARY_SYSTEM_PROMPT,
+  SCRIPT_SUMMARY_TEMPERATURE,
+  type ScriptSummarizer,
+} from "./script-summary.js";
+export {
+  buildLinkExtractUserPrompt,
+  buildSessionMetadata,
+  LINK_EXTRACT_MAX_ABSTRACTS,
+  LINK_EXTRACT_MAX_TOKENS,
+  LINK_EXTRACT_SYSTEM_PROMPT,
+  LINK_EXTRACT_TEMPERATURE,
+  type LinkExtractInput,
+  type LinkExtractor,
+  type SessionMetadataOptions,
+} from "./session-metadata.js";
+export {
   buildSessionTitles,
   buildTitleUserPrompt,
   type Entitler,
@@ -665,12 +692,3 @@ export {
   TITLER_TEMPERATURE,
   type TitleInput,
 } from "./title.js";
-export {
-  buildScriptSummaryUserPrompt,
-  SCRIPT_SUMMARY_INPUT_MAX_CHARS,
-  SCRIPT_SUMMARY_MAX_TOKENS,
-  SCRIPT_SUMMARY_OUTPUT_MAX_CHARS,
-  SCRIPT_SUMMARY_SYSTEM_PROMPT,
-  SCRIPT_SUMMARY_TEMPERATURE,
-  type ScriptSummarizer,
-} from "./script-summary.js";

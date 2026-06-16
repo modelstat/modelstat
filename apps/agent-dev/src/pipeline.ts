@@ -26,11 +26,13 @@ import {
   defaultLlamaConfig,
   llamaCognize,
   llamaEntitle,
+  llamaExtractLinks,
   llamaScriptSummarize,
   llamaSummarize,
 } from "@modelstat/companion-core/node";
 import {
   buildSegmentsForSession,
+  buildSessionMetadata as buildSessionMetadataCore,
   buildSessionTitles as buildSessionTitlesCore,
   type PipelineAdapters,
   type ScriptSummarizer,
@@ -38,8 +40,8 @@ import {
 } from "@modelstat/companion-core/pipeline";
 import type { ToolCallDraft } from "@modelstat/companion-core/queue";
 import { createPrivacyFilterRedactor } from "@modelstat/companion-core/redact/privacy-filter";
-import type { RawEvent, Segment } from "@modelstat/core";
-import type { LocalToolContext } from "@modelstat/parsers";
+import type { RawEvent, Segment, SessionMetadata } from "@modelstat/core";
+import { type LocalToolContext, resolveGitContext } from "@modelstat/parsers";
 import { enrichToolCallScripts } from "./enrich-scripts.js";
 
 let adapters: PipelineAdapters | null = null;
@@ -74,6 +76,13 @@ async function bundledAdapters(): Promise<PipelineAdapters> {
     // sessions-list title in the dashboard). Best-effort like cognize:
     // failures fall back to a deterministic title in buildSessionTitles.
     entitle: llamaEntitle(llamaCfg),
+    // Link-extraction pass — same bundled model, fifth chat session with
+    // LINK_EXTRACT_SYSTEM_PROMPT. One short call per session that surfaces
+    // PR/issue/commit references from the redacted abstracts, so detection
+    // works even for clients whose logs carry no git data. Best-effort:
+    // failures fall back to the deterministic git + content channels in
+    // buildSessionMetadata.
+    extractLinks: llamaExtractLinks(llamaCfg),
     // Model-based PII redactor (OpenAI Privacy Filter via
     // transformers.js / ONNX). Runs locally on CPU after the regex
     // pass in packages/core/redact.ts. ~1 GB model downloaded on
@@ -124,6 +133,25 @@ export async function buildSegments(
 export async function buildSessionTitles(segments: Segment[]): Promise<Record<string, string>> {
   const a = await getAdapters();
   return buildSessionTitlesCore(segments, a.entitle);
+}
+
+/**
+ * Per-session repo/PR/commit/issue metadata for the given segments + events
+ * — the join layer between AI spend and shipped work. Fuses git context
+ * (resolved on disk via the parsers' `resolveGitContext`, which is cwd-cached
+ * for the process), deterministic scanning of the redacted abstracts, and the
+ * bundled link-extraction model (see `extractLinks` above). Best-effort
+ * throughout: any channel can no-op without blocking the upload.
+ */
+export async function buildSessionMetadata(
+  segments: Segment[],
+  events: RawEvent[],
+): Promise<Record<string, SessionMetadata>> {
+  const a = await getAdapters();
+  return buildSessionMetadataCore(segments, events, {
+    resolveGit: resolveGitContext,
+    extractLinks: a.extractLinks,
+  });
 }
 
 /** Max bytes read from any one script before summarising. Scripts are small;

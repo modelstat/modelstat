@@ -29,7 +29,7 @@ import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { RawEvent } from "@modelstat/core";
-import { redact, sourceEventId } from "@modelstat/core";
+import { detectEventReferences, redact, sourceEventId } from "@modelstat/core";
 import { guessRepoSlugFromPath } from "../git.js";
 import { extractLocalToolContext, extractToolAction } from "../tool-action/index.js";
 import {
@@ -147,6 +147,31 @@ function extractExcerpt(content: ClaudeMessageContent): string | undefined {
   const cleaned = redact(text).text;
   const truncated = cleaned.slice(0, 320);
   return truncated.length > 0 ? truncated : undefined;
+}
+
+/** Join a message's natural-language TEXT (string content or `text` blocks) at
+ * FULL length, for public-reference detection. Unlike {@link extractExcerpt} it
+ * does not truncate or strip code fences (a PR URL may sit in backticks or past
+ * the 320-char excerpt window). tool_use / tool_result blocks are skipped on
+ * purpose — command output and file dumps add example-URL noise and hurt
+ * precision. Capped so a giant pasted turn can't make the regex scan unbounded.
+ * The text is NOT redacted here: detectEventReferences pulls only public ref
+ * shapes from it, never raw text. */
+function collectRefText(content: ClaudeMessageContent): string {
+  if (!content) return "";
+  let text = "";
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const block of content) {
+      if (block && block.type === "text" && typeof block.text === "string") {
+        parts.push(block.text);
+      }
+    }
+    text = parts.join(" ");
+  }
+  return text.length > 64_000 ? text.slice(0, 64_000) : text;
 }
 
 /** Build one ToolCallDraft from an observed tool_use (content block or
@@ -362,6 +387,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
 
       const slug = guessRepoSlugFromPath(cwd);
       const excerpt = extractExcerpt(a.message?.content);
+      const refs = detectEventReferences(collectRefText(a.message?.content));
 
       // Per-call tool_use extraction + the aggregate identity → count
       // map carried by this assistant event. Drafts are returned via
@@ -407,15 +433,21 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         turn_index: null,
         parent_event_id: a.parentUuid ?? null,
         cwd,
-        git: slug
-          ? {
-              remote_url: null,
-              remote_host: slug.includes("/") ? "github.com" : null,
-              remote_slug: slug,
-              branch: gitBranch,
-              commit_sha: null,
-            }
-          : null,
+        // Emit git context whenever there is ANY signal — a repo slug OR the
+        // session's branch. Gating on `slug` alone dropped the branch (and all
+        // git context) for cwds the path heuristic doesn't match (e.g.
+        // ~/Documents/<repo>), starving the session-metadata join. The branch
+        // is the historical one Claude Code recorded for the turn.
+        git:
+          slug || gitBranch
+            ? {
+                remote_url: null,
+                remote_host: slug?.includes("/") ? "github.com" : null,
+                remote_slug: slug,
+                branch: gitBranch,
+                commit_sha: null,
+              }
+            : null,
         tokens: {
           input: usage.input_tokens ?? 0,
           output: usage.output_tokens ?? 0,
@@ -427,6 +459,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         tool_calls: aggregate,
         files_touched: [],
         ...(excerpt ? { content_excerpt: excerpt } : {}),
+        ...(refs ? { references: refs } : {}),
         source_file: ctx.sourceFile,
         source_byte_offset: offsetAtLineStart,
         // Files in ~/.claude/projects/ come from the Claude Code app
@@ -468,6 +501,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         continue;
       }
       const excerpt = extractExcerpt(u.message?.content);
+      const refs = detectEventReferences(collectRefText(u.message?.content));
       await emit({
         source_event_id: eventId,
         ts: u.timestamp,
@@ -485,6 +519,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         tool_calls: {},
         files_touched: [],
         ...(excerpt ? { content_excerpt: excerpt } : {}),
+        ...(refs ? { references: refs } : {}),
         source_file: ctx.sourceFile,
         source_byte_offset: offsetAtLineStart,
         billing: "subscription",

@@ -13,7 +13,7 @@ import { batchId } from "@modelstat/companion-core";
 import { INGEST_BATCH_MAX_EVENTS } from "@modelstat/companion-core/config";
 import type { SegmentProgressFn } from "@modelstat/companion-core/pipeline";
 import { attachSegmentIdsByMap, type ToolCallDraft } from "@modelstat/companion-core/queue";
-import type { IngestBatch, RawEvent, Segment } from "@modelstat/core";
+import type { IngestBatch, RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import {
   type LocalToolContext,
   parseClaudeCodeJsonl,
@@ -22,7 +22,12 @@ import {
 } from "@modelstat/parsers";
 import { uploadBatch } from "./api.js";
 import { state } from "./config.js";
-import { buildSegments, buildSessionTitles, enrichScripts } from "./pipeline.js";
+import {
+  buildSegments,
+  buildSessionMetadata,
+  buildSessionTitles,
+  enrichScripts,
+} from "./pipeline.js";
 
 /** Substituted by tsup's `define` (see tsup.config.ts) — a string
  * literal in the bundle; falls back to "agent-dev" when run unbundled
@@ -227,6 +232,19 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
       // Titles are auxiliary — never sink a batch over them.
       console.warn("session titling failed — shipping batch untitled:", (e as Error).message);
     }
+    // Per-session repo/PR/commit/issue metadata — the join layer between AI
+    // spend and shipped work. Uses the run-accumulated segments (full session
+    // view, like titles) for abstract scanning + this batch's events for git
+    // context. Auxiliary + best-effort: a detection hiccup never sinks a batch.
+    let sessionMetadata: Record<string, SessionMetadata> = {};
+    try {
+      sessionMetadata = await buildSessionMetadata(titleInput, events);
+    } catch (e) {
+      console.warn(
+        "session metadata detection failed — shipping batch without it:",
+        (e as Error).message,
+      );
+    }
     // Attribute each buffered call to the segment covering its source
     // event — resolved against EVERY segment seen this run for the
     // call's session, not just this batch's. A file whose events
@@ -253,6 +271,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
       segments,
       tool_calls: attachSegmentIdsByMap(toolCallBuffer, callSegmentByEvent),
       ...(Object.keys(sessionTitles).length ? { session_titles: sessionTitles } : {}),
+      ...(Object.keys(sessionMetadata).length ? { session_metadata: sessionMetadata } : {}),
     };
     // These segments are now in-flight.
     cb.onUpload?.({ events: events.length, segments: segments.length });

@@ -10,6 +10,7 @@ import {
   PROVIDERS,
   TOOL_CALL_STATUSES,
 } from "./enums.js";
+import { EventReferences, SessionMetadata } from "./session-metadata.js";
 
 /**
  * Canonical event — one row per meaningful turn inside a session.
@@ -77,6 +78,13 @@ export const RawEvent = z.object({
   // summarize prompt; it never gets stored long-term server-side, only
   // used to construct the summarize input.
   content_excerpt: z.string().max(320).optional(),
+
+  // Public code references (PRs, issues, commits, repos) detected on-device
+  // from this turn's FULL text — the high-recall feed the server rolls up into
+  // SessionMetadata. Only public reference shapes (forge URLs, slugs, numbers,
+  // ticket keys) ride here, never raw text — so it is derived pre-redaction
+  // safely (same class as git.remote_slug). Optional + additive.
+  references: EventReferences.optional(),
 
   // Reference to originating file for reparsing
   source_file: z.string().max(1024).nullable(),
@@ -309,6 +317,13 @@ export const IngestBatch = z.object({
    * freshest title. Absent for runtimes without a titler (older agents,
    * no-op browser summariser). */
   session_titles: z.record(z.string(), z.string().max(120)).optional(),
+  /** Optional per-session deterministic metadata — session_id →
+   * {@link SessionMetadata}: the repos, pull requests, commits, and issues the
+   * session touched, detected on-device across git context, tool calls,
+   * redacted content, and the local model (so it works for any provider).
+   * Additive — old companions omit it, old servers ignore it (the wire has no
+   * `deny_unknown_fields`). The join layer between AI spend and shipped work. */
+  session_metadata: z.record(z.string(), SessionMetadata).optional(),
 });
 export type IngestBatch = z.infer<typeof IngestBatch>;
 

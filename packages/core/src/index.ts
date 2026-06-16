@@ -5,3 +5,4 @@ export * from "./policies.js";
 export * from "./redact.js";
 export * from "./redact-floor.js";
 export * from "./schemas.js";
+export * from "./session-metadata.js";

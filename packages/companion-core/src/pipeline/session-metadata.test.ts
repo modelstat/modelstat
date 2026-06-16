@@ -1,0 +1,180 @@
+import { strict as assert } from "node:assert";
+import { test } from "node:test";
+import type { GitContext } from "@modelstat/core/schemas";
+import { RawEvent, Segment } from "@modelstat/core/schemas";
+import {
+  buildLinkExtractUserPrompt,
+  buildSessionMetadata,
+  type LinkExtractor,
+} from "./session-metadata.js";
+
+let n = 0;
+
+function mkGit(over: Partial<GitContext>): GitContext {
+  return {
+    remote_url: null,
+    remote_host: null,
+    remote_slug: null,
+    branch: null,
+    commit_sha: null,
+    ...over,
+  };
+}
+
+function mkEvent(over: {
+  session_id?: string;
+  cwd?: string | null;
+  git?: GitContext | null;
+  content_excerpt?: string;
+}): RawEvent {
+  n += 1;
+  return RawEvent.parse({
+    source_event_id: `e${n}`,
+    ts: "2026-06-15T10:00:00.000Z",
+    kind: "assistant_message",
+    agent: "claude_code",
+    provider: "anthropic",
+    model: "claude-opus-4-8",
+    session_id: over.session_id ?? "s1",
+    turn_index: null,
+    parent_event_id: null,
+    cwd: over.cwd ?? null,
+    git: over.git ?? null,
+    tokens: { input: 1, output: 1, cache_creation: 0, cache_read: 0, reasoning: 0 },
+    duration_ms: null,
+    source_file: "f.jsonl",
+    source_byte_offset: 0,
+    ...(over.content_excerpt ? { content_excerpt: over.content_excerpt } : {}),
+  });
+}
+
+function mkSegment(session_id: string, abstract: string): Segment {
+  n += 1;
+  return Segment.parse({
+    segment_id: `seg${n}`,
+    session_id,
+    agent: "claude_code",
+    started_at: "2026-06-15T10:00:00.000Z",
+    ended_at: "2026-06-15T10:01:00.000Z",
+    abstract,
+    tokens: { input: 1, output: 1, cache_creation: 0, cache_read: 0, reasoning: 0 },
+    redaction: {},
+    source_event_ids: [`e${n}`],
+  });
+}
+
+test("repos come from event git context, with the branch", async () => {
+  const ev = mkEvent({
+    git: mkGit({ remote_host: "github.com", remote_slug: "acme/web", branch: "main" }),
+  });
+  const seg = mkSegment("s1", "Refactored the auth module.");
+  const out = await buildSessionMetadata([seg], [ev]);
+  assert.equal(out.s1?.repos.length, 1);
+  assert.equal(out.s1?.repos[0]?.slug, "acme/web");
+  assert.deepEqual(out.s1?.repos[0]?.branches, ["main"]);
+  assert.equal(out.s1?.repos[0]?.source, "git");
+});
+
+test("PRs + issues are mined from redacted abstracts", async () => {
+  const ev = mkEvent({});
+  const seg = mkSegment("s1", "Reviewed https://github.com/acme/web/pull/42 and fixed acme/web#7.");
+  const out = await buildSessionMetadata([seg], [ev]);
+  assert.equal(out.s1?.pull_requests[0]?.number, 42);
+  assert.equal(out.s1?.issues.find((i) => i.key === "7")?.slug, "acme/web");
+});
+
+test("resolveGit enriches repos + branch tickets from disk", async () => {
+  const ev = mkEvent({ cwd: "/Users/dev/Documents/api" });
+  const seg = mkSegment("s1", "Implemented retry logic.");
+  const resolveGit = async (cwd: string | null): Promise<GitContext | null> =>
+    cwd === "/Users/dev/Documents/api"
+      ? mkGit({ remote_host: "github.com", remote_slug: "acme/api", branch: "feature/ENG-9-retry" })
+      : null;
+  const out = await buildSessionMetadata([seg], [ev], { resolveGit });
+  assert.equal(out.s1?.repos[0]?.slug, "acme/api");
+  // The ticket key in the branch becomes an issue ref.
+  assert.ok(out.s1?.issues.some((i) => i.key === "ENG-9"));
+});
+
+test("the model channel surfaces refs for content with no URL (any provider)", async () => {
+  const ev = mkEvent({});
+  const seg = mkSegment("s1", "Opened a pull request for the retry-logic fix.");
+  const extractLinks: LinkExtractor = async () => "https://github.com/acme/web/pull/99";
+  const out = await buildSessionMetadata([seg], [ev], { extractLinks });
+  const pr = out.s1?.pull_requests[0];
+  assert.equal(pr?.number, 99);
+  assert.equal(pr?.source, "model");
+});
+
+test("sessions with no detectable references are omitted", async () => {
+  const ev = mkEvent({});
+  const seg = mkSegment("s1", "Discussed the weekly plan, nothing concrete.");
+  const out = await buildSessionMetadata([seg], [ev]);
+  assert.equal(out.s1, undefined);
+  assert.deepEqual(Object.keys(out), []);
+});
+
+test("a failing git/model channel never blocks the deterministic one", async () => {
+  const ev = mkEvent({ content_excerpt: "see https://github.com/acme/web/pull/5" });
+  const seg = mkSegment("s1", "Landed the fix.");
+  const resolveGit = async (): Promise<GitContext | null> => {
+    throw new Error("git exploded");
+  };
+  const extractLinks: LinkExtractor = async () => {
+    throw new Error("model exploded");
+  };
+  const out = await buildSessionMetadata([seg], [ev], { resolveGit, extractLinks });
+  assert.equal(out.s1?.pull_requests[0]?.number, 5, "content channel survives sibling failures");
+});
+
+test("metadata is split per session", async () => {
+  const a = mkEvent({ session_id: "sa", git: mkGit({ remote_slug: "acme/a" }) });
+  const b = mkEvent({ session_id: "sb", git: mkGit({ remote_slug: "acme/b" }) });
+  const out = await buildSessionMetadata([mkSegment("sa", "x"), mkSegment("sb", "y")], [a, b]);
+  assert.equal(out.sa?.repos[0]?.slug, "acme/a");
+  assert.equal(out.sb?.repos[0]?.slug, "acme/b");
+});
+
+test("event.references (the parser's full-text scan) feeds session metadata", async () => {
+  const ev = RawEvent.parse({
+    source_event_id: "r1",
+    ts: "2026-06-15T10:00:00.000Z",
+    kind: "assistant_message",
+    agent: "claude_code",
+    provider: "anthropic",
+    model: "claude-opus-4-8",
+    session_id: "s1",
+    turn_index: null,
+    parent_event_id: null,
+    cwd: null,
+    git: null,
+    tokens: { input: 1, output: 1, cache_creation: 0, cache_read: 0, reasoning: 0 },
+    duration_ms: null,
+    source_file: "f.jsonl",
+    source_byte_offset: 0,
+    references: {
+      repos: [],
+      pull_requests: [
+        {
+          host: "github.com",
+          slug: "acme/web",
+          number: 12,
+          url: "https://github.com/acme/web/pull/12",
+          source: "content",
+          confidence: 0.95,
+        },
+      ],
+      commits: [],
+      issues: [],
+    },
+  });
+  const out = await buildSessionMetadata([mkSegment("s1", "did stuff")], [ev]);
+  assert.equal(out.s1?.pull_requests[0]?.number, 12);
+});
+
+test("buildLinkExtractUserPrompt lays out the abstracts and asks for one-per-line", () => {
+  const p = buildLinkExtractUserPrompt(["did A", "did B"]);
+  assert.match(p, /\[part 1\] did A/);
+  assert.match(p, /\[part 2\] did B/);
+  assert.match(p, /one per line/i);
+});

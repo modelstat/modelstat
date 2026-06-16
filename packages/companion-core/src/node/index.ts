@@ -5,29 +5,29 @@
  * implementations (file-backed queue store, pino logger, Ollama
  * adapters) while keeping the same contracts as the browser side.
  */
-export { FileQueueStore } from "./file-queue-store.js";
 // Back-compat alias — callers that imported SqliteQueueStore still
 // work without a rename. Scheduled for removal once apps/agent-dev
 // ships a release using FileQueueStore directly.
-export { FileQueueStore as SqliteQueueStore } from "./file-queue-store.js";
+export { FileQueueStore, FileQueueStore as SqliteQueueStore } from "./file-queue-store.js";
+export {
+  DEFAULT_LLAMA_MODEL_URL,
+  defaultLlamaConfig,
+  ensureLlamaModel,
+  type LlamaConfig,
+  llamaCognize,
+  llamaEntitle,
+  llamaExtractLinks,
+  llamaScriptSummarize,
+  llamaSummarize,
+} from "./llama.js";
 export {
   defaultOllamaConfig,
+  type OllamaConfig,
   ollamaCognize,
   ollamaEmbed,
   ollamaSummarize,
   ollamaTokenize,
-  type OllamaConfig,
 } from "./ollama.js";
-export {
-  defaultLlamaConfig,
-  ensureLlamaModel,
-  llamaCognize,
-  llamaEntitle,
-  llamaScriptSummarize,
-  llamaSummarize,
-  DEFAULT_LLAMA_MODEL_URL,
-  type LlamaConfig,
-} from "./llama.js";
 // Transformers.js BGE-small-en-v1.5 embedder — the wire embedding is
 // 384-dim (BGE-small), so CLI and browser segment vectors land in the
 // same space.
