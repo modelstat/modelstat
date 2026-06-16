@@ -168,6 +168,10 @@ function installNativeRuntime(sourceCli: string): string[] {
   const childEnv = { ...process.env };
   delete childEnv.npm_config_global;
   delete childEnv.npm_config_prefix;
+  // This step used to be a silent black box: a few seconds with a warm cache,
+  // but a multi-minute (apparently-frozen) network download on a cold/slow one —
+  // `connect` looked hung right here. Announce it so it isn't a mystery.
+  process.stderr.write(`  · staging summariser runtime (node-llama-cpp@${version})…\n`);
   const r = spawnSync(
     "npm",
     [
@@ -179,6 +183,13 @@ function installNativeRuntime(sourceCli: string): string[] {
       "--omit=dev",
       "--no-audit",
       "--no-fund",
+      // Prefer the npm cache the current install already populated (node-llama-cpp
+      // is a direct dep, so the platform prebuilt is cached) — an offline ~3s copy
+      // instead of a redundant network re-fetch. Only a genuine cache miss touches
+      // the network, and a capped per-request timeout makes that fail fast (the
+      // daemon's summariser preflight re-stages) rather than hang indefinitely.
+      "--prefer-offline",
+      "--fetch-timeout=60000",
       "--loglevel=error",
       `node-llama-cpp@${version}`,
     ],
