@@ -148,7 +148,7 @@ jobs:
             echo "- \`otp\` = a fresh code from your authenticator"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: release-dist
           path: release-dist/

@@ -67,7 +67,7 @@ jobs:
           ( cd apps/tray-mac/build && ditto -c -k --keepParent ModelstatTray.app ModelstatTray.zip )
 
       - name: Upload tray app
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: modelstat-tray-v${{ steps.verify.outputs.version }}-${{ steps.verify.outputs.sha7 }}
           path: apps/tray-mac/build/ModelstatTray.zip
