@@ -1,0 +1,74 @@
+name: Tray Build
+
+# Builds the macOS menu-bar tray as a universal (arm64 + x86_64), ad-hoc-signed
+# ModelstatTray.app and uploads it as a downloadable artifact whenever the tray
+# sources change. This is the same binary the release pipeline bakes into the
+# npm tarball (release-build.yml) — having it here too gives a PR-time compile
+# gate (a broken Swift change fails the run) and a grabbable .app for manual
+# testing, without waiting for a release.
+#
+# macOS runner: a universal build needs full Xcode (xcbuild); the on-device
+# fallback compile only does host-arch, which is why it survives on the
+# Command Line Tools alone.
+#
+# Signing is ad-hoc (no Apple account). To ship a DOWNLOADED build without a
+# Gatekeeper prompt, add Developer ID signing + notarization — see the header
+# of apps/tray-mac/build-app.sh; it's an additive CI step once the account
+# exists.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/tray-mac/**"
+      - ".github/workflows/tray-build.yml"
+  pull_request:
+    paths:
+      - "apps/tray-mac/**"
+      - ".github/workflows/tray-build.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: tray-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: |
+          echo "developer dir: $(xcode-select -p)"
+          swift --version
+
+      - name: Build universal, ad-hoc-signed app
+        run: TRAY_UNIVERSAL=1 bash apps/tray-mac/build-app.sh
+
+      - name: Verify bundle (both arches + valid signature)
+        id: verify
+        run: |
+          APP=apps/tray-mac/build/ModelstatTray.app
+          BIN="$APP/Contents/MacOS/modelstat-tray"
+          archs="$(lipo -archs "$BIN")"
+          echo "arches: $archs"
+          case "$archs" in
+            *arm64*x86_64* | *x86_64*arm64*) : ;;
+            *) echo "::error::expected a universal arm64+x86_64 binary, got '$archs'"; exit 1 ;;
+          esac
+          codesign --verify --strict --verbose=2 "$APP"
+          ver="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "sha7=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Zip the app
+        run: |
+          ( cd apps/tray-mac/build && ditto -c -k --keepParent ModelstatTray.app ModelstatTray.zip )
+
+      - name: Upload tray app
+        uses: actions/upload-artifact@v4
+        with:
+          name: modelstat-tray-v${{ steps.verify.outputs.version }}-${{ steps.verify.outputs.sha7 }}
+          path: apps/tray-mac/build/ModelstatTray.zip
+          if-no-files-found: error

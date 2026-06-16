@@ -11,7 +11,7 @@
  * boot (tail preserved in <name>.old.log) — see rotateRunawayLogs in
  * daemon.ts.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -29,11 +29,21 @@ import { fileURLToPath } from "node:url";
 export const SERVICE_LABEL = "ai.modelstat.agent";
 export const SYSTEMD_UNIT = "modelstat"; // → modelstat.service
 
-function home(): string { return homedir(); }
-function stateDir(): string { return join(home(), ".modelstat"); }
-function binDir(): string { return join(stateDir(), "bin"); }
-function logDir(): string { return join(stateDir(), "logs"); }
-function installedCliPath(): string { return join(binDir(), "modelstat.mjs"); }
+function home(): string {
+  return homedir();
+}
+function stateDir(): string {
+  return join(home(), ".modelstat");
+}
+function binDir(): string {
+  return join(stateDir(), "bin");
+}
+function logDir(): string {
+  return join(stateDir(), "logs");
+}
+function installedCliPath(): string {
+  return join(binDir(), "modelstat.mjs");
+}
 
 /** Locate the currently-running CLI script. */
 function runningCliPath(): string {
@@ -133,16 +143,12 @@ function sourceLlamaVersion(sourceCli: string): string | null {
  * matching version is already staged, so re-running `connect` is fast.
  */
 function installNativeRuntime(sourceCli: string): string[] {
-  const version =
-    sourceLlamaVersion(sourceCli) ?? NODE_LLAMA_CPP_FALLBACK_VERSION;
+  const version = sourceLlamaVersion(sourceCli) ?? NODE_LLAMA_CPP_FALLBACK_VERSION;
   const dest = binDir();
   // Already staged at the right version → nothing to do.
   try {
     const have = JSON.parse(
-      readFileSync(
-        join(dest, "node_modules", "node-llama-cpp", "package.json"),
-        "utf8",
-      ),
+      readFileSync(join(dest, "node_modules", "node-llama-cpp", "package.json"), "utf8"),
     ) as { version?: string };
     if (have.version === version) return [`node-llama-cpp@${version} (cached)`];
   } catch {
@@ -301,7 +307,11 @@ function macUninstall(): void {
   launchctl(["bootout", target]);
   const plist = plistPath();
   if (existsSync(plist)) {
-    try { unlinkSync(plist); } catch { /* ignore */ }
+    try {
+      unlinkSync(plist);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -371,7 +381,11 @@ function linuxUninstall(): void {
   systemctl(["disable", "--now", `${SYSTEMD_UNIT}.service`]);
   const unit = systemdUnitPath();
   if (existsSync(unit)) {
-    try { unlinkSync(unit); } catch { /* ignore */ }
+    try {
+      unlinkSync(unit);
+    } catch {
+      /* ignore */
+    }
   }
   systemctl(["daemon-reload"]);
 }
@@ -413,9 +427,13 @@ export function serviceStatus(): { running: boolean; hint: string } {
   return { running: false, hint: `unsupported platform (${p})` };
 }
 
-export function logsDir(): string { return logDir(); }
+export function logsDir(): string {
+  return logDir();
+}
 
-export function absoluteBundlePath(): string { return installedCliPath(); }
+export function absoluteBundlePath(): string {
+  return installedCliPath();
+}
 
 /**
  * Copy a built ModelstatTray.app bundle to ~/Applications so the
@@ -446,20 +464,31 @@ export function installTrayApp(sourceAppPath: string): { installedAt: string } |
   return { installedAt: dest };
 }
 
+/** Progress sink for an on-device tray build. `onLine` receives each
+ *  complete line of `build-app.sh` / SwiftPM output as it streams, so
+ *  the caller can surface granular progress (a cold `swift build` of the
+ *  tray is ~1 min and would otherwise look like a frozen terminal). */
+export interface TrayBuildProgress {
+  onLine?: (line: string) => void;
+}
+
 /**
  * Resolve a built-or-buildable ModelstatTray.app bundled with this CLI
  * package. Strategy (in order):
  *   1. Any pre-built `.app` sitting at the usual candidate paths —
- *      CI publishes one when codesigning is configured.
+ *      CI publishes one when codesigning is configured. This returns
+ *      instantly and never invokes the progress sink.
  *   2. Swift sources shipped in `vendor/tray-mac/` (the default for
  *      the npm tarball); if found and `swift` is on $PATH, we invoke
- *      `build-app.sh` to produce the bundle on the user's machine.
+ *      `build-app.sh` to produce the bundle on the user's machine,
+ *      streaming compiler output line-by-line to `progress.onLine`.
  *
+ * Async because path (2) is a cold compile that blocks for ~30–60s; we
+ * stream it rather than buffering so onboarding shows live progress.
  * Returns null if we can't produce a bundle — callers degrade to the
- * headless launchd path. Swift-build failures are surfaced via stderr
- * from the subprocess so users on Xcode-less Macs get a clear hint.
+ * headless launchd path.
  */
-export function bundledTrayAppPath(): string | null {
+export async function bundledTrayAppPath(progress?: TrayBuildProgress): Promise<string | null> {
   if (platform() !== "darwin") return null;
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -472,23 +501,72 @@ export function bundledTrayAppPath(): string | null {
     if (existsSync(c)) return c;
   }
   // Sources path — build locally if we can.
-  const sourceDirs = [
-    join(here, "..", "vendor", "tray-mac"),
-    join(here, "..", "..", "tray-mac"),
-  ];
+  const sourceDirs = [join(here, "..", "vendor", "tray-mac"), join(here, "..", "..", "tray-mac")];
   for (const src of sourceDirs) {
     const build = join(src, "build-app.sh");
     if (!existsSync(build)) continue;
     if (!hasSwift()) return null;
-    const r = spawnSync("bash", [build], { cwd: src, encoding: "utf8" });
-    if (r.status === 0) {
+    const code = await runTrayBuild(src, build, progress);
+    if (code === 0) {
       const app = join(src, "build", "ModelstatTray.app");
       if (existsSync(app)) return app;
     }
-    // Fall through to try the next candidate; the error surfaces via
-    // the spawnSync stderr which the parent process can capture.
+    // Fall through to try the next candidate; failures surface as the
+    // streamed compiler output the caller already printed.
   }
   return null;
+}
+
+/**
+ * Stateful line-splitter: feed it arbitrary stdout/stderr chunks and it
+ * calls `onLine` once per complete line, regardless of how the OS
+ * happened to slice the stream into chunks. `flush()` emits any trailing
+ * partial line (e.g. a final "Build complete!" with no newline).
+ * Exported so the streaming contract is unit-tested without spawning swift.
+ */
+export function createLineSplitter(onLine: (line: string) => void): {
+  push: (chunk: string) => void;
+  flush: () => void;
+} {
+  let buf = "";
+  return {
+    push(chunk: string): void {
+      buf += chunk;
+      for (;;) {
+        const nl = buf.indexOf("\n");
+        if (nl === -1) break;
+        const line = buf.slice(0, nl).trimEnd();
+        buf = buf.slice(nl + 1);
+        if (line) onLine(line);
+      }
+    },
+    flush(): void {
+      const line = buf.trim();
+      buf = "";
+      if (line) onLine(line);
+    },
+  };
+}
+
+/** Spawn build-app.sh, streaming merged stdout+stderr to `progress.onLine`
+ *  line-by-line. Resolves with the child's exit code (null on spawn error). */
+function runTrayBuild(
+  cwd: string,
+  buildScript: string,
+  progress?: TrayBuildProgress,
+): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawn("bash", [buildScript], { cwd });
+    const splitter = createLineSplitter((line) => progress?.onLine?.(line));
+    const pump = (chunk: Buffer): void => splitter.push(chunk.toString("utf8"));
+    child.stdout?.on("data", pump);
+    child.stderr?.on("data", pump);
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => {
+      splitter.flush();
+      resolve(code);
+    });
+  });
 }
 
 function hasSwift(): boolean {

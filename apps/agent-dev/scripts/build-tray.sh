@@ -2,17 +2,22 @@
 # Bundle the macOS tray sources alongside the agent's npm build so
 # `pnpm pack` ships the Swift package plus the install script.
 #
-# We intentionally ship SOURCES, not a pre-built .app:
-#   · a .app needs codesigning to launch without Gatekeeper warnings,
-#     and signing requires the team's Developer ID cert which CI has
-#     but an npm publish pipeline shouldn't.
-#   · the Swift build is ~3 seconds on an M-series laptop and every
-#     install.sh candidate (macOS) already has — or can install —
-#     `xcode-select` in one command.
-#   · sources cross-compile: the same tarball works on arm64 + x86_64.
+# These sources are the FALLBACK, not the primary install path. The
+# release pipeline (release-build.yml, on a macOS runner) builds a
+# universal, ad-hoc-signed ModelstatTray.app and drops it at
+# vendor/ModelstatTray.app BEFORE pack, so the published tarball ships a
+# ready-to-run binary and no end user compiles anything. We keep the
+# sources because:
+#   · `bundledTrayAppPath()` compiles them on-device if the prebuilt app
+#     is ever missing (e.g. a dev `install:local`, or a future arch).
+#   · they're tiny next to the binary and document exactly what shipped.
+# NB: a COLD `swift build` is ~1 min (not the "~3s" warm rebuild this
+# comment used to claim) and needs Xcode CLT — which is exactly why the
+# prebuilt app, not this fallback, is the path users hit.
 #
 # Idempotent — re-running clears the prior vendor copy before writing
-# new sources.
+# new sources. It does NOT touch vendor/ModelstatTray.app (the CI step
+# owns that), so packing locally keeps any prebuilt app already present.
 
 set -euo pipefail
 
@@ -38,3 +43,12 @@ cp "$SRC/.gitignore" "$DEST/" 2>/dev/null || true
 chmod +x "$DEST/build-app.sh"
 
 echo "✓ tray sources bundled into $DEST"
+
+# Surface whether the CI macOS step has staged the prebuilt app, so the
+# pack log makes it obvious which path users will hit.
+PREBUILT="$AGENT_ROOT/vendor/ModelstatTray.app"
+if [ -d "$PREBUILT" ]; then
+  echo "✓ prebuilt $PREBUILT present — users get the binary (no on-device compile)"
+else
+  echo "ℹ no prebuilt ModelstatTray.app — tarball will compile on-device as a fallback" >&2
+fi

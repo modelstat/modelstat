@@ -35,7 +35,12 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # macOS runner: the agent tarball bakes in a prebuilt, universal
+    # (arm64+x86_64), ad-hoc-signed ModelstatTray.app so end users never
+    # compile Swift on `connect`. Building that fat binary needs full Xcode
+    # (xcbuild), which only the macOS image has. Releases are manual + OTP-
+    # gated and infrequent, so the pricier runner is a non-issue.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v6
         with:
@@ -91,6 +96,22 @@ jobs:
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
 
       - run: pnpm install --frozen-lockfile
+
+      - name: Build + stage macOS tray (universal, ad-hoc-signed)
+        # Agent only. Produces a fat arm64+x86_64 bundle and drops it where
+        # `pnpm pack` (and `bundledTrayAppPath` at runtime) look for it FIRST,
+        # so the published tarball carries a ready-to-run binary. prepack's
+        # build:tray re-vendors the Swift sources but leaves this app intact.
+        if: steps.pkg.outputs.is_agent == 'true'
+        run: |
+          echo "toolchain: $(xcode-select -p)"; swift --version
+          TRAY_UNIVERSAL=1 bash apps/tray-mac/build-app.sh
+          rm -rf apps/agent-dev/vendor/ModelstatTray.app
+          mkdir -p apps/agent-dev/vendor
+          cp -R apps/tray-mac/build/ModelstatTray.app apps/agent-dev/vendor/ModelstatTray.app
+          echo "staged universal tray:"
+          lipo -archs apps/agent-dev/vendor/ModelstatTray.app/Contents/MacOS/modelstat-tray
+          codesign --verify --strict --verbose=2 apps/agent-dev/vendor/ModelstatTray.app
 
       - name: Pack tarball (workspace deps rewritten, prepack build runs here)
         id: pack

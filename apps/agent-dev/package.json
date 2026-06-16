@@ -11,6 +11,7 @@
   "files": [
     "dist",
     "scripts/postinstall.mjs",
+    "vendor/ModelstatTray.app",
     "vendor/tray-mac",
     "README.md",
     "LICENSE"

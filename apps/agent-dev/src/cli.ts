@@ -18,7 +18,7 @@ import {
   reportDiscovery,
   selfRegister,
 } from "./api.js";
-import { machineId, state } from "./config.js";
+import { state } from "./config.js";
 import { backupIdentity, hasIdentityFile, identityPath } from "./identity.js";
 import { deviceUuidFromMachineKey, machineKey, machineKeySource } from "./machine-key.js";
 import { scanAll } from "./scan.js";
@@ -228,6 +228,74 @@ function emitEvent(opts: ConnectOpts, event: string, fields: Record<string, unkn
 }
 
 /**
+ * Renders live progress for the on-device macOS tray compile.
+ *
+ * `bundledTrayAppPath` calls `onLine` once per line of SwiftPM output —
+ * but ONLY when it actually has to build (a prebuilt .app short-circuits
+ * with zero lines). So the UI lazily "begins" on the first line: it prints
+ * a one-time heads-up, starts a 1s elapsed ticker (TTY only), and surfaces
+ * each SwiftPM phase line ("[2/3] Compiling…", "Linking", "Build complete!")
+ * as dim detail. `finish()` stops the ticker and returns the elapsed ms
+ * (or null if no build ran). In `--json` mode it emits structured
+ * tray_build_started / _progress / _done events instead of ANSI.
+ */
+function createTrayBuildUi(opts: ConnectOpts): {
+  onLine: (line: string) => void;
+  finish: () => number | null;
+} {
+  const isTty = !opts.json && process.stdout.isTTY === true;
+  let startedAt: number | null = null;
+  let ticker: ReturnType<typeof setInterval> | null = null;
+
+  const paintTicker = (): void => {
+    if (startedAt === null) return;
+    const s = Math.round((Date.now() - startedAt) / 1000);
+    process.stdout.write(`\r  \x1b[2m⏳ compiling menu-bar tray from source… ${s}s\x1b[0m\x1b[K`);
+  };
+
+  const begin = (): void => {
+    if (startedAt !== null) return;
+    startedAt = Date.now();
+    emitEvent(opts, "tray_build_started", {});
+    if (!opts.json) {
+      process.stdout.write(
+        "  \x1b[2mno prebuilt tray found — compiling a small Swift app locally " +
+          "(first run only, ~1 min)\x1b[0m\n",
+      );
+    }
+    if (isTty) {
+      paintTicker();
+      ticker = setInterval(paintTicker, 1000);
+      ticker.unref?.();
+    }
+  };
+
+  return {
+    onLine: (line: string): void => {
+      begin();
+      emitEvent(opts, "tray_build_progress", { line });
+      if (isTty) {
+        // Commit this phase line above the ticker, which repaints on its
+        // next tick (\r returns to col 0, \x1b[K clears the ticker text).
+        process.stdout.write(`\r\x1b[K  \x1b[2m${line}\x1b[0m\n`);
+      } else if (!opts.json) {
+        process.stdout.write(`  ${line}\n`);
+      }
+    },
+    finish: (): number | null => {
+      if (ticker) {
+        clearInterval(ticker);
+        ticker = null;
+      }
+      if (isTty && startedAt !== null) process.stdout.write("\r\x1b[K");
+      const elapsed = startedAt === null ? null : Date.now() - startedAt;
+      if (elapsed !== null) emitEvent(opts, "tray_build_done", { elapsed_ms: elapsed });
+      return elapsed;
+    },
+  };
+}
+
+/**
  * `modelstat connect` — the primary onboarding command.
  *
  * We talk loudly through every step. Silence on `npx modelstat@latest
@@ -339,14 +407,24 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
   });
 
   // ── 2. macOS menu-bar tray (best-effort) ──────────────────────
+  // When no prebuilt .app ships, we compile the tray from source on the
+  // user's machine — a cold `swift build` is ~1 min. The build UI streams
+  // live progress (heads-up + elapsed ticker + SwiftPM phase lines) so
+  // that minute doesn't read as a frozen terminal.
   if (platform() === "darwin") {
     step("Installing menu-bar tray (macOS)");
+    const buildUi = createTrayBuildUi(opts);
     try {
-      const src = bundledTrayAppPath();
+      const src = await bundledTrayAppPath({ onLine: buildUi.onLine });
+      const buildMs = buildUi.finish();
       if (src) {
+        if (buildMs !== null) ok(`tray compiled from source in ${Math.round(buildMs / 1000)}s`);
         const out = installTrayApp(src);
         if (out) {
-          emitEvent(opts, "tray_installed", { path: out.installedAt });
+          emitEvent(opts, "tray_installed", {
+            path: out.installedAt,
+            ...(buildMs !== null ? { build_ms: buildMs } : {}),
+          });
           ok(`tray at ${out.installedAt}`);
         }
       } else {
@@ -354,6 +432,7 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
         warn("no bundled tray — skipping (install Xcode CLI tools and re-run to get the icon)");
       }
     } catch (e) {
+      buildUi.finish();
       emitEvent(opts, "tray_install_failed", { error: (e as Error).message });
       warn(`tray install skipped: ${(e as Error).message}`);
     }

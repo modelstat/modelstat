@@ -275,10 +275,14 @@ final class TrayController: NSObject {
     }
     guard !ensureInFlight else { return }
     ensureInFlight = true
-    superviseQueue.async { [weak self] in
+    superviseQueue.async {
       // Probe off-main: the health command boots node (~100-300ms).
       let decision = Self.queryDaemonHealth(cli: cli) ?? "spawn"
-      DispatchQueue.main.async {
+      // Capture self on the closure that actually hops back to @MainActor,
+      // not the supervise-queue closure (which only touches statics) — a weak
+      // *var* captured across the actor hop is a data race the CI toolchain
+      // rejects outright.
+      DispatchQueue.main.async { [weak self] in
         MainActor.assumeIsolated {
           guard let self else { return }
           self.ensureInFlight = false
@@ -343,14 +347,17 @@ final class TrayController: NSObject {
     let err = FileHandle(forWritingAtPath: "\(logsDir)/err.log") ?? FileHandle.standardError
     p.standardOutput = out
     p.standardError = err
-    p.terminationHandler = { [weak self] proc in
+    p.terminationHandler = { proc in
       // Daemon exited — re-converge via the health check, which adopts
       // a replacement daemon instead of counter-killing it. A clean
       // sub-5s exit means "another daemon owns the lock" (or an equally
       // immediate no-op); skip the hot retry and let the 30s watchdog
       // re-check, so a stale CLI can't put us in a 2s spawn loop.
       let status = proc.terminationStatus
-      Task { @MainActor in
+      // Capture weak self on the @MainActor Task, not the (non-isolated)
+      // terminationHandler — capturing the outer weak var across the actor
+      // boundary is a data race the CI toolchain rejects.
+      Task { @MainActor [weak self] in
         guard let self else { return }
         let uptime = self.daemonSpawnedAt.map { Date().timeIntervalSince($0) } ?? .infinity
         self.daemon = nil
@@ -442,11 +449,13 @@ final class TrayController: NSObject {
       return
     }
     // Run on a background queue so we don't block the main loop.
-    DispatchQueue.global(qos: .utility).async { [weak self] in
+    DispatchQueue.global(qos: .utility).async {
       p.waitUntilExit()
       let data = pipe.fileHandleForReading.readDataToEndOfFile()
       let stats = try? JSONDecoder().decode(AgentStats.self, from: data)
-      DispatchQueue.main.async {
+      // Hand self to the main-queue closure (which mutates @MainActor state),
+      // not the background closure that only does blocking IO.
+      DispatchQueue.main.async { [weak self] in
         self?.latest = stats
         self?.renderStats()
       }
