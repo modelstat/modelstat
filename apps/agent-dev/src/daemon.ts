@@ -317,8 +317,17 @@ async function runScanCycle(reason: string): Promise<void> {
     });
     bumpStat("files_scanned", r.filesScanned);
     bumpStat("files_unchanged", r.filesUnchanged);
-    setPhase("watching", "Waiting for new events");
-    setProgress(0, 0);
+    if (r.morePending) {
+      // The cycle hit its file cap with older history still to drain — re-scan
+      // promptly (newest-first, bounded per cycle) so a fresh device's backlog
+      // fills in over quick successive scans instead of one giant, OOM-prone,
+      // crash-looping pass.
+      setPhase("processing", "Catching up on history…");
+      setTimeout(() => void requestScan("backfill"), 250);
+    } else {
+      setPhase("watching", "Waiting for new events");
+      setProgress(0, 0);
+    }
   } catch (e) {
     // Unwrap undici's "fetch failed" wrapper so the dashboard shows
     // the actual cause (ECONNREFUSED, ENOTFOUND, certificate error,

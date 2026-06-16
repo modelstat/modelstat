@@ -103,6 +103,9 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
   batchesUploaded: number;
   eventsUploaded: number;
   segmentsUploaded: number;
+  /** True when the per-cycle file cap was hit and older files still remain —
+   * the caller should re-scan promptly to drain the rest (newest-first). */
+  morePending: boolean;
 }> {
   const deviceId = state.deviceId;
   if (!deviceId) throw new Error("agent not enrolled — run `register` first");
@@ -175,6 +178,30 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
   } catch (e) {
     console.warn("codex scan skipped:", (e as Error).message);
   }
+
+  // Recent-first: newest transcripts upload first, so a session you JUST
+  // finished shows up within seconds instead of waiting behind a backlog of
+  // old ones (readdir order is arbitrary). Stats run in parallel — cheap.
+  const ordered = (
+    await Promise.all(
+      jobs.map(async (j) => ({
+        job: j,
+        mtimeMs: (await stat(j.path).catch(() => null))?.mtimeMs ?? 0,
+      })),
+    )
+  )
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .map((x) => x.job);
+
+  // Cold-start / big-backfill bound: process at most this many CHANGED files
+  // per scan cycle. A fresh device with thousands of old transcripts used to
+  // load the whole backlog, OOM, and die BEFORE the first upload ever landed —
+  // and cursors only advance on a CONFIRMED upload, so it crash-looped with
+  // zero progress. Capping + recent-first means the newest session lands fast,
+  // memory stays near the model's resident footprint, and the rest drains over
+  // quick follow-up cycles (see `morePending`).
+  const MAX_FILES_PER_SCAN = 12;
+  let morePending = false;
 
   let filesScanned = 0;
   let filesUnchanged = 0;
@@ -322,9 +349,9 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
     }
   };
 
-  for (let i = 0; i < jobs.length; i++) {
-    const job = jobs[i]!;
-    cb.onFile?.(job.path, i, jobs.length);
+  for (let i = 0; i < ordered.length; i++) {
+    const job = ordered[i]!;
+    cb.onFile?.(job.path, i, ordered.length);
     const cur = state.getCursor(job.path);
     const cs = await quickChecksum(job.path).catch(() => null);
     if (cs && cur && cur.size === cs.size && cur.tailHash === cs.tailHash) {
@@ -358,8 +385,22 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
     } catch (e) {
       console.warn(`  ! parse failed for ${job.path}:`, (e as Error).message);
     }
+    // Stop after the cap so memory + time per cycle stay bounded. The trailing
+    // flush below uploads what's buffered (advancing those files' cursors), and
+    // `morePending` tells the daemon to re-scan the next newest batch.
+    if (filesScanned >= MAX_FILES_PER_SCAN) {
+      morePending = true;
+      break;
+    }
   }
   await flushBatch();
 
-  return { filesScanned, filesUnchanged, batchesUploaded, eventsUploaded, segmentsUploaded };
+  return {
+    filesScanned,
+    filesUnchanged,
+    batchesUploaded,
+    eventsUploaded,
+    segmentsUploaded,
+    morePending,
+  };
 }
