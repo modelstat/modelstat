@@ -243,18 +243,17 @@ function locateTrayExecutable(): string | null {
 function writePlist(cliPath: string): string {
   const p = plistPath();
   mkdirSync(dirname(p), { recursive: true });
-  // Prefer the menu-bar tray bundle when present — the user has asked
-  // for a visible indicator since the beginning of the project. The
-  // tray executable manages its own `modelstat start` subprocess so we
-  // still only have one managed process from launchd's point of view.
-  const tray = locateTrayExecutable();
-  const programArgs = tray
-    ? `    <string>${tray}</string>`
-    : [
-        `    <string>${nodeBinary()}</string>`,
-        `    <string>${cliPath}</string>`,
-        `    <string>start</string>`,
-      ].join("\n");
+  // Run the daemon directly, NOT the menu-bar tray: the tray GUI app exits
+  // 78 (EX_CONFIG) under launchd — AppKit can't come up in that context —
+  // before it ever spawns `modelstat start`, which left the device
+  // permanently disconnected. The daemon needs no GUI and self-heals via
+  // RunAtLoad + KeepAlive. The tray bundle is still staged (installTrayApp)
+  // for anyone who wants to launch it by hand.
+  const programArgs = [
+    `    <string>${nodeBinary()}</string>`,
+    `    <string>${cliPath}</string>`,
+    `    <string>start</string>`,
+  ].join("\n");
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -275,8 +274,7 @@ ${programArgs}
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     <!-- Heap headroom for the startup scan of a large transcript backlog.
          Node's default old-space ceiling (~4 GB) OOM-crashed the daemon on
-         big histories; raise it well below typical RAM. Inherited by the
-         tray-spawned 'modelstat start' child too (NODE_OPTIONS propagates). -->
+         big histories; raise it well below typical RAM. -->
     <key>NODE_OPTIONS</key><string>--max-old-space-size=8192</string>
   </dict>
   <key>WorkingDirectory</key><string>${home()}</string>
