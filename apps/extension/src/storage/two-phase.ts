@@ -21,6 +21,7 @@
 
 import type { Agent } from "@modelstat/core/enums";
 import {
+  EAGER_FINALISE_QUIET_MS,
   MESSAGE_FINALISE_DOM_QUIET_MS,
   MESSAGE_FINALISE_WINDOW_MS,
 } from "@/common/config.js";
@@ -147,8 +148,15 @@ export async function ingestScalar(scalar: NetworkScalar): Promise<void> {
 }
 
 /** Called by a periodic SW alarm — checks every pending row, finalises
- * those ready. */
-export async function sweepFinalise(ctx: CommitterCtx): Promise<number> {
+ * those ready. `eager` (first-impression fast path only) finalises a
+ * stream-ended message as soon as it has briefly settled, without waiting on
+ * the DOM-quiet anchor (which network-only captures never set) or the 30s
+ * window — so the very first session ships in seconds. Steady-state sweeps
+ * pass no opts and behave exactly as before. */
+export async function sweepFinalise(
+  ctx: CommitterCtx,
+  opts?: { eager?: boolean },
+): Promise<number> {
   const now = Date.now();
   const ready: PendingMessage[] = [];
   await db()
@@ -158,7 +166,11 @@ export async function sweepFinalise(ctx: CommitterCtx): Promise<number> {
       const ageMs = now - row.firstSeenAt;
       const quietMs = row.domStableSince ? now - row.domStableSince : 0;
       const windowElapsed = ageMs >= MESSAGE_FINALISE_WINDOW_MS;
-      const streamAndQuiet = row.streamEnded && quietMs >= MESSAGE_FINALISE_DOM_QUIET_MS;
+      const streamAndQuiet =
+        row.streamEnded &&
+        (opts?.eager
+          ? now - row.lastUpdatedAt >= EAGER_FINALISE_QUIET_MS
+          : quietMs >= MESSAGE_FINALISE_DOM_QUIET_MS);
       if (windowElapsed || streamAndQuiet) ready.push(row);
     });
   for (const row of ready) {

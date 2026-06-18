@@ -49,6 +49,7 @@ import {
   markStreamEnded,
 } from "@/storage/two-phase.js";
 import { resolveTokenizerName } from "@/offscreen/tokenizers/index.js";
+import { FIRST_IMPRESSION_QUIET_MS } from "@/common/config.js";
 
 const log = createLogger("sw");
 
@@ -170,6 +171,36 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+// ── First-impression fast path ───────────────────────────────────────────
+// Until this device's first successful ship, collapse the finalise→flush wait
+// so the very first session reaches the dashboard in seconds. Driven from the
+// live service worker and debounced per capture; the periodic finalise/flush
+// alarms remain the guaranteed fallback. Once warmed up it is a no-op, so
+// steady-state capture is completely untouched.
+let firstImpressionTimer: ReturnType<typeof setTimeout> | null = null;
+let firstImpressionDone = false;
+
+async function kickFirstImpression(host: string): Promise<void> {
+  if (firstImpressionDone) return;
+  if (await getSetting<boolean>("firstShipDone", false)) {
+    firstImpressionDone = true;
+    return;
+  }
+  if (firstImpressionTimer) clearTimeout(firstImpressionTimer);
+  firstImpressionTimer = setTimeout(() => {
+    firstImpressionTimer = null;
+    (async () => {
+      if (await getSetting<boolean>("firstShipDone", false)) {
+        firstImpressionDone = true;
+        return;
+      }
+      const ctx = await buildCommitterCtx(host);
+      if (ctx) await sweepFinalise(ctx, { eager: true });
+      await flushQueue({ eager: true });
+    })().catch((e) => log.warn("first-impression kick failed", e));
+  }, FIRST_IMPRESSION_QUIET_MS);
+}
+
 chrome.runtime.onMessage.addListener((msg: RuntimeMsg, sender, sendResponse) => {
   if (msg.kind === "network-frame") {
     bump("frames");
@@ -226,6 +257,7 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMsg, sender, sendResponse) => 
           await markStreamEnded(p.host, p.messageId);
         }
       }
+      void kickFirstImpression(ctx.host);
     })().catch((e) => log.warn("frame handler", e));
     return;
   }
@@ -253,6 +285,7 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMsg, sender, sendResponse) => 
           observedAt: payload.observedAt,
         });
       }
+      void kickFirstImpression(payload.host);
     })().catch((e) => log.warn("dom-event", e));
     return;
   }

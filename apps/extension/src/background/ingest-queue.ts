@@ -19,7 +19,7 @@ import {
   ulid,
 } from "@/common/config.js";
 import { createLogger } from "@/common/logger.js";
-import { db, getSetting, type StoredEvent } from "@/storage/db.js";
+import { db, getSetting, setSetting, type StoredEvent } from "@/storage/db.js";
 import { getBearerToken, getDeviceId } from "./auth.js";
 import { bump } from "./counters.js";
 import { buildSegments } from "./pipeline.js";
@@ -61,9 +61,17 @@ function rawEventFromStored(typed: StoredEvent): RawEvent {
   };
 }
 
-export async function flushQueue(): Promise<{ sent: number; remaining: number }> {
+export async function flushQueue(opts?: {
+  eager?: boolean;
+}): Promise<{ sent: number; remaining: number }> {
   const syncEnabled = await getSetting<boolean>("syncEnabled", true);
   if (!syncEnabled) return { sent: 0, remaining: 0 };
+
+  // First-impression fast path: until this device has shipped once, an eager
+  // flush ignores the session debounce so the very first session reaches the
+  // dashboard immediately. After that flip, every flush batches normally.
+  const warmedUp = await getSetting<boolean>("firstShipDone", false);
+  const eager = !!opts?.eager && !warmedUp;
 
   const deviceId = await getDeviceId();
   const token = await getBearerToken();
@@ -98,7 +106,7 @@ export async function flushQueue(): Promise<{ sent: number; remaining: number }>
   // descending so most-recent conversations ship first (the user's
   // current focus appears in the dashboard immediately; idle ones
   // drain after).
-  const cutoff = Date.now() - SESSION_DEBOUNCE_MS;
+  const cutoff = eager ? Date.now() : Date.now() - SESSION_DEBOUNCE_MS;
   const ready = Array.from(groups.values())
     .filter((g) => g.lastTs <= cutoff)
     .sort((a, b) => b.lastTs - a.lastTs);
@@ -174,6 +182,9 @@ export async function flushQueue(): Promise<{ sent: number; remaining: number }>
   for (const r of rows) {
     if (r.id !== undefined) await db().events.update(r.id, { synced: 1 });
   }
+  // The device's first data has landed server-side — leave the first-impression
+  // fast path for good; every later session uses the efficient batched cadence.
+  if (!warmedUp) await setSetting("firstShipDone", true);
   bump("ingested", rows.length);
   const remaining = await db()
     .events.where("synced")

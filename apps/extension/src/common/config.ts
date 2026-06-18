@@ -35,6 +35,12 @@ export const MESSAGE_FINALISE_WINDOW_MS = 30_000; // two-phase commit window
 export const MESSAGE_FINALISE_DOM_QUIET_MS = 2_000; // stream-end + DOM stable
 export const SSE_FLUSH_INTERVAL_MS = 50;
 
+// First-impression fast path. Until a device's first successful ship, the very
+// first session bypasses the normal finalise/flush cadence so data reaches the
+// dashboard in seconds instead of tens of seconds. Steady state is untouched.
+export const EAGER_FINALISE_QUIET_MS = 1_500; // finalise a stream-ended msg this soon after its last update
+export const FIRST_IMPRESSION_QUIET_MS = 2_000; // debounce before the eager finalise+flush kick
+
 export const AGENT_VERSION = `modelstat-extension@${chrome.runtime.getManifest().version}`;
 
 // Bridge between MAIN and ISOLATED content script worlds. Random per
