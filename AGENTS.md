@@ -7,10 +7,9 @@ when you change how something here works, update this file in the same PR.
 
 The modelstat **companion** — everything that runs on a user's machine and
 feeds the server: the Node CLI/agent (`packages/*`, published to npm +
-Homebrew), the Chrome extension (`apps/extension`), and the macOS tray app
-(`apps/tray-mac`). The server (ingest/pipeline/dashboard, modelstat.ai)
-is a separate private service (closed-source) and is out of scope for
-this repo.
+Homebrew) and the macOS tray app (`apps/tray-mac`). The server
+(ingest/pipeline/dashboard, modelstat.ai) is a separate private service
+(closed-source) and is out of scope for this repo.
 
 ## Build & test
 

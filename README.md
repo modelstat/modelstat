@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://modelstat.ai"><img src="apps/extension/public/logo.svg" alt="modelstat" height="40" /></a>
+  <a href="https://modelstat.ai"><img src="assets/logo.svg" alt="modelstat" height="40" /></a>
 </p>
 
 <h1 align="center">modelstat — companion source</h1>
@@ -20,7 +20,6 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/modelstat"><img src="https://img.shields.io/npm/v/modelstat?label=modelstat" alt="npm modelstat" /></a>
   <a href="https://www.npmjs.com/package/@modelstat/mcp"><img src="https://img.shields.io/npm/v/@modelstat/mcp?label=%40modelstat%2Fmcp" alt="npm @modelstat/mcp" /></a>
-  <a href="https://chromewebstore.google.com/search/modelstat"><img src="https://img.shields.io/badge/Chrome-extension-4285F4?logo=googlechrome&logoColor=white" alt="Chrome extension" /></a>
   <img src="https://img.shields.io/badge/privacy-prompts_stay_on_device-000000" alt="Privacy: prompts stay on device" />
 </p>
 
@@ -32,7 +31,6 @@ This is the **public source** for everything that runs on your machine:
 
 - **[`modelstat`](apps/agent-dev/)** — the Node daemon that watches Claude Code / Codex / Cursor / Aider / Cline / Continue / Windsurf / Zed / Copilot log files, prices them, redacts client-side, and uploads metadata.
 - **[`@modelstat/mcp`](packages/mcp/)** — a Model Context Protocol server so Claude Desktop / Claude Code / Cursor / Cline / Continue / Zed can answer "how much did we spend on X?" in chat.
-- **[Chrome extension](apps/extension/)** — captures Claude.ai / ChatGPT / Gemini / Grok usage via configurable, signed adapters.
 - **[macOS menu-bar tray](apps/tray-mac/)** — native Swift status-bar app.
 - **[`@modelstat/agent-sdk`](packages/agent-sdk/)** — client-side redaction + compaction primitives. The boundary between your machine and our server.
 
@@ -60,8 +58,6 @@ npx modelstat@latest stats                 # live device summary
 npx modelstat@latest remove                # stop and uninstall the background service
 ```
 
-Chrome extension: search "modelstat" in the [Chrome Web Store](https://chromewebstore.google.com/search/modelstat).
-
 ---
 
 ## Building from source (the trust path)
@@ -85,10 +81,6 @@ node apps/agent-dev/dist/cli.mjs
 # MCP server
 pnpm --filter @modelstat/mcp build
 node packages/mcp/dist/index.mjs
-
-# Chrome extension (unpacked .zip in apps/extension/dist/)
-pnpm extension:build
-pnpm extension:zip
 
 # macOS menu-bar tray (Swift)
 pnpm tray-mac:build
@@ -114,16 +106,16 @@ pnpm tray-mac:build
 
 ---
 
-## Integrations (14 supported tools)
+## Integrations (10 supported tools)
 
-| Command-line + agent tools | Editor / IDE | Web chat (via extension) |
-|---|---|---|
-| [Claude Code](https://modelstat.ai/integrations/claude-code) | [Windsurf](https://modelstat.ai/integrations/windsurf) | [ChatGPT](https://modelstat.ai/integrations/chatgpt) |
-| [Cursor](https://modelstat.ai/integrations/cursor) | [Zed AI](https://modelstat.ai/integrations/zed) | [Claude.ai](https://modelstat.ai/integrations/claude-web) |
-| [Codex (OpenAI CLI)](https://modelstat.ai/integrations/codex) | [GitHub Copilot](https://modelstat.ai/integrations/copilot) | [Gemini](https://modelstat.ai/integrations/gemini) |
-| [Cline](https://modelstat.ai/integrations/cline) | [Claude Desktop](https://modelstat.ai/integrations/claude-desktop) | [Grok](https://modelstat.ai/integrations/grok) |
-| [Continue](https://modelstat.ai/integrations/continue) | | |
-| [Aider](https://modelstat.ai/integrations/aider) | | |
+| Command-line + agent tools | Editor / IDE |
+|---|---|
+| [Claude Code](https://modelstat.ai/integrations/claude-code) | [Windsurf](https://modelstat.ai/integrations/windsurf) |
+| [Cursor](https://modelstat.ai/integrations/cursor) | [Zed AI](https://modelstat.ai/integrations/zed) |
+| [Codex (OpenAI CLI)](https://modelstat.ai/integrations/codex) | [GitHub Copilot](https://modelstat.ai/integrations/copilot) |
+| [Cline](https://modelstat.ai/integrations/cline) | [Claude Desktop](https://modelstat.ai/integrations/claude-desktop) |
+| [Continue](https://modelstat.ai/integrations/continue) | |
+| [Aider](https://modelstat.ai/integrations/aider) | |
 
 Full index: **[modelstat.ai/integrations](https://modelstat.ai/integrations)**
 
@@ -199,8 +191,6 @@ The wire-format types live in **[`packages/core/src/schemas.ts`](packages/core/s
 | **Your raw prompts** | The parsers never copy prompt text into the wire-format objects. The only text fields that can ship are `content_excerpt` (capped at 320 chars, pre-redacted) and `abstract` (capped at 240 chars, generated **after** redaction by an LLM running on your machine). Both are bounded by Zod max-length constraints in [`packages/core/src/schemas.ts`](packages/core/src/schemas.ts). |
 | **Your code** | Same path — code fragments that appear in tool inputs/outputs go through the same redaction layer (which catches API keys, paths, secrets) and are size-capped. The `paranoid` policy ([line 176-179 of `agent-sdk/src/redact.ts`](packages/agent-sdk/src/redact.ts)) drops every `stdout`/`stderr`/`tool_output`/`raw_text` blob entirely before upload. |
 | **API keys, tokens, passwords** | Stripped pre-upload by ~15 explicit regex patterns ([`packages/agent-sdk/src/redact.ts` lines 48-71](packages/agent-sdk/src/redact.ts)) plus a Shannon-entropy catcher for unknown high-entropy strings ([`packages/core/src/redact.ts` lines 41-82](packages/core/src/redact.ts)). |
-| **Browser prompts in web chat** | The extension adapters declare which DOM/network paths to extract, in pure-data JSON configs ([sample: `apps/extension/adapters/claude_web.json`](apps/extension/adapters/claude_web.json)). Adapters can ONLY extract paths listed in [`packages/adapters-protocol/src/schema.ts`](packages/adapters-protocol/src/schema.ts) — there is no general-purpose page reader. |
-| **Anything from an unsigned adapter** | Adapter configs are Ed25519-signed; the extension refuses to load any config that doesn't verify against the hardcoded public key at [`apps/extension/public/pubkey.ed25519`](apps/extension/public/pubkey.ed25519). Verification code: [`apps/extension/src/interpreter/signature.ts`](apps/extension/src/interpreter/signature.ts). |
 
 ### Defence-in-depth layers
 
@@ -248,12 +238,10 @@ Security disclosures: please read [SECURITY.md](SECURITY.md) and email `security
 modelstat/
 ├── apps/
 │   ├── agent-dev/          Node companion CLI (modelstat)
-│   ├── extension/          Chrome extension (web-chat capture)
 │   └── tray-mac/           macOS menu-bar app (Swift)
 ├── packages/
-│   ├── adapters-protocol/  Extension adapter schema (Zod)
 │   ├── agent-sdk/          Redact + compact primitives (@modelstat/agent-sdk)
-│   ├── companion-core/     Shared pipeline / queue / HTTP for agent + extension
+│   ├── companion-core/     Shared pipeline / queue / HTTP for the agent
 │   ├── core/               Shared enums + Zod schemas (wire format lives here)
 │   ├── mcp/                Model Context Protocol server (@modelstat/mcp)
 │   ├── parsers/            Per-tool log parsers (Claude Code / Codex / Cursor / ...)
@@ -267,13 +255,11 @@ modelstat/
 
 **Node CLI** — TypeScript, `chokidar` for file watching, `undici` HTTP, `conf` for state, `sql.js` for Cursor's SQLite, [ulid](https://github.com/ulid/javascript) + UUIDv7 for IDs.
 
-**Chrome extension** — Manifest V3, Vite + React 19 + TailwindCSS 4, Ed25519-signed adapter configs.
-
 **MCP server** — `@modelcontextprotocol/sdk` over stdio.
 
 **macOS tray** — Swift 5.9 + SwiftUI + `LaunchAgent`.
 
-**On-device LLMs** — quantised summariser + cognition pass run via a bundled `node-llama-cpp` on the Node side, and WebLLM (or Chrome's built-in Prompt API) in the browser extension. Privacy-filter NER runs via `@huggingface/transformers` (WebGPU/WASM in the browser, CPU/ONNX in Node). All models stay on your machine; nothing is shipped to a remote inference provider from the companion.
+**On-device LLMs** — quantised summariser + cognition pass run via a bundled `node-llama-cpp`. Privacy-filter NER runs via `@huggingface/transformers` (CPU/ONNX in Node). All models stay on your machine; nothing is shipped to a remote inference provider from the companion.
 
 ---
 
@@ -285,7 +271,6 @@ The short version:
 
 - **Bug reports**: [GitHub Issues](https://github.com/modelstat/modelstat/issues) — or email `hello@modelstat.ai` if it's security-sensitive.
 - **New tool integration** (e.g. a new AI coding tool): open an issue first to discuss the parser shape. Parser additions go in [`packages/parsers/src/`](packages/parsers/src/).
-- **New web-chat adapter** (e.g. a new chatbot site): add a signed config in [`apps/extension/src/adapters/`](apps/extension/src/adapters/) and open an issue for us to sign + publish it.
 - **Security disclosures**: please read [SECURITY.md](SECURITY.md) first.
 
 ---

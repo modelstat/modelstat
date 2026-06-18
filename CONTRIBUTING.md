@@ -1,8 +1,8 @@
 # Contributing to modelstat
 
 Thanks for taking the time. This is the companion-code repo — the Node
-agent, Chrome extension, macOS tray, MCP server, and their shared
-packages. The hosted service isn't in scope here.
+agent, macOS tray, MCP server, and their shared packages. The hosted
+service isn't in scope here.
 
 ## Before you start
 
@@ -34,7 +34,6 @@ Per-component:
 ```bash
 pnpm --filter @modelstat/agent build           # Node daemon
 pnpm --filter @modelstat/mcp build             # MCP server
-pnpm --filter @modelstat/extension build       # Chrome extension
 pnpm tray-mac:build                            # macOS tray
 ```
 
@@ -68,25 +67,7 @@ Workflow:
 4. Add the tool slug to the enum in `packages/core/src/enums.ts`.
 5. Open a PR with a 30-line sample of the tool's raw log format.
 
-### 2. New web-chat adapters
-
-Web chatbots (ChatGPT, Claude.ai, Gemini, Grok) don't have local
-logs — the extension captures metadata via a signed adapter config.
-Adding a new chat surface means:
-
-1. Open an issue with the site and what data can be observed via DOM
-   / fetch interception (tokens, model name, conversation ID — **not
-   prompt text**).
-2. Write the adapter config in [`apps/extension/src/adapters/`](apps/extension/src/adapters/)
-   using the `adapters-protocol` schema (extractor kinds:
-   `url.regexGroup`, `dom.selector.text`, `network.responseJsonPath`).
-3. Open a PR. We'll review, sign the config with our Ed25519 key,
-   and publish it via the extension manifest endpoint.
-
-The extension NEVER evaluates arbitrary code. Adapters are pure
-declarative extractors — this is by design.
-
-### 3. Redaction patterns
+### 2. Redaction patterns
 
 Missing a secret shape the `strict-pii-v2` policy should catch?
 
@@ -98,14 +79,14 @@ replacement label. Include an adversarial test in the PR
 description (we don't have a formal test runner yet; we're
 adding Vitest).
 
-### 4. Docs + README polish
+### 3. Docs + README polish
 
 PRs that improve the quickstart, fix typos, or add screenshots to
 the README are gratefully accepted. The README is both a human
 document and an AI-crawled document (ChatGPT / Claude / Perplexity
 cite it) — clarity helps both audiences.
 
-### 5. Bug fixes + refactors
+### 4. Bug fixes + refactors
 
 Please open an issue first for anything that changes behavior
 beyond a localized fix. Refactor-for-the-sake-of-refactor PRs will

@@ -27,7 +27,6 @@ within **30 days** for high-severity issues. Critical vulnerabilities
 - `@modelstat/agent` (npm)
 - `@modelstat/agent-sdk` (npm)
 - `@modelstat/mcp` (npm)
-- The modelstat Chrome extension
 - The `modelstat-tray` macOS app
 - `install.modelstat.ai` shell installer
 - The Homebrew formula at `modelstat/homebrew-tap`
@@ -42,10 +41,6 @@ with a `[service]` tag so they're routed correctly.
   etc.) that the parsers ingest.
 - Any path by which prompts, file contents, or credentials leak past
   the client-side redactor (`packages/agent-sdk/`) into an upload.
-- Any path by which the extension reads data from domains it isn't
-  adapter-configured for.
-- Forged or bypassed adapter-config signatures
-  (`packages/adapters-protocol/`).
 - Privilege escalation or persistence abuse in the macOS tray launch
   agent.
 - Supply-chain risks in the npm-published artifacts — build-time
@@ -74,9 +69,6 @@ reference letters.
 - The release workflow (`.github/workflows/release.yml`) publishes
   npm packages with provenance statements — see
   `@modelstat/agent`'s npm page for verification.
-- Chrome extension adapter configs are signed with an Ed25519 key held
-  by modelstat. The public key ships with the extension; a compromised
-  CDN cannot inject a new adapter.
 
 ## Canonical contact
 
