@@ -13,6 +13,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -470,6 +471,14 @@ export function installTrayApp(sourceAppPath: string): { installedAt: string } |
   if (r.status !== 0) {
     throw new Error(`cp ModelstatTray.app failed: ${r.stderr?.trim() || `exit ${r.status}`}`);
   }
+  // Guarantee the inner binary is executable. `pnpm pack` normalises file
+  // modes in the published tarball and only keeps the exec bit on declared
+  // `bin` entries, so the prebuilt vendor/ModelstatTray.app binary ships as
+  // -rw-r--r-- — and `cp -R` faithfully copies that. launchd then fails to
+  // exec it and quits with EX_CONFIG (78). chmod here makes the install
+  // correct regardless of which path produced the bundle (prebuilt tarball
+  // or on-device `build-app.sh`, which already chmod +x's its output).
+  chmodSync(join(dest, "Contents", "MacOS", "modelstat-tray"), 0o755);
   return { installedAt: dest };
 }
 
