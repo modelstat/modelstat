@@ -12,6 +12,7 @@ export { FileQueueStore, FileQueueStore as SqliteQueueStore } from "./file-queue
 export {
   DEFAULT_LLAMA_MODEL_URL,
   defaultLlamaConfig,
+  disposeLlama,
   ensureLlamaModel,
   type LlamaConfig,
   llamaCognize,

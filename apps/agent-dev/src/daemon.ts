@@ -529,6 +529,16 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
     setPhase("offline", "Shutting down");
     await sendHeartbeat();
     await watcher.close();
+    // Free the bundled summariser before exit so llama.cpp's Metal device
+    // doesn't hit a teardown GGML_ASSERT during static destruction (which
+    // turned every launchd stop/restart into a "failed" exit). No-op when
+    // the summariser was never loaded.
+    try {
+      const { disposeLlama } = await import("@modelstat/companion-core/node");
+      await disposeLlama();
+    } catch {
+      /* best-effort — exit cleanly regardless */
+    }
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

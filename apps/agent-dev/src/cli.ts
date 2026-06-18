@@ -616,6 +616,14 @@ async function cmdScan(): Promise<void> {
   console.log(
     `Done: ${r.filesScanned} files scanned, ${r.filesUnchanged} unchanged, ${r.batchesUploaded} batches, ${r.segmentsUploaded} segments, ${r.eventsUploaded} events uploaded`,
   );
+  // One-shot scan loaded the bundled summariser; dispose it so the process
+  // exits cleanly (avoids llama.cpp's Metal teardown GGML_ASSERT on macOS).
+  try {
+    const { disposeLlama } = await import("@modelstat/companion-core/node");
+    await disposeLlama();
+  } catch {
+    /* best-effort */
+  }
 }
 
 /**

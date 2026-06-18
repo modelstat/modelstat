@@ -171,6 +171,39 @@ type Loaded = {
 let loaded: Loaded | null = null;
 let loadPromise: Promise<Loaded> | null = null;
 let inflight: Promise<unknown> = Promise.resolve();
+// The underlying node-llama-cpp instance, kept so we can dispose it (and
+// every model/context spun off it) before the process exits — see
+// disposeLlama() for why that matters on macOS/Metal.
+let llamaInstance: { dispose: () => Promise<void> } | null = null;
+
+/**
+ * Tear the bundled summariser down cleanly before the process exits.
+ *
+ * node-llama-cpp's llama.cpp Metal backend aborts with
+ * `GGML_ASSERT([rsets->data count] == 0)` when its device is freed by C++
+ * static destructors at `exit()` while contexts are still alive (macOS).
+ * The agent hit this on every launchd stop/restart: the daemon's `exit(0)`
+ * crashed instead of exiting clean, so launchd saw a failed exit. Disposing
+ * the Llama instance here frees its contexts + model + device in order, so
+ * the static-destructor path has nothing left to free.
+ *
+ * No-op when the bundled summariser was never loaded (e.g. the Ollama
+ * path, or a process that never summarised), so it is always safe to call
+ * from a shutdown handler / before a one-shot command returns.
+ */
+export async function disposeLlama(): Promise<void> {
+  const inst = llamaInstance;
+  llamaInstance = null;
+  loaded = null;
+  loadPromise = null;
+  if (!inst) return;
+  try {
+    await inst.dispose();
+  } catch {
+    // Best-effort: if dispose itself throws we still want a clean process
+    // exit; the OS reclaims the resources regardless.
+  }
+}
 
 /**
  * Download the summariser GGUF to disk if it isn't already there.
@@ -286,7 +319,11 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
           getSequence: () => unknown;
         }>;
       }>;
+      dispose: () => Promise<void>;
     };
+    // Hold the instance so disposeLlama() can free it before the process
+    // exits (clean Metal teardown).
+    llamaInstance = llama;
     const model = await llama.loadModel({ modelPath });
     // Two contexts off the same model — one per chat session. The
     // cognition context can be smaller since its prompt + answer are
