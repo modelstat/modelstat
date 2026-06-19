@@ -162,6 +162,16 @@ export const state = {
   setApiUrl(v: string): void {
     store.set("apiUrl", v);
   },
+  /** True when `apiUrl` resolves to the baked-in production default with no
+   * explicit override (no `AGENT_API_URL`, no operator-set stored URL). Used
+   * to refuse silent prod self-register from CI/non-interactive environments
+   * so ephemeral runners don't pile up unclaimed device rows. */
+  get isProdDefaultApi(): boolean {
+    if (process.env.AGENT_API_URL) return false;
+    const stored = store.get("apiUrl");
+    if (stored && stored !== LEGACY_LOCALHOST_API) return false;
+    return true;
+  },
 
   // ── Identity: backed by ~/.modelstat/identity.json ─────────────
 

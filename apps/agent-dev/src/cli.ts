@@ -109,6 +109,17 @@ function intendedDeviceUuid(): string {
   return deviceUuidFromMachineKey(key);
 }
 
+/** No human at the keyboard: a CI runner, or stdin isn't a TTY. */
+function isNonInteractive(): boolean {
+  return Boolean(process.env.CI) || process.stdin.isTTY !== true;
+}
+
+/** Explicit "yes, really register against prod headlessly" opt-in. */
+function prodRegisterOptIn(): boolean {
+  const v = process.env.MODELSTAT_ALLOW_PROD_REGISTER?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
 /**
  * Self-register: generate a UUIDv7 client-side, POST it to the server, and
  * cache the returned device_secret + claim_code in the local state file.
@@ -130,6 +141,25 @@ async function cmdSelfRegister(): Promise<void> {
   //      existing row instead of creating a duplicate device.
   const deviceUuid = state.deviceUuid ?? intendedDeviceUuid();
   const derived = !state.deviceUuid;
+
+  // Guard: never silently create a NEW device on PRODUCTION from a
+  // non-interactive / CI environment. Ephemeral CI + cloud sandbox runners
+  // were self-registering against prod and piling up unclaimed device rows
+  // (and pinging ops Slack). This only blocks a *fresh* enrollment with the
+  // unoverridden prod default — an already-enrolled device re-registering
+  // (a claimed user's installed service) is never touched, and interactive
+  // `npx modelstat@latest` onboarding is unaffected.
+  if (derived && state.isProdDefaultApi && isNonInteractive() && !prodRegisterOptIn()) {
+    process.stderr.write(
+      "modelstat: refusing to self-register a new device against production from a\n" +
+        "non-interactive/CI environment (no claim is possible here anyway). Either:\n" +
+        "  • point at your own backend:  AGENT_API_URL=https://your-host   (CI/e2e)\n" +
+        "  • explicitly opt in:          MODELSTAT_ALLOW_PROD_REGISTER=1\n" +
+        "  • or run it interactively:    npx modelstat@latest\n",
+    );
+    process.exit(2);
+  }
+
   const mid = machineKey();
 
   const fingerprint: Record<string, string | number | boolean> = {
