@@ -1,0 +1,147 @@
+name: release-sdks
+
+# Auto-publish the standalone SDKs in sdks/{rust,node,python} on push to main,
+# via OIDC Trusted Publishing — NO long-lived tokens (the same model release.yml
+# uses for npm). Each job publishes ONLY when the manifest's version isn't
+# already on its registry, so a push that didn't bump the version is a no-op
+# (idempotent; re-runs are safe). To cut a release: bump the version in the
+# manifest and merge.
+#
+# Kept SEPARATE from release.yml (the daemon / pnpm-workspace npm pipeline) on
+# purpose: these SDKs are standalone (outside the workspace), so isolating them
+# means an SDK release can't break daemon releases and vice-versa.
+#
+# ── ONE-TIME registry setup (per package, on the registry websites — only an
+#    owner can do this; until it's done, the matching job's publish step 4xxs):
+#    • crates.io — crate `modelstat` → Settings → Trusted Publishing → add repo
+#      `modelstat/modelstat`, workflow `release-sdks.yml`. The crate already
+#      exists (0.0.2), so there's no bootstrap; the first run ships 0.0.3.
+#    • PyPI      — Account → Publishing → add a PENDING publisher for project
+#      `modelstat-sdk`: repo `modelstat/modelstat`, workflow `release-sdks.yml`,
+#      environment left BLANK. "Pending" lets the very first run CREATE the
+#      project, so no bootstrap upload is needed.
+#    • npm       — `@modelstat/sdk` is brand-new, so (exactly like
+#      `@modelstat/daemon-sdk`) it needs ONE bootstrap `npm publish` OR org-level
+#      Trusted Publishing, plus a Trusted Publisher on npmjs.com (Package →
+#      Settings). Until then the node job fails on first publish — that's the cue
+#      to bootstrap.
+#
+# After the registry setup, run this once via "Run workflow" (workflow_dispatch)
+# to ship the current versions; thereafter every `sdks/**` change auto-publishes.
+
+on:
+  push:
+    branches: [main]
+    # NB: the workflow file itself is intentionally NOT in this list, so merging
+    # a change to the workflow can't trigger a publish before registries are set
+    # up — only real SDK source changes do.
+    paths:
+      - "sdks/rust/**"
+      - "sdks/node/**"
+      - "sdks/python/**"
+  workflow_dispatch: {}
+
+concurrency:
+  group: release-sdks
+  cancel-in-progress: false
+
+jobs:
+  # ── Rust → crates.io ────────────────────────────────────────────────────────
+  rust:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC → crates.io Trusted Publishing
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Decide whether to publish
+        id: decide
+        working-directory: sdks/rust
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: modelstat-release-ci (github.com/modelstat/modelstat)' \
+            "https://crates.io/api/v1/crates/modelstat/$VERSION")"
+          if [ "$CODE" = "200" ]; then
+            echo "modelstat $VERSION already on crates.io — skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "modelstat $VERSION is new (HTTP $CODE) — will publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Authenticate to crates.io (OIDC)
+        if: steps.decide.outputs.publish == 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: cargo publish
+        if: steps.decide.outputs.publish == 'true'
+        working-directory: sdks/rust
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish
+
+  # ── Python → PyPI ───────────────────────────────────────────────────────────
+  python:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC → PyPI Trusted Publishing
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Decide whether to publish (build the dist if so)
+        id: decide
+        working-directory: sdks/python
+        run: |
+          VERSION="$(grep -m1 '__version__' src/modelstat/_version.py | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/modelstat-sdk/$VERSION/json")"
+          if [ "$CODE" = "200" ]; then
+            echo "modelstat-sdk $VERSION already on PyPI — skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "modelstat-sdk $VERSION is new (HTTP $CODE) — building + will publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            pipx run build
+          fi
+      - name: Publish to PyPI
+        if: steps.decide.outputs.publish == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist
+
+  # ── TypeScript → npm ─────────────────────────────────────────────────────────
+  node:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC → npm Trusted Publishing
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Ensure a Trusted-Publishing-capable npm (>= 11.5.1)
+        run: npm install -g npm@latest && npm --version
+      - name: Decide whether to publish
+        id: decide
+        working-directory: sdks/node
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "@modelstat/sdk@$VERSION" version >/dev/null 2>&1; then
+            echo "@modelstat/sdk $VERSION already on npm — skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "@modelstat/sdk $VERSION is new — will publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build + publish (OIDC; no NODE_AUTH_TOKEN)
+        if: steps.decide.outputs.publish == 'true'
+        working-directory: sdks/node
+        run: |
+          npm install
+          npm run build
+          npm publish --access public
