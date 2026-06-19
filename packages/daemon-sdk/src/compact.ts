@@ -62,7 +62,7 @@ function looksLikeBase64Blob(s: string): boolean {
 function truncate(s: string, max: number, label: string): { value: string; saved: number; changed: boolean } {
   if (s.length <= max) return { value: s, saved: 0, changed: false };
   const head = s.slice(0, max);
-  const truncated = `${head}\n…[truncated by modelstat-agent: ${label}, ${s.length - max} chars dropped]`;
+  const truncated = `${head}\n…[truncated by modelstat-daemon: ${label}, ${s.length - max} chars dropped]`;
   return { value: truncated, saved: s.length - truncated.length, changed: true };
 }
 

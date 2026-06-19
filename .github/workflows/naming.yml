@@ -1,0 +1,19 @@
+name: naming
+
+# Enforce the daemon/agent/companion naming rule on every push + PR, so the
+# renamed names can't regress. See .github/scripts/check-naming.sh for what's
+# forbidden (retired our-process names) vs kept (the AI-tool "agent").
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash .github/scripts/check-naming.sh

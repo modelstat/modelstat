@@ -3,7 +3,7 @@
  *
  * Use the library form when you have a session payload in memory and
  * want to redact / compact / pipe before uploading; use the bundled
- * `modelstat-agent` CLI for stream-based pipelines on disk.
+ * `modelstat-daemon` CLI for stream-based pipelines on disk.
  *
  *   import { redact, compact, pipe } from "@modelstat/agent";
  *

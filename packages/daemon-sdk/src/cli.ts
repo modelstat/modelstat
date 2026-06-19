@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * modelstat-agent CLI — sanitisation pipelines on the command line.
+ * modelstat-daemon CLI — sanitisation pipelines on the command line.
  *
- *   modelstat-agent redact <file>                 # reads JSON, prints redacted JSON to stdout
- *   modelstat-agent compact <file>                # reads JSON, prints compacted JSON
- *   modelstat-agent pipe <file>                   # redact + compact together
- *   modelstat-agent stats <file>                  # show what would change, don't transform
+ *   modelstat-daemon redact <file>                 # reads JSON, prints redacted JSON to stdout
+ *   modelstat-daemon compact <file>                # reads JSON, prints compacted JSON
+ *   modelstat-daemon pipe <file>                   # redact + compact together
+ *   modelstat-daemon stats <file>                  # show what would change, don't transform
  *
  * Flags:
  *   --policy <name>          one of: none, secrets-only, strict-pii-v2, paranoid
@@ -31,14 +31,14 @@ type Args = {
 };
 
 const HELP = `\
-modelstat-agent — privacy-first session sanitisation
+modelstat-daemon — privacy-first session sanitisation
 
 USAGE
-  modelstat-agent redact   <file>     redact PII + secrets
-  modelstat-agent compact  <file>     truncate large fields, drop blobs
-  modelstat-agent pipe     <file>     redact + compact together
-  modelstat-agent stats    <file>     show what would change without transforming
-  modelstat-agent policies            list available redaction policies
+  modelstat-daemon redact   <file>     redact PII + secrets
+  modelstat-daemon compact  <file>     truncate large fields, drop blobs
+  modelstat-daemon pipe     <file>     redact + compact together
+  modelstat-daemon stats    <file>     show what would change without transforming
+  modelstat-daemon policies            list available redaction policies
 
   Use "-" for <file> to read from stdin.
 
@@ -51,9 +51,9 @@ FLAGS
   --pretty                   pretty-print JSON output
 
 EXAMPLES
-  cat session.json | modelstat-agent pipe - --pretty > clean.json
-  modelstat-agent stats session.json
-  modelstat-agent redact session.json --policy paranoid > redacted.json
+  cat session.json | modelstat-daemon pipe - --pretty > clean.json
+  modelstat-daemon stats session.json
+  modelstat-daemon redact session.json --policy paranoid > redacted.json
 `;
 
 function parseArgs(argv: readonly string[]): Args {
@@ -183,6 +183,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  process.stderr.write(`modelstat-agent: ${(e as Error).message}\n`);
+  process.stderr.write(`modelstat-daemon: ${(e as Error).message}\n`);
   process.exit(1);
 });

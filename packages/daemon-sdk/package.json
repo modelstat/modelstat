@@ -29,7 +29,7 @@
     }
   },
   "bin": {
-    "modelstat-agent": "./dist/cli.mjs"
+    "modelstat-daemon": "./dist/cli.mjs"
   },
   "files": ["dist/**/*", "README.md", "LICENSE"],
   "scripts": {
