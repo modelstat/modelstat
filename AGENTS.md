@@ -11,6 +11,14 @@ Homebrew) and the macOS tray app (`apps/tray-mac`). The server
 (ingest/pipeline/dashboard, modelstat.ai) is a separate private service
 (closed-source) and is out of scope for this repo.
 
+## Naming: daemon, not agent/companion
+
+Our local long-running process is the **daemon** (what `npx modelstat` installs; npm package `modelstat`). Never call it "agent" or "companion".
+
+- **daemon** — our process / CLI / SDK side. (It was historically "companion", and earlier "agent" — both retired.) Use `daemon` for routes (`/v1/daemon/heartbeat`), env (`DAEMON_API_URL`), the launchd label (`ai.modelstat.daemon`), `packages/daemon-core`, the `daemon_version` wire field, etc.
+- **agent** — ONLY the user's AI tool (`claude_code`, `cursor`, `codex_cli`, …). Keep "agent" for: the `AGENTS` enum + the `agent` event field, the `/device/:claim/agent` machine-readable view (it's *for* AI agents/LLMs), the `User-Agent` header, this `AGENTS.md`, and "agentic".
+- **companion** — retired; don't reintroduce.
+
 ## Build & test
 
 ```sh
