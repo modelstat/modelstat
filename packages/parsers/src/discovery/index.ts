@@ -375,6 +375,51 @@ async function probeIdentities(os: "macos" | "linux"): Promise<DetectedIdentity[
     }
   }
 
+  // Claude Code (desktop app + recent CLI) — the OAuth account lives in
+  // ~/.claude.json's `oauthAccount`, not only the "Claude Code-credentials"
+  // keychain item the older CLI used (absent for desktop-app users, the most
+  // common case). Plain file we already read, so no keychain-ACL / launchd
+  // permission issues; dedupeIdentities collapses this with the keychain hit
+  // when both exist (same accountUuid).
+  const claudeConfigs = [`${homedir()}/.claude.json`];
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    claudeConfigs.unshift(`${process.env.CLAUDE_CONFIG_DIR}/.claude.json`);
+  }
+  for (const candidate of claudeConfigs) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const data = await fs.promises.readFile(candidate, "utf8");
+      const obj = JSON.parse(data) as {
+        oauthAccount?: {
+          accountUuid?: string;
+          emailAddress?: string;
+          organizationUuid?: string;
+          organizationName?: string;
+          displayName?: string;
+          billingType?: string;
+        };
+      };
+      const acct = obj.oauthAccount;
+      const stableId = acct?.accountUuid ?? acct?.organizationUuid;
+      if (acct && stableId) {
+        ids.push({
+          provider: "anthropic",
+          provider_account_id: stableId,
+          provider_account_label:
+            acct.emailAddress ?? acct.organizationName ?? acct.displayName ?? "Claude account",
+          account_email: acct.emailAddress ?? null,
+          account_org: acct.organizationName ?? acct.billingType ?? null,
+          display_name: acct.displayName ?? null,
+          owner_scope: "unassigned",
+          detection_source: "claude_json_oauth",
+        });
+        break;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
   // Codex auth.json — JWT id_token contains email + sub + auth_provider
   for (const candidate of [
     `${homedir()}/.codex/auth.json`,
