@@ -28,8 +28,21 @@ export interface ToolActionInput {
   cwd?: string | null;
 }
 
-/** Mirror of the backend's per-command cap. */
-const MAX_COMMAND_REDACTED = 1000;
+/**
+ * Malicious-size guard, mirrored from the backend
+ * (`MAX_TOOL_ACTION_PARAM_SHAPE_CHARS` / `MAX_TOOL_ACTION_COMMAND_CHARS`). The
+ * full value-masked / redacted command rides the wire untouched below this;
+ * over it we clamp (Unicode-scalar safe) rather than drop. Long random blobs
+ * (keys / base64 / hashes) are collapsed by {@link redact}, not by this cap.
+ */
+const MAX_FIELD_CHARS = 16_384;
+
+/** Truncate to at most `max` Unicode code points (matches the backend's
+ * char-boundary clamp; never splits a surrogate pair). */
+function clampChars(s: string, max: number): string {
+  const cps = [...s];
+  return cps.length > max ? cps.slice(0, max).join("") : s;
+}
 
 /**
  * Extract the deterministic structural facts for one tool call. The returned
@@ -47,9 +60,9 @@ export function extractToolAction(call: ToolActionInput): ToolAction {
   if (command != null) {
     const [head = "", ...rest] = command.trim().split(/\s+/);
     executable = basename(head) || null;
-    param_shape = paramShape(rest.join(" ")) || null;
+    param_shape = clampChars(paramShape(rest.join(" ")), MAX_FIELD_CHARS) || null;
     command_redacted =
-      redact(command, call.cwd ?? undefined).text.slice(0, MAX_COMMAND_REDACTED) || null;
+      clampChars(redact(command, call.cwd ?? undefined).text, MAX_FIELD_CHARS) || null;
   }
 
   return {

@@ -190,8 +190,10 @@ export const ToolAction = z
     object: z.string().max(60).nullable().default(null),
     /** Governed safe flags (`destructive`, `remote`, …). (tier 0) */
     qualifiers: z.array(z.string().max(40)).max(8).default([]),
-    /** Value-masked argument skeleton (every value → `§`). (tier 1) */
-    param_shape: z.string().max(200).nullable().default(null),
+    /** Value-masked argument skeleton (every value → `§`). Carried in full up
+     * to a malicious-size guard (mirrors backend `MAX_TOOL_ACTION_PARAM_SHAPE_CHARS`);
+     * the companion clamps rather than truncating semantically. (tier 1) */
+    param_shape: z.string().max(16_384).nullable().default(null),
     /** Relevant non-sensitive keywords (e.g. ["rollout","restart","prod"]),
      * OpenAI-redacted on-device. (tier 0) */
     keywords: z.array(z.string().max(40)).max(12).default([]),
@@ -201,7 +203,7 @@ export const ToolAction = z
     /** The compliance-redacted command text — PII/secrets stripped on-device
      * (SOC2/GDPR), org-internal infra intact; the server derives semantics from
      * it. Un-redacted raw never ships. (tier 0, post-redaction) */
-    command_redacted: z.string().max(1000).nullable().default(null),
+    command_redacted: z.string().max(16_384).nullable().default(null),
     /** Per-script content abstracts for any script/bash FILES the command runs
      * — summarized on-device by the local model, then redacted. Ordered by
      * appearance; `token` is the script's token exactly as it appears in

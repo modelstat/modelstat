@@ -55,9 +55,10 @@ const ABSOLUTE_PATH_MACOS = /\/Users\/[^\s"'`)]+/g;
 const ABSOLUTE_PATH_LINUX = /\/home\/[^\s"'`)]+/g;
 
 /** Entropy-based catcher for generic high-entropy tokens (API keys we don't
- * have explicit patterns for). Flags sequences of ≥32 chars mixing case +
- * digits with Shannon entropy ≥ 3.6 bits/char. Conservative: applies only to
- * unbroken word tokens. */
+ * have explicit patterns for) plus large random blobs — digests / git SHAs /
+ * other hashes and base64 payloads. These carry no analytic value, can leak
+ * secrets, and bloat the wire, so they are collapsed to a marker. Operates on
+ * unbroken word tokens of ≥32 chars; see {@link redact} for the rules. */
 function entropy(s: string): number {
   const freq = new Map<string, number>();
   for (const c of s) freq.set(c, (freq.get(c) ?? 0) + 1);
@@ -97,17 +98,30 @@ export function redact(text: string, repoRootAbs?: string): RedactionResult {
 
   // Entropy pass — after named patterns, so it won't double-count.
   out = out.replace(TOKEN_CANDIDATE, (match) => {
-    // skip obvious non-secrets: pure hex looking like a git SHA, long words
-    if (/^[a-f0-9]+$/i.test(match)) return match;
-    if (/^[A-Z]+$/.test(match)) return match; // all caps constants
-    const hasLetter = /[A-Za-z]/.test(match);
+    // Long pure-hex = a digest / git SHA / content hash — collapse it (privacy
+    // + payload size). Hex shorter than 32 chars never reaches here.
+    if (/^[a-fA-F0-9]{32,}$/.test(match)) {
+      counts.secrets_found += 1;
+      return "[REDACTED:hash]";
+    }
+    // SCREAMING_SNAKE / all-caps-or-digit constant names — not secrets.
+    if (/^[A-Z0-9_]+$/.test(match)) return match;
+    // Base64 / base64url blobs: trailing `=` padding or an embedded `+` are
+    // strong binary-payload signals that code and paths almost never carry.
+    // (`/` alone is a path separator, so it is deliberately NOT a signal —
+    // redacting paths would break command readability + script-token zipping.)
+    if (/=$|\+/.test(match) && entropy(match) >= 3.5) {
+      counts.secrets_found += 1;
+      return "[REDACTED:base64]";
+    }
+    // Generic high-entropy token — an API key we have no explicit pattern for.
     const hasDigit = /\d/.test(match);
     const hasUpper = /[A-Z]/.test(match);
     const hasLower = /[a-z]/.test(match);
-    if (!(hasLetter && hasDigit && hasUpper && hasLower)) return match;
+    if (!(hasDigit && hasUpper && hasLower)) return match;
     if (entropy(match) < 3.6) return match;
     counts.secrets_found += 1;
-    return `[REDACTED:hi-entropy]`;
+    return "[REDACTED:hi-entropy]";
   });
 
   out = out.replace(EMAIL_PATTERN, () => {
