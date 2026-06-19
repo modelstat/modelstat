@@ -1,7 +1,7 @@
 //! The privacy floor: deterministic, dependency-light redaction that runs
 //! **in-process before any bytes leave the SDK**.
 //!
-//! This is a Rust port of the companion's `SECRET_FLOOR`
+//! This is a Rust port of the daemon's `SECRET_FLOOR`
 //! (`packages/core/src/redact-floor.ts`) plus the email / absolute-path PII
 //! rules. It is the irreducible baseline — even in "raw" remote mode the floor
 //! still scrubs live credentials; "raw" means *full turns*, not *leaked keys*.

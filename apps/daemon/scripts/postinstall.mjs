@@ -84,14 +84,14 @@ async function main() {
   }
 
   // Resolve the helper from the workspace package the bundle uses.
-  // companion-core is bundled into dist/cli.mjs by tsup, but we need
+  // daemon-core is bundled into dist/cli.mjs by tsup, but we need
   // the helper as a standalone import here (postinstall runs against
   // the unbundled source layout).
   let ensureLlamaModel;
   let defaultLlamaConfig;
   try {
     ({ ensureLlamaModel, defaultLlamaConfig } = await import(
-      "@modelstat/companion-core/node"
+      "@modelstat/daemon-core/node"
     ));
   } catch (err) {
     console.warn(

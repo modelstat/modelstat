@@ -1,11 +1,11 @@
-# AGENTS.md — working on the modelstat companion
+# AGENTS.md — working on the modelstat daemon
 
 Guidance for developers and coding agents in this repo. Keep it current:
 when you change how something here works, update this file in the same PR.
 
 ## What this repo is
 
-The modelstat **companion** — everything that runs on a user's machine and
+The modelstat **daemon** — everything that runs on a user's machine and
 feeds the server: the Node CLI/daemon (`packages/*`, published to npm +
 Homebrew) and the macOS tray app (`apps/tray-mac`). The server
 (ingest/pipeline/dashboard, modelstat.ai) is a separate private service
@@ -31,7 +31,7 @@ Things to know:
 - Parsers (`packages/parsers`) emit raw events only and keep transcript
   data verbatim — e.g. the `<synthetic>` pseudo-model Claude Code records
   for local error/notice messages is passed through as-is (the server
-  decides what to hide; the companion never drops data). The one exception:
+  decides what to hide; the daemon never drops data). The one exception:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
 - The summariser is npm-only, single-path (no Ollama, no fallbacks),
   staged via `installNativeRuntime`/`_setup-runtime`.

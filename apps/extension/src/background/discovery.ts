@@ -46,7 +46,7 @@ export async function postDiscovery(): Promise<void> {
     installations,
     identities: [], // v1: no identity scraping from chat sites
     scanned_at: new Date().toISOString(),
-    companion_version: `modelstat-extension@${version}`,
+    daemon_version: `modelstat-extension@${version}`,
   };
 
   try {

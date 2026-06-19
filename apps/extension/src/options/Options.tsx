@@ -1,6 +1,6 @@
 import type React from "react";
 import { useEffect, useState } from "react";
-import { WEBLLM_CHAT_MODEL } from "@modelstat/companion-core/pipeline";
+import { WEBLLM_CHAT_MODEL } from "@modelstat/daemon-core/pipeline";
 
 type AuthStatus =
   | { kind: "registering" }

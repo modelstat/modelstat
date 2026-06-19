@@ -1,6 +1,6 @@
 # Contributing to modelstat
 
-Thanks for taking the time. This is the companion-code repo — the Node
+Thanks for taking the time. This is the daemon-code repo — the Node
 daemon, macOS tray, MCP server, and their shared packages. The hosted
 service isn't in scope here.
 

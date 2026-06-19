@@ -5,7 +5,7 @@
  *
  * All id helpers are runtime-agnostic: they work in Node 20+ and in the
  * browser (Chrome extension service worker). See
- * docs/companion-unification.md for the policy.
+ * docs/daemon-unification.md for the policy.
  */
 /**
  * Inline ULID — runtime-agnostic (Node 20+, MV3 service worker, browser).
@@ -60,7 +60,7 @@ export function uuidv7(): string {
  * Deterministic dedupe key for a single parsed event.
  *
  * Three legal shapes for `source`:
- *   - `{ file, byteOffset }` — CLI companion parsing JSONL
+ *   - `{ file, byteOffset }` — CLI daemon parsing JSONL
  *   - `{ host, conversationId, messageId }` — Chrome extension capturing
  *     a web chat turn
  *   - `{ lineUuid }` — position-independent key for transcript lines whose

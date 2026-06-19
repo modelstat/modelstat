@@ -38,7 +38,7 @@ async function attempt(token: string, deviceId: string, apiUrl: string): Promise
         queue_size: queueSize,
         stats: {},
         last_event_at: null,
-        companion_version: DAEMON_VERSION,
+        daemon_version: DAEMON_VERSION,
       }),
     });
     if (res.ok) return { ok: true };

@@ -1,6 +1,6 @@
 /**
  * CLI-side pipeline binding — wires the summariser/embedder pair the
- * daemon runs and hands them to companion-core.
+ * daemon runs and hands them to daemon-core.
  *
  * ONE summariser path, no fallback: the bundled `node-llama-cpp`
  * runtime. The daemon ships `node-llama-cpp` as a real dependency and
@@ -29,7 +29,7 @@ import {
   llamaExtractLinks,
   llamaScriptSummarize,
   llamaSummarize,
-} from "@modelstat/companion-core/node";
+} from "@modelstat/daemon-core/node";
 import {
   buildSegmentsForSession,
   buildSessionMetadata as buildSessionMetadataCore,
@@ -37,9 +37,9 @@ import {
   type PipelineAdapters,
   type ScriptSummarizer,
   type SegmentProgressFn,
-} from "@modelstat/companion-core/pipeline";
-import type { ToolCallDraft } from "@modelstat/companion-core/queue";
-import { createPrivacyFilterRedactor } from "@modelstat/companion-core/redact/privacy-filter";
+} from "@modelstat/daemon-core/pipeline";
+import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
+import { createPrivacyFilterRedactor } from "@modelstat/daemon-core/redact/privacy-filter";
 import type { RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import { type LocalToolContext, resolveGitContext } from "@modelstat/parsers";
 import { enrichToolCallScripts } from "./enrich-scripts.js";
@@ -127,7 +127,7 @@ export async function buildSegments(
 /**
  * One title per session from the given segments — the sessions-list
  * line in the dashboard. Runs the local titler (same bundled model,
- * see `entitle` above); deterministic fallback inside companion-core
+ * see `entitle` above); deterministic fallback inside daemon-core
  * means this never throws for healthy segments.
  */
 export async function buildSessionTitles(segments: Segment[]): Promise<Record<string, string>> {

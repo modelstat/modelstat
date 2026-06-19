@@ -1,7 +1,7 @@
 import { request } from "undici";
 import type { DiscoveryReport, IngestBatch } from "@modelstat/core";
-import { IngestClient } from "@modelstat/companion-core/http";
-import { createLogger } from "@modelstat/companion-core/logger";
+import { IngestClient } from "@modelstat/daemon-core/http";
+import { createLogger } from "@modelstat/daemon-core/logger";
 import { state } from "./config.js";
 
 /* ─── Phase 2: self-register / claim ──────────────────────────────── */
@@ -29,7 +29,7 @@ export type DeviceMeResponse = {
   user_id: string | null;
   secret_prefix: string | null;
   hostname: string | null;
-  companion_status: string | null;
+  daemon_status: string | null;
   last_seen_at: string | null;
   fingerprint: Record<string, unknown> | null;
 };
@@ -126,8 +126,8 @@ export interface DeviceViewSummary {
     id: string;
     hostname: string | null;
     os_family: string | null;
-    companion_version: string | null;
-    companion_status: string | null;
+    daemon_version: string | null;
+    daemon_status: string | null;
     last_seen_at: string | null;
   };
   analyzed: { count: number; totalTokens: string; totalCostUsd: number };
@@ -192,7 +192,7 @@ export async function fetchDeviceViewLedgerByClaim(
 
 // Shared IngestClient wired once and reused for the process lifetime.
 // Retry matrix (400=drop, 401=reauth, 429/5xx=backoff) lives in
-// @modelstat/companion-core/http — CLI just passes its AuthProvider.
+// @modelstat/daemon-core/http — CLI just passes its AuthProvider.
 let _ingest: IngestClient | null = null;
 
 function ingestClient(): IngestClient {

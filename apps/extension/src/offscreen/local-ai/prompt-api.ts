@@ -16,7 +16,7 @@ import {
   SUMMARISER_SYSTEM_PROMPT,
   SUMMARISER_TEMPERATURE,
   SUMMARISER_TOP_K,
-} from "@modelstat/companion-core/pipeline";
+} from "@modelstat/daemon-core/pipeline";
 import { createLogger } from "@/common/logger.js";
 
 const log = createLogger("prompt-api");

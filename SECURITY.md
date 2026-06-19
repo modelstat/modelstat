@@ -1,6 +1,6 @@
 # Security policy
 
-modelstat takes the security of its companion software seriously — this is
+modelstat takes the security of its daemon software seriously — this is
 the code that watches files on your laptop and talks to the cloud, so it
 has to be worth trusting.
 

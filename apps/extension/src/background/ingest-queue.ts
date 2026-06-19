@@ -53,7 +53,7 @@ function rawEventFromStored(typed: StoredEvent): RawEvent {
     // IngestBatch.tool_calls either. When a capture source starts
     // exposing tool activity, mirror the CLI plumbing:
     // QueueItem.tool_calls → buildBatches → attachSegmentIds
-    // (@modelstat/companion-core/queue).
+    // (@modelstat/daemon-core/queue).
     tool_calls: {},
     files_touched: [],
     source_file: null,
@@ -128,7 +128,7 @@ export async function flushQueue(opts?: {
   }
   if (rows.length === 0) return { sent: 0, remaining: allUnsynced.length };
 
-  // Run the shared companion pipeline — redact → segment → summarise
+  // Run the shared daemon pipeline — redact → segment → summarise
   // → tag — against the offscreen document's adapters (MiniLM embed,
   // Chrome Prompt API / WebLLM summariser, tiktoken). Segments ship
   // alongside events so the server sees the exact same shape it gets
@@ -143,7 +143,7 @@ export async function flushQueue(opts?: {
   const batch = IngestBatch.parse({
     batch_id: ulid(),
     device_id: deviceId,
-    companion_version: DAEMON_VERSION,
+    daemon_version: DAEMON_VERSION,
     events,
     segments,
   });

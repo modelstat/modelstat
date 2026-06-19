@@ -30,7 +30,7 @@ test("lineUuid shape ignores file position and is stable (wire contract)", () =>
   );
 });
 
-// param_shape is value-masked and tier-1; the companion derives it on-device
+// param_shape is value-masked and tier-1; the daemon derives it on-device
 // from raw args (which never ship), so a shared reference impl is the only
 // cross-repo determinism check. These MUST match the backend's Rust
 // implementation byte-for-byte. `§` = U+00A7.

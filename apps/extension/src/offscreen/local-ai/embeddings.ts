@@ -18,7 +18,7 @@
  */
 
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
-import { BROWSER_EMBED_MODEL } from "@modelstat/companion-core/pipeline";
+import { BROWSER_EMBED_MODEL } from "@modelstat/daemon-core/pipeline";
 import { createLogger } from "@/common/logger.js";
 
 const log = createLogger("embed");

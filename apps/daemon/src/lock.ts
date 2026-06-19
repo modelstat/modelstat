@@ -9,7 +9,7 @@
  *   - scrambled Live Activity (heartbeats from two PIDs interleave)
  *
  * Mechanism: a lockfile at ~/.modelstat/daemon.lock containing
- *   { pid, startedAt, companionVersion, apiUrl }.
+ *   { pid, startedAt, daemonVersion, apiUrl }.
  *
  * On start:
  *   1. Read the existing lock if any.
@@ -43,7 +43,7 @@ import { join } from "node:path";
 export interface LockMeta {
   pid: number;
   startedAt: string;
-  companionVersion: string;
+  daemonVersion: string;
   apiUrl: string;
 }
 
@@ -77,7 +77,7 @@ export function readDaemonLock(lockFile: string = LOCK_FILE): LockMeta | null {
     return {
       pid: obj.pid,
       startedAt: obj.startedAt ?? "unknown",
-      companionVersion: obj.companionVersion ?? "unknown",
+      daemonVersion: obj.daemonVersion ?? "unknown",
       apiUrl: obj.apiUrl ?? "unknown",
     };
   } catch {
@@ -118,7 +118,7 @@ export type AcquireResult =
   | { kind: "already_running"; owner: LockMeta; ageSec: number };
 
 export interface AcquireOpts {
-  companionVersion: string;
+  daemonVersion: string;
   apiUrl: string;
   /** If true, kill any existing owner (if alive) and take the lock.
    * Used by `modelstat start --force` to recover from a stuck daemon.
@@ -171,7 +171,7 @@ export function acquireDaemonLock(opts: AcquireOpts): AcquireResult {
   const meta: LockMeta = {
     pid: process.pid,
     startedAt: new Date().toISOString(),
-    companionVersion: opts.companionVersion,
+    daemonVersion: opts.daemonVersion,
     apiUrl: opts.apiUrl,
   };
   writeLockAtomic(meta);

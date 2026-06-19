@@ -2,7 +2,7 @@ import { z } from "zod";
 import {
   AGENTS,
   CLASSIFICATION_CONFIDENCE,
-  COMPANION_PHASES,
+  DAEMON_PHASES,
   EVENT_KINDS,
   IDENTITY_OWNER_SCOPES,
   INSTALL_METHODS,
@@ -73,7 +73,7 @@ export const RawEvent = z.object({
   //      available, the on-device Privacy Filter adapter.
   //   3. Stripping code blocks and file-path noise.
   // Optional — events without it fall back to metadata-only abstracts
-  // (the historical behaviour). The companion-core pipeline runs
+  // (the historical behaviour). The daemon-core pipeline runs
   // redact() over it again as defence-in-depth before building the
   // summarize prompt; it never gets stored long-term server-side, only
   // used to construct the summarize input.
@@ -104,7 +104,7 @@ export type RawEvent = z.infer<typeof RawEvent>;
  *
  * Three guaranteed fields cover the regex pass (secrets / emails /
  * absolute-paths). Additional `pf_<category>` keys appear when the
- * companion runs the OpenAI Privacy Filter model client-side — one
+ * daemon runs the OpenAI Privacy Filter model client-side — one
  * counter per detected category (pf_name, pf_address, pf_email, etc.).
  * `.catchall()` keeps them on the parsed object instead of stripping. */
 export const RedactionReport = z
@@ -116,10 +116,10 @@ export const RedactionReport = z
   .catchall(z.number().int().nonnegative());
 export type RedactionReport = z.infer<typeof RedactionReport>;
 
-/** Companion-tagged segment — the unit of sync between companion and server.
+/** Daemon-tagged segment — the unit of sync between daemon and server.
  *
  * A segment is a semantically-coherent slice of a session: its own tokens,
- * its own tags, its own redacted abstract. The companion produces segments
+ * its own tags, its own redacted abstract. The daemon produces segments
  * by redact → tokenize → segment → summarise → tag on device; the server
  * never sees unredacted text.
  *
@@ -127,7 +127,7 @@ export type RedactionReport = z.infer<typeof RedactionReport>;
  * sorted(source_event_ids)), so re-running the pipeline on the same events
  * reproduces the same id and upload is idempotent at the segment level. */
 /**
- * A companion-emitted tag hint. `root_key` + `name` together identify a
+ * A daemon-emitted tag hint. `root_key` + `name` together identify a
  * target taxonomy node inside the owning org. Root keys are NOT a fixed
  * enum — each org's taxonomy tree can have any set of roots; the
  * TAXONOMY_ROOTS constant in @modelstat/core/enums is just the seed
@@ -140,7 +140,7 @@ export const TaxonomyHintRooted = z.object({
   root_key: z.string().max(60),
   name: z.string().max(120),
   confidence: z.number().min(0).max(1).default(0.7),
-  /** Optional free-text reason the companion attached this tag — surfaces
+  /** Optional free-text reason the daemon attached this tag — surfaces
    * in the audit log so the user can see "why was this tagged X?" */
   reason: z.string().max(200).optional(),
 });
@@ -165,7 +165,7 @@ export const Segment = z.object({
   /** `source_event_id`s covered by this segment. Used for dedupe + replay. */
   source_event_ids: z.array(z.string()).max(2000),
   /** Optional embedding of the abstract (BGE-small-en-v1.5, 384 dims).
-   * Present when the companion has an Embedder adapter configured. */
+   * Present when the daemon has an Embedder adapter configured. */
   abstract_embedding: z.array(z.number()).length(384).optional(),
 });
 export type Segment = z.infer<typeof Segment>;
@@ -192,7 +192,7 @@ export const ToolAction = z
     qualifiers: z.array(z.string().max(40)).max(8).default([]),
     /** Value-masked argument skeleton (every value → `§`). Carried in full up
      * to a malicious-size guard (mirrors backend `MAX_TOOL_ACTION_PARAM_SHAPE_CHARS`);
-     * the companion clamps rather than truncating semantically. (tier 1) */
+     * the daemon clamps rather than truncating semantically. (tier 1) */
     param_shape: z.string().max(16_384).nullable().default(null),
     /** Relevant non-sensitive keywords (e.g. ["rollout","restart","prod"]),
      * OpenAI-redacted on-device. (tier 0) */
@@ -223,7 +223,7 @@ export type ToolAction = z.infer<typeof ToolAction>;
 
 /**
  * One tool invocation made by an agent during a session — the per-call
- * companion to RawEvent.tool_calls (which stays an aggregate count map).
+ * daemon to RawEvent.tool_calls (which stays an aggregate count map).
  *
  * Naming discipline: `agent` is the AGENTS enum value (claude_code,
  * codex_cli, …) — the AI client that ran the call. `server`/`name`
@@ -249,7 +249,7 @@ export const ToolCallWire = z.object({
   session_id: z.string().max(120),
   /** The RawEvent that contained the tool_use (dedupe/replay anchor). */
   source_event_id: z.string(),
-  /** Segment containing source_event_id — filled by the companion at
+  /** Segment containing source_event_id — filled by the daemon at
    * batch-build time when known, else null. */
   segment_id: z.string().max(64).nullable().default(null),
   /** The agent that made the call (AGENTS enum). */
@@ -285,9 +285,9 @@ export const ToolCallWire = z.object({
 });
 export type ToolCallWire = z.infer<typeof ToolCallWire>;
 
-/** Bundle the companion ships to the server in one request.
+/** Bundle the daemon ships to the server in one request.
  *
- * The companion runs the full pipeline locally
+ * The daemon runs the full pipeline locally
  * (redact → segment → summarise → tag) and ships the finished
  * `segments: Segment[]` alongside the raw `events`. Events are
  * internal plumbing (cost math, event-level drilldown);
@@ -295,7 +295,7 @@ export type ToolCallWire = z.infer<typeof ToolCallWire>;
 export const IngestBatch = z.object({
   batch_id: z.string(), // ULID
   device_id: z.string(),
-  companion_version: z.string().max(40),
+  daemon_version: z.string().max(40),
   events: z.array(RawEvent).max(10_000),
   segments: z.array(Segment).max(2_000).default([]),
   /** Per-call tool invocations (additive — old agents omit it, old
@@ -313,8 +313,8 @@ export const IngestBatch = z.object({
     )
     .optional(),
   /** Optional per-session titles — session_id → short redacted title
-   * (≤120 chars) produced by the companion's local titler from the
-   * session's segment abstracts. Companions recompute it from the full
+   * (≤120 chars) produced by the daemon's local titler from the
+   * session's segment abstracts. Daemons recompute it from the full
    * session view on every upload, so the latest batch always carries the
    * freshest title. Absent for runtimes without a titler (older agents,
    * no-op browser summariser). */
@@ -323,26 +323,26 @@ export const IngestBatch = z.object({
    * {@link SessionMetadata}: the repos, pull requests, commits, and issues the
    * session touched, detected on-device across git context, tool calls,
    * redacted content, and the local model (so it works for any provider).
-   * Additive — old companions omit it, old servers ignore it (the wire has no
+   * Additive — old daemons omit it, old servers ignore it (the wire has no
    * `deny_unknown_fields`). The join layer between AI spend and shipped work. */
   session_metadata: z.record(z.string(), SessionMetadata).optional(),
 });
 export type IngestBatch = z.infer<typeof IngestBatch>;
 
-/** Unified heartbeat payload emitted by every companion. CLI and
+/** Unified heartbeat payload emitted by every daemon. CLI and
  * extension populate all fields; fields that don't apply to a runtime
  * use sensible zeros / nulls rather than being omitted, so the server
  * can parse one schema. */
 export const HeartbeatPayload = z.object({
   device_id: z.string(),
-  status: z.enum(COMPANION_PHASES),
+  status: z.enum(DAEMON_PHASES),
   message: z.string().max(240).nullable(),
   progress_done: z.number().int().nonnegative().default(0),
   progress_total: z.number().int().nonnegative().default(0),
   queue_size: z.number().int().nonnegative().default(0),
   stats: z.record(z.string(), z.unknown()).default({}),
   last_event_at: z.string().datetime({ offset: true }).nullable(),
-  companion_version: z.string().max(40),
+  daemon_version: z.string().max(40),
 });
 export type HeartbeatPayload = z.infer<typeof HeartbeatPayload>;
 
@@ -353,7 +353,7 @@ export const DeviceEnrollment = z.object({
   os_family: z.enum(OS_FAMILIES),
   os_version: z.string().max(60),
   arch: z.enum(["x86_64", "arm64", "other"]),
-  companion_version: z.string().max(40),
+  daemon_version: z.string().max(40),
 });
 export type DeviceEnrollment = z.infer<typeof DeviceEnrollment>;
 
@@ -379,8 +379,8 @@ export const DeviceSelfRegister = z.object({
       os_family: z.enum(OS_FAMILIES).optional(),
       os_version: z.string().max(60).optional(),
       arch: z.enum(["x86_64", "arm64", "other"]).optional(),
-      companion: z.string().max(80).optional(),
-      companion_version: z.string().max(40).optional(),
+      daemon: z.string().max(80).optional(),
+      daemon_version: z.string().max(40).optional(),
       // Allow extra fields for forward-compat without breaking old agents.
     })
     .catchall(z.union([z.string(), z.number(), z.boolean()]))

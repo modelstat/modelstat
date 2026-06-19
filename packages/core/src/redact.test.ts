@@ -49,8 +49,8 @@ test("collapses base64 blobs but leaves paths and constants intact", () => {
   assert.match(redact("echo aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=").text, /\[REDACTED:base64\]/);
   // A long relative path uses `/` (a path separator, not a base64 signal) and
   // must survive verbatim — the backend zips script summaries to these tokens.
-  const p = redact("tsx packages/companion-core/src/queue/runner_helper_module");
-  assert.match(p.text, /packages\/companion-core\/src\/queue\/runner_helper_module/);
+  const p = redact("tsx packages/daemon-core/src/queue/runner_helper_module");
+  assert.match(p.text, /packages\/daemon-core\/src\/queue\/runner_helper_module/);
   // SCREAMING_SNAKE constant names are not secrets.
   const c = redact("export MAX_TOOL_ACTION_PARAM_SHAPE_CHARS_LIMIT");
   assert.match(c.text, /MAX_TOOL_ACTION_PARAM_SHAPE_CHARS_LIMIT/);

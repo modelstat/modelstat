@@ -1,6 +1,6 @@
 /**
  * One-shot scan: walk known Claude Code + Codex directories, parse each
- * JSONL, run the shared companion pipeline (redact → segment →
+ * JSONL, run the shared daemon pipeline (redact → segment →
  * summarise → tag), upload the resulting batch.
  *
  * Tracks per-file cursors in conf so a second scan only sends
@@ -9,10 +9,10 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { batchId } from "@modelstat/companion-core";
-import { INGEST_BATCH_MAX_EVENTS } from "@modelstat/companion-core/config";
-import type { SegmentProgressFn } from "@modelstat/companion-core/pipeline";
-import { attachSegmentIdsByMap, type ToolCallDraft } from "@modelstat/companion-core/queue";
+import { batchId } from "@modelstat/daemon-core";
+import { INGEST_BATCH_MAX_EVENTS } from "@modelstat/daemon-core/config";
+import type { SegmentProgressFn } from "@modelstat/daemon-core/pipeline";
+import { attachSegmentIdsByMap, type ToolCallDraft } from "@modelstat/daemon-core/queue";
 import type { IngestBatch, RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import {
   type LocalToolContext,
@@ -34,7 +34,7 @@ import {
  * (tsx / tests), where the define isn't applied. */
 const DAEMON_VERSION =
   typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "daemon-dev";
-// Shared cross-companion batch size — same value the extension uses, so
+// Shared cross-daemon batch size — same value the extension uses, so
 // both sides present an identical rate-limit profile to the ingest endpoint.
 const BATCH_MAX_EVENTS = INGEST_BATCH_MAX_EVENTS;
 /** Wire cap on IngestBatch.tool_calls (z.array(ToolCallWire).max(20_000)
@@ -293,7 +293,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
     const batch: IngestBatch = {
       batch_id: batchId(),
       device_id: deviceId!,
-      companion_version: DAEMON_VERSION,
+      daemon_version: DAEMON_VERSION,
       events,
       segments,
       tool_calls: attachSegmentIdsByMap(toolCallBuffer, callSegmentByEvent),

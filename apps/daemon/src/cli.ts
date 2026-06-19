@@ -167,8 +167,8 @@ async function cmdSelfRegister(): Promise<void> {
     os_family: osFamily(),
     os_version: release(),
     arch: osArch(),
-    companion: "modelstat-daemon",
-    companion_version: DAEMON_VERSION,
+    daemon: "modelstat-daemon",
+    daemon_version: DAEMON_VERSION,
     // Stable, install-method-independent machine key. The server
     // dedupes self-register on this so the same physical machine can
     // never become two device rows, even if the UUID somehow differs
@@ -478,7 +478,7 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
   step("Preparing local summariser (downloads on first run)");
   let modelReady = false;
   try {
-    const { ensureLlamaModel, defaultLlamaConfig } = await import("@modelstat/companion-core/node");
+    const { ensureLlamaModel, defaultLlamaConfig } = await import("@modelstat/daemon-core/node");
     await ensureLlamaModel(defaultLlamaConfig());
     modelReady = true;
     emitEvent(opts, "summariser_model_ready", {});
@@ -628,7 +628,7 @@ async function cmdScan(): Promise<void> {
   // Verify the summariser actually works on this machine BEFORE we
   // start producing segments. Otherwise the user discovers it's broken
   // by way of useless abstracts in the dashboard a day later. See
-  // packages/companion-core/src/pipeline/index.ts: a thrown summariser
+  // packages/daemon-core/src/pipeline/index.ts: a thrown summariser
   // failure now propagates instead of silently writing the metadata
   // template.
   const { preflightSummariser } = await import("./pipeline.js");
@@ -649,7 +649,7 @@ async function cmdScan(): Promise<void> {
   // One-shot scan loaded the bundled summariser; dispose it so the process
   // exits cleanly (avoids llama.cpp's Metal teardown GGML_ASSERT on macOS).
   try {
-    const { disposeLlama } = await import("@modelstat/companion-core/node");
+    const { disposeLlama } = await import("@modelstat/daemon-core/node");
     await disposeLlama();
   } catch {
     /* best-effort */
@@ -812,9 +812,9 @@ async function cmdStats(args: readonly string[]): Promise<void> {
   }
   console.log(`device:   ${view.device.id}`);
   console.log(`host:     ${view.device.hostname ?? "(unknown)"} (${view.device.os_family ?? "?"})`);
-  console.log(`companion: ${view.device.companion_version ?? "(unknown)"}`);
+  console.log(`daemon: ${view.device.daemon_version ?? "(unknown)"}`);
   console.log(
-    `status:   ${view.device.companion_status ?? "(unknown)"}${view.device.last_seen_at ? ` · last seen ${view.device.last_seen_at}` : ""}`,
+    `status:   ${view.device.daemon_status ?? "(unknown)"}${view.device.last_seen_at ? ` · last seen ${view.device.last_seen_at}` : ""}`,
   );
   console.log(
     `claim:    ${view.status}${view.status === "unclaimed" ? ` (at ${view.claim_url})` : ""}`,
@@ -984,7 +984,7 @@ async function main(): Promise<void> {
       // Never throws: a broken probe must not strand the supervisor,
       // so any failure degrades to "spawn".
       try {
-        console.log(JSON.stringify(daemonHealth({ myCompanionVersion: DAEMON_VERSION })));
+        console.log(JSON.stringify(daemonHealth({ myDaemonVersion: DAEMON_VERSION })));
       } catch (e) {
         console.log(JSON.stringify({ decision: "spawn", error: (e as Error).message }));
       }

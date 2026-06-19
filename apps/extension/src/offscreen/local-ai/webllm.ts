@@ -4,7 +4,7 @@
  * available. Opt-in: the user must accept the download in Options first.
  *
  * The default is the SAME model the CLI bundles — Qwen3-4B-Instruct, kept
- * in sync via companion-core's `WEBLLM_CHAT_MODEL` — so an
+ * in sync via daemon-core's `WEBLLM_CHAT_MODEL` — so an
  * extension-produced abstract matches a CLI-produced one. It's heavier
  * (~2.4 GB WebGPU heap); the lighter ids stay selectable for constrained
  * GPUs, and if a model can't load the dispatcher falls through to the
@@ -15,7 +15,7 @@
  */
 
 import type { InitProgressReport, MLCEngine } from "@mlc-ai/web-llm";
-import { WEBLLM_CHAT_MODEL } from "@modelstat/companion-core/pipeline";
+import { WEBLLM_CHAT_MODEL } from "@modelstat/daemon-core/pipeline";
 import { createLogger } from "@/common/logger.js";
 
 const log = createLogger("webllm");

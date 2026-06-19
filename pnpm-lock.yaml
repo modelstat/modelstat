@@ -45,12 +45,12 @@ importers:
         specifier: ^7.1.0
         version: 7.25.0
     devDependencies:
-      '@modelstat/companion-core':
-        specifier: workspace:*
-        version: link:../../packages/companion-core
       '@modelstat/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@modelstat/daemon-core':
+        specifier: workspace:*
+        version: link:../../packages/daemon-core
       '@modelstat/parsers':
         specifier: workspace:*
         version: link:../../packages/parsers
@@ -78,12 +78,12 @@ importers:
       '@modelstat/adapters-protocol':
         specifier: workspace:*
         version: link:../../packages/adapters-protocol
-      '@modelstat/companion-core':
-        specifier: workspace:*
-        version: link:../../packages/companion-core
       '@modelstat/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@modelstat/daemon-core':
+        specifier: workspace:*
+        version: link:../../packages/daemon-core
       '@noble/hashes':
         specifier: ^1.7.0
         version: 1.8.0
@@ -150,14 +150,8 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
-  packages/companion-core:
+  packages/core:
     dependencies:
-      '@modelstat/core':
-        specifier: workspace:*
-        version: link:../core
-      '@modelstat/remote-config':
-        specifier: workspace:*
-        version: link:../remote-config
       ulid:
         specifier: ^2.3.0
         version: 2.4.0
@@ -169,8 +163,14 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
-  packages/core:
+  packages/daemon-core:
     dependencies:
+      '@modelstat/core':
+        specifier: workspace:*
+        version: link:../core
+      '@modelstat/remote-config':
+        specifier: workspace:*
+        version: link:../remote-config
       ulid:
         specifier: ^2.3.0
         version: 2.4.0

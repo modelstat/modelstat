@@ -34,7 +34,7 @@ modelstat = "0.0.1"
 
 ### 1. Run the modelstat daemon
 
-The daemon is the open-source `modelstat` companion. It runs as a background service, downloads a small local model on first start, and listens on loopback for SDK traffic.
+The daemon is the open-source `modelstat` daemon. It runs as a background service, downloads a small local model on first start, and listens on loopback for SDK traffic.
 
 ```bash
 # zero-install: starts the background service + fetches the local model

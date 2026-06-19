@@ -58,9 +58,9 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 // Inlined model config — kept in sync with
-// packages/companion-core/src/node/llama.ts. Duplicating these few
+// packages/daemon-core/src/node/llama.ts. Duplicating these few
 // lines keeps the eval harness runnable as a plain Node script
-// (companion-core is .ts source with no built .js, so importing it
+// (daemon-core is .ts source with no built .js, so importing it
 // directly from Node fails). When the bundled summariser model
 // changes there, change it here too.
 const DEFAULT_MODEL_URL =
@@ -216,7 +216,7 @@ function loadFixtures(dir) {
   return out;
 }
 
-// ── Prompt construction (mirrors companion-core/pipeline) ─────────
+// ── Prompt construction (mirrors daemon-core/pipeline) ─────────
 function buildPrompt(fixture, systemPromptUnused, excerptCountFromVariant) {
   // The prompt template lives here so each variant can also
   // override excerpt count / size if we extend the variant shape.

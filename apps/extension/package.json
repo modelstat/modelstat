@@ -20,7 +20,7 @@
     "@huggingface/transformers": "^3.3.0",
     "@mlc-ai/web-llm": "^0.2.78",
     "@modelstat/adapters-protocol": "workspace:*",
-    "@modelstat/companion-core": "workspace:*",
+    "@modelstat/daemon-core": "workspace:*",
     "@modelstat/core": "workspace:*",
     "@noble/hashes": "^1.7.0",
     "dexie": "^4.0.10",

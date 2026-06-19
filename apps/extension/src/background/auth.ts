@@ -299,7 +299,7 @@ function describeFingerprint(): Record<string, unknown> {
     // full User-Agent.
     os_version: extractOsVersion(ua),
     arch: "other",
-    companion_version: `modelstat-extension@${chrome.runtime.getManifest().version}`,
+    daemon_version: `modelstat-extension@${chrome.runtime.getManifest().version}`,
     surface: "chrome_extension",
     browser,
   };

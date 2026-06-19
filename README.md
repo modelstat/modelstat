@@ -2,7 +2,7 @@
   <a href="https://modelstat.ai"><img src="assets/logo.svg" alt="modelstat" height="40" /></a>
 </p>
 
-<h1 align="center">modelstat — companion source</h1>
+<h1 align="center">modelstat — daemon source</h1>
 
 <p align="center">
   <strong>Track every AI token your team spends — across Claude Code, Cursor, Codex, Cline, Continue, Aider, Copilot, Claude Desktop, and web chat.</strong>
@@ -165,7 +165,7 @@ modelstat is built so a developer reading their own logs (or a security reviewer
 
 ### The boundary
 
-Exactly one function on this side talks to our server: **[`IngestClient.upload()`](packages/companion-core/src/http/index.ts) → POST `/v1/ingest`**. There is no other outbound channel from the companion. Audit that one entry point and you've audited everything you upload.
+Exactly one function on this side talks to our server: **[`IngestClient.upload()`](packages/daemon-core/src/http/index.ts) → POST `/v1/ingest`**. There is no other outbound channel from the daemon. Audit that one entry point and you've audited everything you upload.
 
 The wire-format types live in **[`packages/core/src/schemas.ts`](packages/core/src/schemas.ts)** — Zod schemas, so the upload payload is statically constrained to the shapes documented there. If a field isn't in those schemas, the uploader literally cannot send it.
 
@@ -179,9 +179,9 @@ The wire-format types live in **[`packages/core/src/schemas.ts`](packages/core/s
 | `cwd`, `git.{host,slug,branch}` | Working directory + repo metadata (paths inside `/Users/` are scrubbed) | RawEvent |
 | `files_touched` | Filenames mentioned in the turn (paths scrubbed) | RawEvent |
 | `content_excerpt` | An optional ≤320-char excerpt the parser may include — **already passed through the redaction pipeline** | RawEvent |
-| `abstract` | One sentence (≤240 chars), generated **on-device** by a local LLM from already-redacted content | [`schemas.ts` → Segment](packages/core/src/schemas.ts), cap in [`pipeline/prompts.ts`](packages/companion-core/src/pipeline/prompts.ts) |
+| `abstract` | One sentence (≤240 chars), generated **on-device** by a local LLM from already-redacted content | [`schemas.ts` → Segment](packages/core/src/schemas.ts), cap in [`pipeline/prompts.ts`](packages/daemon-core/src/pipeline/prompts.ts) |
 | `redaction` | Per-segment **counts** of what was redacted (`{secret: 3, email: 1, …}`) — never the matched text | Segment |
-| `tags` | Structured labels (e.g. `[Mood: focused] [Mind: debugging]`) from the on-device cognition pass — closed vocabulary, no freeform text | [`pipeline/cognition.ts`](packages/companion-core/src/pipeline/cognition.ts) |
+| `tags` | Structured labels (e.g. `[Mood: focused] [Mind: debugging]`) from the on-device cognition pass — closed vocabulary, no freeform text | [`pipeline/cognition.ts`](packages/daemon-core/src/pipeline/cognition.ts) |
 | `processing` | Provenance: `{ redacted_by, redaction_policy, redaction_policy_version, redactions_applied, original_size_bytes, uploaded_size_bytes }` | [`daemon-sdk/src/redact.ts → processingFor()`](packages/daemon-sdk/src/redact.ts) |
 
 ### What we never receive
@@ -202,7 +202,7 @@ Every byte that crosses the boundary has been through several independent filter
 | **Regex pass (secrets)** | Anthropic / OpenAI / Google / AWS / GitHub / Slack / Stripe keys, JWTs, PEM blocks, `Bearer` headers, DB URLs with passwords, `ds_live_*` device tokens | [`packages/daemon-sdk/src/redact.ts` lines 48-71](packages/daemon-sdk/src/redact.ts) |
 | **Regex pass (PII)** | Emails, phone numbers, **public** IPv4 (private/loopback skipped on purpose), URL credentials (`https://user:pass@…`), absolute home paths (`/Users/`, `/home/`, `C:\Users\`) | [`packages/daemon-sdk/src/redact.ts` lines 79-96](packages/daemon-sdk/src/redact.ts) |
 | **Entropy catcher** | Any ≥32-char token with Shannon entropy ≥ 3.6 bits/char (unknown API-key shapes) | [`packages/core/src/redact.ts` lines 41-82](packages/core/src/redact.ts) |
-| **On-device NER** | Person names, organisation names, locations — via a quantised model running locally through `@huggingface/transformers` (WebGPU in the browser, CPU in Node). Optional peer dep; if missing, the regex layer stands alone. | [`packages/companion-core/src/redact/privacy-filter.ts`](packages/companion-core/src/redact/privacy-filter.ts) |
+| **On-device NER** | Person names, organisation names, locations — via a quantised model running locally through `@huggingface/transformers` (WebGPU in the browser, CPU in Node). Optional peer dep; if missing, the regex layer stands alone. | [`packages/daemon-core/src/redact/privacy-filter.ts`](packages/daemon-core/src/redact/privacy-filter.ts) |
 | **Length caps** | Hard upper bounds on every textual wire field, enforced by Zod | [`packages/core/src/schemas.ts`](packages/core/src/schemas.ts) |
 | **Policy gate** | The `paranoid` policy drops the entire `stdout`/`stderr`/`tool_output`/`raw_text` family of fields rather than redact them | [`packages/daemon-sdk/src/redact.ts` lines 176-179](packages/daemon-sdk/src/redact.ts) |
 | **Provenance stamp** | Every upload carries which policy ran, which version, how many redactions were applied, bytes-before / bytes-after — visible to you in the dashboard | [`packages/daemon-sdk/src/redact.ts → processingFor()`](packages/daemon-sdk/src/redact.ts) |
@@ -224,7 +224,7 @@ If you want to verify the wire format end-to-end, the three things to read are:
 
 1. **[`packages/core/src/schemas.ts`](packages/core/src/schemas.ts)** — every type that can be uploaded. If a field isn't here, the uploader can't ship it.
 2. **[`packages/daemon-sdk/src/redact.ts`](packages/daemon-sdk/src/redact.ts)** — the redaction policies + patterns.
-3. **[`packages/companion-core/src/http/index.ts`](packages/companion-core/src/http/index.ts)** — the single function that calls `fetch()` to our server. Everything that leaves your machine passes through here.
+3. **[`packages/daemon-core/src/http/index.ts`](packages/daemon-core/src/http/index.ts)** — the single function that calls `fetch()` to our server. Everything that leaves your machine passes through here.
 
 You can also run `npx modelstat@latest stats` to print, locally, a summary of what's been uploaded — token counts and redaction counters straight from the same provenance metadata the server sees.
 
@@ -237,11 +237,11 @@ Security disclosures: please read [SECURITY.md](SECURITY.md) and email `security
 ```
 modelstat/
 ├── apps/
-│   ├── daemon/          Node companion CLI (modelstat)
+│   ├── daemon/          Node daemon CLI (modelstat)
 │   └── tray-mac/           macOS menu-bar app (Swift)
 ├── packages/
 │   ├── daemon-sdk/          Redact + compact primitives (@modelstat/daemon-sdk)
-│   ├── companion-core/     Shared pipeline / queue / HTTP for the daemon
+│   ├── daemon-core/     Shared pipeline / queue / HTTP for the daemon
 │   ├── core/               Shared enums + Zod schemas (wire format lives here)
 │   ├── mcp/                Model Context Protocol server (@modelstat/mcp)
 │   ├── parsers/            Per-tool log parsers (Claude Code / Codex / Cursor / ...)
@@ -259,7 +259,7 @@ modelstat/
 
 **macOS tray** — Swift 5.9 + SwiftUI + `LaunchAgent`.
 
-**On-device LLMs** — quantised summariser + cognition pass run via a bundled `node-llama-cpp`. Privacy-filter NER runs via `@huggingface/transformers` (CPU/ONNX in Node). All models stay on your machine; nothing is shipped to a remote inference provider from the companion.
+**On-device LLMs** — quantised summariser + cognition pass run via a bundled `node-llama-cpp`. Privacy-filter NER runs via `@huggingface/transformers` (CPU/ONNX in Node). All models stay on your machine; nothing is shipped to a remote inference provider from the daemon.
 
 ---
 

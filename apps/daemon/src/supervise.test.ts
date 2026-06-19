@@ -23,7 +23,7 @@ function lockMeta(pid: number, startedAtMsAgo: number, now: number): LockMeta {
   return {
     pid,
     startedAt: new Date(now - startedAtMsAgo).toISOString(),
-    companionVersion: "test",
+    daemonVersion: "test",
     apiUrl: "http://localhost",
   };
 }
@@ -98,31 +98,31 @@ test("decideSupervision: healthy owner on a DIFFERENT daemon version → replace
       ownerAlive: true,
       lockAgeMs: 3_600_000,
       statusAgeMs: 1_000,
-      myCompanionVersion: "daemon-0.0.43",
+      myDaemonVersion: "daemon-0.0.43",
     }),
     "replace",
   );
   // Same version → freshness rules apply as usual.
-  const sameVersion = { ...lockMeta(4242, 3_600_000, NOW), companionVersion: "daemon-0.0.43" };
+  const sameVersion = { ...lockMeta(4242, 3_600_000, NOW), daemonVersion: "daemon-0.0.43" };
   assert.equal(
     decideSupervision({
       lock: sameVersion,
       ownerAlive: true,
       lockAgeMs: 3_600_000,
       statusAgeMs: 1_000,
-      myCompanionVersion: "daemon-0.0.43",
+      myDaemonVersion: "daemon-0.0.43",
     }),
     "adopt",
   );
   // Unknown lock version (pre-versioning lockfile) → don't churn.
-  const unknownVersion = { ...lockMeta(4242, 3_600_000, NOW), companionVersion: "unknown" };
+  const unknownVersion = { ...lockMeta(4242, 3_600_000, NOW), daemonVersion: "unknown" };
   assert.equal(
     decideSupervision({
       lock: unknownVersion,
       ownerAlive: true,
       lockAgeMs: 3_600_000,
       statusAgeMs: 1_000,
-      myCompanionVersion: "daemon-0.0.43",
+      myDaemonVersion: "daemon-0.0.43",
     }),
     "adopt",
   );

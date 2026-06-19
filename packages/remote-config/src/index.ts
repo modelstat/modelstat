@@ -1,7 +1,7 @@
 /**
  * `@modelstat/remote-config` — the server-driven config loader.
  *
- * The spine of the server-driven companion: fetch a config payload from the
+ * The spine of the server-driven daemon: fetch a config payload from the
  * modelstat origin over TLS, validate its shape, cache it to disk, and fall
  * back gracefully (memory → disk → bundled) on any failure. One mechanism
  * for every evolving config kind.

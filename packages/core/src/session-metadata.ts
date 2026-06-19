@@ -4,12 +4,12 @@
  *
  * This is the join layer between AI *spend* (events/segments/tokens) and
  * development *outcomes* (PRs merged, commits landed, tickets closed). The
- * companion attaches one {@link SessionMetadata} per session to the ingest
+ * daemon attaches one {@link SessionMetadata} per session to the ingest
  * batch; the server can later join it to GitHub/GitLab/Linear/Jira to answer
  * "what did this spend actually ship?".
  *
  * Everything in this module is **pure and dependency-free** (zod only) so it
- * can run in any companion runtime (Node CLI, browser extension) and be
+ * can run in any daemon runtime (Node CLI, browser extension) and be
  * exhaustively unit-tested without a model, a network, or a filesystem.
  *
  * Three detection channels feed it, each stamped on every reference as a

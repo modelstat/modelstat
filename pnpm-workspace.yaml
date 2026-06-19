@@ -3,7 +3,7 @@ packages:
   - "apps/extension"
   - "packages/adapters-protocol"
   - "packages/daemon-sdk"
-  - "packages/companion-core"
+  - "packages/daemon-core"
   - "packages/core"
   - "packages/mcp"
   - "packages/parsers"

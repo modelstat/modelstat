@@ -1,4 +1,4 @@
-// ModelstatTray — macOS menu-bar companion for the modelstat agent.
+// ModelstatTray — macOS menu-bar daemon for the modelstat agent.
 //
 // What it does:
 //   · puts a "◉" status item in the menu bar
@@ -66,7 +66,7 @@ struct AgentStats: Decodable {
 struct DeviceInfo: Decodable {
   let hostname: String?
   let os_family: String?
-  let companion_status: String?
+  let daemon_status: String?
   let last_seen_at: String?
 }
 
@@ -85,7 +85,7 @@ struct LocalStatus: Decodable {
   let message: String?
   let queue_size: Int?
   let last_event_at: String?
-  let companion_version: String?
+  let daemon_version: String?
   let stats: LocalStatsCounters?
 }
 
@@ -482,10 +482,10 @@ final class TrayController: NSObject {
     }
 
     // Live agent phase comes from the local heartbeat mirror.
-    // Falls back to the device-view's reported companion_status. If
+    // Falls back to the device-view's reported daemon_status. If
     // both are missing we say "running" rather than "starting" so
     // the menu doesn't lie about the daemon's state.
-    let phase = local?.status ?? s.device?.companion_status ?? "running"
+    let phase = local?.status ?? s.device?.daemon_status ?? "running"
     let phaseMsg = local?.message
     // Pulse the leading dot while the agent is actively working so the
     // menu reads as alive even on the rare beat where the numbers don't
@@ -503,7 +503,7 @@ final class TrayController: NSObject {
       // numbers, plus point the menu items at the dashboard. Keep the
       // reassuring "Claimed ✓" and append the agent version when the
       // local snapshot carries it.
-      if let v = local?.companion_version, !v.isEmpty {
+      if let v = local?.daemon_version, !v.isEmpty {
         setInfo(deviceMI, "Claimed ✓ · \(v)")
       } else {
         setInfo(deviceMI, "Claimed ✓ — synced to your account")

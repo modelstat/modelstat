@@ -2,7 +2,7 @@
   "name": "modelstat",
   "version": "0.0.0",
   "private": true,
-  "description": "Companion source for modelstat — the Node CLI, macOS tray, and shared packages that produce the binaries published to npm and Homebrew. Build from source if you prefer to audit what runs on your machine.",
+  "description": "Daemon source for modelstat — the Node CLI, macOS tray, and shared packages that produce the binaries published to npm and Homebrew. Build from source if you prefer to audit what runs on your machine.",
   "homepage": "https://modelstat.ai",
   "repository": {
     "type": "git",

@@ -142,7 +142,7 @@ function extractExcerpt(content: ClaudeMessageContent): string | undefined {
   text = text.replace(/\s+/g, " ").trim();
   if (!text) return undefined;
 
-  // Redact, then trim to the schema cap. The companion-core pipeline
+  // Redact, then trim to the schema cap. The daemon-core pipeline
   // re-redacts as defence-in-depth; this is the first pass.
   const cleaned = redact(text).text;
   const truncated = cleaned.slice(0, 320);

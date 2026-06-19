@@ -16,7 +16,7 @@
  *      stage so the dashboard shows precise activity.
  */
 import { existsSync, statSync } from "node:fs";
-import { describeErrorWithCause } from "@modelstat/companion-core/logger";
+import { describeErrorWithCause } from "@modelstat/daemon-core/logger";
 import type { DiscoveryReport } from "@modelstat/core";
 import { discover } from "@modelstat/parsers";
 import { request } from "undici";
@@ -57,7 +57,7 @@ interface Heartbeat {
   queue_size?: number;
   stats?: Record<string, number | string>;
   last_event_at?: string | null;
-  companion_version?: string;
+  daemon_version?: string;
   /** Stable hardware machine key (see machine-key.ts). Sent so the
    * server can backfill `devices.machine_id` onto an already-enrolled
    * row that registered before machine_id existed — which is what lets
@@ -127,7 +127,7 @@ function snapshotBody(): Heartbeat & { device_id: string | null } {
     queue_size: status.queueSize,
     stats: status.stats,
     last_event_at: status.lastEventAt,
-    companion_version: DAEMON_VERSION,
+    daemon_version: DAEMON_VERSION,
     machine_id: machineKey(),
   };
 }
@@ -367,7 +367,7 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   // under this home directory. Two daemons clobber each other's file
   // cursors and send duplicate heartbeats that scramble Live Activity.
   const lock = acquireDaemonLock({
-    companionVersion: DAEMON_VERSION,
+    daemonVersion: DAEMON_VERSION,
     apiUrl: state.apiUrl,
     force: opts.force === true,
     // If a racing daemon out-renamed us for the lock (see lock.ts
@@ -387,7 +387,7 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
     console.log(
       `modelstat daemon is already running — PID ${lock.owner.pid}, started ${formatAge(
         lock.ageSec,
-      )} ago, daemon ${lock.owner.companionVersion}.`,
+      )} ago, daemon ${lock.owner.daemonVersion}.`,
     );
     // biome-ignore lint/suspicious/noConsole: user-visible CLI output
     console.log("  → to stop it:          kill " + lock.owner.pid);
@@ -453,7 +453,7 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   // fail-safe: the compiled-in floor always applies, a forged/stale bundle is
   // rejected, and an offline boot degrades to floor-only. Never blocks startup.
   try {
-    const { createPolicyRefresher } = await import("@modelstat/companion-core/policies");
+    const { createPolicyRefresher } = await import("@modelstat/daemon-core/policies");
     await createPolicyRefresher({ apiUrl: state.apiUrl }).start();
   } catch (err) {
     setMessage(`policy refresh unavailable: ${(err as Error).message}`);
@@ -534,7 +534,7 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
     // turned every launchd stop/restart into a "failed" exit). No-op when
     // the summariser was never loaded.
     try {
-      const { disposeLlama } = await import("@modelstat/companion-core/node");
+      const { disposeLlama } = await import("@modelstat/daemon-core/node");
       await disposeLlama();
     } catch {
       /* best-effort — exit cleanly regardless */

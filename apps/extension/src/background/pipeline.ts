@@ -1,5 +1,5 @@
 /**
- * Extension-side companion pipeline binding.
+ * Extension-side daemon pipeline binding.
  *
  * The offscreen document hosts the ML runtimes (transformers.js for
  * 384-dim MiniLM embeddings, Chrome Prompt API / WebLLM for
@@ -11,7 +11,7 @@ import type { RawEvent, Segment } from "@modelstat/core";
 import {
   buildSegmentsForSession,
   type PipelineAdapters,
-} from "@modelstat/companion-core/pipeline";
+} from "@modelstat/daemon-core/pipeline";
 import {
   offscreenEmbed,
   offscreenSummarize,

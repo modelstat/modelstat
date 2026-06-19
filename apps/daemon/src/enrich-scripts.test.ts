@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ToolCallDraft } from "@modelstat/companion-core/queue";
+import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
 import type { ToolAction } from "@modelstat/core";
 import type { LocalToolContext } from "@modelstat/parsers";
 import { defaultRoots, type EnrichScriptsDeps, enrichToolCallScripts } from "./enrich-scripts.js";

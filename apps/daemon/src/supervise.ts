@@ -74,14 +74,14 @@ export function decideSupervision(input: {
   ownerAlive: boolean;
   lockAgeMs: number | null;
   statusAgeMs: number | null;
-  /** The probing CLI's own compiled-in companion version. When set and the
+  /** The probing CLI's own compiled-in daemon version. When set and the
    * live owner's lock carries a DIFFERENT version, the owner is
    * replaced even though it's healthy: after an upgrade re-stages the
    * bundle, the old-version daemon would otherwise be adopted forever
    * — it survives launchd's group kill (observed 2026-06-12: a
    * kickstart left the old daemon running and the new tray adopted
    * it), heartbeats happily, and never picks up the new code. */
-  myCompanionVersion?: string;
+  myDaemonVersion?: string;
   statusFreshMs?: number;
   bootGraceMs?: number;
 }): SuperviseDecision {
@@ -89,9 +89,9 @@ export function decideSupervision(input: {
   const grace = input.bootGraceMs ?? BOOT_GRACE_MS;
   if (!input.lock || !input.ownerAlive) return "spawn";
   if (
-    input.myCompanionVersion &&
-    input.lock.companionVersion !== "unknown" &&
-    input.lock.companionVersion !== input.myCompanionVersion
+    input.myDaemonVersion &&
+    input.lock.daemonVersion !== "unknown" &&
+    input.lock.daemonVersion !== input.myDaemonVersion
   ) {
     return "replace";
   }
@@ -111,10 +111,10 @@ export function daemonHealth(
     statusPath?: string;
     now?: number;
     pidAlive?: (pid: number) => boolean;
-    /** See decideSupervision.myCompanionVersion. cli.ts passes its
+    /** See decideSupervision.myDaemonVersion. cli.ts passes its
      * compiled-in DAEMON_VERSION so an upgraded bundle replaces a
      * still-running old-version daemon. */
-    myCompanionVersion?: string;
+    myDaemonVersion?: string;
   } = {},
 ): DaemonHealth {
   const now = opts.now ?? Date.now();
@@ -140,7 +140,7 @@ export function daemonHealth(
       ownerAlive,
       lockAgeMs,
       statusAgeMs,
-      myCompanionVersion: opts.myCompanionVersion,
+      myDaemonVersion: opts.myDaemonVersion,
     }),
     lock,
     ownerAlive,

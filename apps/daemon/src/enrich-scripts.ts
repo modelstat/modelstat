@@ -16,7 +16,7 @@
  *
  * Best-effort + additive: any failure (file missing, unreadable, model error)
  * just leaves that script out; the call still ships its redacted command. The
- * whole pass can be skipped (browser companion, model unavailable) with no loss
+ * whole pass can be skipped (browser daemon, model unavailable) with no loss
  * beyond the abstracts.
  *
  * Generic by construction: detection is a pure structural signal (script-ish
@@ -24,8 +24,8 @@
  * model describes whatever the file actually does — no tool/category vocabulary.
  */
 
-import type { ScriptSummarizer } from "@modelstat/companion-core/pipeline";
-import type { ToolCallDraft } from "@modelstat/companion-core/queue";
+import type { ScriptSummarizer } from "@modelstat/daemon-core/pipeline";
+import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
 import { redact, type ToolAction } from "@modelstat/core";
 import { detectScriptRefs, type LocalToolContext, resolveScriptPath } from "@modelstat/parsers";
 

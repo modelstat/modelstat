@@ -32,7 +32,7 @@ export const AGENTS = [
   "raw_sdk_anthropic",
   "raw_sdk_openai",
   "raw_sdk_google",
-  // Web chat UIs (Chrome-extension companion). Categorically distinct
+  // Web chat UIs (Chrome-extension daemon). Categorically distinct
   // from *_cli / *_desktop agents — same provider, different surface.
   "chatgpt_web",
   "claude_web",
@@ -165,11 +165,11 @@ export const DEFAULT_TAXONOMY_ROOTS: ReadonlyArray<{
   { slug: "tool_calls",   name: "Tool calls",   color: "#2dd4bf", description: "Tools invoked by agents — builtin (Bash, Read, …) and MCP (mcp:server/tool)." },
 ];
 
-/** Companion heartbeat phases. Both CLI and extension emit these via the
+/** Daemon heartbeat phases. Both CLI and extension emit these via the
  * same HeartbeatPayload schema (packages/core/src/schemas.ts → HeartbeatPayload).
  * Extension treats unused phases as "never reached" — still in the enum
  * so the contract stays uniform. */
-export const COMPANION_PHASES = [
+export const DAEMON_PHASES = [
   "starting",
   "discovering",
   "idle",
@@ -180,7 +180,7 @@ export const COMPANION_PHASES = [
   "offline",
   "error",
 ] as const;
-export type CompanionPhase = (typeof COMPANION_PHASES)[number];
+export type DaemonPhase = (typeof DAEMON_PHASES)[number];
 
 /** How confidently the classifier assigned a work_type / area. */
 export const CLASSIFICATION_CONFIDENCE = [

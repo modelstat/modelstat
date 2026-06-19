@@ -1,6 +1,6 @@
 # modelstat
 
-> **See every AI token your team spends.** Local companion for [modelstat](https://modelstat.ai) — reads the session logs your AI coding tools already write (Claude Code, Codex, Cursor, Cline, Continue, Aider, Windsurf, Zed, Copilot, Claude Desktop), tokenises events on-device, and uploads only metadata to your modelstat dashboard.
+> **See every AI token your team spends.** Local daemon for [modelstat](https://modelstat.ai) — reads the session logs your AI coding tools already write (Claude Code, Codex, Cursor, Cline, Continue, Aider, Windsurf, Zed, Copilot, Claude Desktop), tokenises events on-device, and uploads only metadata to your modelstat dashboard.
 
 **Your prompts never leave your machine.** The daemon uploads only token counts, model ids, timestamps, and a provider-assigned session id. Source is auditable on [GitHub](https://github.com/modelstat/modelstat/tree/main/apps/daemon).
 
