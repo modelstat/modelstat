@@ -27,7 +27,7 @@
 ```toml
 # Cargo.toml
 [dependencies]
-modelstat = "0.0.1"
+modelstat = "0.0.3"
 ```
 
 ## Guide: run a daemon locally, then point the SDK at it
@@ -104,13 +104,13 @@ let cfg = Config::new("msk_live_…", "raw_sdk_openai")
 
 Before any bytes leave the SDK process — in **every** mode — an in-process redaction floor scrubs secrets (provider keys, tokens, JWTs, PEM blocks, DB passwords, …), emails, and absolute home paths. "Raw" mode means *full turns*, not *leaked credentials* — the floor still runs. Tool calls ship only hashes, byte sizes, and allowlisted command verbs — never raw args, results, paths, or command text.
 
-## What's live today (v0.0.1)
+## What's live today (v0.0.3)
 
 Early release — the honest state, so nothing surprises you:
 
 - ✅ **SDK**: zero-latency capture, the redaction floor, batching/backpressure, and both transports are implemented and tested.
+- ✅ **Remote mode** is live end-to-end: `raw = false` ships the ≤320-char redacted excerpt to `/v1/ingest`, and `raw = true` ships full floor-redacted turns to `/v1/ingest/raw`, which summarizes them server-side and persists only the abstract (raw is never stored). Authenticate with an org ingest key (`msk_…`).
 - 🚧 **Daemon loopback ingest** (the receiving side of local-daemon mode) is in active development. The daemon already runs a local model and summarizes today; the SDK-push endpoint is landing next. **Until it ships, use remote mode** — the local-daemon API is stable, so your code won't change when it does.
-- 🚧 **`/v1/ingest/raw`** (server-side summarization for `raw = true`) is rolling out; `raw = false` against `/v1/ingest` works today for token/cost telemetry.
 
 Progress: https://github.com/modelstat/modelstat
 

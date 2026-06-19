@@ -65,10 +65,10 @@ pub struct Config {
     pub device_id: String,
     /// The **agent** label for every record — which AI tool/integration the
     /// user used (e.g. `raw_sdk_openai`, `raw_sdk_anthropic`, `raw_sdk_generic`;
-    /// an `AGENTS` value). Ships as the wire `tool`/`agent` fields.
+    /// an `AGENTS` value). Ships as the wire `agent` field.
     pub agent: String,
     /// This client build's version (≤40 chars). Ships as the wire
-    /// `client_version` field — the *producer's* version (daemon or SDK), not
+    /// `daemon_version` field — the *producer's* version (daemon or SDK), not
     /// the agent's.
     pub client_version: String,
     /// Bearer credential: an org-scoped ingest key (`msk_…`) or a device secret.

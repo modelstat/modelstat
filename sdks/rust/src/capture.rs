@@ -170,7 +170,7 @@ fn event_from_call(cfg: &Config, call: &LlmCall, seq: u64) -> (RawEvent, Vec<Too
         source_event_id: source_event_id.clone(),
         ts: call.started_at,
         kind: call.kind,
-        tool: cfg.agent.clone(),
+        agent: cfg.agent.clone(),
         provider: call.provider.clone(),
         model: call.model.clone(),
         session_id: call.session_id.clone(),
@@ -271,7 +271,7 @@ pub(crate) fn build_batch(
     IngestBatch {
         batch_id: wire::batch_id(&source_ids),
         device_id: cfg.device_id.clone(),
-        client_version: cfg.client_version.clone(),
+        daemon_version: cfg.client_version.clone(),
         events,
         tool_calls,
     }
@@ -297,7 +297,7 @@ mod tests {
 
         assert_eq!(batch.events.len(), 1);
         let ev = &batch.events[0];
-        assert_eq!(ev.tool, "raw_sdk_openai");
+        assert_eq!(ev.agent, "raw_sdk_openai");
         assert_eq!(ev.provider, "openai");
         let excerpt = ev.content_excerpt.as_ref().unwrap();
         assert!(

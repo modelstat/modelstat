@@ -1,0 +1,50 @@
+{
+  "name": "@modelstat/sdk",
+  "version": "0.0.1",
+  "description": "Privacy-first SDK for modelstat — wrap your backend LLM calls and ship redacted usage to a local daemon or the modelstat server, without touching live-request latency.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test \"dist/__tests__/*.test.js\"",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "llm",
+    "observability",
+    "telemetry",
+    "redaction",
+    "privacy",
+    "ai",
+    "analytics"
+  ],
+  "homepage": "https://modelstat.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/modelstat/modelstat"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^6.0.3"
+  }
+}

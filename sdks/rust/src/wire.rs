@@ -91,8 +91,8 @@ pub struct RawEvent {
     pub ts: DateTime<Utc>,
     pub kind: EventKind,
     /// The **agent** — which AI tool/integration produced the call (e.g.
-    /// `raw_sdk_openai`), not the provider. (The wire key is `tool`.)
-    pub tool: String,
+    /// `raw_sdk_openai`), not the provider. (The wire key is `agent`.)
+    pub agent: String,
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -155,9 +155,10 @@ pub struct ToolCallWire {
 pub struct IngestBatch {
     pub batch_id: String,
     pub device_id: String,
-    /// This SDK build's version — the producer/client version (daemon or SDK),
-    /// not the agent. Ships as the wire `client_version` field.
-    pub client_version: String,
+    /// This SDK build's version string (≤40 chars). Ships as the wire
+    /// `daemon_version` field — the server's name for the producing client's
+    /// version; an SDK is just another producer of the ingest contract.
+    pub daemon_version: String,
     pub events: Vec<RawEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallWire>,
@@ -237,7 +238,7 @@ mod tests {
             source_event_id: "evt_x".into(),
             ts: "2026-06-19T00:00:00Z".parse().unwrap(),
             kind: EventKind::AssistantMessage,
-            tool: "raw_sdk_openai".into(),
+            agent: "raw_sdk_openai".into(),
             provider: "openai".into(),
             model: Some("gpt-x".into()),
             session_id: "sess_1".into(),
@@ -254,7 +255,7 @@ mod tests {
         };
         let j: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(j["kind"], "assistant_message");
-        assert_eq!(j["tool"], "raw_sdk_openai");
+        assert_eq!(j["agent"], "raw_sdk_openai");
         assert_eq!(j["billing"], "api");
         assert_eq!(j["tokens"]["input"], 10);
         // Absent optionals must not serialize (additive wire contract).
