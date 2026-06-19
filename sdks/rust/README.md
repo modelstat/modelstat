@@ -1,70 +1,119 @@
-# modelstat (Rust SDK)
+# modelstat
 
-Privacy-first SDK for wrapping the LLM calls your backend already makes and
-shipping **redacted** usage to modelstat — without adding latency to live
-requests.
+**Wrap your backend's LLM calls and get spend + usage analytics — while your prompts stay on your own machine.**
 
-## How it works
+`modelstat` is a privacy-first Rust SDK. It captures the LLM calls your backend already makes and hands them to a **local modelstat daemon**, which **summarizes them on your machine with a local model** and ships only short, **redacted abstracts** to the modelstat analytics server. Raw prompts, completions, and tool arguments **never leave your infrastructure**.
 
-The SDK is *in* your request path, so it sees the exact prompt, completion,
-token usage, latency, and tool calls. But it must never slow a live request, so:
+```text
+   your backend                          your machine                       modelstat
+ ┌──────────────┐   loopback        ┌──────────────────────┐   HTTPS    ┌───────────────┐
+ │  ms.record() │ ───────────────▶  │   modelstat daemon   │ ─────────▶ │   analytics   │
+ │ (non-block)  │   raw stays here  │  • local model        │  redacted  │   dashboard   │
+ └──────────────┘                   │    → summarize        │  abstract  │  (spend, by   │
+        ▲                           │  • redact (PII/keys)  │   + tokens │  project/etc) │
+   real LLM call                    │  • batch + retry      │            └───────────────┘
+                                    └──────────────────────┘
+              ↑ raw prompts / completions / args never cross this line ↑
+```
 
-- **Hot path** (`Client::record`) does nothing but move your already-in-hand
-  call into a bounded in-memory buffer and return.
-- A **background worker** redacts, batches, and ships — entirely off the request
-  path. On buffer overflow the newest record is dropped and a counter
-  increments; your request is never blocked and memory never grows unbounded.
+## Why a local daemon?
+
+- **Privacy by construction.** Summarization happens **on your machine**. Only a bounded, redacted abstract (≤512 chars) + token/cost numbers are uploaded — never raw text. That's what gives you content-level attribution (by project, feature, work-type) *without* sending content to a vendor.
+- **No added request latency.** `record()` is a non-blocking move into an in-memory buffer; a background worker handles redaction, the daemon hand-off, batching, and shipping entirely off your request path. If the buffer fills, the newest record is dropped and a counter ticks up — your request is **never** blocked.
+- **One daemon, many producers.** Every service instance points at the same local daemon; the daemon owns the local model, durable retry, and the upload. Your app stays a thin, dependency-light client.
+
+## Install
+
+```toml
+# Cargo.toml
+[dependencies]
+modelstat = "0.0.1"
+```
+
+## Guide: run a daemon locally, then point the SDK at it
+
+### 1. Run the modelstat daemon
+
+The daemon is the open-source `modelstat` companion. It runs as a background service, downloads a small local model on first start, and listens on loopback for SDK traffic.
+
+```bash
+# zero-install: starts the background service + fetches the local model
+npx modelstat@latest
+
+# …or install it globally
+npm i -g modelstat && modelstat start
+
+modelstat status      # confirm it's running (and which loopback port it uses)
+```
+
+By default the daemon listens on `http://127.0.0.1:4319`.
+
+### 2. Point the SDK at the daemon
+
+Local-daemon mode is the **default** — supply your org ingest key and a source label and you're pointed at the local daemon already:
+
+```rust
+use modelstat::{Client, Config};
+
+let cfg = Config::new("msk_live_…", "raw_sdk_openai"); // defaults to the local daemon
+let ms = Client::new(cfg);
+```
+
+Changed the daemon's port? Set the mode explicitly (`mode` is a public field):
+
+```rust
+use modelstat::Mode;
+
+let mut cfg = Config::new("msk_live_…", "raw_sdk_openai");
+cfg.mode = Mode::LocalDaemon { url: "http://127.0.0.1:4319/v1/ingest".into() };
+```
+
+### 3. Record your calls
+
+After each real LLM call returns, hand the SDK what it already has:
+
+```rust
+use modelstat::{LlmCall, TokenUsage};
+
+ms.record(
+    LlmCall::new("openai", "session-or-trace-id")     // provider, grouping id
+        .model("gpt-x")
+        .tokens(TokenUsage { input: 800, output: 120, ..Default::default() })
+        .text("the prompt", "the completion"),         // raw — summarized locally, never uploaded raw
+);
+
+ms.shutdown().await;   // flush what's buffered on the way out
+```
+
+**What flows where:** your prompt + completion go to the **local daemon only**. The daemon summarizes them with its local model, redacts, and uploads just the abstract + token/cost metadata to modelstat. The `source` label (`raw_sdk_openai`) records which integration produced the calls; `session_id` groups calls into a conversation/session downstream.
 
 ## Modes
 
-- **Local daemon (default).** The SDK hands calls to a local **modelstat daemon**
-  over loopback. The daemon summarizes with its local Qwen model and ships only
-  redacted abstracts to the server — **raw text never leaves the machine.**
-- **Remote.** Ship directly to the modelstat server — no local daemon, no local
-  model. With `raw = true`, send full (still floor-redacted) turns for
-  **server-side** summarization.
-
-Default is the local daemon unless you explicitly configure remote.
-
-## Privacy floor
-
-Before any bytes leave the SDK process, an in-process **redaction floor** scrubs
-secrets (provider keys, tokens, JWTs, PEM blocks, DB passwords, …), emails, and
-absolute home paths. The floor runs **even in raw mode** — "raw" means *full
-turns*, not *leaked credentials*. Tool calls ship only hashes, byte sizes, and
-allowlisted command verbs — never raw args, results, paths, or command text.
-
-## Quickstart
+| Mode | Where summarization runs | What leaves your machine | Use when |
+|---|---|---|---|
+| **Local daemon** *(default)* | Your machine (daemon's local model) | Redacted abstract + metadata only | Maximum privacy; a daemon can run on/near the host |
+| **Remote** | modelstat server | Floor-redacted full turns (`raw=true`), or just the ≤320-char redacted excerpt (`raw=false`) | Serverless / can't run a local model; you accept server-side summarization |
 
 ```rust
-use modelstat::{Client, Config, LlmCall, TokenUsage};
-
-// Org-scoped ingest key binds traffic to your account.
+// Remote (no local daemon / no local model):
 let cfg = Config::new("msk_live_…", "raw_sdk_openai")
     .with_remote("https://api.modelstat.ai", /* raw */ true);
-let ms = Client::new(cfg);
-
-// ... after your real LLM call returns ...
-ms.record(
-    LlmCall::new("openai", "session-or-trace-id")
-        .model("gpt-x")
-        .tokens(TokenUsage { input: 800, output: 120, ..Default::default() })
-        .text("the prompt", "the completion"),
-);
-
-ms.shutdown().await; // flush on the way out
 ```
 
-`source` (the second `Config::new` argument, e.g. `raw_sdk_openai`) labels what
-produced the calls; `session_id` groups calls into a conversation/session
-downstream.
+## Privacy floor (always on)
 
-## Status
+Before any bytes leave the SDK process — in **every** mode — an in-process redaction floor scrubs secrets (provider keys, tokens, JWTs, PEM blocks, DB passwords, …), emails, and absolute home paths. "Raw" mode means *full turns*, not *leaked credentials* — the floor still runs. Tool calls ship only hashes, byte sizes, and allowlisted command verbs — never raw args, results, paths, or command text.
 
-Prototype. Implemented: zero-latency capture, the redaction floor, batching, the
-local-daemon and remote transports, and the wire contract. Not yet: durable
-on-disk retry for the remote path (the local **daemon** already owns durable
-retry in daemon mode), provider auto-wrappers (`wrap(client)`), and the
-`/v1/ingest/raw` server endpoint that backs `raw = true`.
+## What's live today (v0.0.1)
 
-License: Apache-2.0.
+Early release — the honest state, so nothing surprises you:
+
+- ✅ **SDK**: zero-latency capture, the redaction floor, batching/backpressure, and both transports are implemented and tested.
+- 🚧 **Daemon loopback ingest** (the receiving side of local-daemon mode) is in active development. The daemon already runs a local model and summarizes today; the SDK-push endpoint is landing next. **Until it ships, use remote mode** — the local-daemon API is stable, so your code won't change when it does.
+- 🚧 **`/v1/ingest/raw`** (server-side summarization for `raw = true`) is rolling out; `raw = false` against `/v1/ingest` works today for token/cost telemetry.
+
+Progress: https://github.com/modelstat/modelstat
+
+## License
+
+Apache-2.0.
