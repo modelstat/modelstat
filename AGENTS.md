@@ -50,42 +50,59 @@ Things to know:
 
 ## Releasing (npm + Homebrew)
 
-Releases are **manual** and **OTP-gated** — a live 2FA code from the
-maintainer's authenticator is required for every npm publish, so a leaked
-`NPM_TOKEN` alone can't ship a package. It's a two-phase flow: build is slow,
-but the publish must land inside the OTP's ~30s window, so they're separate
-runs.
+Releases are **zero-touch**. Every push to main runs `release`
+(`.github/workflows/release.yml`), which decides which publishable packages
+changed and what version each gets, then publishes to npm, tags, bumps main,
+and cuts a GitHub Release. No `release_type` input, no OTP, no two-phase split.
 
-**1. Build** (`.github/workflows/release-build.yml`) — bumps `package.json`,
-builds, and packs a tarball artifact. Publishes nothing; touches neither npm
-nor main. The run summary prints the run id you need for phase 2.
+**How the version is chosen** — `.github/scripts/release-plan.mjs` reads the
+Conventional Commits since each package's last tag (the **tag** is the source
+of truth for the last released version, not `package.json`):
 
-```sh
-gh workflow run release-build.yml -f package=agent -f release_type=patch
-# package: agent | mcp;  release_type: patch | minor | major | none
-# or -f version=X.Y.Z to pin an exact version
-```
+- `feat:` → minor · `fix:`/`perf:`/`refactor:`/`revert:` → patch ·
+  `!`/`BREAKING CHANGE` → major. `chore`/`docs`/`ci`/`test`/`style`/`build`
+  alone → **no release**.
+- **Pre-1.0 clamp**: while a package is `0.x`, a breaking change bumps the
+  minor (`0.1.3` → `0.2.0`), never auto-jumping to `1.0.0`.
+- **Dependency-aware**: a package is "changed" if its own dir *or any of its
+  transitive workspace deps* changed. A `fix(core):` in `packages/core`
+  therefore republishes `modelstat` and `@modelstat/agent-sdk` (both depend on
+  it) but not `@modelstat/mcp` (no workspace deps).
+- The publishable set is every workspace package with `private !== true`, so a
+  new public package is picked up automatically (only the `agent → agent-v` tag
+  alias is hand-maintained in the script).
 
-**2. Publish** (`.github/workflows/release-publish.yml`) — downloads that
-tarball and runs `npm publish … --otp=<code>` as its first step, then commits
-the bump to main → tags `<pkg>-v<version>` → GitHub Release → (agent) Homebrew
-tap bump.
+**Auth — npm Trusted Publishing (OIDC), no token.** The runner mints a
+short-lived OIDC token (`id-token: write`) that npm exchanges for a publish
+credential, and every publish carries provenance. There is **no `NPM_TOKEN`**.
+This requires a **one-time setup per package** on npmjs.com:
 
-```sh
-gh workflow run release-publish.yml -f build_run_id=<id> -f otp=<fresh-code>
-```
+> Package → Settings → **Trusted Publisher** → GitHub Actions →
+> org `modelstat`, repo `modelstat`, workflow `release.yml`.
 
-(or GitHub → Actions → the two "Release · …" workflows → Run workflow.)
+A brand-new package that isn't on npm yet needs **one bootstrap publish** (a
+manual `npm publish` from a maintainer, or org-level trusted publishing) before
+the OIDC flow can take over; after that it's hands-off.
+
+**Runners** — the agent (`modelstat`) builds on macOS (it bakes a universal,
+ad-hoc-signed `ModelstatTray.app` into its tarball, which needs full Xcode);
+the pure-JS packages build on ubuntu. The plan step picks the runner per
+package, so a merge that doesn't touch the agent never spins a macOS runner.
+
+To **skip** a release, use a non-releasing commit type (`chore:`, `docs:`, …).
+To **force** one, merge a `fix:`/`feat:` that touches the package (or trigger
+the workflow manually: GitHub → Actions → release → Run workflow).
 
 ### Observing a release
 
 ```sh
-gh run list --workflow=release-publish.yml --limit 3
+gh run list --workflow=release.yml --limit 3
 gh run watch <run-id> --exit-status
 ```
 
-Verify the artifact landed: `npm view modelstat version` (agent) and the
-GitHub Release/tag exist.
+The plan step prints a "Release plan" summary (what's shipping at what
+version). Verify the artifact landed: `npm view modelstat version` and the
+`<pkg>-v<version>` tag + GitHub Release exist.
 
 ### When a release fails
 
@@ -93,13 +110,17 @@ GitHub Release/tag exist.
 gh run view <run-id> --log-failed
 ```
 
-- npm `EOTP` → the code expired before the publish step ran (a slow runner).
-  Just re-run phase 2 with a fresh code — publish is idempotent (it skips a
-  version already on npm), so nothing double-publishes and main stays clean.
-- npm `ENEEDAUTH` / `E403` → `NPM_TOKEN` is missing or lacks publish rights:
-  `gh secret set NPM_TOKEN`. It does **not** need to be an Automation token —
-  any publish-capable token plus the OTP is enough.
-- The publish runs BEFORE anything touches main, so a failed publish leaves
+The whole flow is **idempotent** — re-running (push an empty commit, or
+re-run the job) converges:
+
+- npm publish skips a version already on npm, so nothing double-publishes.
+- The planner reads the **tag**, so if a run died after `npm publish` but
+  before tagging, the re-run recomputes the same version, skips the (already
+  published) npm step, and just finishes the tag/bump/release.
+- `403` / "Trusted Publisher" errors → the per-package trusted publisher above
+  isn't configured yet (or the package doesn't exist on npm — do the one
+  bootstrap publish).
+- The npm publish runs BEFORE anything touches main, so a failed publish leaves
   main untouched.
 - The Homebrew tap bump no-ops when `HOMEBREW_TAP_DISPATCH_TOKEN` is
   absent — a missing tap update with a green run usually means that.

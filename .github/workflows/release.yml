@@ -1,0 +1,217 @@
+name: release
+
+# Zero-touch, fully automated npm release. On every push to main this decides
+# which publishable packages changed and what version each should get — from
+# the Conventional Commits since that package's last tag (feat -> minor,
+# fix -> patch, !/BREAKING -> major; pre-1.0 breaking clamps to minor) — then
+# builds, publishes to npm, tags, bumps main, and cuts a GitHub Release for
+# each. No release_type input, no OTP, no two-phase split. See the planner at
+# .github/scripts/release-plan.mjs for the exact rules and the dependency-aware
+# change detection (a fix in packages/core republishes everything that depends
+# on it).
+#
+# AUTH — npm Trusted Publishing (OIDC). There is NO NPM_TOKEN. Each publishable
+# package must have THIS repo + THIS workflow registered as a trusted publisher
+# on npmjs.com (Package → Settings → Trusted Publisher), once per package. The
+# `id-token: write` permission lets the runner mint the short-lived OIDC token
+# npm exchanges for a publish credential, and publishes carry provenance
+# automatically. A brand-new package that isn't on npm yet needs one bootstrap
+# (a first manual `npm publish`, or org-level trusted publishing) before the
+# OIDC publish can take over.
+#
+# RUNNERS — the agent (`modelstat`) builds on macOS because it bakes a
+# universal, ad-hoc-signed ModelstatTray.app into its tarball (needs full
+# Xcode). The pure-JS packages build on ubuntu. The plan step picks the runner.
+#
+# IDEMPOTENT — re-running is safe: publish skips a version already on npm, and
+# the tag/bump/release steps are all guarded, so a run that died after npm but
+# before tagging converges on the next push (the planner reads the TAG, not
+# package.json, as the source of truth for the last released version).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - run: git fetch --tags --force --quiet
+      - name: Compute release plan
+        id: plan
+        run: |
+          MATRIX="$(node .github/scripts/release-plan.mjs)"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Plan: $MATRIX"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-plan
+          path: release-plan.json
+          retention-days: 3
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.matrix != '' && needs.plan.outputs.matrix != '[]'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      id-token: write # OIDC -> npm Trusted Publishing
+      contents: write # push the version-bump commit + tag, cut the Release
+    env:
+      # Slack release alerts (best-effort; no-op until SLACK_BOT_TOKEN is set).
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL || 'C0B1KQ183B6' }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    strategy:
+      fail-fast: false # one package failing must not abort the others
+      max-parallel: 1 # serialize the bump-commit pushes to main
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24 # npm 11 — Trusted Publishing needs npm >= 11.5.1
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+      - name: Ensure a Trusted-Publishing-capable npm
+        run: npm install -g npm@latest && npm --version
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-plan
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Set version to ${{ matrix.newVersion }}
+        env:
+          DIR: ${{ matrix.dir }}
+          VERSION: ${{ matrix.newVersion }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = process.env.DIR + "/package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            j.version = process.env.VERSION;
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+          '
+
+      - name: Build + stage the universal macOS tray (agent only)
+        if: matrix.isAgent
+        run: |
+          echo "toolchain: $(xcode-select -p)"; swift --version
+          TRAY_UNIVERSAL=1 bash apps/tray-mac/build-app.sh
+          rm -rf apps/agent-dev/vendor/ModelstatTray.app
+          mkdir -p apps/agent-dev/vendor
+          cp -R apps/tray-mac/build/ModelstatTray.app apps/agent-dev/vendor/ModelstatTray.app
+          echo "staged universal tray:"
+          lipo -archs apps/agent-dev/vendor/ModelstatTray.app/Contents/MacOS/modelstat-tray
+          codesign --verify --strict --verbose=2 apps/agent-dev/vendor/ModelstatTray.app
+
+      - name: Pack tarball (pnpm rewrites workspace deps; prepack builds here)
+        id: pack
+        env:
+          DIR: ${{ matrix.dir }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/release-dist"
+          ( cd "$DIR" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/release-dist" )
+          TARBALL="$(basename "$(ls "$GITHUB_WORKSPACE"/release-dist/*.tgz | head -1)")"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to npm (Trusted Publishing + provenance)
+        env:
+          NAME: ${{ matrix.name }}
+          VERSION: ${{ matrix.newVersion }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION already on npm — skipping publish (idempotent re-run)."
+          else
+            # Leading ./ so npm treats it as a tarball PATH, not an owner/repo
+            # git shorthand. No --otp / NODE_AUTH_TOKEN: OIDC handles auth.
+            npm publish "./release-dist/$TARBALL" --access public --provenance
+          fi
+
+      # Everything below mutates main / GitHub and runs ONLY after a successful
+      # (or idempotently-skipped) publish.
+      - name: Tag, bump main, and cut the GitHub Release
+        env:
+          NAME: ${{ matrix.name }}
+          VERSION: ${{ matrix.newVersion }}
+          TAG: ${{ matrix.tag }}
+          DIR: ${{ matrix.dir }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Commit the version bump back to main. [skip ci] + the fact that
+          # GITHUB_TOKEN pushes don't re-trigger workflows means this never
+          # re-releases. Rebase-retry survives a concurrent push (e.g. tray).
+          if ! git diff --quiet -- "$DIR/package.json"; then
+            git add "$DIR/package.json"
+            git commit -m "release: $NAME v$VERSION [skip ci]"
+            pushed=0
+            for i in 1 2 3; do
+              git fetch origin main --quiet
+              if git rebase origin/main && git push origin HEAD:main; then pushed=1; break; fi
+              git rebase --abort 2>/dev/null || true
+              sleep 3
+            done
+            [ "$pushed" = 1 ] || { echo "::error::failed to push version bump for $NAME"; exit 1; }
+          fi
+
+          # Tag the released commit (idempotent).
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already on origin."
+          else
+            git tag "$TAG" && git push origin "$TAG"
+          fi
+
+          # GitHub Release with the planner's computed notes (idempotent).
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+          else
+            jq -r --arg n "$NAME" '.[] | select(.name==$n) | .notes' release-plan.json > /tmp/notes.md
+            gh release create "$TAG" --title "$NAME $VERSION" \
+              --notes-file /tmp/notes.md --target "$(git rev-parse HEAD)"
+          fi
+
+      - name: Bump the Homebrew tap (agent only)
+        if: matrix.isAgent
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+          VERSION: ${{ matrix.newVersion }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_DISPATCH_TOKEN not set — skipping homebrew bump."
+            exit 0
+          fi
+          gh api --method POST -H "Accept: application/vnd.github+json" \
+            /repos/modelstat/homebrew-tap/dispatches \
+            -f "event_type=agent-released" \
+            -f "client_payload[version]=$VERSION"
+
+      - name: Slack — release published
+        if: success()
+        run: |
+          bash .github/scripts/slack-notify.sh "📦 *published* ${{ matrix.name }}@${{ matrix.newVersion }} (${{ matrix.bump }}) — $RUN_URL"
+
+      - name: Slack — release failed
+        if: failure()
+        run: |
+          bash .github/scripts/slack-notify.sh "🚨 *npm release FAILED* ${{ matrix.name }} to ${{ matrix.newVersion }} — logs $RUN_URL"
