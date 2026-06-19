@@ -14,8 +14,9 @@ name: release
 # package must have THIS repo + THIS workflow registered as a trusted publisher
 # on npmjs.com (Package → Settings → Trusted Publisher), once per package. The
 # `id-token: write` permission lets the runner mint the short-lived OIDC token
-# npm exchanges for a publish credential, and publishes carry provenance
-# automatically. A brand-new package that isn't on npm yet needs one bootstrap
+# npm exchanges for a publish credential. (No --provenance: npm provenance needs
+# a PUBLIC source repo and this one is private — re-add it once public.) A
+# brand-new package that isn't on npm yet needs one bootstrap
 # (a first manual `npm publish`, or org-level trusted publishing) before the
 # OIDC publish can take over.
 #
@@ -132,7 +133,7 @@ jobs:
           TARBALL="$(basename "$(ls "$GITHUB_WORKSPACE"/release-dist/*.tgz | head -1)")"
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
-      - name: Publish to npm (Trusted Publishing + provenance)
+      - name: Publish to npm (Trusted Publishing)
         env:
           NAME: ${{ matrix.name }}
           VERSION: ${{ matrix.newVersion }}
@@ -143,7 +144,10 @@ jobs:
           else
             # Leading ./ so npm treats it as a tarball PATH, not an owner/repo
             # git shorthand. No --otp / NODE_AUTH_TOKEN: OIDC handles auth.
-            npm publish "./release-dist/$TARBALL" --access public --provenance
+            # NOTE: no --provenance — npm provenance requires a PUBLIC source repo
+            # (this repo is private; it 422s otherwise). Trusted Publishing still
+            # authenticates fine. Re-add --provenance once the repo is public.
+            npm publish "./release-dist/$TARBALL" --access public
           fi
 
       # Everything below mutates main / GitHub and runs ONLY after a successful
