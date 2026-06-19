@@ -29,10 +29,10 @@
 
 This is the **public source** for everything that runs on your machine:
 
-- **[`modelstat`](apps/agent-dev/)** — the Node daemon that watches Claude Code / Codex / Cursor / Aider / Cline / Continue / Windsurf / Zed / Copilot log files, prices them, redacts client-side, and uploads metadata.
+- **[`modelstat`](apps/daemon/)** — the Node daemon that watches Claude Code / Codex / Cursor / Aider / Cline / Continue / Windsurf / Zed / Copilot log files, prices them, redacts client-side, and uploads metadata.
 - **[`@modelstat/mcp`](packages/mcp/)** — a Model Context Protocol server so Claude Desktop / Claude Code / Cursor / Cline / Continue / Zed can answer "how much did we spend on X?" in chat.
 - **[macOS menu-bar tray](apps/tray-mac/)** — native Swift status-bar app.
-- **[`@modelstat/agent-sdk`](packages/agent-sdk/)** — client-side redaction + compaction primitives. The boundary between your machine and our server.
+- **[`@modelstat/daemon-sdk`](packages/daemon-sdk/)** — client-side redaction + compaction primitives. The boundary between your machine and our server.
 
 **Why it's open.** The code that watches your files needs to be auditable. The hosted service that aggregates your team's metadata is closed-source; everything that runs on your laptop is right here. You can read it, fork it, build your own binaries, or pin a specific commit to install from source.
 
@@ -42,7 +42,7 @@ See [LICENSE](LICENSE) for usage terms.
 
 ## Getting modelstat (the fast path)
 
-You don't need this repo to *use* modelstat. One command installs the published agent, downloads the on-device summariser model, pairs your machine, and installs the background service:
+You don't need this repo to *use* modelstat. One command installs the published daemon, downloads the on-device summariser model, pairs your machine, and installs the background service:
 
 ```bash
 npx modelstat@latest
@@ -76,7 +76,7 @@ Individual components:
 ```bash
 # Node daemon
 pnpm --filter modelstat build
-node apps/agent-dev/dist/cli.mjs
+node apps/daemon/dist/cli.mjs
 
 # MCP server
 pnpm --filter @modelstat/mcp build
@@ -182,15 +182,15 @@ The wire-format types live in **[`packages/core/src/schemas.ts`](packages/core/s
 | `abstract` | One sentence (≤240 chars), generated **on-device** by a local LLM from already-redacted content | [`schemas.ts` → Segment](packages/core/src/schemas.ts), cap in [`pipeline/prompts.ts`](packages/companion-core/src/pipeline/prompts.ts) |
 | `redaction` | Per-segment **counts** of what was redacted (`{secret: 3, email: 1, …}`) — never the matched text | Segment |
 | `tags` | Structured labels (e.g. `[Mood: focused] [Mind: debugging]`) from the on-device cognition pass — closed vocabulary, no freeform text | [`pipeline/cognition.ts`](packages/companion-core/src/pipeline/cognition.ts) |
-| `processing` | Provenance: `{ redacted_by, redaction_policy, redaction_policy_version, redactions_applied, original_size_bytes, uploaded_size_bytes }` | [`agent-sdk/src/redact.ts → processingFor()`](packages/agent-sdk/src/redact.ts) |
+| `processing` | Provenance: `{ redacted_by, redaction_policy, redaction_policy_version, redactions_applied, original_size_bytes, uploaded_size_bytes }` | [`daemon-sdk/src/redact.ts → processingFor()`](packages/daemon-sdk/src/redact.ts) |
 
 ### What we never receive
 
 | Claim | Why it's true |
 |---|---|
 | **Your raw prompts** | The parsers never copy prompt text into the wire-format objects. The only text fields that can ship are `content_excerpt` (capped at 320 chars, pre-redacted) and `abstract` (capped at 240 chars, generated **after** redaction by an LLM running on your machine). Both are bounded by Zod max-length constraints in [`packages/core/src/schemas.ts`](packages/core/src/schemas.ts). |
-| **Your code** | Same path — code fragments that appear in tool inputs/outputs go through the same redaction layer (which catches API keys, paths, secrets) and are size-capped. The `paranoid` policy ([line 176-179 of `agent-sdk/src/redact.ts`](packages/agent-sdk/src/redact.ts)) drops every `stdout`/`stderr`/`tool_output`/`raw_text` blob entirely before upload. |
-| **API keys, tokens, passwords** | Stripped pre-upload by ~15 explicit regex patterns ([`packages/agent-sdk/src/redact.ts` lines 48-71](packages/agent-sdk/src/redact.ts)) plus a Shannon-entropy catcher for unknown high-entropy strings ([`packages/core/src/redact.ts` lines 41-82](packages/core/src/redact.ts)). |
+| **Your code** | Same path — code fragments that appear in tool inputs/outputs go through the same redaction layer (which catches API keys, paths, secrets) and are size-capped. The `paranoid` policy ([line 176-179 of `daemon-sdk/src/redact.ts`](packages/daemon-sdk/src/redact.ts)) drops every `stdout`/`stderr`/`tool_output`/`raw_text` blob entirely before upload. |
+| **API keys, tokens, passwords** | Stripped pre-upload by ~15 explicit regex patterns ([`packages/daemon-sdk/src/redact.ts` lines 48-71](packages/daemon-sdk/src/redact.ts)) plus a Shannon-entropy catcher for unknown high-entropy strings ([`packages/core/src/redact.ts` lines 41-82](packages/core/src/redact.ts)). |
 
 ### Defence-in-depth layers
 
@@ -199,17 +199,17 @@ Every byte that crosses the boundary has been through several independent filter
 | Layer | What it catches | Where |
 |---|---|---|
 | **Parser scope** | Parsers only read fields they declare an interest in; they don't grab whole files. | [`packages/parsers/src/`](packages/parsers/src/) |
-| **Regex pass (secrets)** | Anthropic / OpenAI / Google / AWS / GitHub / Slack / Stripe keys, JWTs, PEM blocks, `Bearer` headers, DB URLs with passwords, `ds_live_*` device tokens | [`packages/agent-sdk/src/redact.ts` lines 48-71](packages/agent-sdk/src/redact.ts) |
-| **Regex pass (PII)** | Emails, phone numbers, **public** IPv4 (private/loopback skipped on purpose), URL credentials (`https://user:pass@…`), absolute home paths (`/Users/`, `/home/`, `C:\Users\`) | [`packages/agent-sdk/src/redact.ts` lines 79-96](packages/agent-sdk/src/redact.ts) |
+| **Regex pass (secrets)** | Anthropic / OpenAI / Google / AWS / GitHub / Slack / Stripe keys, JWTs, PEM blocks, `Bearer` headers, DB URLs with passwords, `ds_live_*` device tokens | [`packages/daemon-sdk/src/redact.ts` lines 48-71](packages/daemon-sdk/src/redact.ts) |
+| **Regex pass (PII)** | Emails, phone numbers, **public** IPv4 (private/loopback skipped on purpose), URL credentials (`https://user:pass@…`), absolute home paths (`/Users/`, `/home/`, `C:\Users\`) | [`packages/daemon-sdk/src/redact.ts` lines 79-96](packages/daemon-sdk/src/redact.ts) |
 | **Entropy catcher** | Any ≥32-char token with Shannon entropy ≥ 3.6 bits/char (unknown API-key shapes) | [`packages/core/src/redact.ts` lines 41-82](packages/core/src/redact.ts) |
 | **On-device NER** | Person names, organisation names, locations — via a quantised model running locally through `@huggingface/transformers` (WebGPU in the browser, CPU in Node). Optional peer dep; if missing, the regex layer stands alone. | [`packages/companion-core/src/redact/privacy-filter.ts`](packages/companion-core/src/redact/privacy-filter.ts) |
 | **Length caps** | Hard upper bounds on every textual wire field, enforced by Zod | [`packages/core/src/schemas.ts`](packages/core/src/schemas.ts) |
-| **Policy gate** | The `paranoid` policy drops the entire `stdout`/`stderr`/`tool_output`/`raw_text` family of fields rather than redact them | [`packages/agent-sdk/src/redact.ts` lines 176-179](packages/agent-sdk/src/redact.ts) |
-| **Provenance stamp** | Every upload carries which policy ran, which version, how many redactions were applied, bytes-before / bytes-after — visible to you in the dashboard | [`packages/agent-sdk/src/redact.ts → processingFor()`](packages/agent-sdk/src/redact.ts) |
+| **Policy gate** | The `paranoid` policy drops the entire `stdout`/`stderr`/`tool_output`/`raw_text` family of fields rather than redact them | [`packages/daemon-sdk/src/redact.ts` lines 176-179](packages/daemon-sdk/src/redact.ts) |
+| **Provenance stamp** | Every upload carries which policy ran, which version, how many redactions were applied, bytes-before / bytes-after — visible to you in the dashboard | [`packages/daemon-sdk/src/redact.ts → processingFor()`](packages/daemon-sdk/src/redact.ts) |
 
 ### Policies
 
-Four built-in policies, defined in [`packages/agent-sdk/src/redact.ts` lines 19-26](packages/agent-sdk/src/redact.ts):
+Four built-in policies, defined in [`packages/daemon-sdk/src/redact.ts` lines 19-26](packages/daemon-sdk/src/redact.ts):
 
 | Policy | Behaviour |
 |---|---|
@@ -223,7 +223,7 @@ Four built-in policies, defined in [`packages/agent-sdk/src/redact.ts` lines 19-
 If you want to verify the wire format end-to-end, the three things to read are:
 
 1. **[`packages/core/src/schemas.ts`](packages/core/src/schemas.ts)** — every type that can be uploaded. If a field isn't here, the uploader can't ship it.
-2. **[`packages/agent-sdk/src/redact.ts`](packages/agent-sdk/src/redact.ts)** — the redaction policies + patterns.
+2. **[`packages/daemon-sdk/src/redact.ts`](packages/daemon-sdk/src/redact.ts)** — the redaction policies + patterns.
 3. **[`packages/companion-core/src/http/index.ts`](packages/companion-core/src/http/index.ts)** — the single function that calls `fetch()` to our server. Everything that leaves your machine passes through here.
 
 You can also run `npx modelstat@latest stats` to print, locally, a summary of what's been uploaded — token counts and redaction counters straight from the same provenance metadata the server sees.
@@ -237,11 +237,11 @@ Security disclosures: please read [SECURITY.md](SECURITY.md) and email `security
 ```
 modelstat/
 ├── apps/
-│   ├── agent-dev/          Node companion CLI (modelstat)
+│   ├── daemon/          Node companion CLI (modelstat)
 │   └── tray-mac/           macOS menu-bar app (Swift)
 ├── packages/
-│   ├── agent-sdk/          Redact + compact primitives (@modelstat/agent-sdk)
-│   ├── companion-core/     Shared pipeline / queue / HTTP for the agent
+│   ├── daemon-sdk/          Redact + compact primitives (@modelstat/daemon-sdk)
+│   ├── companion-core/     Shared pipeline / queue / HTTP for the daemon
 │   ├── core/               Shared enums + Zod schemas (wire format lives here)
 │   ├── mcp/                Model Context Protocol server (@modelstat/mcp)
 │   ├── parsers/            Per-tool log parsers (Claude Code / Codex / Cursor / ...)

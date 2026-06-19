@@ -1,7 +1,7 @@
 /**
- * Install/uninstall the modelstat agent as a background service.
+ * Install/uninstall the modelstat daemon as a background service.
  *
- * macOS → launchd user agent at ~/Library/LaunchAgents/ai.modelstat.agent.plist
+ * macOS → launchd user agent at ~/Library/LaunchAgents/ai.modelstat.daemon.plist
  * Linux → systemd --user unit at ~/.config/systemd/user/modelstat.service
  *
  * We copy the running CLI bundle to a stable path (~/.modelstat/bin) so
@@ -27,7 +27,7 @@ import { homedir, platform, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const SERVICE_LABEL = "ai.modelstat.agent";
+export const SERVICE_LABEL = "ai.modelstat.daemon";
 export const SYSTEMD_UNIT = "modelstat"; // → modelstat.service
 
 function home(): string {
@@ -87,7 +87,7 @@ export function setupRuntime(): string {
 }
 
 /** Pinned fallback if we can't read the version from the source tree
- * (kept in sync with apps/agent-dev/package.json's node-llama-cpp range). */
+ * (kept in sync with apps/daemon/package.json's node-llama-cpp range). */
 const NODE_LLAMA_CPP_FALLBACK_VERSION = "3.18.1";
 
 /** Read node-llama-cpp's installed version from the package we're
@@ -133,7 +133,7 @@ function sourceLlamaVersion(sourceCli: string): string | null {
  * symlinked store — exactly the kind of brittle wiring that left this
  * machine without a summariser. `npm install` resolves the closure and
  * the right platform binary for us. This is the single place we shell
- * out to npm; everything else the agent needs is inlined in the bundle.
+ * out to npm; everything else the daemon needs is inlined in the bundle.
  *
  * Runs from inside `installBundle()`, i.e. on every `connect` / service
  * refresh — straight out of the freshly-unpacked npm tree, where npm is
@@ -342,7 +342,7 @@ function writeSystemdUnit(cliPath: string): string {
   const unitPath = systemdUnitPath();
   mkdirSync(dirname(unitPath), { recursive: true });
   const unit = `[Unit]
-Description=modelstat agent
+Description=modelstat daemon
 Documentation=https://modelstat.ai
 After=network-online.target
 Wants=network-online.target
@@ -419,7 +419,7 @@ export function installService(): { path: string; logs: string } {
     return { path: systemdUnitPath(), logs: logDir() };
   }
   throw new Error(
-    `Service installation isn't supported on ${p}. Run 'modelstat start' manually to keep the agent running.`,
+    `Service installation isn't supported on ${p}. Run 'modelstat start' manually to keep the daemon running.`,
   );
 }
 
@@ -512,7 +512,7 @@ export async function bundledTrayAppPath(progress?: TrayBuildProgress): Promise<
   const candidates = [
     // Pre-built .app — CI with codesigning drops one here.
     join(here, "..", "vendor", "ModelstatTray.app"),
-    // Local dev layout: apps/agent-dev/src/service.ts → ../../tray-mac/build/ModelstatTray.app
+    // Local dev layout: apps/daemon/src/service.ts → ../../tray-mac/build/ModelstatTray.app
     join(here, "..", "..", "tray-mac", "build", "ModelstatTray.app"),
   ];
   for (const c of candidates) {

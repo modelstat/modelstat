@@ -24,8 +24,8 @@ within **30 days** for high-severity issues. Critical vulnerabilities
 
 **In scope** — anything in this repository, plus the published artifacts:
 
-- `@modelstat/agent` (npm)
-- `@modelstat/agent-sdk` (npm)
+- `modelstat` (npm)
+- `@modelstat/daemon-sdk` (npm)
 - `@modelstat/mcp` (npm)
 - The `modelstat-tray` macOS app
 - `install.modelstat.ai` shell installer
@@ -40,9 +40,9 @@ with a `[service]` tag so they're routed correctly.
 - Code execution triggered by malformed tool log files (JSONL, SQLite,
   etc.) that the parsers ingest.
 - Any path by which prompts, file contents, or credentials leak past
-  the client-side redactor (`packages/agent-sdk/`) into an upload.
+  the client-side redactor (`packages/daemon-sdk/`) into an upload.
 - Privilege escalation or persistence abuse in the macOS tray launch
-  agent.
+  daemon.
 - Supply-chain risks in the npm-published artifacts — build-time
   script execution, typosquat shadowing, etc.
 
@@ -50,7 +50,7 @@ with a `[service]` tag so they're routed correctly.
 
 - Redaction patterns missing a new secret shape — that's a routine
   improvement. Open a PR adding the pattern to
-  `packages/agent-sdk/src/redact.ts` + a test case.
+  `packages/daemon-sdk/src/redact.ts` + a test case.
 - The bearer token `npx modelstat@latest` writes to your local config
   directory. It's stored unencrypted on purpose — rotate it via
   `npx modelstat@latest` if you suspect it's been exposed. It's scoped
@@ -68,7 +68,7 @@ reference letters.
 
 - The release workflow (`.github/workflows/release.yml`) publishes
   npm packages with provenance statements — see
-  `@modelstat/agent`'s npm page for verification.
+  `modelstat`'s npm page for verification.
 
 ## Canonical contact
 

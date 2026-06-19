@@ -1,12 +1,12 @@
 /**
- * Redaction helpers — the wire privacy floor. The agent runs this BEFORE any
+ * Redaction helpers — the wire privacy floor. The daemon runs this BEFORE any
  * content hits the wire. The server may apply its own defence-in-depth checks
  * independently.
  *
  * Goal: high recall on secrets + PII; minimal false positives on code.
  *
  * The secret catalogue lives in `./redact-floor` (the single source of truth,
- * shared with the agent-sdk redactor so the two can't drift). A signed,
+ * shared with the daemon-sdk redactor so the two can't drift). A signed,
  * additive `policies` bundle may *union in* extra patterns via
  * {@link setRemoteRedactionPatterns}; that augment runs AFTER the baseline and
  * can only ADD redactions. The baseline floor here is unconditional and can

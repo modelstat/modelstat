@@ -358,14 +358,14 @@ export const DeviceEnrollment = z.object({
 export type DeviceEnrollment = z.infer<typeof DeviceEnrollment>;
 
 /**
- * Self-register flow (POST /v1/devices/self-register). The agent generates
+ * Self-register flow (POST /v1/devices/self-register). The daemon generates
  * an identity client-side (UUIDv7 + optional ed25519 keypair) and registers
  * itself without any prior auth. Server returns a one-time `device_secret`
- * the agent uses for subsequent calls, plus a 3-word `claim_code` the
+ * the daemon uses for subsequent calls, plus a 3-word `claim_code` the
  * human will use to attach the device to their account.
  */
 export const DeviceSelfRegister = z.object({
-  /** Agent-generated UUIDv7 — must pass shape + recent-timestamp checks. */
+  /** Daemon-generated UUIDv7 — must pass shape + recent-timestamp checks. */
   device_uuid: z.string(),
   /** Base64-encoded ed25519 public key, exactly 32 raw bytes. Optional
    * but recommended (used for sender-constrained tokens / DPoP later). */
@@ -402,7 +402,7 @@ export type DeviceClaimRequest = z.infer<typeof DeviceClaimRequest>;
  * which policy version. If absent on an upload, the service applies the
  * account's default policy and stamps its own metadata.
  *
- * See @modelstat/agent for the canonical client implementation.
+ * See the `modelstat` daemon for the canonical client implementation.
  */
 export const ProcessingMetadata = z.object({
   redacted_by: z.string().max(120).optional(),

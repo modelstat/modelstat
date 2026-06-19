@@ -1,6 +1,6 @@
 /**
- * Periodic heartbeat to /v1/agent/heartbeat. Same endpoint the CLI
- * agent uses — bumps `agentLastHeartbeatAt` so:
+ * Periodic heartbeat to /v1/daemon/heartbeat. Same endpoint the CLI
+ * daemon uses — bumps `agentLastHeartbeatAt` so:
  *   - the /connect page can flip from "approved" → "heartbeat received"
  *     and redirect the user to /dashboard/devices
  *   - the Devices page dot shows online/stale/offline correctly
@@ -8,7 +8,7 @@
  * Fires immediately on connect and again every 60 s.
  */
 
-import { DEFAULT_API_URL, AGENT_VERSION } from "@/common/config.js";
+import { DEFAULT_API_URL, DAEMON_VERSION } from "@/common/config.js";
 import { createLogger } from "@/common/logger.js";
 import { db, getSetting } from "@/storage/db.js";
 import { getBearerToken, getDeviceId } from "./auth.js";
@@ -23,7 +23,7 @@ async function attempt(token: string, deviceId: string, apiUrl: string): Promise
   // not "idle".
   const syncEnabled = await getSetting<boolean>("syncEnabled", true);
   try {
-    const res = await fetch(`${apiUrl}/v1/agent/heartbeat`, {
+    const res = await fetch(`${apiUrl}/v1/daemon/heartbeat`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -38,7 +38,7 @@ async function attempt(token: string, deviceId: string, apiUrl: string): Promise
         queue_size: queueSize,
         stats: {},
         last_event_at: null,
-        companion_version: AGENT_VERSION,
+        companion_version: DAEMON_VERSION,
       }),
     });
     if (res.ok) return { ok: true };

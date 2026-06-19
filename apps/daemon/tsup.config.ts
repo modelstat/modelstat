@@ -7,7 +7,7 @@ import { defineConfig } from "tsup";
 // previous approach — runtime parent-walk for package.json — broke
 // the moment we copied dist/cli.mjs to ~/.modelstat/bin/ without a
 // sibling package.json (which is always). Three modules used to
-// hardcode AGENT_VERSION as a string constant and inevitably
+// hardcode DAEMON_VERSION as a string constant and inevitably
 // drifted apart across releases (cli.ts said "0.0.1", scan.ts said
 // "0.0.23", daemon.ts walked the disk). Now they all use the same
 // `__MODELSTAT_VERSION__` macro that esbuild substitutes at build
@@ -16,7 +16,7 @@ const __pkgPath = join(dirname(fileURLToPath(import.meta.url)), "package.json");
 const __pkgVersion = JSON.parse(readFileSync(__pkgPath, "utf8")).version;
 
 /**
- * Bundles the agent CLI into a single self-contained `dist/cli.mjs`
+ * Bundles the daemon CLI into a single self-contained `dist/cli.mjs`
  * with a Node shebang.
  *
  * `installBundle()` in service.ts copies the .mjs to
@@ -94,6 +94,6 @@ export default defineConfig({
   // `__MODELSTAT_VERSION__` and reads it as a string literal at
   // bundle time — no runtime file-walk, no drift across modules.
   define: {
-    __MODELSTAT_VERSION__: JSON.stringify(`agent-${__pkgVersion}`),
+    __MODELSTAT_VERSION__: JSON.stringify(`daemon-${__pkgVersion}`),
   },
 });

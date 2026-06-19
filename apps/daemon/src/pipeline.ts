@@ -1,18 +1,18 @@
 /**
  * CLI-side pipeline binding — wires the summariser/embedder pair the
- * agent runs and hands them to companion-core.
+ * daemon runs and hands them to companion-core.
  *
  * ONE summariser path, no fallback: the bundled `node-llama-cpp`
- * runtime. The agent ships `node-llama-cpp` as a real dependency and
+ * runtime. The daemon ships `node-llama-cpp` as a real dependency and
  * stages it (plus this platform's prebuilt binary) beside the installed
- * bundle at install time — see apps/agent-dev/src/service.ts
+ * bundle at install time — see apps/daemon/src/service.ts
  * `installNativeRuntime`. A ~2.7 GB Qwen3.5-4B GGUF is lazy-downloaded
  * to `~/.modelstat/models/` on first scan. This runs on every supported
  * machine (macOS arm64/x64, Linux) with no external runtime to install,
  * configure, or keep alive — no Ollama, no separate daemon, no probing.
  *
  * **No silent no-op fallback.** Summarisation is core product output:
- * if the native runtime can't load on this machine the agent throws at
+ * if the native runtime can't load on this machine the daemon throws at
  * startup so the user sees the failure immediately, instead of happily
  * uploading thousands of useless "100 turns on claude_code" abstracts
  * that look fine in the database but tell them nothing.
@@ -98,15 +98,15 @@ async function bundledAdapters(): Promise<PipelineAdapters> {
 async function getAdapters(): Promise<PipelineAdapters> {
   if (adapters) return adapters;
   // Single summariser path: the bundled node-llama-cpp runtime, staged
-  // beside the bundle at install time (apps/agent-dev/src/service.ts
+  // beside the bundle at install time (apps/daemon/src/service.ts
   // `installNativeRuntime`). Require the native binding to load; if it
-  // can't, throw so the user sees the problem at agent start rather than
+  // can't, throw so the user sees the problem at daemon start rather than
   // discovering it three days later via a wall of garbage abstracts.
   try {
     await import("node-llama-cpp");
   } catch (err) {
     throw new Error(
-      "modelstat agent can't start: the bundled summariser (node-llama-cpp) failed to " +
+      "modelstat daemon can't start: the bundled summariser (node-llama-cpp) failed to " +
         "load. Re-run `modelstat connect` (or `npm i -g modelstat`) so the native runtime " +
         `is re-staged beside the bundle. Underlying error: ${(err as Error).message}`,
     );
@@ -191,7 +191,7 @@ export async function enrichScripts(
 }
 
 /**
- * Preflight check — exercise the summariser end-to-end at agent
+ * Preflight check — exercise the summariser end-to-end at daemon
  * startup so a broken adapter (missing native binary, bad or truncated
  * model file) surfaces NOW instead of being noticed three days later
  * when the user opens the dashboard and sees a thousand "100 turns on

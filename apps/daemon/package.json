@@ -72,6 +72,6 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/modelstat/modelstat.git",
-    "directory": "apps/agent-dev"
+    "directory": "apps/daemon"
   }
 }

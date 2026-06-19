@@ -1,6 +1,6 @@
 /**
  * Local processing-pipeline version — the marker that lets a new
- * agent build force a re-scan of every previously-uploaded session.
+ * daemon build force a re-scan of every previously-uploaded session.
  *
  * Why we need it: file cursors in `state.cursor` track "I've uploaded
  * up to byte N of this JSONL", so a normal restart only ships new

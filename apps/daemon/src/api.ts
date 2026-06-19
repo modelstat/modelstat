@@ -99,7 +99,7 @@ export async function rotateDeviceSecret(currentSecret: string): Promise<{
 
 export async function reportDiscovery(report: DiscoveryReport): Promise<void> {
   const bearer = state.bearer;
-  if (!bearer) throw new Error("agent not enrolled — run `register` first");
+  if (!bearer) throw new Error("daemon not enrolled — run `register` first");
   const res = await request(`${state.apiUrl}/v1/devices/discovery`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
@@ -197,7 +197,7 @@ let _ingest: IngestClient | null = null;
 
 function ingestClient(): IngestClient {
   if (_ingest) return _ingest;
-  const logger = createLogger("agent.ingest");
+  const logger = createLogger("daemon.ingest");
   _ingest = new IngestClient({
     apiUrl: state.apiUrl,
     auth: {

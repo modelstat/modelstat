@@ -246,13 +246,13 @@ final class TrayController: NSObject {
   //
   // The tray no longer spawns `start --force` blindly. Blind --force
   // SIGTERMs whatever live daemon owns the singleton lock (see
-  // apps/agent-dev/src/lock.ts), so two briefly-coexisting trays
+  // apps/daemon/src/lock.ts), so two briefly-coexisting trays
   // (kickstart -k racing a reinstall, KeepAlive respawn overlap) had
   // their daemons kill each other in a loop — observed 2026-06-12
   // ending with zero daemons and nothing restarting them. Instead,
   // every (re)start funnels through ensureDaemon(), which asks the CLI
   // `_daemon-health` (decision logic + tests live in
-  // apps/agent-dev/src/supervise.ts):
+  // apps/daemon/src/supervise.ts):
   //   adopt   → a live, heartbeating daemon owns the lock — leave it.
   //   spawn   → no live owner — plain `start` (a dead owner's stale
   //             lock is reclaimed without --force by lock.ts).

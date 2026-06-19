@@ -1,8 +1,8 @@
 packages:
-  - "apps/agent-dev"
+  - "apps/daemon"
   - "apps/extension"
   - "packages/adapters-protocol"
-  - "packages/agent-sdk"
+  - "packages/daemon-sdk"
   - "packages/companion-core"
   - "packages/core"
   - "packages/mcp"

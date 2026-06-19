@@ -17,7 +17,7 @@
  *
  *   Ollama (CLI/tray) → "qwen3:4b"                     — 4B params, ~2.5 GB q4
  *   WebLLM (browser)  → "Qwen3-4B-Instruct-q4f16_1-MLC" — same family, browser-quantised
- *   Bundled llama.cpp → Qwen3.5-4B-Q4_K_M.gguf          — agent-dev fallback when Ollama absent
+ *   Bundled llama.cpp → Qwen3.5-4B-Q4_K_M.gguf          — daemon-dev fallback when Ollama absent
  *   Prompt API        → n/a (Chrome picks its built-in Gemini Nano when available)
  *
  * Why the bump from Qwen3.5-0.8B → Qwen3-4B (May 2026):

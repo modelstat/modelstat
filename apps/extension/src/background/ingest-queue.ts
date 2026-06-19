@@ -10,7 +10,7 @@
 
 import { IngestBatch, type RawEvent } from "@modelstat/core/schemas";
 import {
-  AGENT_VERSION,
+  DAEMON_VERSION,
   DEFAULT_API_URL,
   FORCE_SHIP_THRESHOLD,
   INGEST_BATCH_INTERVAL_MS,
@@ -143,7 +143,7 @@ export async function flushQueue(opts?: {
   const batch = IngestBatch.parse({
     batch_id: ulid(),
     device_id: deviceId,
-    companion_version: AGENT_VERSION,
+    companion_version: DAEMON_VERSION,
     events,
     segments,
   });

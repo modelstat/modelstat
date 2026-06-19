@@ -56,7 +56,7 @@ export function pipe<T>(
   };
 } {
   const policy = opts.policy ?? "strict-pii-v2";
-  const agentId = opts.agentId ?? "modelstat-agent-sdk";
+  const agentId = opts.agentId ?? "modelstat-daemon-sdk";
   const before = JSON.stringify(input).length;
 
   const r = redact(input, policy);

@@ -1,15 +1,15 @@
 /**
- * Resolve the modelstat agent state. Single source of truth: the agent
+ * Resolve the modelstat daemon state. Single source of truth: the daemon
  * CLI's `modelstat paths --json` output, which prints the real Conf
  * store path regardless of whether the CLI was installed via npm or
- * Homebrew. That guarantees MCP reads from the same file the agent
+ * Homebrew. That guarantees MCP reads from the same file the daemon
  * writes to — no duplicate device identity, same bearer.
  *
  * Fallback chain (most trusted first):
  *   1. `modelstat paths --json` on PATH
  *   2. MODELSTAT_STATE_FILE env var (explicit override)
  *   3. Heuristic: reproduce Conf's default path for projectName
- *      "modelstat-agent-dev" on macOS / Linux
+ *      "modelstat-daemon" on macOS / Linux
  *
  * If all fall through to "no bearer", tools surface a friendly
  * "run npx modelstat@latest" error.
@@ -30,11 +30,11 @@ export type State = {
   statePath: string;
 };
 
-/** Compute Conf's default path for the agent. Mirrors env-paths logic
+/** Compute Conf's default path for the daemon. Mirrors env-paths logic
  * so we don't take a runtime dep. If Conf's algorithm ever changes,
  * prefer `modelstat paths --json` output (which calls the real Conf). */
 function heuristicStatePath(): string {
-  const name = "modelstat-agent-dev-nodejs";
+  const name = "modelstat-daemon-nodejs";
   const home = homedir();
   if (platform() === "darwin") {
     return join(home, "Library", "Preferences", name, "config.json");
@@ -64,7 +64,7 @@ function askCliForState(): { statePath: string; apiUrl?: string } | null {
 }
 
 export function loadState(): State {
-  const envApi = process.env.MODELSTAT_API_URL ?? process.env.AGENT_API_URL;
+  const envApi = process.env.MODELSTAT_API_URL ?? process.env.DAEMON_API_URL;
   const cliInfo = askCliForState();
   const overridePath = process.env.MODELSTAT_STATE_FILE;
   const statePath = overridePath ?? cliInfo?.statePath ?? heuristicStatePath();
@@ -79,7 +79,7 @@ export function loadState(): State {
   }
 
   // Field names in Conf's store match the AgentState interface in
-  // apps/agent-dev/src/config.ts: bearerToken, deviceId, deviceUuid,
+  // apps/daemon/src/config.ts: bearerToken, deviceId, deviceUuid,
   // userEmail, apiUrl (may be "" post-0.0.8 migration).
   const rec = stored as Record<string, unknown>;
   return {

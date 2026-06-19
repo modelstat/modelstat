@@ -7,7 +7,7 @@
  * (c) produce exactly the same events, in the same order, as a
  *     non-streaming parse.
  * This is what keeps a full-corpus reprocess (cursor wipe) at bounded
- * memory in the agent's scan loop — see apps/agent-dev/src/scan.ts.
+ * memory in the agent's scan loop — see apps/daemon/src/scan.ts.
  */
 
 import assert from "node:assert/strict";

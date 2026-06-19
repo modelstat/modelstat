@@ -30,10 +30,10 @@ import {
 } from "./pipeline.js";
 
 /** Substituted by tsup's `define` (see tsup.config.ts) — a string
- * literal in the bundle; falls back to "agent-dev" when run unbundled
+ * literal in the bundle; falls back to "daemon-dev" when run unbundled
  * (tsx / tests), where the define isn't applied. */
-const AGENT_VERSION =
-  typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "agent-dev";
+const DAEMON_VERSION =
+  typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "daemon-dev";
 // Shared cross-companion batch size — same value the extension uses, so
 // both sides present an identical rate-limit profile to the ingest endpoint.
 const BATCH_MAX_EVENTS = INGEST_BATCH_MAX_EVENTS;
@@ -108,7 +108,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
   morePending: boolean;
 }> {
   const deviceId = state.deviceId;
-  if (!deviceId) throw new Error("agent not enrolled — run `register` first");
+  if (!deviceId) throw new Error("daemon not enrolled — run `register` first");
 
   // Each job streams its file's events into the provided sink in small
   // chunks (ParserContext.onEvents) instead of returning them all at
@@ -218,7 +218,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
   // NOT been advanced yet. Cursor advances only when the batch
   // containing their events has been confirmed uploaded — so a
   // mid-scan network failure means the next run re-parses the same
-  // files and tries again (idempotent from the agent's side).
+  // files and tries again (idempotent from the daemon's side).
   let pendingCursors: Array<{ path: string; cs: Awaited<ReturnType<typeof quickChecksum>> }> = [];
   // Segments accumulated per session across the whole run. A big file
   // can split a session across BATCH_MAX_EVENTS boundaries; the title
@@ -293,7 +293,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
     const batch: IngestBatch = {
       batch_id: batchId(),
       device_id: deviceId!,
-      companion_version: AGENT_VERSION,
+      companion_version: DAEMON_VERSION,
       events,
       segments,
       tool_calls: attachSegmentIdsByMap(toolCallBuffer, callSegmentByEvent),

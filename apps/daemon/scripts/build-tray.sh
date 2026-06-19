@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bundle the macOS tray sources alongside the agent's npm build so
+# Bundle the macOS tray sources alongside the daemon's npm build so
 # `pnpm pack` ships the Swift package plus the install script.
 #
 # These sources are the FALLBACK, not the primary install path. The

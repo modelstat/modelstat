@@ -16,7 +16,7 @@
  * dependency in the agent CLI. Imports are dynamic so a companion that
  * doesn't have the package installed (e.g. the bundled service when
  * node_modules isn't beside the bundle) silently falls through to the
- * next adapter in the chain — see apps/agent-dev/src/pipeline.ts.
+ * next adapter in the chain — see apps/daemon/src/pipeline.ts.
  */
 
 import { existsSync } from "node:fs";

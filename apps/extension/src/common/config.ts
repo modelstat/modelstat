@@ -41,7 +41,7 @@ export const SSE_FLUSH_INTERVAL_MS = 50;
 export const EAGER_FINALISE_QUIET_MS = 1_500; // finalise a stream-ended msg this soon after its last update
 export const FIRST_IMPRESSION_QUIET_MS = 2_000; // debounce before the eager finalise+flush kick
 
-export const AGENT_VERSION = `modelstat-extension@${chrome.runtime.getManifest().version}`;
+export const DAEMON_VERSION = `modelstat-extension@${chrome.runtime.getManifest().version}`;
 
 // Bridge between MAIN and ISOLATED content script worlds. Random per
 // page-load to prevent external sites from spoofing our messages.

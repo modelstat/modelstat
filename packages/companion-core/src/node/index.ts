@@ -6,7 +6,7 @@
  * adapters) while keeping the same contracts as the browser side.
  */
 // Back-compat alias — callers that imported SqliteQueueStore still
-// work without a rename. Scheduled for removal once apps/agent-dev
+// work without a rename. Scheduled for removal once apps/daemon
 // ships a release using FileQueueStore directly.
 export { FileQueueStore, FileQueueStore as SqliteQueueStore } from "./file-queue-store.js";
 export {

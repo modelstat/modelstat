@@ -298,7 +298,7 @@ function stripThinking(text) {
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
 async function loadModel() {
-  // Resolve through agent-dev's node_modules where node-llama-cpp
+  // Resolve through daemon-dev's node_modules where node-llama-cpp
   // lives. Node walks up looking for the package, so this works from
   // any working directory under the workspace.
   const llamaMod = await import("node-llama-cpp");

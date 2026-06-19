@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build + pack + install the @modelstat/agent CLI globally from the
+# Build + pack + install the @modelstat/daemon CLI globally from the
 # local tarball. Works on macOS + Linux, with pnpm / bun / npm.
 #
 # Uninstall any previous global copy first to avoid two `modelstat`
@@ -12,7 +12,7 @@ pnpm run build
 
 TARBALL_DIR=/tmp
 # `npm pack` names the tarball after the package's `name` field. The
-# package was renamed `@modelstat/agent` → `modelstat`, so the glob
+# package was renamed `@modelstat/daemon` → `modelstat`, so the glob
 # now matches `modelstat-VERSION.tgz`. The negative lookahead-style
 # trick — `modelstat-[0-9]*.tgz` — keeps us from accidentally matching
 # `modelstat-public-*.tgz` or similar siblings if a future repo dumps
@@ -25,7 +25,7 @@ echo "▶ packed: $TARBALL"
 # Uninstall any previous global copies (ignore errors — each PM will
 # simply no-op if it didn't install it).
 echo "▶ removing any existing global modelstat installs (both package names)"
-for name in modelstat @modelstat/agent; do
+for name in modelstat @modelstat/daemon; do
   command -v pnpm >/dev/null 2>&1 && pnpm remove -g "$name" >/dev/null 2>&1 || true
   command -v bun  >/dev/null 2>&1 && bun  remove -g "$name" >/dev/null 2>&1 || true
   command -v npm  >/dev/null 2>&1 && npm  uninstall -g "$name" >/dev/null 2>&1 || true

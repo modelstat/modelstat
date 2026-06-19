@@ -7,7 +7,7 @@
  *   dom_events  — DOM observer emissions from content script
  *   messages    — messages extracted by the interpreter
  *   events      — finalised events written to IndexedDB
- *   heartbeats  — successful /v1/agent/heartbeat posts
+ *   heartbeats  — successful /v1/daemon/heartbeat posts
  *   ingested    — events synced to the modelstat API
  *
  * These live in-memory on the SW; lost on SW eviction. That's fine —

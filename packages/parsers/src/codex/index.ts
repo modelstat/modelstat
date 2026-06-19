@@ -228,7 +228,7 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
   // the rollout file is. See ParserContext.onEvents.
   const events: RawEvent[] = [];
   const toolCalls: ToolCallDraft[] = [];
-  // Local-only raw command + cwd per shell call, for the agent's script-summary
+  // Local-only raw command + cwd per shell call, for the daemon's script-summary
   // pass. Never shipped (see LocalToolContext); returned on ParseResult.
   const scriptContexts: LocalToolContext[] = [];
   let chunk: RawEvent[] = [];
@@ -337,7 +337,7 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
         const srcId = sourceEventId(ctx.deviceId, ctx.sourceFile, offsetAtLineStart);
         const { args_hash, signature_hash, args_bytes } = hashArgs(extracted.input);
         const externalCallId = (extracted.callId ?? fallbackCallId(srcId, 0)).slice(0, 120);
-        // Stash the raw command + cwd locally (never shipped) so the Node agent
+        // Stash the raw command + cwd locally (never shipped) so the Node daemon
         // can summarise referenced script FILES into ToolAction.scripts. See
         // ParseResult.scriptContexts / LocalToolContext.
         const localCtx = extractLocalToolContext({

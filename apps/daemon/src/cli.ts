@@ -72,10 +72,10 @@ function tryOpenBrowser(url: string): boolean {
 }
 
 /** Substituted by tsup's `define` (see tsup.config.ts) — a string
- * literal like "agent-0.0.33" in the bundle. Falls back to "agent-dev"
+ * literal like "daemon-0.0.33" in the bundle. Falls back to "daemon-dev"
  * when run unbundled (tsx / tests), where the define isn't applied. */
-const AGENT_VERSION =
-  typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "agent-dev";
+const DAEMON_VERSION =
+  typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "daemon-dev";
 
 function osFamily(): "macos" | "linux" | "other" {
   const p = platform();
@@ -124,7 +124,7 @@ function prodRegisterOptIn(): boolean {
  * Self-register: generate a UUIDv7 client-side, POST it to the server, and
  * cache the returned device_secret + claim_code in the local state file.
  *
- * After this returns, the agent is "registered but unclaimed" — it can
+ * After this returns, the daemon is "registered but unclaimed" — it can
  * heartbeat, report discovery, and poll its own state. The operator (or
  * a human admin) needs to visit `claim_url` and sign in to attach the
  * device to an org. Until then, ingest of session data is rejected.
@@ -153,7 +153,7 @@ async function cmdSelfRegister(): Promise<void> {
     process.stderr.write(
       "modelstat: refusing to self-register a new device against production from a\n" +
         "non-interactive/CI environment (no claim is possible here anyway). Either:\n" +
-        "  • point at your own backend:  AGENT_API_URL=https://your-host   (CI/e2e)\n" +
+        "  • point at your own backend:  DAEMON_API_URL=https://your-host   (CI/e2e)\n" +
         "  • explicitly opt in:          MODELSTAT_ALLOW_PROD_REGISTER=1\n" +
         "  • or run it interactively:    npx modelstat@latest\n",
     );
@@ -167,8 +167,8 @@ async function cmdSelfRegister(): Promise<void> {
     os_family: osFamily(),
     os_version: release(),
     arch: osArch(),
-    companion: "modelstat-agent-dev",
-    companion_version: AGENT_VERSION,
+    companion: "modelstat-daemon",
+    companion_version: DAEMON_VERSION,
     // Stable, install-method-independent machine key. The server
     // dedupes self-register on this so the same physical machine can
     // never become two device rows, even if the UUID somehow differs
@@ -497,7 +497,7 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
   // bundle copy at ~/.modelstat/bin/modelstat.mjs and bounces the
   // service so the new code loads. The user always sees "service
   // installed and running" by the end.
-  step("Installing/refreshing background service so the agent survives reboots");
+  step("Installing/refreshing background service so the daemon survives reboots");
   let serviceOk = false;
   try {
     const svc = installService();
@@ -511,7 +511,7 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
   } catch (e) {
     emitEvent(opts, "service_install_failed", { error: (e as Error).message });
     warn(`couldn't install service: ${(e as Error).message}`);
-    warn("the agent will not run in the background — re-run after fixing the issue");
+    warn("the daemon will not run in the background — re-run after fixing the issue");
   }
 
   // ── 5. Detect local AI installs + signed-in accounts ──────────
@@ -661,7 +661,7 @@ async function cmdScan(): Promise<void> {
  * processing-version stamp so the next scan re-reads all JSONLs
  * from byte 0 and re-summarises every session. Same effect as
  * shipping a new processing-version, just user-triggered (e.g. when
- * upstream changed something the agent doesn't know about, or when
+ * upstream changed something the daemon doesn't know about, or when
  * the user wants to backfill old sessions for a freshly-claimed
  * device).
  */
@@ -734,7 +734,7 @@ function fmtTokens(v: string | number): string {
   return String(n);
 }
 
-/** Live ingestion stats for the agent's device. Pulled from the
+/** Live ingestion stats for the daemon's device. Pulled from the
  * claim-code capability endpoint so we work for unclaimed devices
  * (the common "I just ran connect" case). Claimed devices get a
  * "see the dashboard" pointer — the CLI doesn't carry the cookie
@@ -798,7 +798,7 @@ async function cmdStats(args: readonly string[]): Promise<void> {
       console.log(`  ${dashboard}`);
       if (local) {
         console.log(
-          `local agent: ${local.status ?? "?"}${local.message ? ` · ${local.message}` : ""}`,
+          `local daemon: ${local.status ?? "?"}${local.message ? ` · ${local.message}` : ""}`,
         );
         const stats = (local.stats as Record<string, number | string> | undefined) ?? {};
         for (const [k, v] of Object.entries(stats)) console.log(`  ${k}: ${v}`);
@@ -984,7 +984,7 @@ async function main(): Promise<void> {
       // Never throws: a broken probe must not strand the supervisor,
       // so any failure degrades to "spawn".
       try {
-        console.log(JSON.stringify(daemonHealth({ myCompanionVersion: AGENT_VERSION })));
+        console.log(JSON.stringify(daemonHealth({ myCompanionVersion: DAEMON_VERSION })));
       } catch (e) {
         console.log(JSON.stringify({ decision: "spawn", error: (e as Error).message }));
       }

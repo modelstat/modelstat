@@ -88,7 +88,7 @@ test("decideSupervision: live owner, silent past grace → replace (wedged)", ()
   );
 });
 
-test("decideSupervision: healthy owner on a DIFFERENT agent version → replace (upgrade path)", () => {
+test("decideSupervision: healthy owner on a DIFFERENT daemon version → replace (upgrade path)", () => {
   // After an upgrade re-stages the bundle, the old-version daemon
   // survives launchd's group kill and heartbeats forever; adopting it
   // would pin the old code. Version drift wins over freshness.
@@ -98,19 +98,19 @@ test("decideSupervision: healthy owner on a DIFFERENT agent version → replace 
       ownerAlive: true,
       lockAgeMs: 3_600_000,
       statusAgeMs: 1_000,
-      myCompanionVersion: "agent-0.0.43",
+      myCompanionVersion: "daemon-0.0.43",
     }),
     "replace",
   );
   // Same version → freshness rules apply as usual.
-  const sameVersion = { ...lockMeta(4242, 3_600_000, NOW), companionVersion: "agent-0.0.43" };
+  const sameVersion = { ...lockMeta(4242, 3_600_000, NOW), companionVersion: "daemon-0.0.43" };
   assert.equal(
     decideSupervision({
       lock: sameVersion,
       ownerAlive: true,
       lockAgeMs: 3_600_000,
       statusAgeMs: 1_000,
-      myCompanionVersion: "agent-0.0.43",
+      myCompanionVersion: "daemon-0.0.43",
     }),
     "adopt",
   );
@@ -122,7 +122,7 @@ test("decideSupervision: healthy owner on a DIFFERENT agent version → replace 
       ownerAlive: true,
       lockAgeMs: 3_600_000,
       statusAgeMs: 1_000,
-      myCompanionVersion: "agent-0.0.43",
+      myCompanionVersion: "daemon-0.0.43",
     }),
     "adopt",
   );

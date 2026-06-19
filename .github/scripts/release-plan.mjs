@@ -9,11 +9,11 @@
 //
 // Design notes:
 //   * SOURCE OF TRUTH for "last released version" is the git TAG (agent-v*,
-//     mcp-v*, agent-sdk-v*), NOT package.json — package.json has drifted from
+//     mcp-v*, daemon-sdk-v*), NOT package.json — package.json has drifted from
 //     the tags before, and the tag is what npm actually shipped against.
 //   * MONOREPO-AWARE: a package is "affected" if its own dir OR any of its
 //     transitive workspace dependencies changed. So a fix in packages/core
-//     republishes both `modelstat` and `@modelstat/agent-sdk` (both depend on
+//     republishes both `modelstat` and `@modelstat/daemon-sdk` (both depend on
 //     it) but leaves `@modelstat/mcp` (no workspace deps) alone.
 //   * PRE-1.0 CLAMP: while a package is 0.x its API is unstable, so a breaking
 //     change bumps the MINOR (0.1.3 -> 0.2.0), never auto-jumping to 1.0.0.
@@ -32,11 +32,10 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-// Packages NOT to auto-publish yet. `@modelstat/agent-sdk` is being renamed to
-// `@modelstat/daemon-sdk` (chore/agent-to-daemon) — we never ship an
-// "agent"-named package (that word is reserved for the user's AI tool), so the
-// rename publishes it as daemon-sdk. Drop this entry once the old name is gone.
-const SKIP_PUBLISH = new Set(["@modelstat/agent-sdk"]);
+// Packages NOT to auto-publish yet. `@modelstat/daemon-sdk` is brand-new (not on
+// npm), so an OIDC publish 404s until its trusted publisher is configured on
+// npmjs.com. Drop this entry once that's set up — then it ships like the rest.
+const SKIP_PUBLISH = new Set(["@modelstat/daemon-sdk"]);
 
 // Packages that must build on macOS: the daemon CLI (`modelstat`) bakes a
 // universal, ad-hoc-signed ModelstatTray.app into its tarball, which needs full

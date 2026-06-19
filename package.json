@@ -38,9 +38,9 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "clean": "turbo run clean && rm -rf node_modules .turbo",
-    "agent:build": "pnpm --filter @modelstat/agent build",
-    "agent:pack": "pnpm --filter @modelstat/agent pack:tarball",
-    "agent:install-local": "pnpm --filter @modelstat/agent install:local",
+    "daemon:build": "pnpm --filter modelstat build",
+    "daemon:pack": "pnpm --filter modelstat pack:tarball",
+    "daemon:install-local": "pnpm --filter modelstat install:local",
     "mcp:build": "pnpm --filter @modelstat/mcp build",
     "mcp:dev": "pnpm --filter @modelstat/mcp dev",
     "tray-mac:build": "cd apps/tray-mac && swift build -c release"

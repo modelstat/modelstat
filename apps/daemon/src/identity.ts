@@ -38,7 +38,7 @@ import { homedir, hostname as osHostname } from "node:os";
 import { join } from "node:path";
 
 export interface DeviceIdentity {
-  /** Agent-generated UUIDv7. Stable across reinstalls. */
+  /** Daemon-generated UUIDv7. Stable across reinstalls. */
   deviceUuid: string;
   /** Server UUID returned from /v1/devices/self-register. */
   deviceId: string;
@@ -54,7 +54,7 @@ export interface DeviceIdentity {
   hostname: string;
   /** ISO timestamp. For audit + UI. */
   createdAt: string;
-  /** Optional — set once the agent discovers from /devices/me that the
+  /** Optional — set once the daemon discovers from /devices/me that the
    * device is claimed. Just a display convenience. */
   userEmail?: string | null;
   /** Default routing org snapshot. Display-only. */

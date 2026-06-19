@@ -6,7 +6,7 @@
  * than stacking up.
  *
  * Why this exists — it is the load-bearing bound on the daemon's memory.
- * The daemon (apps/agent-dev/src/daemon.ts) triggers `runScanCycle` from
+ * The daemon (apps/daemon/src/daemon.ts) triggers `runScanCycle` from
  * three places: the startup boot, the chokidar file-watcher (debounced),
  * and a 5-minute backstop `setInterval`. None of those checked whether a
  * scan was already in progress. During a long backfill a single

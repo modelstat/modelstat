@@ -10,7 +10,7 @@
  *
  * Browser-safe: prompt strings + a builder + the adapter type only — no `fs`, no
  * model. The Node binding (companion-core/node/llama.ts) supplies inference; the
- * agent's enrichment pass (apps/agent-dev) supplies file reading + redaction.
+ * agent's enrichment pass (apps/daemon) supplies file reading + redaction.
  *
  * Generic by construction: nothing about specific tools, languages, or
  * categories is baked in — the model describes whatever the file actually does.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Post-install hook for the @modelstat/agent CLI.
+ * Post-install hook for the @modelstat/daemon CLI.
  *
  * Runs after `npm install -g modelstat` (or `npx modelstat` cache
  * population) and downloads the bundled summariser GGUF (~2.7 GB)
@@ -20,7 +20,7 @@
  *     install that doesn't want long-running side-effects).
  *
  * In all skip cases the model still downloads lazily on first
- * `modelstat scan` — the agent always preflights the summariser
+ * `modelstat scan` — the daemon always preflights the summariser
  * before producing any segments (see src/pipeline.ts), so users in
  * skip-mode just see the download then, instead of now.
  */
@@ -69,7 +69,7 @@ async function main() {
 
   // ── TTY-only path: pre-download the heavy summariser model ───────
   // The 2.7 GB GGUF is the only thing we want to skip in non-TTY
-  // installs (CI, npm cache, packagers). The agent always preflights
+  // installs (CI, npm cache, packagers). The daemon always preflights
   // the summariser before producing segments (see src/pipeline.ts),
   // so users in skip-mode just see the download then, instead of now.
   const skipModelDownload =
@@ -126,7 +126,7 @@ async function main() {
     );
   }
   console.log(
-    "[modelstat] all set — your dashboard already has the new agent running",
+    "[modelstat] all set — your dashboard already has the new daemon running",
   );
 }
 
@@ -136,7 +136,7 @@ async function rebootServiceIfInstalled() {
     homedir(),
     "Library",
     "LaunchAgents",
-    "ai.modelstat.agent.plist",
+    "ai.modelstat.daemon.plist",
   );
   const systemdUnit = join(
     process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),

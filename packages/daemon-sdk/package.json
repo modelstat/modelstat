@@ -1,5 +1,5 @@
 {
-  "name": "@modelstat/agent-sdk",
+  "name": "@modelstat/daemon-sdk",
   "version": "0.0.1",
   "description": "Sanitize, compact, and upload AI session data to modelstat — privacy-first SDK + CLI for the @modelstat/agent daemon and any third-party tool.",
   "keywords": ["modelstat", "ai", "llm", "observability", "redact", "pii", "telemetry", "agent"],
@@ -7,7 +7,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/modelstat/modelstat.git",
-    "directory": "packages/agent-sdk"
+    "directory": "packages/daemon-sdk"
   },
   "bugs": "https://github.com/modelstat/modelstat/issues",
   "license": "Apache-2.0",

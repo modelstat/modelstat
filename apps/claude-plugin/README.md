@@ -16,4 +16,4 @@ claude plugin install modelstat@modelstat
 
 Bundles the [`@modelstat/mcp`](https://www.npmjs.com/package/@modelstat/mcp) server, so the tools also answer plain questions ("how much did Opus cost me this month?") without `/stat`.
 
-Requires a paired [modelstat](https://modelstat.ai/install) agent: `npx modelstat@latest`.
+Requires a paired [modelstat](https://modelstat.ai/install) daemon: `npx modelstat@latest`.

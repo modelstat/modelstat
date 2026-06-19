@@ -45,24 +45,24 @@ interface AgentState {
    * an accounting ledger. */
   segmentsSent: number;
   /** Sticky marker for the local processing-pipeline version that
-   * last produced cursors. When the agent's compiled-in
+   * last produced cursors. When the daemon's compiled-in
    * PROCESSING_VERSION is higher than this, the daemon wipes all
    * cursors at startup so every session gets re-summarised by the
    * new pipeline. NULL = pre-versioning install (treat as stale). */
   processingVersion: number | null;
 }
 
-/** Production API. Dev overrides via AGENT_API_URL (set in .env). */
+/** Production API. Dev overrides via DAEMON_API_URL (set in .env). */
 const DEFAULT_API_URL = "https://modelstat.ai";
 
-/** Legacy default that `@modelstat/agent@0.0.7` persisted to disk on
+/** Legacy default that `@modelstat/daemon@0.0.7` persisted to disk on
  * first run. If we see this exact string in the stored state today
  * and no env override is set, treat it as unset and use the new
  * default. Prevents the "upgraded but still points at localhost" trap. */
 const LEGACY_LOCALHOST_API = "http://localhost:3010";
 
 const store = new Conf<AgentState>({
-  projectName: "modelstat-agent-dev",
+  projectName: "modelstat-daemon",
   defaults: {
     // Intentionally empty — the apiUrl getter below computes this
     // from env + stored value + DEFAULT_API_URL. Keeping the stored
@@ -154,7 +154,7 @@ export const state = {
    * or paired pre-0.0.8) → production default. The legacy localhost
    * value is ignored so upgrades from 0.0.7 self-heal. */
   get apiUrl(): string {
-    if (process.env.AGENT_API_URL) return process.env.AGENT_API_URL;
+    if (process.env.DAEMON_API_URL) return process.env.DAEMON_API_URL;
     const stored = store.get("apiUrl");
     if (stored && stored !== LEGACY_LOCALHOST_API) return stored;
     return DEFAULT_API_URL;
@@ -163,11 +163,11 @@ export const state = {
     store.set("apiUrl", v);
   },
   /** True when `apiUrl` resolves to the baked-in production default with no
-   * explicit override (no `AGENT_API_URL`, no operator-set stored URL). Used
+   * explicit override (no `DAEMON_API_URL`, no operator-set stored URL). Used
    * to refuse silent prod self-register from CI/non-interactive environments
    * so ephemeral runners don't pile up unclaimed device rows. */
   get isProdDefaultApi(): boolean {
-    if (process.env.AGENT_API_URL) return false;
+    if (process.env.DAEMON_API_URL) return false;
     const stored = store.get("apiUrl");
     if (stored && stored !== LEGACY_LOCALHOST_API) return false;
     return true;

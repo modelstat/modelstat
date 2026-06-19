@@ -2,7 +2,7 @@
 
 > **See every AI token your team spends.** Local companion for [modelstat](https://modelstat.ai) — reads the session logs your AI coding tools already write (Claude Code, Codex, Cursor, Cline, Continue, Aider, Windsurf, Zed, Copilot, Claude Desktop), tokenises events on-device, and uploads only metadata to your modelstat dashboard.
 
-**Your prompts never leave your machine.** The agent uploads only token counts, model ids, timestamps, and a provider-assigned session id. Source is auditable on [GitHub](https://github.com/modelstat/modelstat/tree/main/apps/agent-dev).
+**Your prompts never leave your machine.** The daemon uploads only token counts, model ids, timestamps, and a provider-assigned session id. Source is auditable on [GitHub](https://github.com/modelstat/modelstat/tree/main/apps/daemon).
 
 ## Install
 
@@ -19,7 +19,7 @@ bunx modelstat@latest
 pnpm dlx modelstat@latest
 ```
 
-The first run downloads the on-device summariser model (~2.7 GB Qwen3.5-4B GGUF to `~/.modelstat/models/`), pairs the device, and installs a **launchd user agent** on macOS (at `~/Library/LaunchAgents/ai.modelstat.agent.plist`) or a **systemd user unit** on Linux (at `~/.config/systemd/user/modelstat.service`). The daemon starts automatically on login and watches your AI-tool session logs in the background. The CLI exits cleanly — there's no foreground process to keep open.
+The first run downloads the on-device summariser model (~2.7 GB Qwen3.5-4B GGUF to `~/.modelstat/models/`), pairs the device, and installs a **launchd user daemon** on macOS (at `~/Library/LaunchAgents/ai.modelstat.daemon.plist`) or a **systemd user unit** on Linux (at `~/.config/systemd/user/modelstat.service`). The daemon starts automatically on login and watches your AI-tool session logs in the background. The CLI exits cleanly — there's no foreground process to keep open.
 
 Requires Node 20+. macOS and Linux (x86_64, arm64) supported.
 
@@ -51,11 +51,11 @@ Emits one NDJSON event per line, so a wrapper can drive pairing non-interactivel
 
 ## Shared state across install methods
 
-Installing via both Homebrew and npm on the same laptop produces the **same binary reading the same state file** — on macOS that's `~/Library/Preferences/modelstat-agent-dev-nodejs/config.json`. Your device UUID, bearer token, and pairing state persist across install methods — and the service deduplicates the device server-side, so you won't see the same laptop twice in the dashboard.
+Installing via both Homebrew and npm on the same laptop produces the **same binary reading the same state file** — on macOS that's `~/Library/Preferences/modelstat-daemon-nodejs/config.json`. Your device UUID, bearer token, and pairing state persist across install methods — and the service deduplicates the device server-side, so you won't see the same laptop twice in the dashboard.
 
 ## MCP server
 
-Pair the agent, then install [`@modelstat/mcp`](https://www.npmjs.com/package/@modelstat/mcp) to query your own spend from inside Claude Desktop, Cursor, Cline, Continue, or Zed:
+Pair the daemon, then install [`@modelstat/mcp`](https://www.npmjs.com/package/@modelstat/mcp) to query your own spend from inside Claude Desktop, Cursor, Cline, Continue, or Zed:
 
 ```bash
 # Claude Code
@@ -66,18 +66,18 @@ Full wire-up docs per client: https://modelstat.ai/mcp
 
 ## Self-host
 
-To point the agent at your own modelstat API (not the hosted SaaS):
+To point the daemon at your own modelstat API (not the hosted SaaS):
 
 ```bash
-export AGENT_API_URL=https://your-modelstat-api.example.com
+export DAEMON_API_URL=https://your-modelstat-api.example.com
 npx modelstat@latest
 ```
 
-`AGENT_API_URL` can also be set persistently via `.env` or in the systemd/launchd unit.
+`DAEMON_API_URL` can also be set persistently via `.env` or in the systemd/launchd unit.
 
 ## Privacy
 
-- Agent reads local session logs written by the tools you use. Nothing is intercepted — the tools already write these files.
+- Daemon reads local session logs written by the tools you use. Nothing is intercepted — the tools already write these files.
 - Upload payload: token counts, model name, timestamps, provider-assigned session id, git remote URL (redactable), redacted work-type summary.
 - Never uploaded: prompt text, model responses, file contents, tool-call arguments, environment variables, SSH keys, secrets.
 - Redaction is on-device via [`@modelstat/parsers`](https://github.com/modelstat/modelstat/tree/main/packages/parsers).
@@ -91,4 +91,4 @@ npx modelstat@latest
 
 ## License
 
-Apache-2.0. Source at https://github.com/modelstat/modelstat/tree/main/apps/agent-dev.
+Apache-2.0. Source at https://github.com/modelstat/modelstat/tree/main/apps/daemon.

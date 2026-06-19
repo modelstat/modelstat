@@ -2,8 +2,8 @@
  * Stable per-machine key — the permanent anchor for device identity.
  *
  * The whole point: the SAME physical machine must derive the SAME
- * device identity no matter how the agent got installed (npm / pnpm /
- * bun / manual binary copy), across agent-version bumps, across OS
+ * device identity no matter how the daemon got installed (npm / pnpm /
+ * bun / manual binary copy), across daemon-version bumps, across OS
  * upgrades, and EVEN after `~/.modelstat/` is deleted. Before this,
  * `deviceUuid` was a random UUIDv7 stored only in identity.json — so
  * any loss or reset of that file minted a brand-new UUID and the

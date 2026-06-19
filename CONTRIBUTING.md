@@ -1,7 +1,7 @@
 # Contributing to modelstat
 
 Thanks for taking the time. This is the companion-code repo — the Node
-agent, macOS tray, MCP server, and their shared packages. The hosted
+daemon, macOS tray, MCP server, and their shared packages. The hosted
 service isn't in scope here.
 
 ## Before you start
@@ -32,15 +32,15 @@ pnpm typecheck
 Per-component:
 
 ```bash
-pnpm --filter @modelstat/agent build           # Node daemon
+pnpm --filter modelstat build           # Node daemon
 pnpm --filter @modelstat/mcp build             # MCP server
 pnpm tray-mac:build                            # macOS tray
 ```
 
-Point the agent at a local / self-hosted API:
+Point the daemon at a local / self-hosted API:
 
 ```bash
-AGENT_API_URL=http://localhost:3010 node apps/agent-dev/dist/cli.cjs connect
+DAEMON_API_URL=http://localhost:3010 node apps/daemon/dist/cli.cjs connect
 ```
 
 ## What kinds of contributions we'd love
@@ -71,7 +71,7 @@ Workflow:
 
 Missing a secret shape the `strict-pii-v2` policy should catch?
 
-Where: [`packages/agent-sdk/src/redact.ts`](packages/agent-sdk/src/redact.ts)
+Where: [`packages/daemon-sdk/src/redact.ts`](packages/daemon-sdk/src/redact.ts)
 
 Add a `Pattern` entry to the right category (`SECRETS`,
 `MODELSTAT_SECRETS`, or `PII`) with a regex, a name, and a
@@ -116,7 +116,7 @@ usually be declined — the project has a deliberate simplicity bias.
 ## Code of conduct
 
 Be kind, be specific, assume good faith. Don't share other users'
-data in issues or PRs — the agent handles sensitive file paths and
+data in issues or PRs — the daemon handles sensitive file paths and
 tool logs; please redact before attaching samples.
 
 ## Questions

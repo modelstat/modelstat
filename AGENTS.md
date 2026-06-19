@@ -6,7 +6,7 @@ when you change how something here works, update this file in the same PR.
 ## What this repo is
 
 The modelstat **companion** — everything that runs on a user's machine and
-feeds the server: the Node CLI/agent (`packages/*`, published to npm +
+feeds the server: the Node CLI/daemon (`packages/*`, published to npm +
 Homebrew) and the macOS tray app (`apps/tray-mac`). The server
 (ingest/pipeline/dashboard, modelstat.ai) is a separate private service
 (closed-source) and is out of scope for this repo.
@@ -38,7 +38,7 @@ Things to know:
 - Redaction has **one floor**. The secret-pattern catalogue lives in
   `@modelstat/core/redact-floor` (dependency-free) and is the single source of
   truth for both the wire redactor (`@modelstat/core/redact`) and the published
-  SDK redactor (`@modelstat/agent-sdk`) — add a newly-leaked credential format
+  SDK redactor (`@modelstat/daemon-sdk`) — add a newly-leaked credential format
   there, once. The server can *augment* it at runtime via a signed, additive
   `policies` config: the floor always applies and a signed bundle can only ever
   add patterns, never remove or weaken them.
@@ -66,11 +66,13 @@ of truth for the last released version, not `package.json`):
   minor (`0.1.3` → `0.2.0`), never auto-jumping to `1.0.0`.
 - **Dependency-aware**: a package is "changed" if its own dir *or any of its
   transitive workspace deps* changed. A `fix(core):` in `packages/core`
-  therefore republishes `modelstat` and `@modelstat/agent-sdk` (both depend on
+  therefore republishes `modelstat` and `@modelstat/daemon-sdk` (both depend on
   it) but not `@modelstat/mcp` (no workspace deps).
 - The publishable set is every workspace package with `private !== true`, so a
-  new public package is picked up automatically (only the `agent → agent-v` tag
-  alias is hand-maintained in the script).
+  new public package is picked up automatically. The tag prefix derives from the
+  package's unscoped name (`modelstat` → `modelstat-v`, `@modelstat/mcp` →
+  `mcp-v`); the only hand-maintained list is `SKIP_PUBLISH` (currently
+  `@modelstat/daemon-sdk`, until its npm trusted publisher is configured).
 
 **Auth — npm Trusted Publishing (OIDC), no token.** The runner mints a
 short-lived OIDC token (`id-token: write`) that npm exchanges for a publish
@@ -84,10 +86,10 @@ A brand-new package that isn't on npm yet needs **one bootstrap publish** (a
 manual `npm publish` from a maintainer, or org-level trusted publishing) before
 the OIDC flow can take over; after that it's hands-off.
 
-**Runners** — the agent (`modelstat`) builds on macOS (it bakes a universal,
+**Runners** — the daemon (`modelstat`) builds on macOS (it bakes a universal,
 ad-hoc-signed `ModelstatTray.app` into its tarball, which needs full Xcode);
 the pure-JS packages build on ubuntu. The plan step picks the runner per
-package, so a merge that doesn't touch the agent never spins a macOS runner.
+package, so a merge that doesn't touch the daemon never spins a macOS runner.
 
 To **skip** a release, use a non-releasing commit type (`chore:`, `docs:`, …).
 To **force** one, merge a `fix:`/`feat:` that touches the package (or trigger

@@ -30,10 +30,10 @@ import { createCoalescingRunner } from "./single-flight.js";
 // Substituted by tsup's `define` at build time (see tsup.config.ts).
 // Replaces an older runtime parent-walk for package.json that broke
 // once the bundle was copied to ~/.modelstat/bin/ (no sibling
-// package.json), making the daemon report "agent-unknown" on every
+// package.json), making the daemon report "daemon-unknown" on every
 // upgrade. cli.ts and scan.ts use the same macro.
-const AGENT_VERSION: string =
-  typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "agent-dev";
+const DAEMON_VERSION: string =
+  typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "daemon-dev";
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const SCAN_INTERVAL_MS = 5 * 60 * 1000; // backstop periodic scan
 const DISCOVERY_INTERVAL_MS = 60_000; // re-enumerate installs + identities
@@ -127,7 +127,7 @@ function snapshotBody(): Heartbeat & { device_id: string | null } {
     queue_size: status.queueSize,
     stats: status.stats,
     last_event_at: status.lastEventAt,
-    companion_version: AGENT_VERSION,
+    companion_version: DAEMON_VERSION,
     machine_id: machineKey(),
   };
 }
@@ -164,7 +164,7 @@ async function sendHeartbeat(): Promise<void> {
   if (!bearer || !deviceId) return; // pre-enrollment
   const body = { ...snapshotBody(), device_id: deviceId };
   try {
-    const res = await request(`${state.apiUrl}/v1/agent/heartbeat`, {
+    const res = await request(`${state.apiUrl}/v1/daemon/heartbeat`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
       body: JSON.stringify(body),
@@ -367,7 +367,7 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   // under this home directory. Two daemons clobber each other's file
   // cursors and send duplicate heartbeats that scramble Live Activity.
   const lock = acquireDaemonLock({
-    companionVersion: AGENT_VERSION,
+    companionVersion: DAEMON_VERSION,
     apiUrl: state.apiUrl,
     force: opts.force === true,
     // If a racing daemon out-renamed us for the lock (see lock.ts
@@ -387,7 +387,7 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
     console.log(
       `modelstat daemon is already running — PID ${lock.owner.pid}, started ${formatAge(
         lock.ageSec,
-      )} ago, agent ${lock.owner.companionVersion}.`,
+      )} ago, daemon ${lock.owner.companionVersion}.`,
     );
     // biome-ignore lint/suspicious/noConsole: user-visible CLI output
     console.log("  → to stop it:          kill " + lock.owner.pid);

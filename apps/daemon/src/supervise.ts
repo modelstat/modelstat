@@ -112,7 +112,7 @@ export function daemonHealth(
     now?: number;
     pidAlive?: (pid: number) => boolean;
     /** See decideSupervision.myCompanionVersion. cli.ts passes its
-     * compiled-in AGENT_VERSION so an upgraded bundle replaces a
+     * compiled-in DAEMON_VERSION so an upgraded bundle replaces a
      * still-running old-version daemon. */
     myCompanionVersion?: string;
   } = {},
