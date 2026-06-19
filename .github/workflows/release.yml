@@ -19,7 +19,7 @@ name: release
 # (a first manual `npm publish`, or org-level trusted publishing) before the
 # OIDC publish can take over.
 #
-# RUNNERS — the agent (`modelstat`) builds on macOS because it bakes a
+# RUNNERS — the daemon (`modelstat`) builds on macOS because it bakes a
 # universal, ad-hoc-signed ModelstatTray.app into its tarball (needs full
 # Xcode). The pure-JS packages build on ubuntu. The plan step picks the runner.
 #
@@ -110,17 +110,17 @@ jobs:
             fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
           '
 
-      - name: Build + stage the universal macOS tray (agent only)
-        if: matrix.isAgent
+      - name: Build + stage the universal macOS tray (daemon only)
+        if: matrix.isDaemon
         run: |
           echo "toolchain: $(xcode-select -p)"; swift --version
           TRAY_UNIVERSAL=1 bash apps/tray-mac/build-app.sh
-          rm -rf apps/agent-dev/vendor/ModelstatTray.app
-          mkdir -p apps/agent-dev/vendor
-          cp -R apps/tray-mac/build/ModelstatTray.app apps/agent-dev/vendor/ModelstatTray.app
+          rm -rf "${{ matrix.dir }}/vendor/ModelstatTray.app"
+          mkdir -p "${{ matrix.dir }}/vendor"
+          cp -R apps/tray-mac/build/ModelstatTray.app "${{ matrix.dir }}/vendor/ModelstatTray.app"
           echo "staged universal tray:"
-          lipo -archs apps/agent-dev/vendor/ModelstatTray.app/Contents/MacOS/modelstat-tray
-          codesign --verify --strict --verbose=2 apps/agent-dev/vendor/ModelstatTray.app
+          lipo -archs "${{ matrix.dir }}/vendor/ModelstatTray.app/Contents/MacOS/modelstat-tray"
+          codesign --verify --strict --verbose=2 "${{ matrix.dir }}/vendor/ModelstatTray.app"
 
       - name: Pack tarball (pnpm rewrites workspace deps; prepack builds here)
         id: pack
@@ -191,8 +191,8 @@ jobs:
               --notes-file /tmp/notes.md --target "$(git rev-parse HEAD)"
           fi
 
-      - name: Bump the Homebrew tap (agent only)
-        if: matrix.isAgent
+      - name: Bump the Homebrew tap (daemon only)
+        if: matrix.isDaemon
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
           VERSION: ${{ matrix.newVersion }}
@@ -201,6 +201,9 @@ jobs:
             echo "HOMEBREW_TAP_DISPATCH_TOKEN not set — skipping homebrew bump."
             exit 0
           fi
+          # NOTE: "agent-released" is the repository_dispatch event_type the
+          # homebrew-tap repo listens for — it's a cross-repo contract, so rename
+          # it there first before changing it here (tracked with the daemon rename).
           gh api --method POST -H "Accept: application/vnd.github+json" \
             /repos/modelstat/homebrew-tap/dispatches \
             -f "event_type=agent-released" \

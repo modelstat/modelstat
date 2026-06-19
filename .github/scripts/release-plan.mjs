@@ -32,13 +32,15 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-// Historical tag prefixes that don't match the package's unscoped name. The
-// CLI publishes as `modelstat` but its tags have always been `agent-v*`.
-const TAG_ALIAS = { modelstat: "agent" };
+// Packages NOT to auto-publish yet. `@modelstat/agent-sdk` is being renamed to
+// `@modelstat/daemon-sdk` (chore/agent-to-daemon) — we never ship an
+// "agent"-named package (that word is reserved for the user's AI tool), so the
+// rename publishes it as daemon-sdk. Drop this entry once the old name is gone.
+const SKIP_PUBLISH = new Set(["@modelstat/agent-sdk"]);
 
-// Packages that must build on macOS (the agent bakes a universal, ad-hoc-signed
-// ModelstatTray.app into its tarball — that needs full Xcode). Everything else
-// is pure JS and builds on ubuntu.
+// Packages that must build on macOS: the daemon CLI (`modelstat`) bakes a
+// universal, ad-hoc-signed ModelstatTray.app into its tarball, which needs full
+// Xcode. Everything else is pure JS and builds on ubuntu.
 const MACOS_PACKAGES = new Set(["modelstat"]);
 
 function git(args) {
@@ -110,8 +112,11 @@ function affectedDirs(name, graph) {
 }
 
 function tagPrefix(name) {
+  // Prefix = the package's unscoped name (modelstat -> modelstat-v,
+  // @modelstat/mcp -> mcp-v). No aliases: the legacy agent-v* tags are dead, and
+  // the modelstat-v lineage is seeded at the same commit as agent-v0.1.3.
   const unscoped = name.includes("/") ? name.split("/")[1] : name;
-  return `${TAG_ALIAS[unscoped] || unscoped}-v`;
+  return `${unscoped}-v`;
 }
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
@@ -209,9 +214,11 @@ function main() {
   const dirs = workspaceDirs();
   const graph = workspaceGraph(dirs);
   const plan = [];
+  const skipped = [];
 
   for (const pkg of Object.values(graph)) {
     if (pkg.private) continue; // only publishable packages
+    if (SKIP_PUBLISH.has(pkg.name)) { skipped.push(pkg.name); continue; }
     const prefix = tagPrefix(pkg.name);
     const last = lastReleased(prefix);
     const dirsFor = affectedDirs(pkg.name, graph);
@@ -222,7 +229,7 @@ function main() {
       // release (publish is idempotent, so re-runs are safe).
       plan.push({
         name: pkg.name, dir: pkg.dir, tagPrefix: prefix, runner,
-        isAgent: MACOS_PACKAGES.has(pkg.name),
+        isDaemon: MACOS_PACKAGES.has(pkg.name),
         fromVersion: null, newVersion: pkg.version, bump: "initial",
         tag: `${prefix}${pkg.version}`,
         notes: `First published release of \`${pkg.name}\`.`,
@@ -235,7 +242,7 @@ function main() {
     const newVersion = bumpVersion(last.version, level);
     plan.push({
       name: pkg.name, dir: pkg.dir, tagPrefix: prefix, runner,
-      isAgent: MACOS_PACKAGES.has(pkg.name),
+      isDaemon: MACOS_PACKAGES.has(pkg.name),
       fromVersion: last.version, newVersion, bump: LEVEL_NAME[level],
       tag: `${prefix}${newVersion}`,
       notes: notes(commits),
@@ -246,7 +253,7 @@ function main() {
   fs.writeFileSync("release-plan.json", JSON.stringify(plan, null, 2));
   const slim = plan.map((r) => ({
     name: r.name, dir: r.dir, tagPrefix: r.tagPrefix, tag: r.tag,
-    runner: r.runner, newVersion: r.newVersion, isAgent: r.isAgent, bump: r.bump,
+    runner: r.runner, newVersion: r.newVersion, isDaemon: r.isDaemon, bump: r.bump,
   }));
   process.stdout.write(JSON.stringify(slim));
 
@@ -254,7 +261,8 @@ function main() {
     const md = plan.length
       ? plan.map((r) => `- **${r.name}** ${r.fromVersion ? `${r.fromVersion} → ` : ""}**${r.newVersion}** (${r.bump}) on \`${r.runner}\``).join("\n")
       : "_No publishable package changed — nothing to release._";
-    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Release plan\n${md}\n`);
+    const skip = skipped.length ? `\n\n_Skipped (SKIP_PUBLISH): ${skipped.join(", ")}._` : "";
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Release plan\n${md}${skip}\n`);
   }
 }
 
