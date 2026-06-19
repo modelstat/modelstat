@@ -50,6 +50,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     permissions:
+      contents: read # checkout needs this; a permissions: block defaults all else to none
       id-token: write # OIDC → crates.io Trusted Publishing
     steps:
       - uses: actions/checkout@v6
@@ -85,6 +86,7 @@ jobs:
   python:
     runs-on: ubuntu-latest
     permissions:
+      contents: read # checkout needs this; a permissions: block defaults all else to none
       id-token: write # OIDC → PyPI Trusted Publishing
     steps:
       - uses: actions/checkout@v6
@@ -116,6 +118,7 @@ jobs:
   node:
     runs-on: ubuntu-latest
     permissions:
+      contents: read # checkout needs this; a permissions: block defaults all else to none
       id-token: write # OIDC → npm Trusted Publishing
     steps:
       - uses: actions/checkout@v6
