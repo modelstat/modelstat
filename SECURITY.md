@@ -66,9 +66,9 @@ reference letters.
 
 ## Signing
 
-- The release workflow (`.github/workflows/release.yml`) publishes
-  npm packages with provenance statements — see
-  `modelstat`'s npm page for verification.
+- The release workflows (`.github/workflows/release-daemon.yml` and
+  `.github/workflows/release-sdks.yml`) publish via OIDC Trusted Publishing —
+  short-lived, workflow-scoped credentials, no long-lived registry tokens.
 
 ## Canonical contact
 

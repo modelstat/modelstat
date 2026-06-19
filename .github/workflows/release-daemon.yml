@@ -2,10 +2,9 @@ name: release-daemon
 
 # Zero-touch, fully automated release of the daemon + workspace npm packages.
 # (The standalone SDKs in sdks/* publish separately via release-sdks.yml — kept
-# apart so an SDK release can't break the daemon's, and vice-versa. NOTE: the
-# FILE stays release.yml — npm Trusted Publishing pins the workflow filename, so
-# renaming it would break every daemon package's publish; only the display
-# `name:` above changed.)
+# apart so an SDK release can't break the daemon's, and vice-versa. npm Trusted
+# Publishing pins the workflow filename, so each daemon package's trusted
+# publisher must name THIS file: release-daemon.yml.)
 # On every push to main this decides
 # which publishable packages changed and what version each should get — from
 # the Conventional Commits since that package's last tag (feat -> minor,

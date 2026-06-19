@@ -1,13 +1,13 @@
 name: release-sdks
 
 # Auto-publish the standalone SDKs in sdks/{rust,node,python} on push to main,
-# via OIDC Trusted Publishing — NO long-lived tokens (the same model release.yml
+# via OIDC Trusted Publishing — NO long-lived tokens (the same model release-daemon.yml
 # uses for npm). Each job publishes ONLY when the manifest's version isn't
 # already on its registry, so a push that didn't bump the version is a no-op
 # (idempotent; re-runs are safe). To cut a release: bump the version in the
 # manifest and merge.
 #
-# Kept SEPARATE from release.yml (the daemon / pnpm-workspace npm pipeline) on
+# Kept SEPARATE from release-daemon.yml (the daemon / pnpm-workspace npm pipeline) on
 # purpose: these SDKs are standalone (outside the workspace), so isolating them
 # means an SDK release can't break daemon releases and vice-versa.
 #

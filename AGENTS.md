@@ -59,7 +59,7 @@ Things to know:
 ## Releasing (npm + Homebrew)
 
 Releases are **zero-touch**. Every push to main runs `release`
-(`.github/workflows/release.yml`), which decides which publishable packages
+(`.github/workflows/release-daemon.yml`), which decides which publishable packages
 changed and what version each gets, then publishes to npm, tags, bumps main,
 and cuts a GitHub Release. No `release_type` input, no OTP, no two-phase split.
 
@@ -88,7 +88,7 @@ credential, and every publish carries provenance. There is **no `NPM_TOKEN`**.
 This requires a **one-time setup per package** on npmjs.com:
 
 > Package → Settings → **Trusted Publisher** → GitHub Actions →
-> org `modelstat`, repo `modelstat`, workflow `release.yml`.
+> org `modelstat`, repo `modelstat`, workflow `release-daemon.yml`.
 
 A brand-new package that isn't on npm yet needs **one bootstrap publish** (a
 manual `npm publish` from a maintainer, or org-level trusted publishing) before
@@ -106,7 +106,7 @@ the workflow manually: GitHub → Actions → release → Run workflow).
 ### Observing a release
 
 ```sh
-gh run list --workflow=release.yml --limit 3
+gh run list --workflow=release-daemon.yml --limit 3
 gh run watch <run-id> --exit-status
 ```
 
