@@ -692,3 +692,13 @@ export {
   TITLER_TEMPERATURE,
   type TitleInput,
 } from "./title.js";
+export {
+  applyLlmRedactions,
+  composeRedactors,
+  LLM_REDACTION_MARKER,
+  parseRedactReply,
+  REDACT_MAX_TOKENS,
+  REDACT_SYSTEM_PROMPT,
+  REDACT_TEMPERATURE,
+  shouldDeepRedact,
+} from "./redaction.js";

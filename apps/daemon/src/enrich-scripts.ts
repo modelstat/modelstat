@@ -24,7 +24,7 @@
  * model describes whatever the file actually does — no tool/category vocabulary.
  */
 
-import type { ScriptSummarizer } from "@modelstat/daemon-core/pipeline";
+import type { Redactor, ScriptSummarizer } from "@modelstat/daemon-core/pipeline";
 import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
 import { redact, type ToolAction } from "@modelstat/core";
 import { detectScriptRefs, type LocalToolContext, resolveScriptPath } from "@modelstat/parsers";
@@ -45,6 +45,41 @@ export interface EnrichScriptsDeps {
   readFile: (path: string) => Promise<string>;
   /** Candidate root dirs from a call's cwd. Defaults to {@link defaultRoots}. */
   roots?: (cwd: string | null) => string[];
+  /** Optional model-based redactor (Privacy Filter + LLM backstop) run over a
+   * script summary AFTER the deterministic `redact()` pass — defense-in-depth on
+   * the model-generated sentence. Omitted ⇒ summaries get the regex floor only. */
+  modelRedact?: Redactor;
+}
+
+/**
+ * Deep-redact each draft's `command_redacted` with the model passes (layers 2+3
+ * behind {@link Redactor}). Layer 1 (the deterministic floor) already ran at
+ * extraction; this adds the Privacy Filter + LLM backstop to the SHIPPED command
+ * — the most sensitive field, previously regex-only. Deduped per distinct
+ * command (many calls share one), best-effort (a failure keeps the layer-1
+ * command), mutates the drafts in place. Run BEFORE script enrichment so script
+ * tokens are matched against the final redacted command.
+ */
+export async function enrichToolCallRedaction(
+  drafts: readonly ToolCallDraft[],
+  redactModel: Redactor,
+): Promise<void> {
+  const cache = new Map<string, string>();
+  for (const draft of drafts) {
+    const action = draft.action;
+    const cmd = action?.command_redacted;
+    if (!action || !cmd) continue;
+    try {
+      let deep = cache.get(cmd);
+      if (deep === undefined) {
+        deep = (await redactModel(cmd)).text;
+        cache.set(cmd, deep);
+      }
+      action.command_redacted = deep;
+    } catch {
+      // best-effort: keep the layer-1 redacted command
+    }
+  }
 }
 
 /**
@@ -136,8 +171,16 @@ async function enrichOneAction(
     const summaryRaw = await deps.summarize({ ref, content });
     if (!summaryRaw) continue;
     // Defence-in-depth: the model could echo a secret/PII from the file body.
-    // Redact the abstract before it ships, then enforce the wire cap.
-    const summary = redact(summaryRaw).text.trim().slice(0, MAX_SUMMARY_CHARS);
+    // Regex floor first, then the optional model passes (PF + LLM), then cap.
+    let summaryText = redact(summaryRaw).text;
+    if (deps.modelRedact) {
+      try {
+        summaryText = (await deps.modelRedact(summaryText)).text;
+      } catch {
+        // best-effort: keep the regex-floor summary
+      }
+    }
+    const summary = summaryText.trim().slice(0, MAX_SUMMARY_CHARS);
     if (!summary) continue;
 
     seen.add(token);

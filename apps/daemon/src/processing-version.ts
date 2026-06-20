@@ -59,8 +59,15 @@
  *      boundaries (and therefore segment_ids) shift; the wipe forces
  *      a full re-parse so historical transcripts get tool_call rows
  *      plus the new `tool_calls` segment tags.
+ * v6 — defense-in-depth redaction. The shipped `command_redacted` (and
+ *      script summaries) now go through layers 2+3 — the on-device
+ *      Privacy Filter (NER/PII) + the local-LLM secret backstop — not
+ *      just the regex floor, and the floor's `env_secret` rule was fixed
+ *      to catch bare `SECRET=`/`TOKEN=` names. Re-scan so historical
+ *      transcripts are re-redacted from the raw logs through the full
+ *      stack (the raw never left the device, so only the daemon can).
  */
-export const PROCESSING_VERSION = 5;
+export const PROCESSING_VERSION = 6;
 
 export interface ProcessingState {
   processingVersion: number | null;

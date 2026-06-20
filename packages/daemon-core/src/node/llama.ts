@@ -48,6 +48,15 @@ import {
   type LinkExtractor,
 } from "../pipeline/session-metadata.js";
 import {
+  applyLlmRedactions,
+  parseRedactReply,
+  REDACT_MAX_TOKENS,
+  REDACT_SYSTEM_PROMPT,
+  REDACT_TEMPERATURE,
+  shouldDeepRedact,
+} from "../pipeline/redaction.js";
+import type { Redactor } from "../pipeline/index.js";
+import {
   buildTitleUserPrompt,
   type Entitler,
   TITLER_MAX_TOKENS,
@@ -167,6 +176,7 @@ type Loaded = {
   entitler: Session;
   scriptSummarizer: Session;
   linkExtractor: Session;
+  redactor: Session;
 };
 let loaded: Loaded | null = null;
 let loadPromise: Promise<Loaded> | null = null;
@@ -371,7 +381,15 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
       contextSequence: linkExtractContext.getSequence(),
       systemPrompt: LINK_EXTRACT_SYSTEM_PROMPT,
     });
-    loaded = { summarizer, cognizer, entitler, scriptSummarizer, linkExtractor };
+    // Redaction backstop — one short command in, a few candidate substrings out.
+    const redactorContext = await model.createContext({
+      contextSize: Math.min(cfg.contextSize, 2048),
+    });
+    const redactor = new llamaMod.LlamaChatSession({
+      contextSequence: redactorContext.getSequence(),
+      systemPrompt: REDACT_SYSTEM_PROMPT,
+    });
+    loaded = { summarizer, cognizer, entitler, scriptSummarizer, linkExtractor, redactor };
     return loaded;
   })();
   try {
@@ -613,5 +631,47 @@ export function llamaExtractLinks(
     } catch {
       return null;
     }
+  };
+}
+
+/**
+ * Local-LLM redaction backstop (layer 3) — see `../pipeline/redaction.ts`. Asks
+ * the bundled model to name any secret substrings still present after the regex +
+ * Privacy-Filter passes, then deletes those exact substrings deterministically.
+ * Cheap pre-filter (`shouldDeepRedact`) skips the common no-secret command, so
+ * most calls cost nothing. Fail-safe: model unavailable / error / empty reply →
+ * the input is returned unchanged (the earlier layers already redacted it).
+ */
+export function llamaRedact(cfg: Required<LlamaConfig> = defaultLlamaConfig()): Redactor {
+  return async (text: string) => {
+    const unchanged = { text, counts: {} as Record<string, number> };
+    if (!shouldDeepRedact(text)) return unchanged;
+    let loadedSessions: Loaded;
+    try {
+      loadedSessions = await loadOnce(cfg);
+    } catch {
+      return unchanged;
+    }
+    const { redactor } = loadedSessions;
+    const run = inflight.then(async () => {
+      redactor.resetChatHistory();
+      const raw = await redactor.prompt(text, {
+        temperature: REDACT_TEMPERATURE,
+        // Thinking budget on top of the short list of substrings.
+        maxTokens: REDACT_MAX_TOKENS + 400,
+      });
+      return stripThinking(raw ?? "");
+    });
+    inflight = run.catch(() => undefined);
+    let reply: string;
+    try {
+      reply = await run;
+    } catch {
+      return unchanged;
+    }
+    const candidates = parseRedactReply(reply);
+    if (candidates.length === 0) return unchanged;
+    const { text: redacted, count } = applyLlmRedactions(text, candidates);
+    return { text: redacted, counts: count > 0 ? { llm_secrets: count } : {} };
   };
 }

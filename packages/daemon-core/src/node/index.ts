@@ -18,6 +18,7 @@ export {
   llamaCognize,
   llamaEntitle,
   llamaExtractLinks,
+  llamaRedact,
   llamaScriptSummarize,
   llamaSummarize,
 } from "./llama.js";

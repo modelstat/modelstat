@@ -27,6 +27,7 @@ import {
   llamaCognize,
   llamaEntitle,
   llamaExtractLinks,
+  llamaRedact,
   llamaScriptSummarize,
   llamaSummarize,
 } from "@modelstat/daemon-core/node";
@@ -34,7 +35,9 @@ import {
   buildSegmentsForSession,
   buildSessionMetadata as buildSessionMetadataCore,
   buildSessionTitles as buildSessionTitlesCore,
+  composeRedactors,
   type PipelineAdapters,
+  type Redactor,
   type ScriptSummarizer,
   type SegmentProgressFn,
 } from "@modelstat/daemon-core/pipeline";
@@ -42,7 +45,7 @@ import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
 import { createPrivacyFilterRedactor } from "@modelstat/daemon-core/redact/privacy-filter";
 import type { RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import { checkPullRequestOutcome, type LocalToolContext, resolveGitContext } from "@modelstat/parsers";
-import { enrichToolCallScripts } from "./enrich-scripts.js";
+import { enrichToolCallRedaction, enrichToolCallScripts } from "./enrich-scripts.js";
 
 let adapters: PipelineAdapters | null = null;
 
@@ -91,7 +94,12 @@ async function bundledAdapters(): Promise<PipelineAdapters> {
     // @huggingface/transformers — if the optional peer dep isn't
     // installed it returns a pass-through redactor (regex pass is
     // still the last line of defence).
-    redact: await createPrivacyFilterRedactor(),
+    // Defense-in-depth redaction, layers 2+3, stacked behind one adapter and
+    // applied to BOTH the abstract (in daemon-core) and `command_redacted` (in
+    // enrichRedaction below): the OpenAI Privacy Filter (NER/PII) then the
+    // local-LLM backstop for secrets the fixed patterns miss. Layer 1 (the
+    // deterministic regex floor in @modelstat/core/redact) already ran first.
+    redact: composeRedactors(await createPrivacyFilterRedactor(), llamaRedact(llamaCfg)),
   };
 }
 
@@ -176,10 +184,16 @@ export async function enrichScripts(
   drafts: readonly ToolCallDraft[],
   contexts: readonly LocalToolContext[] = [],
 ): Promise<void> {
-  if (contexts.length === 0 || drafts.length === 0) return;
+  if (drafts.length === 0) return;
   // Gate on the native runtime being loadable — same requirement as the
   // summariser. (getAdapters is cached; usually already warm by this point.)
-  await getAdapters();
+  const built = await getAdapters();
+  // Defense-in-depth over `command_redacted` for EVERY draft (not just ones that
+  // ran a script): layers 2+3 (Privacy Filter + LLM backstop) on top of the
+  // layer-1 floor that already ran at extraction.
+  if (built.redact) await enrichToolCallRedaction(drafts, built.redact);
+  // Per-script content summaries only apply when a command ran a script FILE.
+  if (contexts.length === 0) return;
   if (!scriptSummarizer) scriptSummarizer = llamaScriptSummarize(defaultLlamaConfig());
   await enrichToolCallScripts(drafts, contexts, {
     summarize: scriptSummarizer,
@@ -188,6 +202,7 @@ export async function enrichScripts(
       const buf = await fsReadFile(path);
       return buf.subarray(0, MAX_SCRIPT_READ_BYTES).toString("utf8");
     },
+    modelRedact: built.redact,
   });
 }
 
