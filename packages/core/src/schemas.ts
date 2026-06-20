@@ -215,7 +215,7 @@ export const ToolAction = z
       .default([]),
     /** Extractor confidence in [0, 1]. */
     confidence: z.number().min(0).max(1).default(0),
-    /** Provenance of the extraction, e.g. `shell.v2`. */
+    /** Provenance of the extraction, e.g. `shell.v3`. */
     extractor: z.string().max(40),
   })
   .strict();

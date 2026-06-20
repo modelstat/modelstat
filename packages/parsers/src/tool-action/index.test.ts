@@ -22,7 +22,7 @@ test("shell command → executable + masked param_shape + redacted command", () 
   assert.deepEqual(a.qualifiers, []);
   assert.deepEqual(a.keywords, []);
   assert.equal(a.abstract, null);
-  assert.equal(a.extractor, "shell.v1");
+  assert.equal(a.extractor, "shell.v3");
 });
 
 test("script invocation → basename is the executable", () => {

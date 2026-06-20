@@ -13,6 +13,9 @@
  */
 import { paramShape, redact, type ToolAction } from "@modelstat/core";
 
+import { extractExecutable } from "./executable.js";
+
+export * from "./executable.js";
 export * from "./scripts.js";
 
 /** What the parser has in hand for one observed call at draft-build time
@@ -58,9 +61,13 @@ export function extractToolAction(call: ToolActionInput): ToolAction {
   let command_redacted: string | null = null;
 
   if (command != null) {
-    const [head = "", ...rest] = command.trim().split(/\s+/);
-    executable = basename(head) || null;
-    param_shape = clampChars(paramShape(rest.join(" ")), MAX_FIELD_CHARS) || null;
+    // executable: the leading *meaningful* program (peels cd / wrappers / env
+    // assignments / pipelines), never a raw fragment or secret. See
+    // `extractExecutable`. param_shape keeps its own contract: the value-masked
+    // skeleton of everything after the first whitespace token.
+    executable = extractExecutable(command);
+    const args = command.trim().split(/\s+/).slice(1).join(" ");
+    param_shape = clampChars(paramShape(args), MAX_FIELD_CHARS) || null;
     command_redacted =
       clampChars(redact(command, call.cwd ?? undefined).text, MAX_FIELD_CHARS) || null;
   }
@@ -77,7 +84,9 @@ export function extractToolAction(call: ToolActionInput): ToolAction {
     command_redacted,
     scripts: [],
     confidence: 0,
-    extractor: `${surface}.v1`,
+    // Per-surface provenance. shell bumped to v3 (normalized executable, see
+    // `extractExecutable`); builtin/mcp extraction is unchanged → still v1.
+    extractor: `${surface}.${surface === "shell" ? "v3" : "v1"}`,
   };
 }
 
@@ -115,9 +124,4 @@ function shellCommandOf(input: unknown): string | null {
     }
   }
   return null;
-}
-
-/** Basename of a path-or-program token: `/usr/bin/git` → `git`, `./d.sh` → `d.sh`. */
-function basename(token: string): string {
-  return token.split("/").pop() ?? token;
 }
