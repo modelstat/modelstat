@@ -111,10 +111,14 @@ export const SECRET_FLOOR: readonly FloorSecret[] = [
     replacement: "<REDACTED:modelstat_device_secret>",
   },
   // Generic env-style KEY=VALUE where KEY names a secret. Keeps the var name.
+  // The keyword may be the WHOLE name (`SECRET=`, `TOKEN=`) or part of it
+  // (`AWS_SECRET_ACCESS_KEY=`), so the prefix is `[A-Z0-9_]*` (zero-or-more) —
+  // a mandatory leading `[A-Z]` here used to eat the first letter and miss every
+  // bare-keyword name, leaking `SECRET="…"` / `TOKEN="…"` straight to the wire.
   {
     name: "env_secret",
     pattern:
-      /\b([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|API)[A-Z0-9_]*)\s*[:=]\s*['"]?([^\s'"]{12,})['"]?/g,
+      /\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|API)[A-Z0-9_]*)\s*[:=]\s*['"]?([^\s'"]{12,})['"]?/g,
     replacement: "$1=<REDACTED:env_secret>",
   },
   {

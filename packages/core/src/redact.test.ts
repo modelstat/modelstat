@@ -72,3 +72,33 @@ test("the consolidated floor catches what used to be caught by only one redactor
     /\[REDACTED:modelstat_device_secret\]/,
   );
 });
+
+test("env_secret catches BARE keyword names, not just prefixed ones", () => {
+  // Regression: the name pattern's mandatory leading [A-Z] used to eat the first
+  // letter, so a bare `SECRET=` / `TOKEN=` / `KEY=` never matched and shipped raw
+  // (this is the real leak found in prod `command_redacted`).
+  for (const [cmd, secret] of [
+    ['SECRET="xk_edge_examplefake0000key0000"', "xk_edge_examplefake0000key0000"],
+    ['TOKEN="1000000000:examplefake0000tgtoken0000"', "examplefake0000tgtoken0000"],
+    ["KEY='phc_examplefake0000posthog0000key'", "phc_examplefake0000posthog0000key"],
+    ["PASSWORD=hunter2hunter2hunter2", "hunter2hunter2hunter2"],
+    ["export AWS_SECRET_ACCESS_KEY=abcd1234efgh5678ijkl9", "abcd1234efgh5678ijkl9"],
+  ] as const) {
+    const r = redact(cmd);
+    assert.ok(!r.text.includes(secret), `secret must be gone from: ${cmd}`);
+    assert.match(r.text, /\[REDACTED:env_secret\]/);
+  }
+});
+
+test("env_secret does not redact non-secret assignments", () => {
+  // Var names without a secret keyword, or short values, must survive — these
+  // are useful analytic signal, not secrets.
+  for (const cmd of [
+    "AWS_PROFILE=dev",
+    "CHAIN_ID=42220",
+    'export PATH="$HOME/.fly/bin:/opt/homebrew/bin:$PATH"',
+    "MONKEY=banana",
+  ]) {
+    assert.equal(redact(cmd).counts.secrets_found, 0, `should not redact: ${cmd}`);
+  }
+});
