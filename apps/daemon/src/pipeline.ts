@@ -41,7 +41,7 @@ import {
 import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
 import { createPrivacyFilterRedactor } from "@modelstat/daemon-core/redact/privacy-filter";
 import type { RawEvent, Segment, SessionMetadata } from "@modelstat/core";
-import { type LocalToolContext, resolveGitContext } from "@modelstat/parsers";
+import { checkPullRequestOutcome, type LocalToolContext, resolveGitContext } from "@modelstat/parsers";
 import { enrichToolCallScripts } from "./enrich-scripts.js";
 
 let adapters: PipelineAdapters | null = null;
@@ -151,6 +151,7 @@ export async function buildSessionMetadata(
   return buildSessionMetadataCore(segments, events, {
     resolveGit: resolveGitContext,
     extractLinks: a.extractLinks,
+    checkPrOutcome: checkPullRequestOutcome,
   });
 }
 

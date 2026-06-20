@@ -60,6 +60,15 @@ export const PullRequestRef = z.object({
   url: z.string().max(400).nullable().default(null),
   source: RefSource.default("content"),
   confidence: z.number().min(0).max(1).default(0.9),
+  // On-device verified-outcome signals — filled by the parsers' local git-check
+  // (`checkPullRequestOutcome`) when the PR's repo is on disk. `null` = unknown;
+  // the server's CPVO engine classifies verified/failed from these. Mirrors
+  // core's `PullRequestRef` field-for-field.
+  merged: z.boolean().nullable().optional(),
+  merged_at: z.string().max(40).nullable().optional(),
+  reverted: z.boolean().nullable().optional(),
+  hotfixed: z.boolean().nullable().optional(),
+  reopened: z.boolean().nullable().optional(),
 });
 export type PullRequestRef = z.infer<typeof PullRequestRef>;
 

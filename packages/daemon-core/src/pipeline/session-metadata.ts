@@ -87,6 +87,13 @@ export interface SessionMetadataOptions {
   resolveGit?: (cwd: string | null) => Promise<GitContext | null>;
   /** On-device model that surfaces references from redacted abstracts. */
   extractLinks?: LinkExtractor;
+  /** Local git verified-outcome check for a PR in `cwd` (parsers'
+   * `checkPullRequestOutcome`) — fills a referenced PR's merged/merged_at/
+   * reverted signals for the server's CPVO engine. Best-effort. */
+  checkPrOutcome?: (
+    cwd: string,
+    prNumber: number,
+  ) => Promise<{ merged: boolean; merged_at: string | null; reverted: boolean } | null>;
 }
 
 function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {
@@ -122,6 +129,9 @@ export async function buildSessionMetadata(
       const evs = eventsBySession.get(sessionId) ?? [];
       const segs = segsBySession.get(sessionId) ?? [];
       const parts: DetectedRefs[] = [];
+      // repo slug → a cwd on disk for it (built in step 2), used to run the
+      // verified-outcome git-check against the right local repo.
+      const slugToCwd = new Map<string, string>();
 
       // 1. git context already on the events.
       const cwds = new Set<string>();
@@ -160,6 +170,7 @@ export async function buildSessionMetadata(
             g = null;
           }
           if (!g?.remote_slug) continue;
+          slugToCwd.set(g.remote_slug.toLowerCase(), cwd);
           const refs = emptyDetectedRefs();
           refs.repos.push({
             host: g.remote_host ?? null,
@@ -201,6 +212,26 @@ export async function buildSessionMetadata(
       }
 
       const meta = dedupeSessionMetadata(parts);
+
+      // 5. enrich PRs with on-device verified-outcome signals (CPVO), where the
+      //    PR's repo is on disk. Best-effort + per-PR isolated.
+      if (opts.checkPrOutcome && meta.pull_requests.length > 0) {
+        for (const pr of meta.pull_requests) {
+          const cwd = pr.slug ? slugToCwd.get(pr.slug.toLowerCase()) : undefined;
+          if (!cwd) continue;
+          try {
+            const o = await opts.checkPrOutcome(cwd, pr.number);
+            if (o) {
+              pr.merged = o.merged;
+              pr.merged_at = o.merged_at;
+              pr.reverted = o.reverted;
+            }
+          } catch {
+            // best-effort — a failed git-check just leaves the PR unenriched.
+          }
+        }
+      }
+
       if (!isEmptySessionMetadata(meta)) out[sessionId] = meta;
     } catch {
       // Defence-in-depth: a single session's failure never drops metadata for
