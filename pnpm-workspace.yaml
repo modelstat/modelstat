@@ -2,7 +2,6 @@ packages:
   - "apps/daemon"
   - "apps/extension"
   - "packages/adapters-protocol"
-  - "packages/daemon-sdk"
   - "packages/daemon-core"
   - "packages/core"
   - "packages/mcp"

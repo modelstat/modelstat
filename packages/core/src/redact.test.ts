@@ -56,7 +56,7 @@ test("collapses base64 blobs but leaves paths and constants intact", () => {
   assert.match(c.text, /MAX_TOOL_ACTION_PARAM_SHAPE_CHARS_LIMIT/);
 });
 
-test("the consolidated floor catches what used to be daemon-sdk-only", () => {
+test("the consolidated floor catches what used to be caught by only one redactor", () => {
   // discord_token / db_url / bearer / modelstat device secret were missing from
   // the wire floor before the two catalogues were unified.
   assert.match(

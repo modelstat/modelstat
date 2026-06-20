@@ -9,7 +9,7 @@
  * (`./redact`). See the never-weakenable tests.
  *
  * This module is the one that may use zod — it is consumed by the daemon's
- * signed-config loader, never by the published `@modelstat/daemon-sdk` (which
+ * signed-config loader, never by the published SDK (which
  * imports only the dependency-free `./redact-floor`).
  */
 

@@ -45,10 +45,11 @@ Things to know:
   staged via `installNativeRuntime`/`_setup-runtime`.
 - Redaction has **one floor**. The secret-pattern catalogue lives in
   `@modelstat/core/redact-floor` (dependency-free) and is the single source of
-  truth for both the wire redactor (`@modelstat/core/redact`) and the published
-  SDK redactor (`@modelstat/daemon-sdk`) — add a newly-leaked credential format
-  there, once. The server can *augment* it at runtime via a signed, additive
-  `policies` config: the floor always applies and a signed bundle can only ever
+  truth for the wire redactor (`@modelstat/core/redact`) and the daemon — add a
+  newly-leaked credential format there, once. (The standalone `@modelstat/sdk`
+  in `sdks/node` keeps its own copy.) The server can *augment* it at runtime via
+  a signed, additive `policies` config: the floor always applies and a signed
+  bundle can only ever
   add patterns, never remove or weaken them.
 - `@modelstat/remote-config` is the shared signed-config loader (fetch → verify
   Ed25519 over raw bytes → disk-cache under `~/.modelstat/config/` → fall back
@@ -74,13 +75,13 @@ of truth for the last released version, not `package.json`):
   minor (`0.1.3` → `0.2.0`), never auto-jumping to `1.0.0`.
 - **Dependency-aware**: a package is "changed" if its own dir *or any of its
   transitive workspace deps* changed. A `fix(core):` in `packages/core`
-  therefore republishes `modelstat` and `@modelstat/daemon-sdk` (both depend on
-  it) but not `@modelstat/mcp` (no workspace deps).
+  therefore republishes `modelstat` (which depends on it) but not
+  `@modelstat/mcp` (no workspace deps).
 - The publishable set is every workspace package with `private !== true`, so a
   new public package is picked up automatically. The tag prefix derives from the
   package's unscoped name (`modelstat` → `modelstat-v`, `@modelstat/mcp` →
-  `mcp-v`); the only hand-maintained list is `SKIP_PUBLISH` (currently
-  `@modelstat/daemon-sdk`, until its npm trusted publisher is configured).
+  `mcp-v`); the only hand-maintained list is `SKIP_PUBLISH` (currently empty —
+  every public package auto-publishes).
 
 **Auth — npm Trusted Publishing (OIDC), no token.** The runner mints a
 short-lived OIDC token (`id-token: write`) that npm exchanges for a publish

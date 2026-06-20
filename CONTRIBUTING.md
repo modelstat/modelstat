@@ -71,7 +71,7 @@ Workflow:
 
 Missing a secret shape the `strict-pii-v2` policy should catch?
 
-Where: [`packages/daemon-sdk/src/redact.ts`](packages/daemon-sdk/src/redact.ts)
+Where: [`packages/core/src/redact.ts`](packages/core/src/redact.ts)
 
 Add a `Pattern` entry to the right category (`SECRETS`,
 `MODELSTAT_SECRETS`, or `PII`) with a regex, a name, and a

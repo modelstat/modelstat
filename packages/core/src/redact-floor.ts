@@ -5,12 +5,12 @@
  *
  * This is the baseline a compromised server can never weaken. It was
  * previously duplicated and *drifting* across `packages/core/src/redact`
- * (the wire floor) and `packages/daemon-sdk/src/redact` (the SDK redactor) — one
+ * (the wire floor) and the SDK's standalone redactor — one
  * had `discord_token`/`db_url`, the other didn't. They now both source this
  * catalogue, so a newly-leaked credential format is added in exactly one place.
  *
  * Kept deliberately dependency-free (no zod, no imports) so the published,
- * self-contained `@modelstat/daemon-sdk` can bundle it without pulling anything
+ * a self-contained build can bundle it without pulling anything
  * else in. The remote `policies` augment (additive-only) layers on top of this
  * floor; it can never replace or disable it.
  *
@@ -86,7 +86,7 @@ export const SECRET_FLOOR: readonly FloorSecret[] = [
     pattern: /(?:sk|pk|rk)_test_[A-Za-z0-9]{24,}/g,
     replacement: "<REDACTED:stripe_test_key>",
   },
-  // Discord bot token (was daemon-sdk-only — the canonical drift example).
+  // Discord bot token (was caught by only one redactor — the canonical drift example).
   {
     name: "discord_token",
     pattern: /[MN][A-Za-z\d]{23}\.[\w-]{6}\.[\w-]{27}/g,

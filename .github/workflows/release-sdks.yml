@@ -20,11 +20,11 @@ name: release-sdks
 #      `modelstat-sdk`: repo `modelstat/modelstat`, workflow `release-sdks.yml`,
 #      environment left BLANK. "Pending" lets the very first run CREATE the
 #      project, so no bootstrap upload is needed.
-#    • npm       — `@modelstat/sdk` is brand-new, so (exactly like
-#      `@modelstat/daemon-sdk`) it needs ONE bootstrap `npm publish` OR org-level
-#      Trusted Publishing, plus a Trusted Publisher on npmjs.com (Package →
-#      Settings). Until then the node job fails on first publish — that's the cue
-#      to bootstrap.
+#    • npm       — `@modelstat/sdk` needs a Trusted Publisher on npmjs.com
+#      (Package → Settings; repo `modelstat/modelstat`, workflow
+#      `release-sdks.yml`). It's already bootstrapped (0.0.1 was published by
+#      hand), so the trusted publisher is all that's left; without it the node
+#      job fails on publish.
 #
 # After the registry setup, run this once via "Run workflow" (workflow_dispatch)
 # to ship the current versions; thereafter every `sdks/**` change auto-publishes.
