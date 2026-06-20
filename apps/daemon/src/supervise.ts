@@ -38,9 +38,8 @@
  */
 
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { isProcessAlive, type LockMeta, readDaemonLock } from "./lock.js";
+import { homePath } from "./paths.js";
 
 /** Owner is "healthy" while its heartbeat mirror is younger than this.
  * The daemon rewrites last-status.json on every heartbeat (10 s) and
@@ -119,7 +118,7 @@ export function daemonHealth(
 ): DaemonHealth {
   const now = opts.now ?? Date.now();
   const pidAlive = opts.pidAlive ?? isProcessAlive;
-  const statusPath = opts.statusPath ?? join(homedir(), ".modelstat", "last-status.json");
+  const statusPath = opts.statusPath ?? homePath("last-status.json");
 
   const lock = opts.lockPath === undefined ? readDaemonLock() : readDaemonLock(opts.lockPath);
   const ownerAlive = lock !== null && pidAlive(lock.pid);

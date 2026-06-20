@@ -32,7 +32,6 @@
   },
   "dependencies": {
     "chokidar": "^4.0.3",
-    "conf": "^13.1.0",
     "dotenv": "^16.4.7",
     "node-llama-cpp": "^3.18.0",
     "ulid": "^2.3.0",

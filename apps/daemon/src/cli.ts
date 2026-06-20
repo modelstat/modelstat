@@ -743,10 +743,9 @@ function fmtTokens(v: string | number): string {
  * parsed object or null if the file isn't there / can't be parsed. */
 async function readLocalStatus(): Promise<Record<string, unknown> | null> {
   try {
-    const { homedir } = await import("node:os");
-    const { join } = await import("node:path");
     const { readFile } = await import("node:fs/promises");
-    const p = join(homedir(), ".modelstat", "last-status.json");
+    const { homePath } = await import("./paths.js");
+    const p = homePath("last-status.json");
     const txt = await readFile(p, "utf8");
     return JSON.parse(txt) as Record<string, unknown>;
   } catch {

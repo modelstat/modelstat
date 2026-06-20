@@ -6,24 +6,11 @@
  * a new self-register (which would create a ghost device row in the
  * user's account).
  *
- * Separate from the `conf` store because:
- *   - `conf` lives under ~/Library/Preferences/ (macOS) or
- *     ~/.config/ (linux), whose paths are easy for users to nuke
- *     during debugging without realizing what they're deleting.
- *   - Users' mental model is "my modelstat config lives in
- *     ~/.modelstat/" (that's where the CLI installs the binary and
- *     writes logs + the daemon lockfile too).
- *   - The identity file holds a long-lived bearer — we want explicit
- *     chmod 0600 so nothing else on the machine can read it.
- *
- * The `conf` store stays around for runtime state: file cursors,
- * overridden API URL, etc. Things that are per-install or
- * per-session and don't need to survive a nuke.
- *
- * Migration: `loadIdentity()` first checks the file; if missing but
- * the legacy `conf` store contains identity fields (pre-0.0.23
- * installs), it migrates them once and deletes the conf copy so
- * we have exactly one source of truth going forward.
+ * Lives under the single daemon home (`modelstatHome()`, default `~/.modelstat`,
+ * relocatable via MODELSTAT_HOME) alongside `state.json` — see ./paths.ts. The
+ * identity file holds a long-lived bearer, so it gets explicit chmod 0600.
+ * Runtime bookkeeping (cursors, API-URL override) lives in the sibling
+ * `state.json` (./runtime-state.ts); both share one location so state can't fork.
  */
 
 import {
@@ -34,8 +21,9 @@ import {
   writeFileSync,
   existsSync,
 } from "node:fs";
-import { homedir, hostname as osHostname } from "node:os";
+import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
+import { modelstatHome } from "./paths.js";
 
 export interface DeviceIdentity {
   /** Daemon-generated UUIDv7. Stable across reinstalls. */
@@ -61,25 +49,10 @@ export interface DeviceIdentity {
   defaultOrgId?: string | null;
 }
 
-/**
- * Legacy slots the conf store used pre-0.0.23. Duplicated here (not
- * imported from ./config.ts) so this module doesn't create a cycle.
- */
-interface LegacyConfShape {
-  bearerToken?: string | null;
-  deviceId?: string | null;
-  deviceUuid?: string | null;
-  claimCode?: string | null;
-  claimUrl?: string | null;
-  userEmail?: string | null;
-  defaultOrgId?: string | null;
-}
-
-const ROOT = join(homedir(), ".modelstat");
-const IDENTITY_FILE = join(ROOT, "identity.json");
+const IDENTITY_FILE = join(modelstatHome(), "identity.json");
 
 function ensureRoot(): void {
-  mkdirSync(ROOT, { recursive: true, mode: 0o700 });
+  mkdirSync(modelstatHome(), { recursive: true, mode: 0o700 });
 }
 
 /** Atomic write + chmod 0600. Refuses to overwrite silently — caller
@@ -130,34 +103,9 @@ function parseFile(): DeviceIdentity | null {
   }
 }
 
-/**
- * Read the canonical identity. If the file is missing but the legacy
- * `conf` store has identity fields (pre-0.0.23 install), migrate them
- * across once. Returns null if no identity is present anywhere.
- */
-export function loadIdentity(migrateFromConf?: () => LegacyConfShape | null): DeviceIdentity | null {
-  const fromFile = parseFile();
-  if (fromFile) return fromFile;
-
-  if (!migrateFromConf) return null;
-  const legacy = migrateFromConf();
-  if (!legacy) return null;
-  if (!legacy.deviceUuid || !legacy.deviceId || !legacy.bearerToken) {
-    return null;
-  }
-  const migrated: DeviceIdentity = {
-    deviceUuid: legacy.deviceUuid,
-    deviceId: legacy.deviceId,
-    bearerToken: legacy.bearerToken,
-    claimCode: legacy.claimCode ?? null,
-    claimUrl: legacy.claimUrl ?? null,
-    hostname: osHostname(),
-    createdAt: new Date().toISOString(),
-    userEmail: legacy.userEmail ?? null,
-    defaultOrgId: legacy.defaultOrgId ?? null,
-  };
-  writeAtomic(migrated);
-  return migrated;
+/** Read the canonical identity from `identity.json`, or null if absent. */
+export function loadIdentity(): DeviceIdentity | null {
+  return parseFile();
 }
 
 /** Persist the current identity. Writes atomically; caller is

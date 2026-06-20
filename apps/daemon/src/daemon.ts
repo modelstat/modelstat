@@ -238,11 +238,11 @@ async function rotateRunawayLogs(): Promise<void> {
 
 let lastStatusPath: string | null = null;
 async function writeLocalStatus(snapshot: object): Promise<void> {
-  const { homedir } = await import("node:os");
   const { join } = await import("node:path");
   const { writeFile, mkdir, rename } = await import("node:fs/promises");
+  const { modelstatHome } = await import("./paths.js");
   if (!lastStatusPath) {
-    const dir = join(homedir(), ".modelstat");
+    const dir = modelstatHome();
     try {
       await mkdir(dir, { recursive: true });
     } catch {

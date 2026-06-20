@@ -37,8 +37,8 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { modelstatHome } from "./paths.js";
 
 export interface LockMeta {
   pid: number;
@@ -47,7 +47,7 @@ export interface LockMeta {
   apiUrl: string;
 }
 
-const LOCK_DIR = join(homedir(), ".modelstat");
+const LOCK_DIR = modelstatHome();
 const LOCK_FILE = join(LOCK_DIR, "daemon.lock");
 
 export function isProcessAlive(pid: number): boolean {
