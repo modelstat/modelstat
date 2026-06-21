@@ -41,6 +41,9 @@ export class Worker {
   private timer: ReturnType<typeof setInterval> | undefined;
   /** Set once `shutdown()` has run, so late records are ignored. */
   private closed = false;
+  /** Guard so the "local daemon unreachable" hint is printed at most once,
+   * not on every dropped batch. */
+  private warnedLocalDaemon = false;
 
   /**
    * Serializes flushes: every flush chains onto this promise so only one runs
@@ -143,6 +146,19 @@ export class Worker {
           console.error(
             `modelstat: dropping batch of ${batch.events.length} events after retry: ${msg}`,
           );
+          // The most common cause in the default `local_daemon` mode is that
+          // no daemon is listening on loopback. Point the user at the fix
+          // once (not per dropped batch) so a misconfigured setup is obvious
+          // instead of silently losing data.
+          if (this.cfg.mode.kind === "local_daemon" && !this.warnedLocalDaemon) {
+            this.warnedLocalDaemon = true;
+            console.error(
+              `modelstat: the local daemon at ${this.cfg.mode.url} is unreachable — ` +
+                "is it running? Start it with `npx modelstat connect`, or ship " +
+                "directly to the server with `cfg.withRemote(baseUrl, raw)`. " +
+                "(This hint prints once.)",
+            );
+          }
         }
       }
     }

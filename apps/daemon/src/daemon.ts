@@ -24,6 +24,12 @@ import { reportDiscovery } from "./api.js";
 import { state } from "./config.js";
 import { acquireDaemonLock, formatAge } from "./lock.js";
 import { machineKey } from "./machine-key.js";
+import {
+  drainLocalQueue,
+  type LocalIngestReceiver,
+  localQueueDepth,
+  startLocalIngestReceiver,
+} from "./receiver.js";
 import { reconcileBackfill } from "./reconcile.js";
 import { scanAll } from "./scan.js";
 import { createCoalescingRunner } from "./single-flight.js";
@@ -483,6 +489,36 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
     throw err;
   }
 
+  // Local loopback ingest receiver — the server half of the SDKs'
+  // `local_daemon` mode (sdks/{node,python,rust} default to
+  // http://127.0.0.1:4319/v1/ingest). SDK captures land in a durable queue
+  // and drain through the SAME pipeline + uploader as file scans, under this
+  // device's secret — so the SDK ships no credentials and only redacted
+  // segment abstracts leave the machine. Best-effort: a busy port just
+  // disables this path (the file scan is the daemon's core duty).
+  const localIngest: LocalIngestReceiver | null = await startLocalIngestReceiver();
+  const LOCAL_DRAIN_INTERVAL_MS = 5_000;
+  let localDrainTimer: NodeJS.Timeout | null = null;
+  if (localIngest) {
+    const drainTick = async (): Promise<void> => {
+      try {
+        const { events } = await drainLocalQueue({
+          deviceId: state.deviceId as string,
+          daemonVersion: DAEMON_VERSION,
+        });
+        if (events > 0) bumpStat("sdk_events_uploaded", events);
+        setStat("sdk_queue", await localQueueDepth());
+      } catch (e) {
+        // Backend unreachable: events stay durably queued and the next tick
+        // retries. Surface it without flipping the whole daemon to "offline"
+        // (the file-scan path owns that top-level signal).
+        setMessage(`SDK ingest upload deferred: ${describeErrorWithCause(e)}`);
+      }
+    };
+    localDrainTimer = setInterval(() => void drainTick(), LOCAL_DRAIN_INTERVAL_MS);
+    localDrainTimer.unref();
+  }
+
   // Reconcile the local processing-pipeline version. If this build
   // produces materially different segments than the one that wrote
   // the on-disk cursors (e.g. summariser model swap, prompt change),
@@ -596,6 +632,8 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
     setPhase("offline", "Shutting down");
     await sendHeartbeat();
     await watcher.close();
+    if (localDrainTimer) clearInterval(localDrainTimer);
+    await localIngest?.close();
     // Free the bundled summariser before exit so llama.cpp's Metal device
     // doesn't hit a teardown GGML_ASSERT during static destruction (which
     // turned every launchd stop/restart into a "failed" exit). No-op when
