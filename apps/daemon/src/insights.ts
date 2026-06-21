@@ -14,6 +14,7 @@
  * seconds. We short-poll a small, bounded number of times so the cache lands
  * `ready` without spinning.
  */
+import { readFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { request } from "undici";
 import { createLogger } from "@modelstat/daemon-core/logger";
@@ -69,6 +70,23 @@ function sessionsDir(): string {
  * id can never escape the directory. */
 export function sessionInsightsPath(sessionId: string): string {
   return homePath("sessions", `${encodeURIComponent(sessionId)}.json`);
+}
+
+/**
+ * Read a session's cached insights SYNCHRONOUSLY — the statusline's only data
+ * source. Returns null when there's no cache (session not scanned yet) or the
+ * file is unreadable/corrupt. Deliberately sync + swallowing: `modelstat
+ * statusline` runs on every Claude Code render and must never block on I/O or
+ * throw (a crashing statusline would wedge the prompt). The cache is small
+ * (one session's rollup), so a sync read is cheap.
+ */
+export function readCachedInsightsSync(sessionId: string): SessionInsights | null {
+  try {
+    const raw = readFileSync(sessionInsightsPath(sessionId), "utf8");
+    return JSON.parse(raw) as SessionInsights;
+  } catch {
+    return null;
+  }
 }
 
 /**

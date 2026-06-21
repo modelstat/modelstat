@@ -36,10 +36,29 @@ npx modelstat@latest jobs               # pipeline queue + recent processing led
 npx modelstat@latest paths [--json]     # state file + log dir + API URL
 
 npx modelstat@latest scan               # one-shot parse + upload of local JSONL
+npx modelstat@latest scan --session <id> # eager force-scan ONE session now (warms a running daemon)
 npx modelstat@latest rescan             # wipe file cursors so next scan re-reads & re-summarises everything
 npx modelstat@latest watch              # foreground watcher (no service install)
 npx modelstat@latest discover           # report detected tool installs + identities
+modelstat statusline                    # Claude Code status line (reads its stdin JSON)
 ```
+
+## Claude Code status line
+
+The installer auto-enables a live status line in Claude Code so every turn shows
+your current session's **tokens · effective $ · taxonomy** at the bottom of the
+prompt. It reads only a small local cache (`~/.modelstat/sessions/<id>.json`) —
+it never blocks the prompt and never calls the network.
+
+It's added to your **user** `~/.claude/settings.json` (composing with — and
+restoring — any status line you already had):
+
+```json
+{ "statusLine": { "type": "command", "command": "modelstat statusline" } }
+```
+
+Opt out at install time with `MODELSTAT_NO_STATUSLINE=1`, or remove it later
+with `npx modelstat@latest remove`.
 
 **Programmatic pairing** (for scripted / headless setups that pair without a browser):
 

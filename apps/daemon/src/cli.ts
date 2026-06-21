@@ -155,10 +155,15 @@ function isNonInteractive(): boolean {
   return Boolean(process.env.CI) || process.stdin.isTTY !== true;
 }
 
+/** True when an env var is set to a truthy value (`1`/`true`/`yes`). */
+function envFlag(name: string): boolean {
+  const v = process.env[name]?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
 /** Explicit "yes, really register against prod headlessly" opt-in. */
 function prodRegisterOptIn(): boolean {
-  const v = process.env.MODELSTAT_ALLOW_PROD_REGISTER?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
+  return envFlag("MODELSTAT_ALLOW_PROD_REGISTER");
 }
 
 /**
@@ -555,6 +560,38 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     warn("the daemon will not run in the background — re-run after fixing the issue");
   }
 
+  // ── 4.5 Claude Code statusline (opt-out via MODELSTAT_NO_STATUSLINE) ──
+  // A Claude Code plugin can't register the main statusLine, so the installer
+  // is the mechanism: auto-write `modelstat statusline` into the user's
+  // ~/.claude/settings.json so the live per-session line (tokens · $ ·
+  // taxonomy) shows at the bottom of every turn. Idempotent + composes with an
+  // existing statusLine (stashes + restores it). Set MODELSTAT_NO_STATUSLINE=1
+  // to skip entirely.
+  if (!envFlag("MODELSTAT_NO_STATUSLINE")) {
+    step("Enabling the Claude Code statusline (live tokens · $ · taxonomy)");
+    try {
+      const { installStatusline, claudeSettingsPath } = await import("./claude-settings.js");
+      const r = installStatusline();
+      if (r.kind === "installed") {
+        emitEvent(opts, "statusline_installed", { preserved: r.preserved });
+        ok(
+          r.preserved
+            ? `statusline enabled in ${claudeSettingsPath()} (your previous one was preserved)`
+            : `statusline enabled in ${claudeSettingsPath()}`,
+        );
+      } else if (r.kind === "already") {
+        emitEvent(opts, "statusline_already", {});
+        ok("statusline already enabled");
+      } else {
+        emitEvent(opts, "statusline_failed", { error: r.message });
+        warn(`couldn't enable the statusline: ${r.message}`);
+      }
+    } catch (e) {
+      emitEvent(opts, "statusline_failed", { error: (e as Error).message });
+      warn(`couldn't enable the statusline: ${(e as Error).message}`);
+    }
+  }
+
   // ── 5. Detect local AI installs + signed-in accounts ──────────
   // Idempotent: a second `npx modelstat@latest` after the user signs
   // into a new account (e.g. fresh codex login, new Claude Keychain
@@ -816,6 +853,23 @@ async function cmdStop(): Promise<void> {
   try {
     uninstallService();
     console.log("✓ service stopped and uninstalled");
+    // Remove our Claude Code statusLine (restoring any one we composed over).
+    // Best-effort: a settings hiccup must not fail the uninstall.
+    try {
+      const { removeStatusline } = await import("./claude-settings.js");
+      const r = removeStatusline();
+      if (r.kind === "removed") {
+        console.log(
+          r.restored
+            ? "✓ statusline removed (your previous statusLine was restored)"
+            : "✓ statusline removed from Claude Code settings",
+        );
+      } else if (r.kind === "error") {
+        console.log(`  (couldn't remove the statusline: ${r.message})`);
+      }
+    } catch (e) {
+      console.log(`  (couldn't remove the statusline: ${(e as Error).message})`);
+    }
     console.log(`  Your device pairing is still in ${state.storePath}`);
     console.log("  Run `modelstat` again to re-enable.");
   } catch (err) {
@@ -1184,6 +1238,15 @@ async function main(): Promise<void> {
       return cmdDiscover();
     case "scan":
       return cmdScan(rest);
+    case "statusline": {
+      // Claude Code's always-on status line. Reads its stdin JSON, prints one
+      // compact line from the LOCAL insights cache — never blocks, never hits
+      // the network, never throws (a crashing statusline wedges the prompt).
+      // Dynamically imported so the common CLI paths don't pay for it.
+      const { runStatusline } = await import("./statusline.js");
+      await runStatusline();
+      return;
+    }
     case "rescan":
       return cmdRescan();
     case "watch":
@@ -1232,6 +1295,9 @@ async function main(): Promise<void> {
       );
       console.log(
         "  npx modelstat@latest token          — print the device token for hosted MCP / API access (--json)",
+      );
+      console.log(
+        "  modelstat statusline                — Claude Code status line (reads stdin JSON; auto-enabled on install)",
       );
       console.log();
       console.log("Dev / one-shots:");
