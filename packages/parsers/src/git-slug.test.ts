@@ -5,7 +5,17 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { guessRepoSlugFromPath } from "./git.js";
+import { guessRepoSlugFromPath, mainRepoPath } from "./git.js";
+
+test("mainRepoPath: strips an ephemeral .claude worktree to the main repo", () => {
+  // A worktree (deleted by parse time) resolves the MAIN repo's remote instead.
+  assert.equal(
+    mainRepoPath("/Users/dev/Projects/acme/.claude/worktrees/pensive-fermat-ea6051"),
+    "/Users/dev/Projects/acme",
+  );
+  // A plain repo cwd is unchanged.
+  assert.equal(mainRepoPath("/Users/dev/Projects/modelstat/core"), "/Users/dev/Projects/modelstat/core");
+});
 
 test("guessRepoSlugFromPath: owner/repo, but strips .claude/worktrees noise", () => {
   // A real owner/repo layout passes through.

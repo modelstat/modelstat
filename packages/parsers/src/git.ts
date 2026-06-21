@@ -39,10 +39,25 @@ function parseRemote(url: string): { host: string | null; slug: string | null } 
   }
 }
 
+/** The main-repo path for a (possibly ephemeral) worktree cwd: strips
+ * `/.claude/worktrees/<id>` so a deleted worktree still resolves the real repo's
+ * remote. A plain cwd is returned unchanged. */
+export function mainRepoPath(cwd: string): string {
+  const i = cwd.indexOf("/.claude/");
+  return i === -1 ? cwd : cwd.slice(0, i);
+}
+
 export async function resolveGitContext(cwd: string | null): Promise<GitContext | null> {
   if (!cwd) return null;
-  if (cache.has(cwd)) return cache.get(cwd) ?? null;
-  const root = findRepoRoot(cwd);
+  // Ephemeral worktrees live under `<repo>/.claude/worktrees/<id>` and are often
+  // deleted by the time the daemon parses the session. Resolve from the MAIN repo
+  // (`<repo>`, still on disk) so EVERY session of a repo yields the one canonical
+  // remote slug — not a path-guess off the dead worktree, which split the project
+  // dimension (`acme/acme` vs `acme`). Worktrees share the remote, so this is also
+  // correct for live ones.
+  const target = mainRepoPath(cwd);
+  if (cache.has(target)) return cache.get(target) ?? null;
+  const root = findRepoRoot(target);
   if (!root) {
     const empty: GitContext = {
       remote_url: null,
@@ -51,7 +66,7 @@ export async function resolveGitContext(cwd: string | null): Promise<GitContext 
       branch: null,
       commit_sha: null,
     };
-    cache.set(cwd, empty);
+    cache.set(target, empty);
     return empty;
   }
 
@@ -76,7 +91,7 @@ export async function resolveGitContext(cwd: string | null): Promise<GitContext 
     branch,
     commit_sha: sha,
   };
-  cache.set(cwd, ctx);
+  cache.set(target, ctx);
   return ctx;
 }
 
