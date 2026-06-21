@@ -31,6 +31,14 @@ export interface RuntimeState {
   segmentsSent: number;
   /** Pipeline version that last produced the cursors; bump ⇒ full re-scan. */
   processingVersion: number | null;
+  /** Self-healing reconcile cache: per transcript file, its mtime and a
+   * (UTC-day → session → event-count) tally, so reconcile compares against the
+   * server WITHOUT re-parsing unchanged files (O(changed files)). Bounded by the
+   * CURRENT file set (GC'd as files vanish) — flat over months. */
+  reconcileCache: Record<
+    string,
+    { mtime: number; perDaySession: Record<string, Record<string, number>> }
+  >;
 }
 
 const DEFAULTS: RuntimeState = {
@@ -38,6 +46,7 @@ const DEFAULTS: RuntimeState = {
   cursor: {},
   segmentsSent: 0,
   processingVersion: null,
+  reconcileCache: {},
 };
 
 export function statePath(): string {
@@ -57,6 +66,7 @@ function load(): RuntimeState {
       cursor: obj.cursor ?? {},
       segmentsSent: obj.segmentsSent ?? 0,
       processingVersion: obj.processingVersion ?? null,
+      reconcileCache: obj.reconcileCache ?? {},
     };
   } catch {
     // Missing/corrupt ⇒ fresh defaults (a new install, or post-`MODELSTAT_HOME`
@@ -99,6 +109,29 @@ export const runtimeState = {
     s.cursor = {};
     persist(s);
   },
+  /** Drop ONE file's cursor so the next scan re-reads it — the precise lever the
+   * self-healing reconcile pulls for the files of sessions the server is missing. */
+  clearCursor(path: string): void {
+    const s = load();
+    if (path in s.cursor) {
+      delete s.cursor[path];
+      persist(s);
+    }
+  },
+  /** Drop cursors for files no longer present so the map tracks the CURRENT file
+   * set, not every file ever seen. Returns how many were pruned. */
+  pruneCursors(present: Set<string>): number {
+    const s = load();
+    let removed = 0;
+    for (const p of Object.keys(s.cursor)) {
+      if (!present.has(p)) {
+        delete s.cursor[p];
+        removed += 1;
+      }
+    }
+    if (removed) persist(s);
+    return removed;
+  },
 
   getSegmentsSent(): number {
     return load().segmentsSent;
@@ -116,6 +149,16 @@ export const runtimeState = {
   setProcessingVersion(v: number): void {
     const s = load();
     s.processingVersion = v;
+    persist(s);
+  },
+
+  /** Self-healing reconcile cache (see {@link RuntimeState.reconcileCache}). */
+  getReconcileCache(): RuntimeState["reconcileCache"] {
+    return load().reconcileCache;
+  },
+  setReconcileCache(c: RuntimeState["reconcileCache"]): void {
+    const s = load();
+    s.reconcileCache = c;
     persist(s);
   },
 

@@ -237,3 +237,43 @@ export async function uploadBatch(batch: IngestBatch): Promise<{
     batch_id: result.response.batch_id,
   };
 }
+
+/* ─── Self-healing reconcile (anti-entropy) ───────────────────────────
+ * The server is authoritative for what's ingested. The daemon fetches the
+ * server's per-session event digest for its scope and re-ships any session the
+ * server is short on (see reconcile.ts). Read-only; device-secret auth. */
+
+/** Top level: scope-wide total (the O(1) "anything to do?" check) + per-day rollup. */
+export interface BackfillDays {
+  total_events: number;
+  days: Array<{ day: string; events: number }>;
+}
+/** Drill level: one day's per-session counts (fetched only for divergent days). */
+export interface BackfillDaySessions {
+  day: string;
+  sessions: Array<{ session_id: string; events: number }>;
+}
+
+async function backfillGet<T>(query: string): Promise<T | null> {
+  const bearer = state.bearer;
+  if (!bearer) return null;
+  const res = await request(`${state.apiUrl}/v1/backfill/digests${query}`, {
+    method: "GET",
+    headers: { authorization: `Bearer ${bearer}` },
+  });
+  if (res.statusCode >= 300) {
+    await res.body.dump();
+    return null;
+  }
+  return (await res.body.json()) as T;
+}
+
+/** Per-day digest for this device's scope (top of the reconcile tree). */
+export function fetchBackfillDays(): Promise<BackfillDays | null> {
+  return backfillGet<BackfillDays>("");
+}
+
+/** One day's per-session counts — fetched only for days whose total diverged. */
+export function fetchBackfillDaySessions(day: string): Promise<BackfillDaySessions | null> {
+  return backfillGet<BackfillDaySessions>(`?day=${encodeURIComponent(day)}`);
+}

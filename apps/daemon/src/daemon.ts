@@ -24,6 +24,7 @@ import { reportDiscovery } from "./api.js";
 import { state } from "./config.js";
 import { acquireDaemonLock, formatAge } from "./lock.js";
 import { machineKey } from "./machine-key.js";
+import { reconcileBackfill } from "./reconcile.js";
 import { scanAll } from "./scan.js";
 import { createCoalescingRunner } from "./single-flight.js";
 
@@ -523,6 +524,19 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   // stuck on the snapshot taken at install time.
   const discoveryTimer = setInterval(() => void runDiscovery(), DISCOVERY_INTERVAL_MS);
   discoveryTimer.unref();
+
+  // Self-healing reconcile: periodically verify the server still holds what we
+  // shipped and re-ship precisely what it's missing (e.g. after a DB/raw-log
+  // wipe). Cheap when in sync — one digest fetch + a summariser-free parse tally;
+  // it only re-ships sessions the server is short on. The first pass runs shortly
+  // after startup so a wiped scope refills on its own without a restart.
+  const RECONCILE_INTERVAL_MS = 30 * 60_000;
+  const reconcileTimer = setInterval(
+    () => void reconcileBackfill(requestScan),
+    RECONCILE_INTERVAL_MS,
+  );
+  reconcileTimer.unref();
+  setTimeout(() => void reconcileBackfill(requestScan), 60_000).unref();
 
   // Handle Ctrl-C / service restarts
   const shutdown = async (): Promise<void> => {

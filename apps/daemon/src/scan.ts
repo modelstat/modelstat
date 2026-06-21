@@ -97,34 +97,23 @@ export interface ScanCallbacks {
   onProgress?: SegmentProgressFn;
 }
 
-export async function scanAll(cb: ScanCallbacks = {}): Promise<{
-  filesScanned: number;
-  filesUnchanged: number;
-  batchesUploaded: number;
-  eventsUploaded: number;
-  segmentsUploaded: number;
-  /** True when the per-cycle file cap was hit and older files still remain —
-   * the caller should re-scan promptly to drain the rest (newest-first). */
-  morePending: boolean;
-}> {
-  const deviceId = state.deviceId;
-  if (!deviceId) throw new Error("daemon not enrolled — run `register` first");
+/** Streaming event sink: a parser pushes its file's events in small chunks. */
+export type EventSink = (events: RawEvent[]) => Promise<void>;
+/** A discovered transcript file + its streaming parser. */
+export interface ScanJob {
+  path: string;
+  parse: (
+    sink: EventSink,
+  ) => Promise<{ toolCalls: ToolCallDraft[]; scriptContexts: LocalToolContext[] }>;
+}
 
-  // Each job streams its file's events into the provided sink in small
-  // chunks (ParserContext.onEvents) instead of returning them all at
-  // once — a single multi-hundred-MB transcript must never materialise
-  // as one array. The sink flushes batches as it fills, so a full
-  // reprocess after a cursor wipe holds at most ~one batch in memory.
-  // Per-call tool invocations (ToolCallDraft) are NOT streamed — they're
-  // hash/byte metadata only (tiny), so the parser returns the whole
-  // file's set, which the caller drains into the event stream below.
-  type EventSink = (events: RawEvent[]) => Promise<void>;
-  const jobs: Array<{
-    parse: (
-      sink: EventSink,
-    ) => Promise<{ toolCalls: ToolCallDraft[]; scriptContexts: LocalToolContext[] }>;
-    path: string;
-  }> = [];
+/**
+ * Walk the known Claude Code + Codex transcript roots and return one
+ * {@link ScanJob} per `.jsonl`. Shared by the incremental {@link scanAll} and the
+ * self-healing reconcile, so both reason over the exact same file set.
+ */
+export async function discoverJobs(deviceId: string): Promise<ScanJob[]> {
+  const jobs: ScanJob[] = [];
 
   // Claude Code
   try {
@@ -178,6 +167,32 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
   } catch (e) {
     console.warn("codex scan skipped:", (e as Error).message);
   }
+
+  return jobs;
+}
+
+export async function scanAll(cb: ScanCallbacks = {}): Promise<{
+  filesScanned: number;
+  filesUnchanged: number;
+  batchesUploaded: number;
+  eventsUploaded: number;
+  segmentsUploaded: number;
+  /** True when the per-cycle file cap was hit and older files still remain —
+   * the caller should re-scan promptly to drain the rest (newest-first). */
+  morePending: boolean;
+}> {
+  const deviceId = state.deviceId;
+  if (!deviceId) throw new Error("daemon not enrolled — run `register` first");
+
+  // Each job streams its file's events into the provided sink in small
+  // chunks (ParserContext.onEvents) instead of returning them all at
+  // once — a single multi-hundred-MB transcript must never materialise
+  // as one array. The sink flushes batches as it fills, so a full
+  // reprocess after a cursor wipe holds at most ~one batch in memory.
+  // Per-call tool invocations (ToolCallDraft) are NOT streamed — they're
+  // hash/byte metadata only (tiny), so the parser returns the whole
+  // file's set, which the caller drains into the event stream below.
+  const jobs = await discoverJobs(deviceId);
 
   // Recent-first: newest transcripts upload first, so a session you JUST
   // finished shows up within seconds instead of waiting behind a backlog of
