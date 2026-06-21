@@ -27,7 +27,19 @@ import type { Entitler } from "./title.js";
 // ── Adapter types ────────────────────────────────────────────────
 
 export type Embedder = (text: string) => Promise<number[]>;
-export type Summarizer = (input: { prompt: string; maxTokens: number }) => Promise<string>;
+export type Summarizer = (input: {
+  prompt: string;
+  maxTokens: number;
+  /** Structured excerpts (the sampled, redacted conversation turns) the `prompt`
+   * was built from. The LLM path uses `prompt`; the dependency-free heuristic
+   * fallback uses these directly. Optional for back-compat with other adapters. */
+  excerpts?: string[];
+  /** One-line structural facts (repo, turns, files, tools) — same source as the
+   * prompt's `Session context:` line. Used by the heuristic fallback. */
+  facts?: string;
+}) => Promise<string>;
+
+export { heuristicSummarize } from "./heuristic-summary.js";
 export type Tokenizer = (text: string) => number | Promise<number>;
 /**
  * Optional model-based redactor that runs AFTER the regex pass.
@@ -413,6 +425,10 @@ Write the SHORTEST keyword-dense paragraph (1-3 sentences, ≤${ABSTRACT_OUTPUT_
   const rawAbstract = await adapters.summarize({
     prompt,
     maxTokens: SUMMARISER_MAX_TOKENS,
+    // Structured inputs for the dependency-free fallback summariser (used when
+    // the bundled LLM can't load); the LLM path ignores these and uses `prompt`.
+    excerpts,
+    facts: promptFacts,
   });
   if (!rawAbstract || rawAbstract.trim().length === 0) {
     throw new Error(

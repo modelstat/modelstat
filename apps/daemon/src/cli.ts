@@ -632,15 +632,18 @@ async function cmdDiscover(): Promise<void> {
 }
 
 async function cmdScan(): Promise<void> {
-  // Verify the summariser actually works on this machine BEFORE we
-  // start producing segments. Otherwise the user discovers it's broken
-  // by way of useless abstracts in the dashboard a day later. See
-  // packages/daemon-core/src/pipeline/index.ts: a thrown summariser
-  // failure now propagates instead of silently writing the metadata
-  // template.
+  // Check the summariser before producing segments so its state (real LLM vs
+  // degraded extractive fallback) is clear up front. The scan NO LONGER aborts
+  // when the LLM can't load — it degrades to the dependency-free fallback so
+  // ingest still happens (the background daemon re-summarises at model quality
+  // once the LLM is healthy; see apps/daemon/src/daemon.ts).
   const { preflightSummariser } = await import("./pipeline.js");
-  const sample = await preflightSummariser();
-  console.log(`[modelstat] summariser preflight ok: "${sample}"`);
+  const { label, degraded } = await preflightSummariser();
+  console.log(
+    degraded
+      ? `[modelstat] ⚠ summariser DEGRADED — ${label}; extractive fallback, ingest continues`
+      : `[modelstat] summariser preflight ok: ${label}`,
+  );
   const { reconcileProcessingVersion } = await import("./processing-version.js");
   const pv = reconcileProcessingVersion(state);
   if (pv.changed) {

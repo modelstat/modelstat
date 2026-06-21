@@ -31,6 +31,7 @@ import {
   startLocalIngestReceiver,
 } from "./receiver.js";
 import { reconcileBackfill } from "./reconcile.js";
+import { runtimeState } from "./runtime-state.js";
 import { scanAll } from "./scan.js";
 import { createCoalescingRunner } from "./single-flight.js";
 import { autoUpdateEnabled, maybeAutoUpdate } from "./update.js";
@@ -45,6 +46,10 @@ const DAEMON_VERSION: string =
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const SCAN_INTERVAL_MS = 5 * 60 * 1000; // backstop periodic scan
 const DISCOVERY_INTERVAL_MS = 60_000; // re-enumerate installs + identities
+// When the LLM recovers after a degraded run, re-scan to upgrade extractive
+// abstracts — but at most this often, so a flaky LLM (preflight passes, scans
+// fail) can't re-scan the whole history on every restart.
+const SUMMARISER_RECOVERY_MIN_INTERVAL_MS = 6 * 60 * 60_000;
 
 type Phase =
   | "starting"
@@ -471,22 +476,47 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   hb.unref();
   void sendHeartbeat(); // prime
 
-  // Verify the summariser end-to-end before producing any segments.
-  // If this throws (the bundled node-llama-cpp runtime didn't load, or
-  // the model file is bad), we'd rather the daemon refuse to start than
-  // churn out useless metadata template abstracts ("100 turns on
-  // claude_code") for hours. The service supervisor (launchd / systemd)
-  // will retry per its throttle, and the user sees a real error in
-  // ~/.modelstat/logs/.
+  // Verify the summariser before producing segments. The daemon NO LONGER
+  // refuses to start when the LLM can't load — that left users with zero data.
+  // It degrades to the dependency-free extractive fallback (loud warning +
+  // degraded status line) and self-heals once the LLM is healthy again.
+  const wasDegraded = runtimeState.getSummariserDegraded();
   try {
     setPhase("starting", "Preflight: summariser");
     const { preflightSummariser } = await import("./pipeline.js");
-    const sample = await preflightSummariser();
-    // biome-ignore lint/suspicious/noConsole: startup status
-    console.log(`[modelstat] summariser preflight ok: "${sample}"`);
+    const { label, degraded } = await preflightSummariser();
+    if (degraded) {
+      // biome-ignore lint/suspicious/noConsole: loud degraded startup status
+      console.warn(`[modelstat] ⚠ summariser preflight DEGRADED — ${label}`);
+      setMessage(
+        "summariser degraded: extractive fallback (LLM unavailable) — ingest continues, self-heals when the model loads",
+      );
+    } else {
+      // biome-ignore lint/suspicious/noConsole: startup status
+      console.log(`[modelstat] summariser preflight ok: ${label}`);
+      // Self-heal: the LLM is healthy, but the LAST run shipped extractive
+      // abstracts → re-scan so they upgrade to model quality. Rate-gated so a
+      // flaky LLM can't re-scan the whole history on every restart.
+      if (wasDegraded) {
+        const since = Date.now() - runtimeState.getSummariserRecoveryAt();
+        if (since > SUMMARISER_RECOVERY_MIN_INTERVAL_MS) {
+          runtimeState.wipeCursors();
+          runtimeState.setSummariserRecoveryAt(Date.now());
+          // biome-ignore lint/suspicious/noConsole: recovery status
+          console.log(
+            "[modelstat] summariser recovered — re-scanning so extractive fallback abstracts upgrade to model quality",
+          );
+        }
+      }
+      runtimeState.setSummariserDegraded(false);
+    }
   } catch (err) {
-    setPhase("error", `summariser preflight failed: ${(err as Error).message}`);
-    throw err;
+    // The preflight no longer throws on a missing LLM (it degrades). A throw
+    // here is genuinely unexpected — log and CONTINUE rather than refuse to
+    // start; ingest availability is the priority.
+    // biome-ignore lint/suspicious/noConsole: unexpected-but-tolerated
+    console.warn(`[modelstat] summariser preflight error (continuing): ${(err as Error).message}`);
+    setMessage(`summariser preflight error (continuing): ${(err as Error).message}`);
   }
 
   // Local loopback ingest receiver — the server half of the SDKs'

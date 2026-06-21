@@ -36,18 +36,84 @@ import {
   buildSessionMetadata as buildSessionMetadataCore,
   buildSessionTitles as buildSessionTitlesCore,
   composeRedactors,
+  heuristicSummarize,
   type PipelineAdapters,
   type Redactor,
   type ScriptSummarizer,
   type SegmentProgressFn,
+  type Summarizer,
 } from "@modelstat/daemon-core/pipeline";
 import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
 import { createPrivacyFilterRedactor } from "@modelstat/daemon-core/redact/privacy-filter";
 import type { RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import { checkPullRequestOutcome, type LocalToolContext, resolveGitContext } from "@modelstat/parsers";
 import { enrichToolCallRedaction, enrichToolCallScripts } from "./enrich-scripts.js";
+import { runtimeState } from "./runtime-state.js";
 
 let adapters: PipelineAdapters | null = null;
+
+// ── Always-works summariser ────────────────────────────────────────────────
+// The bundled Qwen LLM is the quality path, but it must NEVER block ingest. If
+// it can't run on this machine (native runtime missing, model not downloaded,
+// no network, incompatible binary, or even CPU load failing after the Metal
+// guard), we degrade to the dependency-free extractive fallback so the daemon
+// keeps shipping real abstracts instead of refusing to start.
+
+let degradedThisProcess = false;
+// After a CATCHABLE llm failure, skip the LLM for this long before retrying, so
+// a persistent failure (model 404, offline, missing runtime) doesn't re-attempt
+// — and potentially re-download the 2.7 GB GGUF — on every single segment.
+const LLM_RETRY_COOLDOWN_MS = 10 * 60_000;
+let llmRetryAfter = 0;
+
+/** True if this process has fallen back to the extractive summariser at least
+ * once — read by daemon.ts for the degraded status line + self-heal. */
+export function summariserDegradedThisProcess(): boolean {
+  return degradedThisProcess;
+}
+
+function markDegraded(reason: string): void {
+  if (!degradedThisProcess) {
+    degradedThisProcess = true;
+    // biome-ignore lint/suspicious/noConsole: loud, one-time degradation notice
+    console.warn(
+      `[modelstat] ⚠ summariser DEGRADED — bundled LLM unavailable (${reason}); shipping ` +
+        "extractive fallback abstracts so ingest continues. They re-summarise at model " +
+        "quality automatically once the LLM is healthy again.",
+    );
+  }
+  // Persist so the NEXT start can self-heal (re-scan to upgrade these abstracts).
+  runtimeState.setSummariserDegraded(true);
+}
+
+/**
+ * The daemon's summariser: the bundled Qwen LLM when it loads, the
+ * dependency-free extractive fallback when it can't. Per-call fallback on a
+ * catchable LLM failure, debounced so a persistent failure doesn't hammer the
+ * LLM (or its model download). An UNCATCHABLE native abort (e.g. the Metal
+ * GGML_ASSERT) is handled one layer down by the CPU-fallback guard in
+ * daemon-core/node/llama.ts. Never throws, never empty — ingest always proceeds.
+ */
+function resilientSummarize(llamaCfg: Parameters<typeof llamaSummarize>[0]): Summarizer {
+  const llm = llamaSummarize(llamaCfg);
+  const heuristic = heuristicSummarize();
+  return async (input) => {
+    if (Date.now() >= llmRetryAfter) {
+      try {
+        const out = await llm(input);
+        if (out && out.trim().length > 0) return out;
+        // Empty LLM output — treat as a transient miss; use the fallback for
+        // this one call without entering cooldown (the model is loaded/fine).
+      } catch (err) {
+        llmRetryAfter = Date.now() + LLM_RETRY_COOLDOWN_MS;
+        markDegraded((err as Error).message);
+      }
+    } else {
+      markDegraded("LLM in post-failure cooldown");
+    }
+    return heuristic(input);
+  };
+}
 
 /** Builds the single set of pipeline adapters: a transformers.js
  * embedder, the bundled Qwen3.5-4B summariser + cognizer, a local
@@ -71,7 +137,7 @@ async function bundledAdapters(): Promise<PipelineAdapters> {
     // vector-less with empty arrays; hooking embeddings here attaches a
     // real abstract embedding to each segment.)
     embed: createTransformersJsEmbedder(),
-    summarize: llamaSummarize(llamaCfg),
+    summarize: resilientSummarize(llamaCfg),
     tokenize: (text: string) => Math.max(1, Math.ceil(text.length / 4)),
     cognize: llamaCognize(llamaCfg),
     // Session-title pass — same bundled model, third chat session with
@@ -105,22 +171,25 @@ async function bundledAdapters(): Promise<PipelineAdapters> {
 
 async function getAdapters(): Promise<PipelineAdapters> {
   if (adapters) return adapters;
-  // Single summariser path: the bundled node-llama-cpp runtime, staged
-  // beside the bundle at install time (apps/daemon/src/service.ts
-  // `installNativeRuntime`). Require the native binding to load; if it
-  // can't, throw so the user sees the problem at daemon start rather than
-  // discovering it three days later via a wall of garbage abstracts.
+  // The bundled node-llama-cpp summariser is the quality path, staged beside the
+  // bundle at install time (apps/daemon/src/service.ts `installNativeRuntime`).
+  // It must never BLOCK ingest, though: if the native binding can't load we
+  // degrade to the dependency-free extractive fallback (resilientSummarize; the
+  // auxiliary llama passes already no-op) rather than refusing to start and
+  // leaving the user with zero data. Probe the import for an honest one-line
+  // startup log — but do NOT throw on failure.
+  let llmReady = true;
   try {
     await import("node-llama-cpp");
-  } catch (err) {
-    throw new Error(
-      "modelstat daemon can't start: the bundled summariser (node-llama-cpp) failed to " +
-        "load. Re-run `modelstat connect` (or `npm i -g modelstat`) so the native runtime " +
-        `is re-staged beside the bundle. Underlying error: ${(err as Error).message}`,
-    );
+  } catch {
+    llmReady = false;
   }
   // biome-ignore lint/suspicious/noConsole: one-line startup status
-  console.log("[modelstat] using bundled local summariser (Qwen3.5-4B, runs on this machine)");
+  console.log(
+    llmReady
+      ? "[modelstat] using bundled local summariser (Qwen3.5-4B, runs on this machine)"
+      : "[modelstat] bundled summariser runtime not loadable — using extractive fallback (degraded) until it is",
+  );
   adapters = await bundledAdapters();
   return adapters;
 }
@@ -208,27 +277,31 @@ export async function enrichScripts(
 
 /**
  * Preflight check — exercise the summariser end-to-end at daemon
- * startup so a broken adapter (missing native binary, bad or truncated
- * model file) surfaces NOW instead of being noticed three days later
- * when the user opens the dashboard and sees a thousand "100 turns on
- * claude_code" abstracts.
+ * startup so its state (real LLM vs degraded extractive fallback)
+ * surfaces NOW, in the startup log, instead of being inferred later
+ * from abstract quality.
  *
- * Returns the human-readable label of the active summariser. Throws
- * with an actionable message if anything is wrong. Called from
- * `modelstat start` / `scan` boot.
+ * Returns the active summariser's label and whether it's running
+ * DEGRADED (the LLM couldn't load, extractive fallback in use). Never
+ * throws — the fallback is deterministic, so ingest always proceeds.
+ * Called from `modelstat start` / `scan` boot.
  */
-export async function preflightSummariser(): Promise<string> {
+export async function preflightSummariser(): Promise<{ label: string; degraded: boolean }> {
   const a = await getAdapters();
   const out = await a.summarize({
     prompt:
       'Session context: smoke test. Sampled excerpts:\n  [turn 1] "hello world"\nWrite ONE sentence (≤240 chars) describing what the human was doing.',
     maxTokens: 32,
+    excerpts: ["smoke test — verifying the summariser is alive"],
+    facts: "preflight smoke test",
   });
+  const degraded = summariserDegradedThisProcess();
+  // The fallback is deterministic + never empty, so empty output means even it
+  // failed — degrade rather than throw (ingest availability wins).
   if (!out || out.trim().length === 0) {
-    throw new Error(
-      "summariser preflight returned empty output — the configured summariser " +
-        "is reachable but produced no text. Check the model is loaded.",
-    );
+    return { label: "summariser produced no output", degraded: true };
   }
-  return out.length > 60 ? `${out.slice(0, 57)}…` : out;
+  const sample = out.length > 60 ? `${out.slice(0, 57)}…` : out;
+  const engine = degraded ? "extractive fallback (LLM unavailable)" : "Qwen3.5-4B";
+  return { label: `${engine} — "${sample}"`, degraded };
 }

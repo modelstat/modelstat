@@ -39,6 +39,14 @@ export interface RuntimeState {
     string,
     { mtime: number; perDaySession: Record<string, Record<string, number>> }
   >;
+  /** Did the last run ship extractive (LLM-unavailable) abstracts? When the
+   * bundled summariser is healthy again the daemon re-scans so those degraded
+   * abstracts upgrade to model quality. See apps/daemon/src/pipeline.ts. */
+  summariserDegraded: boolean;
+  /** ms-epoch of the last degradation-recovery re-scan — bounds re-scans on a
+   * flaky LLM to at most once per window so a preflight-passes/scan-fails loop
+   * can't re-scan the world every restart. */
+  summariserRecoveryAt: number;
 }
 
 const DEFAULTS: RuntimeState = {
@@ -47,6 +55,8 @@ const DEFAULTS: RuntimeState = {
   segmentsSent: 0,
   processingVersion: null,
   reconcileCache: {},
+  summariserDegraded: false,
+  summariserRecoveryAt: 0,
 };
 
 export function statePath(): string {
@@ -67,6 +77,8 @@ function load(): RuntimeState {
       segmentsSent: obj.segmentsSent ?? 0,
       processingVersion: obj.processingVersion ?? null,
       reconcileCache: obj.reconcileCache ?? {},
+      summariserDegraded: obj.summariserDegraded ?? false,
+      summariserRecoveryAt: obj.summariserRecoveryAt ?? 0,
     };
   } catch {
     // Missing/corrupt ⇒ fresh defaults (a new install, or post-`MODELSTAT_HOME`
@@ -149,6 +161,26 @@ export const runtimeState = {
   setProcessingVersion(v: number): void {
     const s = load();
     s.processingVersion = v;
+    persist(s);
+  },
+
+  /** Whether the last run shipped extractive (LLM-unavailable) abstracts. */
+  getSummariserDegraded(): boolean {
+    return load().summariserDegraded;
+  },
+  setSummariserDegraded(v: boolean): void {
+    const s = load();
+    if (s.summariserDegraded === v) return; // no-op write avoidance (hot path)
+    s.summariserDegraded = v;
+    persist(s);
+  },
+  /** ms-epoch of the last degradation-recovery re-scan (0 = never). */
+  getSummariserRecoveryAt(): number {
+    return load().summariserRecoveryAt;
+  },
+  setSummariserRecoveryAt(ms: number): void {
+    const s = load();
+    s.summariserRecoveryAt = ms;
     persist(s);
   },
 
