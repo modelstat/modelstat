@@ -208,12 +208,19 @@ async function rebootServiceIfInstalled() {
     );
   }
 
-  // Start back up. `modelstat start` re-runs preflight (incl. the
-  // processing-version reconcile that wipes cursors when we ship a
-  // new pipeline), so the upgrade picks up the new behaviour
-  // immediately. Detached so the daemon survives this script.
+  // Start back up. `--force` is REQUIRED, not optional: the stop +
+  // killStaleDaemon above happen BEFORE the (slow, up-to-300 s) native
+  // `_setup-runtime` restage, and a launchd/systemd KeepAlive can respawn
+  // the OLD daemon during that window. A plain `start` would then see a live
+  // owner and no-op ("already running — to force-replace it: start --force"),
+  // leaving the service stuck on the previous build even though the global
+  // package upgraded. `--force` evicts whatever survived and guarantees the
+  // freshly-staged bundle is the one running. `start` re-runs preflight (incl.
+  // the processing-version reconcile that wipes cursors when we ship a new
+  // pipeline), so the upgrade picks up the new behaviour immediately. Detached
+  // so the daemon survives this script.
   const { spawn } = await import("node:child_process");
-  const child = spawn(process.execPath, [freshBundle, "start"], {
+  const child = spawn(process.execPath, [freshBundle, "start", "--force"], {
     detached: true,
     stdio: "ignore",
   });
