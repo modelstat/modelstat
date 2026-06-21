@@ -66,8 +66,14 @@
  *      to catch bare `SECRET=`/`TOKEN=` names. Re-scan so historical
  *      transcripts are re-redacted from the raw logs through the full
  *      stack (the raw never left the device, so only the daemon can).
+ * v7 — canonical project slugs. `resolveGitContext` now resolves the git
+ *      remote from the MAIN repo for ephemeral `.claude` worktrees (deleted by
+ *      parse time), instead of path-guessing a different slug than the repo's
+ *      live sessions (`acme` vs `acme/acme`). Re-scan so every historical
+ *      session re-resolves to its one canonical remote slug — only the daemon
+ *      can, from the raw transcripts on disk.
  */
-export const PROCESSING_VERSION = 6;
+export const PROCESSING_VERSION = 7;
 
 export interface ProcessingState {
   processingVersion: number | null;
