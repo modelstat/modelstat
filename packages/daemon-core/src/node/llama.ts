@@ -19,7 +19,7 @@
  * next adapter in the chain — see apps/daemon/src/pipeline.ts.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -319,11 +319,29 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
     // dep so the import resolves at runtime there.
     // @ts-expect-error — optional peer; resolved at runtime
     const llamaMod = (await import("node-llama-cpp")) as {
-      getLlama: () => Promise<unknown>;
+      getLlama: (opts?: { gpu?: false }) => Promise<unknown>;
       LlamaChatSession: new (opts: unknown) => Session;
     };
     const modelPath = await ensureLlamaModel(cfg);
-    const llama = (await llamaMod.getLlama()) as {
+    // Metal-abort guard. On some Macs node-llama-cpp's llama.cpp Metal backend
+    // ABORTS the whole process during init/load with `GGML_ASSERT([rsets->data
+    // count] == 0)` ("the tensor API is not supported in this environment") — an
+    // uncatchable C++ abort, so try/catch can't save us. Instead we arm a guard
+    // file before touching Metal and disarm it once the model has loaded: a file
+    // left behind means the last start aborted on Metal, so this start runs on
+    // CPU. Working-Metal Macs keep Metal (fast); a broken-Metal Mac summarises on
+    // CPU instead of crash-looping. Delete the guard to re-probe Metal (e.g.
+    // after a node-llama-cpp upgrade).
+    const guardPath = `${dirname(modelPath)}/.metal-load-guard`;
+    const metalAborted = existsSync(guardPath);
+    if (!metalAborted) {
+      try {
+        writeFileSync(guardPath, "probing metal\n");
+      } catch {
+        /* best-effort guard; proceed regardless */
+      }
+    }
+    const llama = (await llamaMod.getLlama(metalAborted ? { gpu: false } : undefined)) as {
       loadModel: (o: { modelPath: string }) => Promise<{
         createContext: (o: { contextSize: number }) => Promise<{
           getSequence: () => unknown;
@@ -335,6 +353,12 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
     // exits (clean Metal teardown).
     llamaInstance = llama;
     const model = await llama.loadModel({ modelPath });
+    // Metal init + model load survived → disarm the guard.
+    try {
+      rmSync(guardPath, { force: true });
+    } catch {
+      /* best-effort */
+    }
     // Two contexts off the same model — one per chat session. The
     // cognition context can be smaller since its prompt + answer are
     // both short, but llama.cpp rounds context sizes up to its block
