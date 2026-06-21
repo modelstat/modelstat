@@ -111,13 +111,22 @@ cfg = Config("msk_live_…", "raw_sdk_openai").with_remote(
 )
 ```
 
+## Taxonomy auto-detection (off by default)
+
+modelstat can auto-detect a work-type *taxonomy* over your sessions, but that's tuned for interactive coding sessions — backend LLM usage usually isn't. So for the SDK taxonomy is **off by default**: every batch ships an explicit `auto_taxonomy: false`. Opt in with the config flag:
+
+```python
+cfg = Config("msk_live_…", "raw_sdk_openai")
+cfg.auto_taxonomy = True  # force server-side taxonomy auto-detection on
+```
+
 ## Privacy floor (always on)
 
 Before any bytes leave the SDK process — in **every** mode — an in-process redaction floor scrubs secrets (provider keys, tokens, JWTs, PEM blocks, DB passwords, …), emails, and absolute home paths. "Raw" mode means *full turns*, not *leaked credentials* — the floor still runs. Tool calls ship only hashes, byte sizes, and allowlisted command verbs — never raw args, results, paths, or command text.
 
 What the floor redacts: Anthropic / OpenAI / Google / AWS / GitHub / Slack / Stripe / Discord keys and tokens, JWTs, PEM private-key blocks, modelstat device secrets, generic `NAME_KEY=value` env secrets (the name is kept, the value is dropped), `Bearer` tokens, database-URL passwords, lone 40-char AWS-style secret blobs, email addresses, and absolute `/Users/…`, `/home/…`, and `C:\Users\…` paths.
 
-## What's live today (v0.0.1)
+## What's live today (v0.0.2)
 
 Early release — the honest state, so nothing surprises you:
 

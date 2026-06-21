@@ -162,6 +162,12 @@ pub struct IngestBatch {
     pub events: Vec<RawEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallWire>,
+    /// Per-batch taxonomy auto-detection toggle. Omitted/`null` = server default
+    /// (taxonomy auto/on); `Some(false)` = skip taxonomy auto-detection for this
+    /// batch; `Some(true)` = force it on. SDK/backend integrations default this
+    /// to `false` (backend LLM usage isn't interactive work-sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_taxonomy: Option<bool>,
 }
 
 // ---- deterministic ids (mirror modelstat-core::ids) -------------------------

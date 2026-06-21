@@ -292,6 +292,12 @@ class IngestBatch:
     daemon_version: str
     events: List[RawEvent] = field(default_factory=list)
     tool_calls: List[ToolCallWire] = field(default_factory=list)
+    # Per-batch taxonomy auto-detection toggle. ``None`` = server default
+    # (taxonomy auto/on); ``False`` = skip taxonomy auto-detection for this
+    # batch; ``True`` = force it on. SDK/backend integrations default this to
+    # ``False`` (backend LLM usage isn't interactive work-sessions). Included in
+    # ``to_dict()`` only when not None.
+    auto_taxonomy: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -303,6 +309,9 @@ class IngestBatch:
         # Omit ``tool_calls`` entirely when empty (do NOT send an empty list).
         if self.tool_calls:
             out["tool_calls"] = [t.to_dict() for t in self.tool_calls]
+        # Optional key -- omit when None (never emit null).
+        if self.auto_taxonomy is not None:
+            out["auto_taxonomy"] = self.auto_taxonomy
         return out
 
 

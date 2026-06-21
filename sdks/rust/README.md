@@ -27,7 +27,7 @@
 ```toml
 # Cargo.toml
 [dependencies]
-modelstat = "0.0.3"
+modelstat = "0.0.4"
 ```
 
 ## Guide: run a daemon locally, then point the SDK at it
@@ -100,11 +100,20 @@ let cfg = Config::new("msk_live_…", "raw_sdk_openai")
     .with_remote("https://api.modelstat.ai", /* raw */ true);
 ```
 
+## Taxonomy auto-detection (off by default)
+
+modelstat can auto-detect a work-type *taxonomy* over your sessions, but that's tuned for interactive coding sessions — backend LLM usage usually isn't. So for the SDKs taxonomy is **off by default**: every batch ships an explicit `auto_taxonomy: false`. Opt in by setting the config flag:
+
+```rust
+let mut cfg = Config::new("msk_live_…", "raw_sdk_openai");
+cfg.auto_taxonomy = true; // force server-side taxonomy auto-detection on
+```
+
 ## Privacy floor (always on)
 
 Before any bytes leave the SDK process — in **every** mode — an in-process redaction floor scrubs secrets (provider keys, tokens, JWTs, PEM blocks, DB passwords, …), emails, and absolute home paths. "Raw" mode means *full turns*, not *leaked credentials* — the floor still runs. Tool calls ship only hashes, byte sizes, and allowlisted command verbs — never raw args, results, paths, or command text.
 
-## What's live today (v0.0.3)
+## What's live today (v0.0.4)
 
 Early release — the honest state, so nothing surprises you:
 

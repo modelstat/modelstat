@@ -85,6 +85,12 @@ pub struct Config {
     pub flush_interval: Duration,
     /// Flush eagerly once this many records are buffered.
     pub flush_max_batch: usize,
+    /// Whether the server should run taxonomy auto-detection on batches from
+    /// this client. Ships as the wire `auto_taxonomy` field. Defaults to
+    /// `false` for SDK/backend integrations — backend LLM usage isn't
+    /// interactive work-sessions, so taxonomy is **off by default**; set it to
+    /// `true` to opt in.
+    pub auto_taxonomy: bool,
 }
 
 impl Config {
@@ -104,6 +110,7 @@ impl Config {
             buffer_capacity: 4096,
             flush_interval: Duration::from_secs(2),
             flush_max_batch: 256,
+            auto_taxonomy: false,
         }
     }
 

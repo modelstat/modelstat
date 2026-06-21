@@ -165,6 +165,14 @@ export interface IngestBatch {
   events: RawEvent[];
   /** Omitted entirely when empty (never send `tool_calls: []`). */
   tool_calls?: ToolCallWire[];
+  /**
+   * Per-batch taxonomy auto-detection toggle. Omitted/`null` = server default
+   * (taxonomy auto/on); `false` = skip taxonomy auto-detection for this batch;
+   * `true` = force it on. SDK/backend integrations default this to `false`
+   * (backend LLM usage isn't interactive work-sessions). The builder only sets
+   * it when defined.
+   */
+  auto_taxonomy?: boolean;
 }
 
 // ---- deterministic ids (mirror modelstat-core::ids) -------------------------

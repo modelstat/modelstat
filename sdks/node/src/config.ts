@@ -92,6 +92,15 @@ export class Config {
   flushMaxBatch = 256;
 
   /**
+   * Whether the server should run taxonomy auto-detection on batches from this
+   * client. Ships as the wire `auto_taxonomy` field. Defaults to `false` for
+   * SDK/backend integrations — backend LLM usage isn't interactive
+   * work-sessions, so taxonomy is **off by default**; set it to `true` to opt
+   * in.
+   */
+  autoTaxonomy = false;
+
+  /**
    * A config with sane defaults: local-daemon mode, floor redaction, a 4096-
    * slot buffer, a 2s flush interval, and 256-record batches.
    *

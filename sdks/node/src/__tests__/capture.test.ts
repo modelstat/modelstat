@@ -30,7 +30,7 @@ test("buildBatch redacts the excerpt and caps its length", () => {
   assert.ok(ev.source_event_id.startsWith("evt_"));
   assert.ok(batch.batch_id.startsWith("batch_"));
   // daemon_version is the producer version key (NOT client_version).
-  assert.equal(batch.daemon_version, "node-sdk/0.0.1");
+  assert.equal(batch.daemon_version, "node-sdk/0.0.3");
   assert.ok(batch.daemon_version.length <= 40);
 });
 
@@ -70,6 +70,21 @@ test("optional keys are omitted entirely when absent (never null)", () => {
     cache_read: 0,
     reasoning: 0,
   });
+});
+
+test("auto_taxonomy defaults off and opts in", () => {
+  // Default config: taxonomy off → explicit `auto_taxonomy: false`.
+  const off = buildBatch(cfg(), [new LlmCall("openai", "sess_1")], { value: 0 });
+  assert.equal(off.auto_taxonomy, false);
+  assert.ok("auto_taxonomy" in off); // always sent explicitly, never omitted
+  assert.ok(JSON.stringify(off).includes('"auto_taxonomy":false'));
+
+  // Opt in: flag true → wire `auto_taxonomy: true`.
+  const c = cfg();
+  c.autoTaxonomy = true;
+  const on = buildBatch(c, [new LlmCall("openai", "sess_1")], { value: 0 });
+  assert.equal(on.auto_taxonomy, true);
+  assert.ok(JSON.stringify(on).includes('"auto_taxonomy":true'));
 });
 
 test("tool calls carry hashes/sizes, never raw args", () => {

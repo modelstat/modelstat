@@ -321,5 +321,10 @@ export function buildBatch(
   if (toolCalls.length > 0) {
     batch.tool_calls = toolCalls;
   }
+  // Always send an explicit value reflecting the config so backend usage is
+  // off-by-default but users can opt in. `setIfPresent` keeps the wire key
+  // omitted only if the flag were ever undefined; the config default makes it a
+  // concrete boolean.
+  setIfPresent(batch, "auto_taxonomy", cfg.autoTaxonomy);
   return batch;
 }

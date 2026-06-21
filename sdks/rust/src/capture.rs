@@ -9,7 +9,7 @@
 use crate::config::{Config, RedactionPolicy};
 use crate::redact;
 use crate::wire::{
-    self, PricingMode, EventKind, GitContext, IngestBatch, RawEvent, TokenUsage, ToolCallStatus,
+    self, EventKind, GitContext, IngestBatch, PricingMode, RawEvent, TokenUsage, ToolCallStatus,
     ToolCallWire,
 };
 use chrono::{DateTime, Utc};
@@ -274,6 +274,9 @@ pub(crate) fn build_batch(
         daemon_version: cfg.client_version.clone(),
         events,
         tool_calls,
+        // Always send an explicit value reflecting the config so backend usage
+        // is off-by-default but users can opt in.
+        auto_taxonomy: Some(cfg.auto_taxonomy),
     }
 }
 
@@ -345,6 +348,25 @@ mod tests {
             !json.contains("rm -rf /tmp/secret"),
             "raw args leaked into wire"
         );
+    }
+
+    #[test]
+    fn auto_taxonomy_defaults_off_and_opts_in() {
+        // Default config: taxonomy off → explicit `auto_taxonomy: false`.
+        let mut seq = 0;
+        let batch = build_batch(&cfg(), [LlmCall::new("openai", "sess_1")], &mut seq);
+        assert_eq!(batch.auto_taxonomy, Some(false));
+        let j: serde_json::Value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(j["auto_taxonomy"], false);
+
+        // Opt in: flag true → wire `auto_taxonomy: true`.
+        let mut on = cfg();
+        on.auto_taxonomy = true;
+        let mut seq = 0;
+        let batch = build_batch(&on, [LlmCall::new("openai", "sess_1")], &mut seq);
+        assert_eq!(batch.auto_taxonomy, Some(true));
+        let j: serde_json::Value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(j["auto_taxonomy"], true);
     }
 
     #[test]

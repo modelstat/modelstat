@@ -260,5 +260,8 @@ def build_batch(
         daemon_version=cfg.client_version,
         events=events,
         tool_calls=tool_calls,
+        # Always send an explicit value reflecting the config so backend usage is
+        # off-by-default but users can opt in.
+        auto_taxonomy=cfg.auto_taxonomy,
     )
     return batch, seq

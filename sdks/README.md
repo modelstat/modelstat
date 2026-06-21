@@ -110,6 +110,10 @@ Before any bytes leave the SDK process — in **every** mode — an in-process r
 
 "Raw" mode means *full turns*, not *leaked credentials* — the floor still runs. **Tool calls** ship only hashes, byte sizes, and allowlisted command verbs — never raw args, results, paths, or command text. The floor is identical across all three SDKs (a shared catalogue ported faithfully), so your privacy guarantee doesn't depend on which language you use.
 
+## Taxonomy auto-detection (off by default)
+
+modelstat can auto-detect a work-type *taxonomy* over your sessions, but that's tuned for interactive coding sessions — backend LLM usage usually isn't. So across all three SDKs taxonomy is **off by default**: every batch ships an explicit `auto_taxonomy: false`. Flip the config flag to opt in (`cfg.auto_taxonomy = true` in Rust/Python, `cfg.autoTaxonomy = true` in TS) and the server runs taxonomy auto-detection on your batches.
+
 ## How it stays off your hot path
 
 `record()` does nothing but move your already-in-hand call into a bounded in-memory buffer and return. A background worker does the redaction, batching, and network I/O. If the buffer fills (a downstream stall), the newest record is dropped and a counter increments — your request is **never** blocked and memory **never** grows unbounded.

@@ -108,6 +108,12 @@ class Config:
     flush_interval: float = 2.0
     # Flush eagerly once this many records are buffered.
     flush_max_batch: int = 256
+    # Whether the server should run taxonomy auto-detection on batches from this
+    # client. Ships as the wire ``auto_taxonomy`` field. Defaults to ``False``
+    # for SDK/backend integrations -- backend LLM usage isn't interactive
+    # work-sessions, so taxonomy is **off by default**; set it to ``True`` to opt
+    # in.
+    auto_taxonomy: bool = False
 
     def __post_init__(self) -> None:
         # The wire field is constrained to 1..=40 chars; keep the SDK honest so

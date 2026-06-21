@@ -115,6 +115,19 @@ class TestBuildBatch(unittest.TestCase):
         batch, _ = build_batch(cfg(), [call], 0)
         self.assertNotIn("tool_calls", batch.to_dict())
 
+    def test_auto_taxonomy_defaults_off_and_opts_in(self) -> None:
+        # Default config: taxonomy off -> explicit ``auto_taxonomy: false``.
+        batch, _ = build_batch(cfg(), [LlmCall("openai", "sess_1")], 0)
+        self.assertEqual(batch.auto_taxonomy, False)
+        self.assertEqual(batch.to_dict()["auto_taxonomy"], False)
+
+        # Opt in: flag True -> wire ``auto_taxonomy: true``.
+        on = cfg()
+        on.auto_taxonomy = True
+        batch, _ = build_batch(on, [LlmCall("openai", "sess_1")], 0)
+        self.assertEqual(batch.auto_taxonomy, True)
+        self.assertEqual(batch.to_dict()["auto_taxonomy"], True)
+
     def test_raw_mode_sends_full_untruncated_turns_still_floor_redacted(
         self,
     ) -> None:
