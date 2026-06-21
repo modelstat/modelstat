@@ -31,6 +31,7 @@
     "build": "tsup src/index.ts --format esm --out-dir dist --clean --no-splitting --minify",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/**/*.test.ts",
     "prepack": "pnpm build"
   },
   "engines": {

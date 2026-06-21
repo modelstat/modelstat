@@ -3,11 +3,11 @@
 Ask any MCP-compatible AI tool — Claude Desktop, Claude Code, Cursor, Cline, Continue, Zed — about your token spend directly in the chat.
 
 - "How much did I spend on Cursor this week?"
-- "Which project is driving my Claude Code cost?"
+- "Total $ I spent debugging the acme-dash project."
 - "Show me recent sessions over $5."
-- "Is my modelstat agent healthy?"
+- "What's this session costing so far?"
 
-Uses the bearer token [`npx modelstat@latest`](https://modelstat.ai/install) already wrote to `~/.config/modelstat/state.json` — no separate auth.
+**No daemon required.** If the [modelstat daemon](https://modelstat.ai/install) is installed, the MCP reuses its device token automatically (fast path). If not, the first tool call opens a browser tab to connect this MCP to your account (one-time), then remembers it in `~/.modelstat/mcp-auth.json`.
 
 ## Install
 
@@ -78,34 +78,37 @@ mcpServers:
 
 ## Tools
 
-All tools are **read-only** except `assign_session`.
+The pattern: **resolve names → ids with the `find_*` tools, then pass the ids as filters to `explore`/`sessions`.** All tools are **read-only** except `assign_session`.
 
 | Tool | Purpose |
 |---|---|
-| `usage_overview` | Spend/usage headline: cost, list price, savings, tokens, sessions. |
-| `usage_explore` | The charting workhorse — group/stack by `day`, `hour`, `model`, `tool`, `provider`, `session`; metrics from cost to per-class tokens (`tokens_input`, `tokens_cache_read`, …); filter by providers/models/tools/session_ids. |
-| `list_sessions` | Recent sessions with cost + tokens (cursor-paginated). |
-| `session_detail` | One session's token breakdown + segments (redacted abstracts, tags). |
-| `sessions_usage` | Combined usage for an explicit session-id set — e.g. one Claude Code conversation across all its compactions/resumes. |
+| `overview` | Spend/usage headline: effective cost, list price, savings, tokens, sessions, taxonomy roots. |
+| `explore` | The analytics workhorse — group/stack by `day`, `hour`, `model`, `tool`, `provider`, `session`, `identity`, `taxonomy`; metrics from cost to per-class tokens; filter by providers/models/tools/identities/session_ids and a `taxonomy` AND-of-OR filter (`[[projId],[debugId]]` = tagged BOTH). |
+| `sessions` | Search/list sessions — filter by taxonomy groups, identity, device, free-text `q`, range (cursor-paginated). |
+| `session_insights` | Live per-session insights for the CURRENT session: tokens, effective $, taxonomy detected, + a `ready`/`analyzing`/`not_ingested` status. `eager:true` force-scans the session locally first; then re-poll while `analyzing`. |
+| `find_taxonomy` | Resolve taxonomy node names → ids (optional `root_key`). |
+| `find_projects` | List/search projects (the `workstreams` root) → node ids, with spend. |
+| `find_people` | Search identities → ids for the `identities` filter. |
 | `assign_session` | MUTATING: reassign a session's owner. |
 
 `range` accepts: `today`, `7d`, `30d`, `90d`, `mtd`, `ytd` — or pass explicit RFC3339 `from`/`to`. Omit both for all-time.
 
 Prefer remote? The same tools are served over streamable HTTP at `https://modelstat.ai/mcp` — auth with `Authorization: Bearer $(npx -y modelstat@latest token)`. Claude Code users: the [modelstat plugin](https://modelstat.ai/dashboard/mcp) bundles this server and adds the `/stat` charts command.
 
-Your MCP client may see additional tools beyond the ones listed above — the live catalog comes from the modelstat backend, and we add new query tools server-side. Ask your client to list available tools to see what's actually exposed for your account.
+Your MCP client may see additional tools beyond the ones listed above — the live catalog comes from the modelstat backend, and the bridge forwards it verbatim. Ask your client to list available tools to see what's actually exposed for your account.
 
 ## Auth & privacy
 
-The MCP server reads the bearer token that `npx modelstat@latest` stored locally. It never transmits that token anywhere except directly to the modelstat API (default `https://modelstat.ai`). Prompts, responses, and file contents never touch this process.
+Auth resolution, most-trusted first: (1) `MODELSTAT_TOKEN` env, (2) a running daemon's token (`modelstat token`), (3) the daemon identity at `~/.modelstat/identity.json`, (4) our own `~/.modelstat/mcp-auth.json` written by the browser claim. With none of those, the first tool call runs the browser claim. The bearer is sent only to the modelstat API (default `https://modelstat.ai`); prompts, responses, and file contents never touch this process.
 
-Override the API endpoint with `MODELSTAT_API_URL` (for self-hosted / dev). Override the state dir with `MODELSTAT_STATE_DIR`.
+Override the API endpoint with `MODELSTAT_API_URL` (self-hosted / dev), the bearer with `MODELSTAT_TOKEN`, or the daemon home with `MODELSTAT_HOME`. Set `MODELSTAT_MCP_BROWSER_AUTH=0` to disable the browser claim (or `=1` to force it in a non-TTY context).
 
 ## Troubleshooting
 
-- **`modelstat is not paired on this machine`** — run `npx modelstat@latest` first.
-- **401 responses** — the bearer expired. Re-run `npx modelstat@latest`.
-- **No data yet** — the agent uploads within a few seconds of your first AI-tool session. Check `npx modelstat@latest status`.
+- **`modelstat isn't connected yet`** — claim it via the browser tab the first tool call opens, or install the daemon with `npx modelstat@latest`.
+- **401 responses** — the token expired. Re-run `npx modelstat@latest`, or just retry to re-claim.
+- **No data yet** — usage uploads within a few seconds of your first AI-tool session. Check `npx modelstat@latest status`.
+- **No browser opened in a headless host** — set `MODELSTAT_TOKEN=$(modelstat token)` (or `MODELSTAT_MCP_BROWSER_AUTH=1` to force the prompt).
 
 ## License
 
