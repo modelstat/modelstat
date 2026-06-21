@@ -27,6 +27,7 @@ import { machineKey } from "./machine-key.js";
 import { reconcileBackfill } from "./reconcile.js";
 import { scanAll } from "./scan.js";
 import { createCoalescingRunner } from "./single-flight.js";
+import { autoUpdateEnabled, maybeAutoUpdate } from "./update.js";
 
 // Substituted by tsup's `define` at build time (see tsup.config.ts).
 // Replaces an older runtime parent-walk for package.json that broke
@@ -64,6 +65,12 @@ interface Heartbeat {
    * row that registered before machine_id existed — which is what lets
    * machine-key dedupe protect legacy devices without a re-register. */
   machine_id?: string;
+  /** Server release verdict for this daemon, set from the heartbeat response
+   * and mirrored to last-status.json for the tray/CLI. null ⇒ up to date. */
+  update?: { verdict: string; latest: string | null } | null;
+  /** Effective auto-update setting (env override or stored pref) — the tray
+   * reads this to render its checkbox. */
+  auto_update?: boolean;
 }
 
 /** Shared mutable state the heartbeat reporter reads. Each subsystem
@@ -77,6 +84,7 @@ const status = {
   queueSize: 0,
   stats: {} as Record<string, number | string>,
   lastEventAt: null as string | null,
+  update: null as { verdict: string; latest: string | null } | null,
 };
 
 export function setPhase(phase: Phase, message?: string | null): void {
@@ -114,6 +122,12 @@ export function noteEventAt(iso: string): void {
   status.lastEventAt = iso;
   scheduleLocalFlush();
 }
+/** Record the server's release verdict (or clear it). Surfaced to the tray/CLI
+ * via last-status.json; the action (auto-update / nudge) is in handleRelease. */
+function setUpdate(u: { verdict: string; latest: string | null } | null): void {
+  status.update = u;
+  scheduleLocalFlush();
+}
 
 /** Snapshot the shared mutable `status` into the wire/heartbeat shape.
  * Used by both the network heartbeat and the local-file mirror so the
@@ -130,6 +144,8 @@ function snapshotBody(): Heartbeat & { device_id: string | null } {
     last_event_at: status.lastEventAt,
     daemon_version: DAEMON_VERSION,
     machine_id: machineKey(),
+    update: status.update,
+    auto_update: autoUpdateEnabled(),
   };
 }
 
@@ -159,6 +175,32 @@ function scheduleLocalFlush(): void {
   localFlushTimer.unref();
 }
 
+// Track the last verdict so a transition is logged once (heartbeat fires every
+// 10s); maybeAutoUpdate self-dedups the action per (verdict, target).
+let lastVerdict = "ok";
+function handleRelease(rel?: { verdict?: string; latest?: string | null }): void {
+  const verdict = rel?.verdict ?? "ok";
+  const latest = rel?.latest ?? null;
+  if (verdict === "ok") {
+    if (status.update) setUpdate(null);
+    lastVerdict = "ok";
+    return;
+  }
+  setUpdate({ verdict, latest });
+  if (verdict !== lastVerdict) {
+    // biome-ignore lint/suspicious/noConsole: one-line release transition for the logs
+    console.log(
+      `[modelstat] release ${verdict}: this daemon ${DAEMON_VERSION}, latest ${latest ?? "?"}`,
+    );
+  }
+  lastVerdict = verdict;
+  const note = maybeAutoUpdate(verdict, latest);
+  if (note) {
+    // biome-ignore lint/suspicious/noConsole: one-time auto-update note for the logs
+    console.log(`[modelstat] ${note}`);
+  }
+}
+
 async function sendHeartbeat(): Promise<void> {
   const bearer = state.bearer;
   const deviceId = state.deviceId;
@@ -173,6 +215,17 @@ async function sendHeartbeat(): Promise<void> {
     if (res.statusCode >= 300) {
       // eat the body so we don't leak a handle
       await res.body.text();
+    } else {
+      // The server returns our release verdict (ok / update_available /
+      // upgrade_required) in the 200 body — act on it (alert + auto-update).
+      try {
+        const data = (await res.body.json()) as {
+          daemon_release?: { verdict?: string; latest?: string | null };
+        };
+        handleRelease(data?.daemon_release);
+      } catch {
+        // non-JSON / read error — ignore; the next heartbeat retries.
+      }
     }
   } catch {
     // Network blip — dashboard will see stale heartbeat and mark us

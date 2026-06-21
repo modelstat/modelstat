@@ -33,6 +33,13 @@ import {
   uninstallService,
 } from "./service.js";
 import { daemonHealth } from "./supervise.js";
+import {
+  autoUpdateEnabled,
+  autoUpdatePinnedByEnv,
+  runUpgrade,
+  setStoredAutoUpdate,
+  storedAutoUpdate,
+} from "./update.js";
 
 /** Yes/no prompt over stdin. Returns `defaultYes` if stdin isn't a
  * TTY or the user just hits Enter. Lowercased "y"/"yes" counts as
@@ -715,6 +722,49 @@ async function cmdStatus(): Promise<void> {
   console.log(`logs:    ${logsDir()}`);
   console.log(`state:   ${state.storePath}`);
   console.log(`api:     ${state.apiUrl}`);
+  console.log(
+    `auto-update: ${autoUpdateEnabled() ? "on" : "off"}${autoUpdatePinnedByEnv() ? " (pinned by env)" : ""}`,
+  );
+  const ls = await readLocalStatus();
+  const upd = ls?.update as { verdict?: string; latest?: string | null } | null | undefined;
+  if (upd?.verdict && upd.verdict !== "ok") {
+    const what = upd.verdict === "upgrade_required" ? "REQUIRED" : "available";
+    console.log(`update:  ${what} — latest ${upd.latest ?? "?"} (run \`modelstat upgrade\`)`);
+  }
+}
+
+/** Show or change the daemon auto-update setting: on | off | toggle | status. */
+function cmdAutoUpdate(args: readonly string[]): void {
+  const sub = (args[0] ?? "").toLowerCase();
+  if (sub === "on" || sub === "enable") {
+    setStoredAutoUpdate(true);
+  } else if (sub === "off" || sub === "disable") {
+    setStoredAutoUpdate(false);
+  } else if (sub === "toggle") {
+    setStoredAutoUpdate(!storedAutoUpdate());
+  } else if (sub !== "" && sub !== "status") {
+    console.log("usage: modelstat autoupdate [on|off|toggle|status]");
+    return;
+  }
+  console.log(`auto-update: ${autoUpdateEnabled() ? "on" : "off"}`);
+  if (autoUpdatePinnedByEnv()) {
+    console.log("  (pinned by MODELSTAT_AUTO_UPDATE env — the stored toggle is ignored)");
+  }
+}
+
+/** Manually upgrade to the latest published version now (ignores the
+ * auto-update setting). The tray's "Update now" item shells this. */
+function cmdUpgrade(): void {
+  console.log("upgrading modelstat to the latest published version…");
+  const r = runUpgrade();
+  if (r.started) {
+    console.log(
+      "  started `npm install -g modelstat@latest` — the service restarts on the new build.",
+    );
+  } else {
+    console.log(`  couldn't start the upgrade: ${r.reason}`);
+    console.log("  upgrade manually: npm install -g modelstat@latest");
+  }
 }
 
 function fmtInt(n: number | string): string {
@@ -1015,6 +1065,14 @@ async function main(): Promise<void> {
       return cmdSelfRegister();
     case "await-claim":
       return cmdAwaitClaim();
+    case "upgrade":
+      // Upgrade to the latest version now (ignores the auto-update setting).
+      cmdUpgrade();
+      return;
+    case "autoupdate":
+      // Show or change the auto-update setting: on | off | toggle | status.
+      cmdAutoUpdate(rest);
+      return;
     default:
       console.log("usage:");
       console.log(
@@ -1032,6 +1090,10 @@ async function main(): Promise<void> {
       console.log();
       console.log("Diagnostics:");
       console.log("  npx modelstat@latest status         — show pairing + service state");
+      console.log("  npx modelstat@latest upgrade        — update to the latest version now");
+      console.log(
+        "  npx modelstat@latest autoupdate     — show/set auto-update: on|off|toggle",
+      );
       console.log(
         "  npx modelstat@latest stats          — live device summary: sessions · tokens · cost (--json)",
       );
