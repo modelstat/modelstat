@@ -119,60 +119,53 @@ function sourcePkgVersion(sourceCli: string, pkgName: string): string | null {
   return null;
 }
 
-/**
- * Lay ONE complete, self-contained native package down beside the installed
- * bundle (`~/.modelstat/bin/node_modules/`) so the dependency-free
- * `modelstat.mjs` can `import(pkgName)` at runtime with nothing but npm in the
- * picture — no Ollama, no system libraries, no separate native build.
- *
- * Why npm and not a file copy: these packages ship large per-platform prebuilt
- * binary closures (node-llama-cpp's `@node-llama-cpp/<plat>`,
- * @huggingface/transformers' `onnxruntime-node`). A hand-rolled copy would have
- * to replicate that whole closure across npm-flat AND pnpm's symlinked store —
- * exactly the brittle wiring that left this machine without a summariser. `npm
- * install` resolves the closure and the right platform binary for us.
- *
- * `critical` shapes the failure message: the summariser (node-llama-cpp) is
- * load-bearing; the embedder + on-device PII/NER redactor
- * (@huggingface/transformers) degrades gracefully to server-side embedding +
- * regex/LLM redaction, so its failure is non-fatal.
- *
- * Best-effort: never throws. Skips the (network) install when the matching
- * version is already staged, so re-running `connect` is fast.
- */
-function stageNativePkg(
-  sourceCli: string,
-  pkgName: string,
-  fallbackVersion: string,
-  critical: boolean,
-): string[] {
-  const version = sourcePkgVersion(sourceCli, pkgName) ?? fallbackVersion;
-  const dest = binDir();
-  const pkgJson = join(dest, "node_modules", ...pkgName.split("/"), "package.json");
-  // Already staged at the right version → nothing to do.
+/** The version of a package already staged in `~/.modelstat/bin/node_modules`,
+ * or null if it isn't there. */
+function stagedVersion(pkgName: string): string | null {
   try {
-    const have = JSON.parse(readFileSync(pkgJson, "utf8")) as { version?: string };
-    if (have.version === version) return [`${pkgName}@${version} (cached)`];
+    const pj = join(binDir(), "node_modules", ...pkgName.split("/"), "package.json");
+    return (JSON.parse(readFileSync(pj, "utf8")) as { version?: string }).version ?? null;
   } catch {
-    /* not staged yet — fall through and install */
+    return null;
   }
+}
 
+/**
+ * Stage native runtimes the dependency-free bundle imports into
+ * `~/.modelstat/bin/node_modules/` with ONE `npm install` of every `name@version`
+ * spec, so the bundle can `import()` them with nothing but npm in the picture —
+ * no Ollama, no system libraries, no separate native build.
+ *
+ * CRITICAL — a SINGLE install, not one-per-package: these are installed with
+ * `--no-save`, and `npm install` PRUNES extraneous packages. Two separate
+ * `npm install --no-save` calls into the same prefix therefore remove the FIRST
+ * package ("added 1, removed 1") — which silently deleted node-llama-cpp when
+ * @huggingface/transformers was staged and dropped the daemon to the extractive
+ * fallback. Installing every spec together keeps them all.
+ *
+ * Why npm and not a file copy: these ship large per-platform prebuilt binary
+ * closures (node-llama-cpp's `@node-llama-cpp/<plat>`, transformers'
+ * `onnxruntime-node`); `npm install` resolves the closure + the right platform
+ * binary for us. Never throws — returns false on failure so the caller decides
+ * what's load-bearing.
+ */
+function stageNativePkgs(specs: string[]): boolean {
+  const dest = binDir();
   mkdirSync(dest, { recursive: true });
   // When this runs from the npm-UPGRADE path it's nested inside
   // `npm install -g modelstat`'s postinstall, so npm's own config leaks in as
   // `npm_config_*` env vars — notably `npm_config_global=true` and the global
   // `npm_config_prefix`. Left alone, the nested install would treat `--prefix`
-  // as a GLOBAL root and drop the package in `<dest>/lib/node_modules` instead
-  // of `<dest>/node_modules`, where the bundle's walk-up can't find it. Force a
+  // as a GLOBAL root and drop packages in `<dest>/lib/node_modules` instead of
+  // `<dest>/node_modules`, where the bundle's walk-up can't find them. Force a
   // LOCAL install (`--global=false`) and scrub the two leaking vars; keep the
   // rest (registry, cache, proxy, auth) so corporate mirrors still work.
   const childEnv = { ...process.env };
   delete childEnv.npm_config_global;
   delete childEnv.npm_config_prefix;
-  const label = critical ? "summariser runtime" : "on-device embedder + PII/NER redactor";
   // This step used to be a silent black box: seconds with a warm cache, but a
   // multi-minute (apparently-frozen) network download on a cold one. Announce it.
-  process.stderr.write(`  · staging ${label} (${pkgName}@${version})…\n`);
+  process.stderr.write(`  · staging native runtime (${specs.join(", ")})…\n`);
   const r = spawnSync(
     "npm",
     [
@@ -191,49 +184,61 @@ function stageNativePkg(
       "--prefer-offline",
       "--fetch-timeout=60000",
       "--loglevel=error",
-      `${pkgName}@${version}`,
+      ...specs,
     ],
     { encoding: "utf8", stdio: "pipe", env: childEnv },
   );
   if (r.status !== 0) {
-    // Don't abort the install. For the summariser, the daemon's preflight is the
-    // backstop. For the embedder/redactor, the pipeline already falls back.
-    // Surface the npm error so `connect` output isn't silent.
     process.stderr.write(
-      critical
-        ? `[modelstat] couldn't stage the bundled summariser runtime via npm` +
-            ` (${pkgName}@${version}); the daemon's summariser preflight will fail until this is resolved.\n` +
-            `${(r.stderr || r.stdout || "").trim()}\n`
-        : `[modelstat] couldn't stage the on-device embedder/redactor (${pkgName}@${version});` +
-            ` the daemon falls back to server-side embedding + regex/LLM redaction (non-fatal).\n`,
+      `[modelstat] npm couldn't stage [${specs.join(", ")}] into ~/.modelstat/bin:\n${(r.stderr || r.stdout || "").trim()}\n`,
     );
-    return [];
+    return false;
   }
-  return [`${pkgName}@${version}`];
+  return true;
 }
 
 /**
- * Stage every native runtime the bundle imports at runtime into
- * `~/.modelstat/bin/node_modules/`. Runs from inside `installBundle()`, i.e. on
- * every `connect` / service refresh — straight out of the freshly-unpacked npm
- * tree, where npm is on PATH — so it can't be skipped the way the postinstall
- * hook is for npx-prewarm / manual-copy installs.
+ * Stage every native runtime the bundle imports — node-llama-cpp (the summariser,
+ * load-bearing) and @huggingface/transformers (the embedder + on-device PII/NER
+ * redactor, best-effort) — into `~/.modelstat/bin`. Runs from inside
+ * `installBundle()` on every `connect` / service refresh, straight out of the
+ * freshly-unpacked npm tree where npm is on PATH.
  *
- * The summariser (node-llama-cpp) is staged first and is load-bearing; the
- * embedder + on-device PII/NER redactor (@huggingface/transformers) is staged
- * best-effort as a SEPARATE install — so a transformers/onnxruntime failure can
- * never block the summariser runtime.
+ * Both go in ONE install (see stageNativePkgs — separate `--no-save` installs
+ * prune each other). If the combined install fails (e.g. transformers'
+ * onnxruntime binary), retry with just node-llama-cpp so a transformers hiccup
+ * can never cost us the summariser. Best-effort: never throws; skips the
+ * (network) install when every package is already staged at the right version.
  */
 function installNativeRuntime(sourceCli: string): string[] {
-  return [
-    ...stageNativePkg(sourceCli, "node-llama-cpp", NODE_LLAMA_CPP_FALLBACK_VERSION, true),
-    ...stageNativePkg(
-      sourceCli,
-      "@huggingface/transformers",
-      HF_TRANSFORMERS_FALLBACK_VERSION,
-      false,
-    ),
+  const pkgs = [
+    {
+      name: "node-llama-cpp",
+      version: sourcePkgVersion(sourceCli, "node-llama-cpp") ?? NODE_LLAMA_CPP_FALLBACK_VERSION,
+    },
+    {
+      name: "@huggingface/transformers",
+      version:
+        sourcePkgVersion(sourceCli, "@huggingface/transformers") ?? HF_TRANSFORMERS_FALLBACK_VERSION,
+    },
   ];
+  // Every package already staged at the right version → nothing to do.
+  if (pkgs.every((p) => stagedVersion(p.name) === p.version)) {
+    return pkgs.map((p) => `${p.name}@${p.version} (cached)`);
+  }
+  const specs = pkgs.map((p) => `${p.name}@${p.version}`);
+  if (stageNativePkgs(specs)) return specs;
+  // Combined install failed — ensure at least the CRITICAL summariser runtime is
+  // staged (the embedder/redactor degrades to server-side embed + regex/LLM).
+  process.stderr.write(
+    "[modelstat] retrying with just the summariser runtime; the embedder/redactor will fall back…\n",
+  );
+  const llamaSpec = `node-llama-cpp@${pkgs[0]!.version}`;
+  if (stageNativePkgs([llamaSpec])) return [llamaSpec];
+  process.stderr.write(
+    `[modelstat] couldn't stage the summariser runtime (${llamaSpec}); the daemon uses the extractive fallback until this is resolved.\n`,
+  );
+  return [];
 }
 
 /** Best-effort: absolute path to the node binary we'd invoke. */
