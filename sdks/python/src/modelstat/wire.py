@@ -36,7 +36,7 @@ import blake3
 __all__ = [
     "TokenUsage",
     "EventKind",
-    "BillingMode",
+    "PricingMode",
     "ToolCallStatus",
     "GitContext",
     "RawEvent",
@@ -118,7 +118,7 @@ class EventKind(str, Enum):
     SUMMARY = "summary"
 
 
-class BillingMode(str, Enum):
+class PricingMode(str, Enum):
     """How the provider billed the call."""
 
     SUBSCRIPTION = "subscription"
@@ -181,7 +181,7 @@ class RawEvent:
     cwd: Optional[str] = None
     git: Optional[GitContext] = None
     duration_ms: Optional[int] = None
-    billing: Optional[BillingMode] = None
+    pricing_mode: Optional[PricingMode] = None
     # Redacted excerpt used to build summaries downstream. Capped at 320 chars
     # in the standard (floor-redacted) path; carries the full redacted turns in
     # remote-raw mode, where the server summarizes.
@@ -206,8 +206,8 @@ class RawEvent:
             out["git"] = self.git.to_dict()
         if self.duration_ms is not None:
             out["duration_ms"] = self.duration_ms
-        if self.billing is not None:
-            out["billing"] = self.billing.value
+        if self.pricing_mode is not None:
+            out["pricing_mode"] = self.pricing_mode.value
         if self.content_excerpt is not None:
             out["content_excerpt"] = self.content_excerpt
         return out

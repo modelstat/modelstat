@@ -9,7 +9,7 @@
 use crate::config::{Config, RedactionPolicy};
 use crate::redact;
 use crate::wire::{
-    self, BillingMode, EventKind, GitContext, IngestBatch, RawEvent, TokenUsage, ToolCallStatus,
+    self, PricingMode, EventKind, GitContext, IngestBatch, RawEvent, TokenUsage, ToolCallStatus,
     ToolCallWire,
 };
 use chrono::{DateTime, Utc};
@@ -71,7 +71,7 @@ pub struct LlmCall {
     pub completion: Option<String>,
     pub cwd: Option<String>,
     pub git: Option<GitContext>,
-    pub billing: Option<BillingMode>,
+    pub pricing_mode: Option<PricingMode>,
     pub tool_calls: Vec<ToolCallInput>,
 }
 
@@ -91,7 +91,7 @@ impl LlmCall {
             completion: None,
             cwd: None,
             git: None,
-            billing: None,
+            pricing_mode: None,
             tool_calls: Vec::new(),
         }
     }
@@ -178,7 +178,7 @@ fn event_from_call(cfg: &Config, call: &LlmCall, seq: u64) -> (RawEvent, Vec<Too
         cwd: call.cwd.clone(),
         git: call.git.clone(),
         duration_ms: call.duration.map(|d| d.as_millis() as u64),
-        billing: call.billing,
+        pricing_mode: call.pricing_mode,
         content_excerpt,
     };
 

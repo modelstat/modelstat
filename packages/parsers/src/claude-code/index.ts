@@ -466,7 +466,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         // used via subscription (not the raw API). Mark them so the
         // server short-circuits token-level cost to $0 — the user has
         // already paid the flat monthly fee.
-        billing: "subscription",
+        pricing_mode: "subscription",
       });
     } else if (obj.type === "user") {
       const u = obj as ClaudeUserLine;
@@ -522,7 +522,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         ...(refs ? { references: refs } : {}),
         source_file: ctx.sourceFile,
         source_byte_offset: offsetAtLineStart,
-        billing: "subscription",
+        pricing_mode: "subscription",
       });
     } else if (obj.type === "tool_use") {
       // Top-level `type:'tool_use'` line form (see the header comment) —

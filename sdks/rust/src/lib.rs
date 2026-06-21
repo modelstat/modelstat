@@ -52,7 +52,7 @@ pub use config::{Config, Mode, RedactionPolicy};
 pub use redact::{redact, Redacted};
 pub use transport::{FakeTransport, HttpTransport, Transport, TransportError};
 pub use wire::{
-    BillingMode, EventKind, GitContext, IngestBatch, RawEvent, TokenUsage, ToolCallStatus,
+    PricingMode, EventKind, GitContext, IngestBatch, RawEvent, TokenUsage, ToolCallStatus,
     ToolCallWire,
 };
 

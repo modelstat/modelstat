@@ -17,7 +17,7 @@ import {
   contentHash,
   sourceEventId,
   zeroTokens,
-  type BillingMode,
+  type PricingMode,
   type EventKind,
   type GitContext,
   type IngestBatch,
@@ -79,7 +79,7 @@ export class LlmCall {
   completion?: string;
   cwd?: string;
   git?: GitContext;
-  billing?: BillingMode;
+  pricing_mode?: PricingMode;
   toolCalls: ToolCallInput[] = [];
 
   /** A call with `startedAt = now` and `kind = "assistant_message"`. */
@@ -240,7 +240,7 @@ function eventFromCall(
   setIfPresent(event, "cwd", call.cwd);
   setIfPresent(event, "git", call.git);
   setIfPresent(event, "duration_ms", call.durationMs);
-  setIfPresent(event, "billing", call.billing);
+  setIfPresent(event, "pricing_mode", call.pricing_mode);
   setIfPresent(event, "content_excerpt", contentExcerpt);
 
   const toolCalls: ToolCallWire[] = call.toolCalls.map((tc, i) => {

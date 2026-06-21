@@ -92,11 +92,11 @@ export const RawEvent = z.object({
 
   // Billing mode. Agents with a flat-fee subscription tier (Claude
   // Code, Cursor Pro, GitHub Copilot, etc) emit events tagged
-  // `billing: "subscription"` — the server short-circuits cost to $0
+  // `pricing_mode: "subscription"` — the server short-circuits cost to $0
   // for those, since token-level pricing doesn't apply once the user
   // is paying the subscription. `api` (or absent) means pay-per-token
   // against whatever rates the org has configured.
-  billing: z.enum(["subscription", "api"]).optional(),
+  pricing_mode: z.enum(["subscription", "api"]).optional(),
 });
 export type RawEvent = z.infer<typeof RawEvent>;
 

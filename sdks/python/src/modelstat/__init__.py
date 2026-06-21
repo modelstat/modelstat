@@ -46,7 +46,7 @@ from .config import DEFAULT_DAEMON_URL, Config, Mode, RedactionPolicy
 from .redact import Redacted, redact
 from .transport import FakeTransport, HttpTransport, Transport, TransportError
 from .wire import (
-    BillingMode,
+    PricingMode,
     EventKind,
     GitContext,
     IngestBatch,
@@ -86,7 +86,7 @@ __all__ = [
     "TokenUsage",
     "GitContext",
     "EventKind",
-    "BillingMode",
+    "PricingMode",
     "ToolCallStatus",
     "content_hash",
     "source_event_id",

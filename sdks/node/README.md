@@ -112,7 +112,7 @@ Source-event and batch ids are derived with **blake3** (via `@noble/hashes`), ex
 ## API surface
 
 - `new Config(ingestKey, agent)` — `.withRemote(baseUrl, raw)`, `.withDeviceId(id)`; public fields `mode`, `redaction`, `bufferCapacity`, `flushIntervalMs`, `flushMaxBatch`, `deviceId`, `version`.
-- `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`; public fields `kind`, `startedAt`, `durationMs`, `cwd`, `git`, `billing`, `toolCalls`.
+- `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`; public fields `kind`, `startedAt`, `durationMs`, `cwd`, `git`, `pricing_mode`, `toolCalls`.
 - `new Client(cfg)` / `Client.withTransport(cfg, transport)` — `record(call)`, `await flush()`, `await shutdown()`, `dropped()`.
 - `FakeTransport` — an in-memory transport for tests (`.batches()`).
 - `redact(text)` — run the floor directly; returns `{ text, secrets, pii }`.

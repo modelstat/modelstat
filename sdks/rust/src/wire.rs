@@ -56,7 +56,7 @@ pub enum EventKind {
 /// How the provider billed the call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BillingMode {
+pub enum PricingMode {
     Subscription,
     Api,
 }
@@ -105,7 +105,7 @@ pub struct RawEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub billing: Option<BillingMode>,
+    pub pricing_mode: Option<PricingMode>,
     /// Redacted excerpt used to build summaries downstream. Capped at 320 chars
     /// in the standard (floor-redacted) path; carries the full redacted turns in
     /// remote-raw mode, where the server summarizes.
@@ -250,13 +250,13 @@ mod tests {
             cwd: None,
             git: None,
             duration_ms: Some(1200),
-            billing: Some(BillingMode::Api),
+            pricing_mode: Some(PricingMode::Api),
             content_excerpt: Some("hello".into()),
         };
         let j: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(j["kind"], "assistant_message");
         assert_eq!(j["agent"], "raw_sdk_openai");
-        assert_eq!(j["billing"], "api");
+        assert_eq!(j["pricing_mode"], "api");
         assert_eq!(j["tokens"]["input"], 10);
         // Absent optionals must not serialize (additive wire contract).
         assert!(j.get("cwd").is_none());

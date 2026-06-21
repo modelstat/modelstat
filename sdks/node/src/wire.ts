@@ -63,7 +63,7 @@ export type EventKind =
   | "summary";
 
 /** How the provider billed the call (snake_case on the wire). */
-export type BillingMode = "subscription" | "api";
+export type PricingMode = "subscription" | "api";
 
 /** Outcome of a tool invocation (snake_case on the wire). */
 export type ToolCallStatus =
@@ -104,7 +104,7 @@ export interface RawEvent {
   cwd?: string;
   git?: GitContext;
   duration_ms?: number;
-  billing?: BillingMode;
+  pricing_mode?: PricingMode;
   /**
    * Redacted excerpt used to build summaries downstream. Capped at 320 chars
    * in the standard (floor-redacted) path; carries the full redacted turns in

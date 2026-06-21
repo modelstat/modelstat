@@ -54,10 +54,10 @@ test("empty prompt+completion yields no content_excerpt key", () => {
 
 test("optional keys are omitted entirely when absent (never null)", () => {
   const seq: SeqRef = { value: 0 };
-  const call = new LlmCall("openai", "sess_1"); // no model/cwd/git/duration/billing
+  const call = new LlmCall("openai", "sess_1"); // no model/cwd/git/duration/pricing_mode
   const batch = buildBatch(cfg(), [call], seq);
   const ev = batch.events[0]!;
-  for (const k of ["model", "cwd", "git", "duration_ms", "billing"]) {
+  for (const k of ["model", "cwd", "git", "duration_ms", "pricing_mode"]) {
     assert.ok(!(k in ev), `expected ${k} omitted, present in ${JSON.stringify(ev)}`);
   }
   // tool_calls omitted at the batch level when empty.

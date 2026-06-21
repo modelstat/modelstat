@@ -19,7 +19,7 @@ from . import wire
 from .config import Config, RedactionPolicy
 from .redact import redact
 from .wire import (
-    BillingMode,
+    PricingMode,
     EventKind,
     GitContext,
     IngestBatch,
@@ -83,7 +83,7 @@ class LlmCall:
     completion: Optional[str] = None
     cwd: Optional[str] = None
     git: Optional[GitContext] = None
-    billing: Optional[BillingMode] = None
+    pricing_mode: Optional[PricingMode] = None
     tool_calls: List[ToolCallInput] = field(default_factory=list)
 
     # ---- chainable builder helpers (ergonomic, mirror the Rust builder) -----
@@ -193,7 +193,7 @@ def _event_from_call(
         cwd=call.cwd,
         git=call.git,
         duration_ms=call.duration_ms,
-        billing=call.billing,
+        pricing_mode=call.pricing_mode,
         content_excerpt=_build_excerpt(cfg, call),
     )
 

@@ -67,7 +67,7 @@ export {
   sourceEventId,
   totalTokens,
   zeroTokens,
-  type BillingMode,
+  type PricingMode,
   type EventKind,
   type GitContext,
   type IngestBatch,
