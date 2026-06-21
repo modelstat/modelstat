@@ -31,6 +31,7 @@
     "test": "node --import tsx --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.7.0",
     "chokidar": "^4.0.3",
     "dotenv": "^16.4.7",
     "node-llama-cpp": "^3.18.0",

@@ -26,6 +26,9 @@ importers:
 
   apps/daemon:
     dependencies:
+      '@huggingface/transformers':
+        specifier: ^3.7.0
+        version: 3.8.1
       chokidar:
         specifier: ^4.0.3
         version: 4.0.3

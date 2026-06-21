@@ -86,20 +86,20 @@ export function setupRuntime(): string {
   return installBundle();
 }
 
-/** Pinned fallback if we can't read the version from the source tree
- * (kept in sync with apps/daemon/package.json's node-llama-cpp range). */
+/** Pinned fallbacks if we can't read the version from the source tree (kept in
+ * sync with each package's range in apps/daemon/package.json + daemon-core). */
 const NODE_LLAMA_CPP_FALLBACK_VERSION = "3.18.1";
+const HF_TRANSFORMERS_FALLBACK_VERSION = "3.8.1";
 
-/** Read node-llama-cpp's installed version from the package we're
- * running out of, so the staged self-contained copy matches exactly
- * what this bundle was built and tested against. Its package.json is
- * hidden behind an `exports` map, so resolve the main entry and walk
- * up to the owning directory. Returns null if it isn't resolvable
- * (e.g. we're running from the already-orphaned bundle). */
-function sourceLlamaVersion(sourceCli: string): string | null {
+/** Read a package's installed version from the tree we're running out of, so the
+ * staged self-contained copy matches exactly what this bundle was built and
+ * tested against. package.json may be hidden behind an `exports` map, so resolve
+ * the main entry and walk up to the owning directory. Returns null if it isn't
+ * resolvable (e.g. we're running from the already-orphaned bundle). */
+function sourcePkgVersion(sourceCli: string, pkgName: string): string | null {
   try {
     const req = createRequire(sourceCli);
-    let d = dirname(realpathSync(req.resolve("node-llama-cpp")));
+    let d = dirname(realpathSync(req.resolve(pkgName)));
     for (let i = 0; i < 10; i++) {
       const pj = join(d, "package.json");
       if (existsSync(pj)) {
@@ -107,7 +107,7 @@ function sourceLlamaVersion(sourceCli: string): string | null {
           name?: string;
           version?: string;
         };
-        if (p.name === "node-llama-cpp" && p.version) return p.version;
+        if (p.name === pkgName && p.version) return p.version;
       }
       const up = dirname(d);
       if (up === d) break;
@@ -120,59 +120,59 @@ function sourceLlamaVersion(sourceCli: string): string | null {
 }
 
 /**
- * Lay a COMPLETE, self-contained `node-llama-cpp` runtime down beside
- * the installed bundle (`~/.modelstat/bin/node_modules/`) so the
- * dependency-free `modelstat.mjs` can `import("node-llama-cpp")` at
- * runtime with nothing but npm in the picture — no Ollama, no system
- * libraries, no separate native build.
+ * Lay ONE complete, self-contained native package down beside the installed
+ * bundle (`~/.modelstat/bin/node_modules/`) so the dependency-free
+ * `modelstat.mjs` can `import(pkgName)` at runtime with nothing but npm in the
+ * picture — no Ollama, no system libraries, no separate native build.
  *
- * Why npm and not a file copy: node-llama-cpp ships ~30 runtime
- * dependencies plus a per-platform prebuilt-binary sibling
- * (`@node-llama-cpp/<plat>`). A hand-rolled copy would have to
- * replicate that whole closure correctly across npm-flat AND pnpm's
- * symlinked store — exactly the kind of brittle wiring that left this
- * machine without a summariser. `npm install` resolves the closure and
- * the right platform binary for us. This is the single place we shell
- * out to npm; everything else the daemon needs is inlined in the bundle.
+ * Why npm and not a file copy: these packages ship large per-platform prebuilt
+ * binary closures (node-llama-cpp's `@node-llama-cpp/<plat>`,
+ * @huggingface/transformers' `onnxruntime-node`). A hand-rolled copy would have
+ * to replicate that whole closure across npm-flat AND pnpm's symlinked store —
+ * exactly the brittle wiring that left this machine without a summariser. `npm
+ * install` resolves the closure and the right platform binary for us.
  *
- * Runs from inside `installBundle()`, i.e. on every `connect` / service
- * refresh — straight out of the freshly-unpacked npm tree, where npm is
- * on PATH — so it can't be skipped the way the postinstall hook is for
- * npx-prewarm / manual-copy installs.
+ * `critical` shapes the failure message: the summariser (node-llama-cpp) is
+ * load-bearing; the embedder + on-device PII/NER redactor
+ * (@huggingface/transformers) degrades gracefully to server-side embedding +
+ * regex/LLM redaction, so its failure is non-fatal.
  *
- * Best-effort: never throws. Skips the (network) install when the
- * matching version is already staged, so re-running `connect` is fast.
+ * Best-effort: never throws. Skips the (network) install when the matching
+ * version is already staged, so re-running `connect` is fast.
  */
-function installNativeRuntime(sourceCli: string): string[] {
-  const version = sourceLlamaVersion(sourceCli) ?? NODE_LLAMA_CPP_FALLBACK_VERSION;
+function stageNativePkg(
+  sourceCli: string,
+  pkgName: string,
+  fallbackVersion: string,
+  critical: boolean,
+): string[] {
+  const version = sourcePkgVersion(sourceCli, pkgName) ?? fallbackVersion;
   const dest = binDir();
+  const pkgJson = join(dest, "node_modules", ...pkgName.split("/"), "package.json");
   // Already staged at the right version → nothing to do.
   try {
-    const have = JSON.parse(
-      readFileSync(join(dest, "node_modules", "node-llama-cpp", "package.json"), "utf8"),
-    ) as { version?: string };
-    if (have.version === version) return [`node-llama-cpp@${version} (cached)`];
+    const have = JSON.parse(readFileSync(pkgJson, "utf8")) as { version?: string };
+    if (have.version === version) return [`${pkgName}@${version} (cached)`];
   } catch {
     /* not staged yet — fall through and install */
   }
 
   mkdirSync(dest, { recursive: true });
   // When this runs from the npm-UPGRADE path it's nested inside
-  // `npm install -g modelstat`'s postinstall, so npm's own config leaks
-  // in as `npm_config_*` env vars — notably `npm_config_global=true` and
-  // the global `npm_config_prefix`. Left alone, the nested install would
-  // treat `--prefix` as a GLOBAL root and drop the package in
-  // `<dest>/lib/node_modules` instead of `<dest>/node_modules`, where
-  // the bundle's `node_modules` walk-up can't find it. Force a LOCAL
-  // install (`--global=false`) and scrub the two leaking vars; keep the
+  // `npm install -g modelstat`'s postinstall, so npm's own config leaks in as
+  // `npm_config_*` env vars — notably `npm_config_global=true` and the global
+  // `npm_config_prefix`. Left alone, the nested install would treat `--prefix`
+  // as a GLOBAL root and drop the package in `<dest>/lib/node_modules` instead
+  // of `<dest>/node_modules`, where the bundle's walk-up can't find it. Force a
+  // LOCAL install (`--global=false`) and scrub the two leaking vars; keep the
   // rest (registry, cache, proxy, auth) so corporate mirrors still work.
   const childEnv = { ...process.env };
   delete childEnv.npm_config_global;
   delete childEnv.npm_config_prefix;
-  // This step used to be a silent black box: a few seconds with a warm cache,
-  // but a multi-minute (apparently-frozen) network download on a cold/slow one —
-  // `connect` looked hung right here. Announce it so it isn't a mystery.
-  process.stderr.write(`  · staging summariser runtime (node-llama-cpp@${version})…\n`);
+  const label = critical ? "summariser runtime" : "on-device embedder + PII/NER redactor";
+  // This step used to be a silent black box: seconds with a warm cache, but a
+  // multi-minute (apparently-frozen) network download on a cold one. Announce it.
+  process.stderr.write(`  · staging ${label} (${pkgName}@${version})…\n`);
   const r = spawnSync(
     "npm",
     [
@@ -184,30 +184,56 @@ function installNativeRuntime(sourceCli: string): string[] {
       "--omit=dev",
       "--no-audit",
       "--no-fund",
-      // Prefer the npm cache the current install already populated (node-llama-cpp
-      // is a direct dep, so the platform prebuilt is cached) — an offline ~3s copy
-      // instead of a redundant network re-fetch. Only a genuine cache miss touches
-      // the network, and a capped per-request timeout makes that fail fast (the
-      // daemon's summariser preflight re-stages) rather than hang indefinitely.
+      // Prefer the npm cache the current install already populated — an offline
+      // ~3s copy instead of a redundant network re-fetch. Only a genuine cache
+      // miss touches the network, and a capped per-request timeout makes that
+      // fail fast (the daemon re-stages on its next preflight) rather than hang.
       "--prefer-offline",
       "--fetch-timeout=60000",
       "--loglevel=error",
-      `node-llama-cpp@${version}`,
+      `${pkgName}@${version}`,
     ],
     { encoding: "utf8", stdio: "pipe", env: childEnv },
   );
   if (r.status !== 0) {
-    // Don't abort the install — the daemon's preflight is the backstop
-    // and prints an actionable message if the summariser truly can't
-    // load. Surface the npm error so `connect` output isn't silent.
+    // Don't abort the install. For the summariser, the daemon's preflight is the
+    // backstop. For the embedder/redactor, the pipeline already falls back.
+    // Surface the npm error so `connect` output isn't silent.
     process.stderr.write(
-      `[modelstat] couldn't stage the bundled summariser runtime via npm` +
-        ` (node-llama-cpp@${version}); the daemon's summariser preflight will fail until this is resolved.\n` +
-        `${(r.stderr || r.stdout || "").trim()}\n`,
+      critical
+        ? `[modelstat] couldn't stage the bundled summariser runtime via npm` +
+            ` (${pkgName}@${version}); the daemon's summariser preflight will fail until this is resolved.\n` +
+            `${(r.stderr || r.stdout || "").trim()}\n`
+        : `[modelstat] couldn't stage the on-device embedder/redactor (${pkgName}@${version});` +
+            ` the daemon falls back to server-side embedding + regex/LLM redaction (non-fatal).\n`,
     );
     return [];
   }
-  return [`node-llama-cpp@${version}`];
+  return [`${pkgName}@${version}`];
+}
+
+/**
+ * Stage every native runtime the bundle imports at runtime into
+ * `~/.modelstat/bin/node_modules/`. Runs from inside `installBundle()`, i.e. on
+ * every `connect` / service refresh — straight out of the freshly-unpacked npm
+ * tree, where npm is on PATH — so it can't be skipped the way the postinstall
+ * hook is for npx-prewarm / manual-copy installs.
+ *
+ * The summariser (node-llama-cpp) is staged first and is load-bearing; the
+ * embedder + on-device PII/NER redactor (@huggingface/transformers) is staged
+ * best-effort as a SEPARATE install — so a transformers/onnxruntime failure can
+ * never block the summariser runtime.
+ */
+function installNativeRuntime(sourceCli: string): string[] {
+  return [
+    ...stageNativePkg(sourceCli, "node-llama-cpp", NODE_LLAMA_CPP_FALLBACK_VERSION, true),
+    ...stageNativePkg(
+      sourceCli,
+      "@huggingface/transformers",
+      HF_TRANSFORMERS_FALLBACK_VERSION,
+      false,
+    ),
+  ];
 }
 
 /** Best-effort: absolute path to the node binary we'd invoke. */

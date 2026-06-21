@@ -72,8 +72,17 @@
  *      live sessions (`acme` vs `acme/acme`). Re-scan so every historical
  *      session re-resolves to its one canonical remote slug — only the daemon
  *      can, from the raw transcripts on disk.
+ * v8 — on-device embedder + PII/NER redactor now actually ship. The daemon
+ *      stages the bundled @huggingface/transformers runtime, so (a) the
+ *      segmenter's turn embeddings are REAL (semantic cosine-distance
+ *      boundaries) instead of the time-gap/max-turns fallback — segment
+ *      boundaries, and therefore segment_ids, shift — and (b) redaction layer 2
+ *      (the Privacy-Filter NER/PII model) engages on top of the regex floor +
+ *      local-LLM backstop. Re-scan so every historical transcript is
+ *      re-segmented and re-redacted through the full on-device stack (only the
+ *      daemon can, from the raw on disk).
  */
-export const PROCESSING_VERSION = 7;
+export const PROCESSING_VERSION = 8;
 
 export interface ProcessingState {
   processingVersion: number | null;
