@@ -70,7 +70,7 @@ Emits one NDJSON event per line, so a wrapper can drive pairing non-interactivel
 
 ## Shared state across install methods
 
-Installing via both Homebrew and npm on the same laptop produces the **same binary reading the same state file** — on macOS that's `~/Library/Preferences/modelstat-daemon-nodejs/config.json`. Your device UUID, bearer token, and pairing state persist across install methods — and the service deduplicates the device server-side, so you won't see the same laptop twice in the dashboard.
+Installing via both Homebrew and npm on the same laptop produces the **same binary reading the same state** — all daemon state lives in one home directory, `~/.modelstat`, identical on every OS (no per-OS Preferences path). Inside it, `identity.json` holds your device UUID + bearer token (`0600`) and `state.json` holds runtime state (file cursors, …), side by side. Set `MODELSTAT_HOME` to relocate everything at once (e.g. `MODELSTAT_HOME=/opt/modelstat` for a system-wide, exactly-one-per-server install). Your device UUID, bearer token, and pairing state persist across install methods — and the service deduplicates the device server-side, so you won't see the same laptop twice in the dashboard.
 
 ## MCP server
 
