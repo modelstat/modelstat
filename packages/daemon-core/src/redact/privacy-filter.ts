@@ -1,32 +1,33 @@
 /**
- * Client-side OpenAI Privacy Filter adapter.
+ * On-device NER/PII redaction adapter (Transformers.js / ONNX).
  *
- * Builds a Redactor function that the daemon pipeline runs AFTER
- * the regex pass. Running on-device means PII never leaves the
- * machine, which is the whole point of "privacy filter".
+ * Builds a Redactor function the daemon pipeline runs AFTER the regex pass.
+ * Running on-device means PII never leaves the machine — the whole point of
+ * "privacy filter". It loads a token-classification (NER) model and redacts each
+ * detected entity span (person, org, location, …) as `[REDACTED:<TYPE>]`. The
+ * BIO span-merging below is model-AGNOSTIC, so any standard NER model works.
  *
- * Loading is lazy: the model file (~1 GB at q4) downloads on first
- * call and caches in IndexedDB (browser) or ~/.cache/huggingface
- * (Node). If the consumer hasn't installed @huggingface/transformers
- * — which we don't depend on directly to keep daemon-core's tree
- * lean — the adapter logs once and returns a no-op redactor that
- * passes text through unchanged. The pipeline always falls through to
- * the regex result in that case.
+ * Default model: `Xenova/bert-base-NER` (dtype q8). NOTE: the previous default
+ * `openai/privacy-filter` is NOT loadable by Transformers.js — its `model_type`
+ * ("openai_privacy_filter") is unsupported, so that adapter ALWAYS threw at load
+ * and fell through to pass-through (the NER layer never actually ran).
+ * bert-base-NER is a standard, supported architecture that loads on-device and
+ * detects person/org/location entities; structured PII (emails, keys, paths) is
+ * covered by the regex floor and the local-LLM backstop around this layer.
+ *
+ * Loading is lazy: the model downloads on first call and caches in IndexedDB
+ * (browser) or ~/.cache/huggingface (Node). If @huggingface/transformers isn't
+ * installed, the adapter logs once and returns a no-op pass-through redactor, so
+ * the pipeline always falls through to the regex result + LLM backstop.
  *
  * Default device:
  *   • Browser: "webgpu" (Transformers.js auto-falls-back to "wasm")
  *   • Node:    "cpu"    (onnxruntime-node)
  *
- * Daemons that don't want the model (small CPU device, slow disk,
- * privacy posture already covered by regex) just don't call this
- * builder — the pipeline runs without a redact adapter and the regex
- * result is the only output, identical to the pre-filter behaviour.
- *
- * IMPORTANT: this is an OPTIONAL adapter. To use it, the consuming
- * package (the daemon CLI / browser extension repo) must add
- * `@huggingface/transformers` as a dependency itself. We use a
- * runtime dynamic import so missing the dep doesn't break the
- * pipeline build for consumers that don't care.
+ * IMPORTANT: this is an OPTIONAL adapter. The consuming package (apps/daemon)
+ * declares `@huggingface/transformers` and stages it beside the bundle; we use a
+ * runtime dynamic import so missing the dep doesn't break the build for
+ * consumers that don't care.
  */
 
 import type { RedactionResult } from "@modelstat/core/redact";
@@ -38,14 +39,15 @@ import {
 export type Redactor = (text: string) => Promise<RedactionResult>;
 
 export interface PrivacyFilterAdapterOptions {
-  /** Override the model id. Defaults to "openai/privacy-filter". */
+  /** Override the model id. Defaults to "Xenova/bert-base-NER" (a Transformers.js-
+   * compatible token-classification model). Any standard BIO-tagged NER model works. */
   model?: string;
   /** Device hint passed through to Transformers.js. Default: webgpu
    * in the browser, cpu in Node. The library auto-falls-back to
    * `wasm` if WebGPU is unavailable. */
   device?: "webgpu" | "wasm" | "cpu";
-  /** Quantisation of the on-device weights. q4 is the recommended
-   * default — ~1 GB on disk, recall stays >97% per OpenAI's card. */
+  /** Quantisation of the on-device weights. q8 is the default — small + fast on
+   * CPU and the variant bert-base-NER publishes (it has no q4 build). */
   dtype?: "fp32" | "fp16" | "q8" | "q4";
   /** Optional progress callback — Transformers.js fires this during
    * the model download so the UI can show a "loading 32%" indicator
@@ -81,8 +83,8 @@ export async function createPrivacyFilterRedactor(
     typeof globalThis !== "undefined" &&
     typeof (globalThis as { window?: unknown }).window !== "undefined";
   const device = opts.device ?? (isBrowser ? "webgpu" : "cpu");
-  const dtype = opts.dtype ?? "q4";
-  const modelId = opts.model ?? "openai/privacy-filter";
+  const dtype = opts.dtype ?? "q8";
+  const modelId = opts.model ?? "Xenova/bert-base-NER";
 
   // Loose typing — the pipeline() return type is a complex union and
   // typing it strictly drags in @huggingface/transformers as a hard

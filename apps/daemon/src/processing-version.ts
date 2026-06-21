@@ -81,8 +81,14 @@
  *      local-LLM backstop. Re-scan so every historical transcript is
  *      re-segmented and re-redacted through the full on-device stack (only the
  *      daemon can, from the raw on disk).
+ * v9 — NER redaction model fix. v8's default `openai/privacy-filter` is NOT
+ *      loadable by Transformers.js (unsupported `model_type`), so redaction
+ *      layer 2 silently fell through to pass-through — it never actually ran.
+ *      Switched to `Xenova/bert-base-NER` (q8), a supported architecture that
+ *      loads on-device and redacts person/org/location entities. Re-scan so
+ *      historical transcripts are re-redacted with the layer that finally works.
  */
-export const PROCESSING_VERSION = 8;
+export const PROCESSING_VERSION = 9;
 
 export interface ProcessingState {
   processingVersion: number | null;
