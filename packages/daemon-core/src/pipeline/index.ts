@@ -554,6 +554,13 @@ Write a ≤${ABSTRACT_OUTPUT_MAX_CHARS}-char summary (1-2 sentences) naming exac
     segmentEmbedding = undefined;
   }
 
+  // User-intent distillation — from the DEVELOPER'S MESSAGES ONLY (not the
+  // assistant's actions or tool calls). This is the source Insights' rule +
+  // skill detectors mine: "what does the user actually ask for / how do they
+  // direct the AI" — which the outcome abstract (what the assistant DID) can't
+  // answer. On-device, redacted, bounded, best-effort.
+  const userIntent = await summariseUserIntent(slice, adapters);
+
   const sourceEventIds = slice.map((e) => e.source_event_id);
   const id = segmentId(sessionId, startedAtMs, endedAtMs, sourceEventIds);
   return {
@@ -578,7 +585,61 @@ Write a ≤${ABSTRACT_OUTPUT_MAX_CHARS}-char summary (1-2 sentences) naming exac
     abstract_embedding:
       segmentEmbedding && segmentEmbedding.length === 384 ? segmentEmbedding : undefined,
     behavior,
+    user_intent: userIntent,
   };
+}
+
+/** Caps for the user-intent distillation (separate from the abstract so the
+ * abstract's contract — length, prompt, fallback — is left untouched). */
+const USER_INTENT_MAX_CHARS = 240;
+const USER_INTENT_MAX_TOKENS = 120;
+
+/** Distill what the DEVELOPER asked for / how they directed the AI, from their
+ * OWN messages only — the source Insights' rule + skill detectors mine. The
+ * outcome abstract describes what the assistant DID, which is the wrong signal
+ * for "what does the user want". On-device, redacted, bounded, best-effort:
+ * returns undefined when there's no user prose or the summariser is unavailable. */
+async function summariseUserIntent(
+  slice: RawEvent[],
+  adapters: PipelineAdapters,
+): Promise<string | undefined> {
+  const userExcerpts = slice
+    .filter((e) => e.kind === "user_message")
+    .map((e) => e.content_excerpt?.replace(/\s+/g, " ").trim())
+    .filter((x): x is string => !!x && x.length > 0);
+  if (userExcerpts.length === 0) return undefined;
+  // The ask is usually first; later messages add direction/corrections.
+  const sample =
+    userExcerpts.length <= 6
+      ? userExcerpts
+      : [...userExcerpts.slice(0, 4), ...userExcerpts.slice(-2)];
+  const block = sample.map((e, i) => `  [msg ${i + 1}] "${e.slice(0, 240)}"`).join("\n");
+  try {
+    const raw = await adapters.summarize({
+      prompt: `The developer's own messages to an AI coding assistant (already redacted of PII and secrets):
+${block}
+
+In ≤${USER_INTENT_MAX_CHARS} chars, summarise WHAT THE DEVELOPER ASKED FOR or DIRECTED — their goal or task in their own framing, AND any standing preferences / directives / conventions they expressed (e.g. "always be thorough", "ship fast", a naming or workflow convention). Focus on the DEVELOPER'S intent and voice, NOT what the assistant did. Reply with only the summary.`,
+      maxTokens: USER_INTENT_MAX_TOKENS,
+      excerpts: sample,
+      facts: "",
+    });
+    if (!raw || !raw.trim()) return undefined;
+    // Same two-pass redaction as the abstract (regex floor + optional model).
+    const regexPass = redact(raw);
+    let text = regexPass.text;
+    if (adapters.redact) {
+      try {
+        text = (await adapters.redact(regexPass.text)).text;
+      } catch {
+        /* keep the regex result */
+      }
+    }
+    const trimmed = text.trim().slice(0, USER_INTENT_MAX_CHARS);
+    return trimmed.length > 0 ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────

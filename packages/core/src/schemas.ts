@@ -180,6 +180,11 @@ export const Segment = z.object({
       frustration: z.number().min(0).max(1).default(0),
     })
     .optional(),
+  /** Distilled "what the developer asked for / how they directed the AI" — from
+   * their MESSAGES ONLY (not the assistant's actions), redacted, ≤512. The
+   * source Insights' rule + skill detectors mine, distinct from the outcome
+   * `abstract`. Optional; absent from daemons that predate it. */
+  user_intent: z.string().max(512).optional(),
 });
 export type Segment = z.infer<typeof Segment>;
 

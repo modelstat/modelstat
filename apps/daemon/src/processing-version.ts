@@ -96,8 +96,15 @@
  *      raw text) for server-side prompt-friction detection. Re-scan so historical
  *      segments get the richer abstract + the behavior signal (only the daemon
  *      can, from the raw transcripts on disk).
+ * v11 — user-intent distillation (Insights v2). Each segment now carries a
+ *      `user_intent` distilled from the DEVELOPER'S MESSAGES ONLY (redacted,
+ *      on-device): "what did the user ask for / how did they direct the AI" —
+ *      the source the rule + skill insights mine instead of the agent's tool
+ *      calls (which made every skill look like a git operation). Re-scan so
+ *      historical segments gain user_intent — only the daemon can, from the raw
+ *      messages on disk.
  */
-export const PROCESSING_VERSION = 10;
+export const PROCESSING_VERSION = 11;
 
 export interface ProcessingState {
   processingVersion: number | null;
