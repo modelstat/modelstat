@@ -285,17 +285,34 @@ export function detectReferences(text: string, source: RefSource = "content"): D
   }
 
   for (const m of text.matchAll(SLUG_HASH)) {
-    // `org/repo#123` is ambiguous between issue and PR on GitHub — record it
-    // as an issue (the superset; a real PR URL elsewhere wins on dedupe).
+    // `org/repo#123` is ambiguous between issue and PR on GitHub. Default to an
+    // issue (the superset; a real PR URL elsewhere wins on dedupe) — but an
+    // explicit PR cue right before it ("PR org/repo#123", "merged org/repo#123")
+    // disambiguates toward a PR, so a shorthand-only PR still reaches the
+    // first-class PR entity instead of being misfiled as an issue. The cue must
+    // be adjacent, so issue cues ("fixes", "closes") never trip it.
     const slug = m[1] ?? "";
-    out.issues.push({
-      provider: "github",
-      key: m[2] ?? "",
-      slug,
-      url: null,
-      source,
-      confidence: 0.55,
-    });
+    const lead = text.slice(Math.max(0, (m.index ?? 0) - 20), m.index ?? 0).toLowerCase();
+    if (/\b(pr|pull[ -]?request|merge[ -]?request|mr|merged)\s*$/.test(lead)) {
+      out.pull_requests.push({
+        host: "github.com",
+        slug,
+        number: Number(m[2] ?? ""),
+        url: null,
+        source,
+        confidence: 0.6,
+      });
+      out.repos.push(repoFrom("github.com", slug, source));
+    } else {
+      out.issues.push({
+        provider: "github",
+        key: m[2] ?? "",
+        slug,
+        url: null,
+        source,
+        confidence: 0.55,
+      });
+    }
   }
 
   if (source === "model") {

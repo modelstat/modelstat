@@ -77,6 +77,24 @@ test("detects org/repo#123 shorthand as a low-confidence issue", () => {
   assert.ok((r.issues[0]?.confidence ?? 1) < 0.7);
 });
 
+test("a PR cue disambiguates org/repo#N shorthand toward the PR entity", () => {
+  // An adjacent "PR"/"merged" cue → a PR (so a shorthand-only PR is captured),
+  for (const text of ["opened PR acme/web#7", "merged acme/web#7", "pull request acme/web#7"]) {
+    const r = detectReferences(text);
+    assert.equal(r.pull_requests.length, 1, `PR for: ${text}`);
+    assert.equal(r.pull_requests[0]?.slug, "acme/web");
+    assert.equal(r.pull_requests[0]?.number, 7);
+    assert.equal(r.issues.length, 0, `no stray issue for: ${text}`);
+    assert.ok(r.repos.some((x) => x.slug === "acme/web"), "the repo is anchored too");
+  }
+  // …but an issue cue or no cue stays an issue (no false PRs).
+  for (const text of ["fixes acme/web#7", "closes acme/web#7", "see acme/web#7"]) {
+    const r = detectReferences(text);
+    assert.equal(r.pull_requests.length, 0, `no PR for: ${text}`);
+    assert.equal(r.issues.length, 1, `issue for: ${text}`);
+  }
+});
+
 test("bare TEAM-123 tickets are mined ONLY from the model channel", () => {
   const fromContent = detectReferences("works on ENG-501 today", "content");
   assert.equal(fromContent.issues.length, 0, "content must not mine bare tickets (UTF-8 noise)");
