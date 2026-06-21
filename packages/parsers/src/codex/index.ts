@@ -440,7 +440,6 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
                 remote_host: slug.includes("/") ? "github.com" : null,
                 remote_slug: slug,
                 branch: null,
-                commit_sha: null,
               }
             : null,
           tokens: {

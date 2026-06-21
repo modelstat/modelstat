@@ -445,7 +445,6 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
                 remote_host: slug?.includes("/") ? "github.com" : null,
                 remote_slug: slug,
                 branch: gitBranch,
-                commit_sha: null,
               }
             : null,
         tokens: {

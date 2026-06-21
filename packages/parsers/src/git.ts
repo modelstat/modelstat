@@ -64,7 +64,6 @@ export async function resolveGitContext(cwd: string | null): Promise<GitContext 
       remote_host: null,
       remote_slug: null,
       branch: null,
-      commit_sha: null,
     };
     cache.set(target, empty);
     return empty;
@@ -81,7 +80,6 @@ export async function resolveGitContext(cwd: string | null): Promise<GitContext 
 
   const remoteUrl = await ran(["config", "--get", "remote.origin.url"]);
   const branch = await ran(["rev-parse", "--abbrev-ref", "HEAD"]);
-  const sha = await ran(["rev-parse", "HEAD"]);
 
   const parsed = remoteUrl ? parseRemote(remoteUrl) : { host: null, slug: null };
   const ctx: GitContext = {
@@ -89,7 +87,6 @@ export async function resolveGitContext(cwd: string | null): Promise<GitContext 
     remote_host: parsed.host,
     remote_slug: parsed.slug,
     branch,
-    commit_sha: sha,
   };
   cache.set(target, ctx);
   return ctx;

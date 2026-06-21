@@ -16,7 +16,6 @@ function mkGit(over: Partial<GitContext>): GitContext {
     remote_host: null,
     remote_slug: null,
     branch: null,
-    commit_sha: null,
     ...over,
   };
 }
@@ -164,7 +163,6 @@ test("event.references (the parser's full-text scan) feeds session metadata", as
           confidence: 0.95,
         },
       ],
-      commits: [],
       issues: [],
     },
   });

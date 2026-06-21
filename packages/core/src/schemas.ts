@@ -34,7 +34,6 @@ export const GitContext = z.object({
   remote_host: z.string().nullable(), // "github.com"
   remote_slug: z.string().nullable(), // "org/repo"
   branch: z.string().nullable(),
-  commit_sha: z.string().nullable(),
 });
 export type GitContext = z.infer<typeof GitContext>;
 
@@ -79,7 +78,7 @@ export const RawEvent = z.object({
   // used to construct the summarize input.
   content_excerpt: z.string().max(320).optional(),
 
-  // Public code references (PRs, issues, commits, repos) detected on-device
+  // Public code references (PRs, issues, repos) detected on-device
   // from this turn's FULL text — the high-recall feed the server rolls up into
   // SessionMetadata. Only public reference shapes (forge URLs, slugs, numbers,
   // ticket keys) ride here, never raw text — so it is derived pre-redaction
@@ -320,7 +319,7 @@ export const IngestBatch = z.object({
    * no-op browser summariser). */
   session_titles: z.record(z.string(), z.string().max(120)).optional(),
   /** Optional per-session deterministic metadata — session_id →
-   * {@link SessionMetadata}: the repos, pull requests, commits, and issues the
+   * {@link SessionMetadata}: the repos, pull requests, and issues the
    * session touched, detected on-device across git context, tool calls,
    * redacted content, and the local model (so it works for any provider).
    * Additive — old daemons omit it, old servers ignore it (the wire has no

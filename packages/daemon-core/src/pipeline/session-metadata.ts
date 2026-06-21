@@ -148,15 +148,6 @@ export async function buildSessionMetadata(
           });
         }
         if (e.git.branch) refs.issues.push(...detectBranchTickets(e.git.branch));
-        if (e.git.commit_sha) {
-          refs.commits.push({
-            sha: e.git.commit_sha,
-            slug: e.git.remote_slug ?? null,
-            url: null,
-            source: "git",
-            confidence: 0.6,
-          });
-        }
         parts.push(refs);
       }
 

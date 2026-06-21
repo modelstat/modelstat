@@ -72,17 +72,6 @@ export const PullRequestRef = z.object({
 });
 export type PullRequestRef = z.infer<typeof PullRequestRef>;
 
-/** A commit the session referenced (by URL, or the repo HEAD). */
-export const CommitRef = z.object({
-  /** 7–40 char hex SHA. */
-  sha: z.string().max(64),
-  slug: z.string().max(200).nullable().default(null),
-  url: z.string().max(400).nullable().default(null),
-  source: RefSource.default("content"),
-  confidence: z.number().min(0).max(1).default(0.8),
-});
-export type CommitRef = z.infer<typeof CommitRef>;
-
 export const ISSUE_PROVIDERS = [
   "github",
   "gitlab",
@@ -112,7 +101,6 @@ export type IssueRef = z.infer<typeof IssueRef>;
 export const SessionMetadata = z.object({
   repos: z.array(RepoRef).max(50).default([]),
   pull_requests: z.array(PullRequestRef).max(100).default([]),
-  commits: z.array(CommitRef).max(200).default([]),
   issues: z.array(IssueRef).max(100).default([]),
 });
 export type SessionMetadata = z.infer<typeof SessionMetadata>;
@@ -124,7 +112,6 @@ export type SessionMetadata = z.infer<typeof SessionMetadata>;
 export const EventReferences = z.object({
   repos: z.array(RepoRef).max(24).default([]),
   pull_requests: z.array(PullRequestRef).max(24).default([]),
-  commits: z.array(CommitRef).max(24).default([]),
   issues: z.array(IssueRef).max(24).default([]),
 });
 export type EventReferences = z.infer<typeof EventReferences>;
@@ -135,12 +122,11 @@ export type EventReferences = z.infer<typeof EventReferences>;
 export interface DetectedRefs {
   repos: RepoRef[];
   pull_requests: PullRequestRef[];
-  commits: CommitRef[];
   issues: IssueRef[];
 }
 
 export function emptyDetectedRefs(): DetectedRefs {
-  return { repos: [], pull_requests: [], commits: [], issues: [] };
+  return { repos: [], pull_requests: [], issues: [] };
 }
 
 // ── Detection patterns ───────────────────────────────────────────────
@@ -155,8 +141,6 @@ const GITLAB_MR = /https?:\/\/gitlab\.com\/([\w./-]+?)\/-\/merge_requests\/(\d+)
 const BITBUCKET_PR = /https?:\/\/bitbucket\.org\/([\w.-]+)\/([\w.-]+)\/pull-requests\/(\d+)/gi;
 const GITHUB_ISSUE = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)/gi;
 const GITLAB_ISSUE = /https?:\/\/gitlab\.com\/([\w./-]+?)\/-\/issues\/(\d+)/gi;
-const GITHUB_COMMIT = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/commit\/([0-9a-f]{7,40})/gi;
-const GITLAB_COMMIT = /https?:\/\/gitlab\.com\/([\w./-]+?)\/-\/commit\/([0-9a-f]{7,40})/gi;
 const LINEAR_ISSUE = /https?:\/\/linear\.app\/[\w.-]+\/issue\/([A-Z][A-Z0-9]*-\d+)/gi;
 const JIRA_ISSUE = /https?:\/\/[\w.-]+\/browse\/([A-Z][A-Z0-9]+-\d+)/gi;
 /** `org/repo#123` — the GitHub shorthand. Safe enough to scan in any text:
@@ -268,22 +252,6 @@ export function detectReferences(text: string, source: RefSource = "content"): D
     });
   }
 
-  for (const m of text.matchAll(GITHUB_COMMIT)) {
-    const slug = `${m[1]}/${m[2]}`;
-    out.commits.push({ sha: m[3] ?? "", slug, url: m[0], source, confidence: 0.95 });
-    out.repos.push(repoFrom("github.com", slug, source));
-  }
-  for (const m of text.matchAll(GITLAB_COMMIT)) {
-    out.commits.push({
-      sha: m[2] ?? "",
-      slug: m[1] ?? null,
-      url: m[0],
-      source,
-      confidence: 0.95,
-    });
-    if (m[1]) out.repos.push(repoFrom("gitlab.com", m[1], source));
-  }
-
   for (const m of text.matchAll(SLUG_HASH)) {
     // `org/repo#123` is ambiguous between issue and PR on GitHub. Default to an
     // issue (the superset; a real PR URL elsewhere wins on dedupe) — but an
@@ -392,7 +360,7 @@ function dedupe<T extends { source: RefSource; confidence?: number }>(
  * {@link SessionMetadata}.
  *
  * Repos dedupe by slug (case-insensitive), unioning branches and keeping the
- * strongest host + source. PRs/issues/commits dedupe by their natural key,
+ * strongest host + source. PRs/issues dedupe by their natural key,
  * keeping the highest-confidence, strongest-source copy — so a deterministic
  * `git` PR URL always beats a low-confidence `model` mention of the same PR.
  */
@@ -401,7 +369,6 @@ export function dedupeSessionMetadata(parts: DetectedRefs[]): SessionMetadata {
   for (const p of parts) {
     all.repos.push(...p.repos);
     all.pull_requests.push(...p.pull_requests);
-    all.commits.push(...p.commits);
     all.issues.push(...p.issues);
   }
 
@@ -430,22 +397,6 @@ export function dedupeSessionMetadata(parts: DetectedRefs[]): SessionMetadata {
         host: win.host ?? lose.host,
         slug: win.slug ?? lose.slug,
         number: win.number,
-        url: win.url ?? lose.url,
-        source: win.source,
-        confidence: Math.max(win.confidence, lose.confidence),
-      };
-    },
-  );
-  const commits = dedupe(
-    all.commits,
-    // Key on slug + sha: two different commits in two repos can share a short
-    // 7-hex prefix, and must not collapse into one.
-    (c) => `${(c.slug ?? "").toLowerCase()}@${c.sha.toLowerCase()}`,
-    (a, b) => {
-      const [win, lose] = score(a) >= score(b) ? [a, b] : [b, a];
-      return {
-        sha: win.sha,
-        slug: win.slug ?? lose.slug,
         url: win.url ?? lose.url,
         source: win.source,
         confidence: Math.max(win.confidence, lose.confidence),
@@ -490,7 +441,6 @@ export function dedupeSessionMetadata(parts: DetectedRefs[]): SessionMetadata {
   return {
     repos: keepValid(RepoRef, repos).slice(0, 50),
     pull_requests: keepValid(PullRequestRef, pull_requests).slice(0, 100),
-    commits: keepValid(CommitRef, commits).slice(0, 200),
     issues: keepValid(IssueRef, reconciledIssues).slice(0, 100),
   };
 }
@@ -501,14 +451,13 @@ export function isEmptySessionMetadata(m: SessionMetadata): boolean {
   return (
     m.repos.length === 0 &&
     m.pull_requests.length === 0 &&
-    m.commits.length === 0 &&
     m.issues.length === 0
   );
 }
 
 /**
  * Extract + dedupe the public references in ONE event's full text — PR/MR,
- * issue, and commit URLs plus the `org/repo#N` shorthand. Returns null when
+ * issue URLs plus the `org/repo#N` shorthand. Returns null when
  * none are found so the caller can leave the optional `RawEvent.references`
  * field off. This is the high-recall counterpart to scanning the ≤320-char
  * excerpt: the parser runs it over the whole turn.
@@ -527,7 +476,6 @@ export function detectEventReferences(text: string): EventReferences | null {
   return {
     repos: m.repos.slice(0, 24),
     pull_requests: m.pull_requests.slice(0, 24),
-    commits: m.commits.slice(0, 24),
     issues: m.issues.slice(0, 24),
   };
 }

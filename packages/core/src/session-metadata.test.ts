@@ -59,15 +59,6 @@ test("detects Linear and Jira issue URLs", () => {
   assert.equal(jira.issues[0]?.key, "PROJ-1234");
 });
 
-test("detects commit URLs (github + gitlab)", () => {
-  const gh = detectReferences("landed https://github.com/acme/web/commit/abc1234def");
-  assert.equal(gh.commits[0]?.sha, "abc1234def");
-  assert.equal(gh.commits[0]?.slug, "acme/web");
-
-  const gl = detectReferences("https://gitlab.com/acme/web/-/commit/0badc0ffee");
-  assert.equal(gl.commits[0]?.sha, "0badc0ffee");
-});
-
 test("detects org/repo#123 shorthand as a low-confidence issue", () => {
   const r = detectReferences("addresses acme/web#321 nicely");
   assert.equal(r.issues.length, 1);
@@ -127,13 +118,11 @@ test("dedupe merges repos by slug, unioning branches and keeping strongest sourc
     {
       repos: [{ host: null, slug: "acme/web", branches: ["feature/x"], source: "content" }],
       pull_requests: [],
-      commits: [],
       issues: [],
     },
     {
       repos: [{ host: "github.com", slug: "Acme/Web", branches: ["main"], source: "git" }],
       pull_requests: [],
-      commits: [],
       issues: [],
     },
   ];
@@ -151,7 +140,6 @@ test("dedupe keeps the highest-confidence/strongest copy of a PR", () => {
       pull_requests: [
         { host: null, slug: "acme/web", number: 5, url: null, source: "model", confidence: 0.4 },
       ],
-      commits: [],
       issues: [],
     },
     {
@@ -166,7 +154,6 @@ test("dedupe keeps the highest-confidence/strongest copy of a PR", () => {
           confidence: 0.95,
         },
       ],
-      commits: [],
       issues: [],
     },
   ];
@@ -182,7 +169,6 @@ test("dedupe carries a URL over from a weaker copy when the winner lacks one", (
     {
       repos: [],
       pull_requests: [],
-      commits: [],
       issues: [
         {
           provider: "github",
@@ -197,7 +183,6 @@ test("dedupe carries a URL over from a weaker copy when the winner lacks one", (
     {
       repos: [],
       pull_requests: [],
-      commits: [],
       issues: [
         {
           provider: "github",
@@ -218,15 +203,15 @@ test("dedupe carries a URL over from a weaker copy when the winner lacks one", (
 test("a full session blob yields plural, deduped metadata", () => {
   const text = [
     "Worked across https://github.com/acme/web/pull/10 and",
-    "https://github.com/acme/web/pull/11, fixed acme/web#12,",
-    "landed https://github.com/acme/api/commit/deadbeef1.",
+    "https://github.com/acme/web/pull/11, fixed acme/web#12.",
   ].join(" ");
   const m = dedupeSessionMetadata([detectReferences(text)]);
   assert.equal(m.pull_requests.length, 2);
-  assert.equal(m.commits.length, 1);
   assert.equal(m.issues.length, 1);
-  // Two distinct repos (web, api), deduped from the four URL hits.
-  assert.deepEqual(m.repos.map((r) => r.slug).sort(), ["acme/api", "acme/web"]);
+  assert.deepEqual(
+    m.repos.map((r) => r.slug),
+    ["acme/web"],
+  );
 });
 
 test("empty input → empty, shippable-guard agrees", () => {
@@ -248,21 +233,6 @@ test("an oversized capture is dropped, never thrown (one bad ref can't poison th
     "the over-cap slug ref is dropped, not shipped",
   );
   assert.ok(SessionMetadata.safeParse(m).success, "result is always wire-valid");
-});
-
-test("commits in different repos sharing a short SHA prefix are not merged", () => {
-  const parts: DetectedRefs[] = [
-    {
-      repos: [],
-      pull_requests: [],
-      commits: [
-        { sha: "abc1234", slug: "acme/web", url: null, source: "content", confidence: 0.9 },
-        { sha: "abc1234", slug: "acme/api", url: null, source: "content", confidence: 0.9 },
-      ],
-      issues: [],
-    },
-  ];
-  assert.equal(dedupeSessionMetadata(parts).commits.length, 2);
 });
 
 test("a phantom org/repo#N issue is reconciled away when the real PR is present", () => {
