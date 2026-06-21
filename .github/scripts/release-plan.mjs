@@ -42,6 +42,12 @@ const SKIP_PUBLISH = new Set([]);
 // Xcode. Everything else is pure JS and builds on ubuntu.
 const MACOS_PACKAGES = new Set(["modelstat"]);
 
+// Non-package source dirs baked INTO a package's tarball at build time, so a
+// change there must release that package even though it isn't a workspace
+// dependency. The daemon bundles the Swift tray (apps/tray-mac) into its npm
+// tarball via build-app.sh — without this, a tray-only change never ships.
+const EXTRA_DIRS = { modelstat: ["apps/tray-mac"] };
+
 function git(args) {
   return execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }
@@ -107,7 +113,9 @@ function affectedDirs(name, graph) {
     seen.add(n);
     for (const d of graph[n].deps) stack.push(d);
   }
-  return [...seen].map((n) => graph[n].dir);
+  const dirs = [...seen].map((n) => graph[n].dir);
+  if (EXTRA_DIRS[name]) dirs.push(...EXTRA_DIRS[name]);
+  return dirs;
 }
 
 function tagPrefix(name) {
