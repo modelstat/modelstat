@@ -81,11 +81,19 @@ export async function resolveGitContext(cwd: string | null): Promise<GitContext 
 }
 
 /** Synchronous best-effort path→slug derivation, used when we cannot
- * invoke git (e.g. walking lots of old sessions). Heuristic only. */
+ * invoke git (e.g. walking lots of old sessions, or an ephemeral worktree that
+ * was deleted before parse time). Heuristic only. */
 export function guessRepoSlugFromPath(cwd: string | null): string | null {
   if (!cwd) return null;
   // common patterns: /Users/x/www/<org>/<repo> or /home/x/src/<org>/<repo>
   const m = /\/(?:www|src|code|repos|projects)\/([^/]+)\/([^/]+)/i.exec(cwd);
-  if (m) return `${m[1]}/${m[2]}`;
-  return null;
+  if (!m) return null;
+  const a = m[1];
+  const b = m[2];
+  if (!a || !b) return null;
+  // `<b>` is worktree/tooling noise — e.g. `<repo>/.claude/worktrees/<id>` — not a
+  // repo name: the project is just `<a>`. (Worktrees are ephemeral, so git often
+  // can't resolve the real remote at parse time and we fall through to here.)
+  if (b.startsWith(".") || b === "worktrees") return a;
+  return `${a}/${b}`;
 }
