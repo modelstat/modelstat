@@ -98,6 +98,40 @@ function osArch(): "x86_64" | "arm64" | "other" {
   return "other";
 }
 
+/** First value after `--flag` (supports `--flag v` and `--flag=v`), or
+ * undefined. */
+function flagValue(args: readonly string[], flag: string): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === flag) return args[i + 1];
+    if (a.startsWith(`${flag}=`)) return a.slice(flag.length + 1);
+  }
+  return undefined;
+}
+
+/** Every value of a repeatable `--flag` (e.g. `--session a --session b`). */
+function flagValues(args: readonly string[], flag: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === flag) {
+      const v = args[i + 1];
+      if (v !== undefined && !v.startsWith("--")) out.push(v);
+    } else if (a.startsWith(`${flag}=`)) {
+      out.push(a.slice(flag.length + 1));
+    }
+  }
+  return out;
+}
+
+/** Numeric value of `--flag`, or undefined when absent / non-numeric. */
+function numericFlag(args: readonly string[], flag: string): number | undefined {
+  const raw = flagValue(args, flag);
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /**
  * The device UUID this machine SHOULD use, derived deterministically
  * from its stable hardware/OS machine key (see machine-key.ts). Same
@@ -631,7 +665,20 @@ async function cmdDiscover(): Promise<void> {
   console.log("✓ reported to backend");
 }
 
-async function cmdScan(): Promise<void> {
+async function cmdScan(rest: readonly string[]): Promise<void> {
+  // `--session <id>` (repeatable) / `--file <path>` → eager single-session
+  // scan. Otherwise the full incremental scan below.
+  const sessionIds = flagValues(rest, "--session");
+  const file = flagValue(rest, "--file");
+  if (sessionIds.length > 0 || file) {
+    return cmdScanSession({
+      sessionIds,
+      file,
+      wait: rest.includes("--wait"),
+      port: numericFlag(rest, "--port"),
+    });
+  }
+
   // Check the summariser before producing segments so its state (real LLM vs
   // degraded extractive fallback) is clear up front. The scan NO LONGER aborts
   // when the LLM can't load — it degrades to the dependency-free fallback so
@@ -658,6 +705,71 @@ async function cmdScan(): Promise<void> {
   );
   // One-shot scan loaded the bundled summariser; dispose it so the process
   // exits cleanly (avoids llama.cpp's Metal teardown GGML_ASSERT on macOS).
+  try {
+    const { disposeLlama } = await import("@modelstat/daemon-core/node");
+    await disposeLlama();
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Eager single-session scan — the fast path behind the `/stat` plugin and the
+ * statusline's freshness. Tries a RUNNING daemon first (its summariser is
+ * already resident, so the session lands in seconds via the loopback control
+ * endpoint); only if no daemon is listening does it cold-load the summariser
+ * and scan in-process. Refreshes the local insights cache either way (the
+ * daemon does it on the control path; the standalone path does it here).
+ */
+async function cmdScanSession(opts: {
+  sessionIds: string[];
+  file?: string;
+  wait: boolean;
+  port?: number;
+}): Promise<void> {
+  const { postControlScan } = await import("./api.js");
+  const target = {
+    ...(opts.sessionIds.length ? { session_ids: opts.sessionIds } : {}),
+    ...(opts.file ? { file: opts.file } : {}),
+  };
+  const outcome = await postControlScan({ ...target, wait: opts.wait }, { port: opts.port });
+  if (outcome.kind === "ok") {
+    console.log(
+      opts.wait
+        ? "✓ daemon force-scanned the session"
+        : "✓ asked the running daemon to force-scan the session",
+    );
+    return;
+  }
+  if (outcome.kind === "error") {
+    console.error(`✗ daemon control scan failed (${outcome.status}): ${outcome.message}`);
+    process.exit(1);
+  }
+
+  // No daemon listening — cold-scan in-process. Slower (loads the summariser)
+  // but works without an installed/running daemon.
+  console.log("no running daemon on the control port — scanning in-process…");
+  const { preflightSummariser } = await import("./pipeline.js");
+  const { label, degraded } = await preflightSummariser();
+  console.log(
+    degraded
+      ? `[modelstat] ⚠ summariser DEGRADED — ${label}; extractive fallback, ingest continues`
+      : `[modelstat] summariser preflight ok: ${label}`,
+  );
+  const { scanSession } = await import("./scan.js");
+  const r = await scanSession({
+    ...(opts.sessionIds.length ? { sessionIds: opts.sessionIds } : {}),
+    ...(opts.file ? { file: opts.file } : {}),
+  });
+  console.log(
+    `Done: ${r.filesScanned} files scanned, ${r.batchesUploaded} batches, ${r.segmentsUploaded} segments, ${r.eventsUploaded} events uploaded`,
+  );
+  // Refresh the local insights cache the statusline reads (the daemon does
+  // this on the control path; here we do it for the standalone scan).
+  if (opts.sessionIds.length > 0) {
+    const { refreshSessionInsights } = await import("./insights.js");
+    await refreshSessionInsights(opts.sessionIds);
+  }
   try {
     const { disposeLlama } = await import("@modelstat/daemon-core/node");
     await disposeLlama();
@@ -1071,7 +1183,7 @@ async function main(): Promise<void> {
     case "discover":
       return cmdDiscover();
     case "scan":
-      return cmdScan();
+      return cmdScan(rest);
     case "rescan":
       return cmdRescan();
     case "watch":
@@ -1124,6 +1236,9 @@ async function main(): Promise<void> {
       console.log();
       console.log("Dev / one-shots:");
       console.log("  npx modelstat@latest scan           — one-shot parse + upload of local JSONL");
+      console.log(
+        "  npx modelstat@latest scan --session <id>  — eager force-scan ONE session now (--file <path>, --wait)",
+      );
       console.log(
         "  npx modelstat@latest rescan         — wipe file cursors so the next scan re-reads & re-summarises everything",
       );

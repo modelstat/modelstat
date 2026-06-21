@@ -277,3 +277,61 @@ export function fetchBackfillDays(): Promise<BackfillDays | null> {
 export function fetchBackfillDaySessions(day: string): Promise<BackfillDaySessions | null> {
   return backfillGet<BackfillDaySessions>(`?day=${encodeURIComponent(day)}`);
 }
+
+/* ─── Loopback control plane ──────────────────────────────────────────
+ * `modelstat scan --session` first asks a RUNNING daemon (warm summariser) to
+ * force-scan, via the loopback control endpoint the receiver serves. Only when
+ * no daemon is listening (ECONNREFUSED) does the CLI fall back to a cold
+ * in-process scan. */
+
+/** Loopback control-plane port — the same 127.0.0.1 server the SDK ingest
+ * uses (resolution mirrors receiver.ts: env override, else 4319). Resolved
+ * here to avoid an api↔receiver import cycle. */
+function controlPort(): number {
+  return Number(process.env.MODELSTAT_LOCAL_INGEST_PORT) || 4319;
+}
+
+export type ControlScanOutcome =
+  /** A running daemon accepted (and, with `wait`, finished) the scan. */
+  | { kind: "ok"; started: boolean; scanned: boolean }
+  /** Nothing is listening on the loopback control port — no daemon running. */
+  | { kind: "no_daemon" }
+  /** The daemon responded with an error (bad target, scan failure, …). */
+  | { kind: "error"; status: number; message: string };
+
+/**
+ * POST the loopback control endpoint to force-scan a session on a running
+ * daemon. Resolves `no_daemon` on connection-refused so the caller can fall
+ * back to a standalone scan; surfaces other failures as `error`.
+ */
+export async function postControlScan(
+  body: { session_ids?: string[]; file?: string; wait?: boolean },
+  opts: { port?: number } = {},
+): Promise<ControlScanOutcome> {
+  const port = opts.port ?? controlPort();
+  try {
+    const res = await request(`http://127.0.0.1:${port}/v1/control/scan`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      // A `wait:true` scan can take a while (cold-ish summariser, big session);
+      // give it room but don't hang forever. undici's headersTimeout/bodyTimeout
+      // default to 30s — lift them for the waiting case.
+      headersTimeout: body.wait ? 600_000 : 5_000,
+      bodyTimeout: body.wait ? 600_000 : 5_000,
+    });
+    if (res.statusCode >= 300) {
+      const message = await res.body.text().catch(() => "");
+      return { kind: "error", status: res.statusCode, message };
+    }
+    const data = (await res.body.json().catch(() => ({}))) as {
+      started?: boolean;
+      scanned?: boolean;
+    };
+    return { kind: "ok", started: data.started === true, scanned: data.scanned === true };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ECONNREFUSED" || code === "ECONNRESET") return { kind: "no_daemon" };
+    return { kind: "error", status: 0, message: (e as Error).message };
+  }
+}

@@ -24,6 +24,7 @@ import { reportDiscovery } from "./api.js";
 import { state } from "./config.js";
 import { acquireDaemonLock, formatAge } from "./lock.js";
 import { machineKey } from "./machine-key.js";
+import { refreshSessionInsights } from "./insights.js";
 import {
   drainLocalQueue,
   type LocalIngestReceiver,
@@ -32,7 +33,7 @@ import {
 } from "./receiver.js";
 import { reconcileBackfill } from "./reconcile.js";
 import { runtimeState } from "./runtime-state.js";
-import { scanAll } from "./scan.js";
+import { scanAll, scanSession } from "./scan.js";
 import { createCoalescingRunner } from "./single-flight.js";
 import { autoUpdateEnabled, maybeAutoUpdate } from "./update.js";
 
@@ -416,6 +417,60 @@ function requestScan(reason: string): Promise<void> {
   return scanRunner.trigger(reason);
 }
 
+/**
+ * Eager single-session force-scan, invoked by the loopback control endpoint
+ * (`POST /v1/control/scan` — see receiver.ts). A warm daemon already has the
+ * summariser resident, so this lands a session you JUST finished in seconds,
+ * then refreshes that session's server insights into the local cache the
+ * statusline reads. Runs safely alongside the periodic file scan: the bundled
+ * summariser serialises its own inference, and a force-scan still advances the
+ * cursor so the next incremental `scanAll` stays consistent.
+ *
+ * The receiver already single-flights control scans, so this just does the
+ * work + reports status; failures are surfaced to the caller (a `wait:true`
+ * POST) but never crash the daemon.
+ */
+async function runEagerSessionScan(target: {
+  sessionIds?: string[];
+  file?: string;
+}): Promise<void> {
+  setPhase("scanning", "Eager scan (current session)");
+  try {
+    const r = await scanSession(target, {
+      onProgress(p) {
+        if (p.segment === 0) setPhase("processing", "Analyzing current session");
+        else setPhase("processing", `Summarising segment ${p.segment}/${p.segmentTotal}`);
+      },
+      onUpload({ segments }) {
+        setPhase("uploading", `Uploading ${segments} segments`);
+        setStat("segments_sending", segments);
+      },
+      onUploaded({ events, segments }) {
+        bumpStat("events_uploaded", events);
+        setStat("segments_sent", state.bumpSegmentsSent(segments));
+        setStat("segments_sending", 0);
+        status.lastEventAt = new Date().toISOString();
+      },
+    });
+    // Refresh the local insights cache for the scanned session(s) so the
+    // statusline shows fresh numbers. Prefer the explicit chain; otherwise the
+    // server resolves nothing useful, so only refresh when ids were given.
+    if (target.sessionIds && target.sessionIds.length > 0) {
+      await refreshSessionInsights(target.sessionIds);
+    }
+    setPhase("watching", "Waiting for new events");
+    setMessage(
+      r.segmentsUploaded > 0
+        ? `Eager scan: ${r.segmentsUploaded} segments uploaded`
+        : "Eager scan: nothing new",
+    );
+  } catch (e) {
+    setStat("segments_sending", 0);
+    setPhase("watching", `Eager scan failed: ${describeErrorWithCause(e)}`);
+    throw e;
+  }
+}
+
 function basename(p: string): string {
   return p.split("/").pop() ?? p;
 }
@@ -526,7 +581,13 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   // device's secret — so the SDK ships no credentials and only redacted
   // segment abstracts leave the machine. Best-effort: a busy port just
   // disables this path (the file scan is the daemon's core duty).
-  const localIngest: LocalIngestReceiver | null = await startLocalIngestReceiver();
+  const localIngest: LocalIngestReceiver | null = await startLocalIngestReceiver({
+    // Serve the loopback control endpoint so `modelstat scan --session` can
+    // warm this running daemon (summariser already loaded) instead of
+    // cold-spawning its own — and so the eager scan refreshes the local
+    // insights cache the statusline reads.
+    onControlScan: runEagerSessionScan,
+  });
   const LOCAL_DRAIN_INTERVAL_MS = 5_000;
   let localDrainTimer: NodeJS.Timeout | null = null;
   if (localIngest) {

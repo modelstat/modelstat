@@ -15,6 +15,8 @@ import type { SegmentProgressFn } from "@modelstat/daemon-core/pipeline";
 import { attachSegmentIdsByMap, type ToolCallDraft } from "@modelstat/daemon-core/queue";
 import type { IngestBatch, RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import {
+  deriveSessionIdFromFilename,
+  deriveSessionIdFromRolloutPath,
   type LocalToolContext,
   parseClaudeCodeJsonl,
   parseCodexRollout,
@@ -171,16 +173,44 @@ export async function discoverJobs(deviceId: string): Promise<ScanJob[]> {
   return jobs;
 }
 
-export async function scanAll(cb: ScanCallbacks = {}): Promise<{
+/** Tallies returned by every scan pass (full corpus or single session). */
+export interface ScanResult {
   filesScanned: number;
   filesUnchanged: number;
   batchesUploaded: number;
   eventsUploaded: number;
   segmentsUploaded: number;
   /** True when the per-cycle file cap was hit and older files still remain —
-   * the caller should re-scan promptly to drain the rest (newest-first). */
+   * the caller should re-scan promptly to drain the rest (newest-first).
+   * Always false for an uncapped {@link scanSession}. */
   morePending: boolean;
-}> {
+}
+
+/** Tuning knobs for {@link runScanOverJobs}, the shared parse→summarise→upload
+ * loop behind both {@link scanAll} (incremental, capped) and
+ * {@link scanSession} (force-read, uncapped). */
+interface RunScanOptions {
+  /** Cap on CHANGED files processed per call; `null` = no cap (single-session
+   * force-scan). When the cap is hit with files still pending, the result's
+   * `morePending` is set so the caller re-scans promptly. */
+  maxFiles: number | null;
+  /** Skip the per-file cursor unchanged-guard and re-read every job from byte
+   * 0. The cursor is still ADVANCED after a confirmed upload, so a later
+   * incremental scan stays correct. Used by {@link scanSession} so the current
+   * session re-uploads even though the daemon already processed it. */
+  forceReadAll: boolean;
+}
+
+// Cold-start / big-backfill bound: process at most this many CHANGED files
+// per incremental scan cycle. A fresh device with thousands of old transcripts
+// used to load the whole backlog, OOM, and die BEFORE the first upload ever
+// landed — and cursors only advance on a CONFIRMED upload, so it crash-looped
+// with zero progress. Capping + recent-first means the newest session lands
+// fast, memory stays near the model's resident footprint, and the rest drains
+// over quick follow-up cycles (see `morePending`).
+const MAX_FILES_PER_SCAN = 12;
+
+export async function scanAll(cb: ScanCallbacks = {}): Promise<ScanResult> {
   const deviceId = state.deviceId;
   if (!deviceId) throw new Error("daemon not enrolled — run `register` first");
 
@@ -196,8 +226,108 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
 
   // Recent-first: newest transcripts upload first, so a session you JUST
   // finished shows up within seconds instead of waiting behind a backlog of
-  // old ones (readdir order is arbitrary). Stats run in parallel — cheap.
-  const ordered = (
+  // old ones (readdir order is arbitrary).
+  const ordered = await orderJobsNewestFirst(jobs);
+
+  return runScanOverJobs(
+    ordered,
+    deviceId,
+    { maxFiles: MAX_FILES_PER_SCAN, forceReadAll: false },
+    cb,
+  );
+}
+
+/**
+ * Force-scan ONE session's transcript(s) immediately — the eager path behind
+ * `modelstat scan --session` and the loopback control endpoint. A warm daemon
+ * (summariser already resident) can land a session you JUST finished in
+ * seconds, instead of waiting for the watch/backstop cycle.
+ *
+ * Targeting:
+ *   - `sessionIds` — map each id to its `<id>.jsonl` (Claude Code) or
+ *     `rollout-…-<id>.jsonl` (Codex) among the discovered jobs. A compaction
+ *     chain is just several ids; pass them all.
+ *   - `file` — scan one explicit transcript path (already validated by the
+ *     caller as living under a known transcript root).
+ *   - neither — fall back to the single newest `.jsonl` across all roots, so a
+ *     bare `modelstat scan --session` still does the useful thing.
+ *
+ * Unlike {@link scanAll} this BYPASSES the per-file cursor unchanged-skip
+ * (the daemon may have already uploaded this session) but still advances the
+ * cursor after a confirmed upload — so the regular incremental scan stays
+ * consistent. Uncapped: a single session is bounded work.
+ */
+export async function scanSession(
+  target: { sessionIds?: string[]; file?: string } = {},
+  cb: ScanCallbacks = {},
+): Promise<ScanResult> {
+  const deviceId = state.deviceId;
+  if (!deviceId) throw new Error("daemon not enrolled — run `register` first");
+
+  const all = await discoverJobs(deviceId);
+  let selected: ScanJob[];
+
+  if (target.file) {
+    // Caller validated the path is under a known transcript root. Reuse the
+    // discovered job if we already enumerated it (keeps its parser wiring);
+    // otherwise build one ad-hoc so an explicit --file still works even when
+    // discovery didn't surface it (e.g. a brand-new file mid-write).
+    const existing = all.find((j) => j.path === target.file);
+    selected = existing ? [existing] : [jobForFile(deviceId, target.file)];
+  } else if (target.sessionIds && target.sessionIds.length > 0) {
+    const wanted = new Set(target.sessionIds);
+    selected = all.filter((j) => {
+      const sid = sessionIdForPath(j.path);
+      return sid != null && wanted.has(sid);
+    });
+  } else {
+    // No target → newest transcript across all roots, so a bare invocation is
+    // still useful (mirrors scanAll's recent-first intent at size 1).
+    const ordered = await orderJobsNewestFirst(all);
+    selected = ordered.slice(0, 1);
+  }
+
+  if (selected.length === 0) {
+    return {
+      filesScanned: 0,
+      filesUnchanged: 0,
+      batchesUploaded: 0,
+      eventsUploaded: 0,
+      segmentsUploaded: 0,
+      morePending: false,
+    };
+  }
+
+  return runScanOverJobs(selected, deviceId, { maxFiles: null, forceReadAll: true }, cb);
+}
+
+/** Map a discovered transcript path back to its session id — Claude Code's
+ * `<uuid>.jsonl` or Codex's `rollout-…-<uuid>.jsonl`. Null when neither shape
+ * matches (so it's never confused with a real id). */
+function sessionIdForPath(path: string): string | null {
+  return deriveSessionIdFromFilename(path) ?? deriveSessionIdFromRolloutPath(path);
+}
+
+/** Build a one-off {@link ScanJob} for an explicit transcript path, picking
+ * the parser from the directory shape (Codex rollouts live under
+ * `.codex/sessions`; everything else is Claude Code JSONL). */
+function jobForFile(deviceId: string, full: string): ScanJob {
+  const isCodex = full.includes("/.codex/sessions/") && /rollout-.*\.jsonl$/.test(full);
+  return {
+    path: full,
+    parse: async (sink) => {
+      const r = isCodex
+        ? await parseCodexRollout({ deviceId, sourceFile: full, onEvents: sink })
+        : await parseClaudeCodeJsonl({ deviceId, sourceFile: full, onEvents: sink });
+      return { toolCalls: r.toolCalls ?? [], scriptContexts: r.scriptContexts ?? [] };
+    },
+  };
+}
+
+/** Sort jobs newest-first by mtime (arbitrary readdir order otherwise). Stats
+ * run in parallel — cheap. */
+async function orderJobsNewestFirst(jobs: ScanJob[]): Promise<ScanJob[]> {
+  return (
     await Promise.all(
       jobs.map(async (j) => ({
         job: j,
@@ -207,15 +337,23 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
   )
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .map((x) => x.job);
+}
 
-  // Cold-start / big-backfill bound: process at most this many CHANGED files
-  // per scan cycle. A fresh device with thousands of old transcripts used to
-  // load the whole backlog, OOM, and die BEFORE the first upload ever landed —
-  // and cursors only advance on a CONFIRMED upload, so it crash-looped with
-  // zero progress. Capping + recent-first means the newest session lands fast,
-  // memory stays near the model's resident footprint, and the rest drains over
-  // quick follow-up cycles (see `morePending`).
-  const MAX_FILES_PER_SCAN = 12;
+/**
+ * Shared parse → summarise → upload loop over an ordered job list. Holds at
+ * most ~one batch of events in memory (the streaming sink applies backpressure
+ * to the file read) and advances each file's cursor only after its events land
+ * — so a mid-scan failure re-tries the same events next run (idempotent
+ * server-side). Both {@link scanAll} and {@link scanSession} funnel through
+ * here; their only differences are {@link RunScanOptions} (file cap +
+ * force-read).
+ */
+async function runScanOverJobs(
+  ordered: ScanJob[],
+  deviceId: string,
+  opts: RunScanOptions,
+  cb: ScanCallbacks,
+): Promise<ScanResult> {
   let morePending = false;
 
   let filesScanned = 0;
@@ -307,7 +445,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
     }
     const batch: IngestBatch = {
       batch_id: batchId(),
-      device_id: deviceId!,
+      device_id: deviceId,
       daemon_version: DAEMON_VERSION,
       events,
       segments,
@@ -369,7 +507,11 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
     cb.onFile?.(job.path, i, ordered.length);
     const cur = state.getCursor(job.path);
     const cs = await quickChecksum(job.path).catch(() => null);
-    if (cs && cur && cur.size === cs.size && cur.tailHash === cs.tailHash) {
+    // Incremental scans skip a file whose size+tail are unchanged since the
+    // last upload. The eager single-session path (forceReadAll) bypasses this
+    // so a session the daemon already processed still re-uploads — the cursor
+    // is still advanced below, keeping later incremental scans consistent.
+    if (!opts.forceReadAll && cs && cur && cur.size === cs.size && cur.tailHash === cs.tailHash) {
       filesUnchanged += 1;
       continue;
     }
@@ -402,8 +544,9 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<{
     }
     // Stop after the cap so memory + time per cycle stay bounded. The trailing
     // flush below uploads what's buffered (advancing those files' cursors), and
-    // `morePending` tells the daemon to re-scan the next newest batch.
-    if (filesScanned >= MAX_FILES_PER_SCAN) {
+    // `morePending` tells the daemon to re-scan the next newest batch. A null
+    // cap (single-session force-scan) never breaks early — it's bounded work.
+    if (opts.maxFiles !== null && filesScanned >= opts.maxFiles) {
       morePending = true;
       break;
     }

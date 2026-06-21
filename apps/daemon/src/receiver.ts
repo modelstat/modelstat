@@ -21,6 +21,8 @@
  * not the SDK, holds the device identity.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
 import type { RawEvent } from "@modelstat/core";
 import { createLogger } from "@modelstat/daemon-core/logger";
 import { FileQueueStore } from "@modelstat/daemon-core/node";
@@ -40,6 +42,43 @@ export const DEFAULT_LOCAL_INGEST_PORT = 4319;
 /** Cap on one POST body. SDK batches are small (≤256 events per flush);
  * this is a generous abuse guard, not a tuning knob. */
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
+
+/** What `POST /v1/control/scan` asks the daemon to force-scan. `file` is one
+ * explicit transcript path; `session_ids` a compaction chain; neither = the
+ * newest transcript. `wait` makes the response block until the scan + insight
+ * refresh finish (used by `modelstat scan --session --wait`). */
+export interface ControlScanRequest {
+  session_ids?: string[];
+  file?: string;
+  wait?: boolean;
+}
+
+/** The daemon-supplied force-scan worker, injected so receiver.ts has no
+ * import cycle back to scan.ts / daemon.ts. Resolves when the scan (and the
+ * subsequent server insight refresh) have completed. */
+export type ControlScanHandler = (target: {
+  sessionIds?: string[];
+  file?: string;
+}) => Promise<void>;
+
+/** Roots an explicit `file` target is allowed to live under — the same
+ * transcript directories the scanner discovers. Anything else is rejected so a
+ * local POST can't make the daemon parse (and ship summaries of) an arbitrary
+ * file on disk. */
+function transcriptRoots(): string[] {
+  const home = homedir();
+  return [resolve(home, ".claude/projects"), resolve(home, ".codex/sessions")];
+}
+
+/** True when `file` resolves to a path strictly inside one of the transcript
+ * roots (defeats `..` traversal — we compare resolved, separator-bounded
+ * prefixes). */
+export function isAllowedTranscriptFile(file: string): boolean {
+  const target = resolve(file);
+  return transcriptRoots().some(
+    (root) => target === root || target.startsWith(root + sep),
+  );
+}
 
 let store: FileQueueStore | null = null;
 function queue(): FileQueueStore {
@@ -166,6 +205,15 @@ export interface LocalIngestReceiver {
   close(): Promise<void>;
 }
 
+export interface StartReceiverOptions {
+  port?: number;
+  /** Optional force-scan worker. When provided, the receiver serves
+   * `POST /v1/control/scan` (loopback) so `modelstat scan --session` can warm
+   * a running daemon instead of cold-loading its own summariser. Omitted (e.g.
+   * in tests) → that route 404s. */
+  onControlScan?: ControlScanHandler;
+}
+
 /**
  * Start the loopback receiver. Best-effort: a busy port (a stale listener;
  * the singleton daemon lock already prevents a second daemon) disables the
@@ -173,12 +221,19 @@ export interface LocalIngestReceiver {
  * duty. Resolves `null` when the receiver could not bind.
  */
 export function startLocalIngestReceiver(
-  opts: { port?: number } = {},
+  opts: StartReceiverOptions = {},
 ): Promise<LocalIngestReceiver | null> {
   const port =
     opts.port ?? (Number(process.env.MODELSTAT_LOCAL_INGEST_PORT) || DEFAULT_LOCAL_INGEST_PORT);
+  // Single-flight the control scan: a burst of /v1/control/scan posts (the
+  // plugin + statusline can both fire on one turn) coalesces into at most one
+  // in-flight scan plus one queued follow-up, mirroring the daemon's own
+  // scan-coalescing so two eager scans never run concurrently.
+  const controlRunner = opts.onControlScan
+    ? createControlRunner(opts.onControlScan)
+    : null;
   return new Promise((resolve) => {
-    const server = createServer((req, res) => void handle(req, res));
+    const server = createServer((req, res) => void handle(req, res, controlRunner));
     let settled = false;
     server.on("error", (err: NodeJS.ErrnoException) => {
       if (settled) return;
@@ -203,13 +258,41 @@ export function startLocalIngestReceiver(
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+/** Coalescing wrapper around the force-scan handler. Returns the promise for
+ * the run that will cover this request's target — a `wait:true` caller awaits
+ * it; a fire-and-forget caller ignores it. Errors are surfaced to the awaiter
+ * but never crash the receiver. */
+interface ControlRunner {
+  run(target: { sessionIds?: string[]; file?: string }): Promise<void>;
+}
+function createControlRunner(handler: ControlScanHandler): ControlRunner {
+  let active: Promise<void> | null = null;
+  return {
+    run(target) {
+      // Chain onto any in-flight scan so we never run two at once; the new
+      // target runs after the current one drains.
+      const prev = active ?? Promise.resolve();
+      const next = prev.catch(() => undefined).then(() => handler(target));
+      active = next.catch(() => undefined);
+      return next;
+    },
+  };
+}
+
+async function handle(
+  req: IncomingMessage,
+  res: ServerResponse,
+  controlRunner: ControlRunner | null,
+): Promise<void> {
   const send = (code: number, body: unknown): void => {
     res.writeHead(code, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
   };
   const path = (req.url ?? "").split("?")[0];
   if (req.method === "GET" && path === "/healthz") return send(200, { ok: true });
+  if (req.method === "POST" && path === "/v1/control/scan") {
+    return handleControlScan(req, send, controlRunner);
+  }
   // SDK local_daemon mode posts to /v1/ingest; accept /raw too (the daemon
   // redacts + summarises regardless of which door the SDK used).
   if (req.method !== "POST" || (path !== "/v1/ingest" && path !== "/v1/ingest/raw")) {
@@ -245,4 +328,61 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     logger.warn(`local ingest enqueue failed: ${(e as Error).message}`);
     return send(500, { error: "enqueue failed" });
   }
+}
+
+/** Read + validate a control-scan body, then dispatch the force-scan. With
+ * `wait:true` the response blocks until the scan + insight refresh finish;
+ * otherwise it returns immediately with `{started:true}`. */
+async function handleControlScan(
+  req: IncomingMessage,
+  send: (code: number, body: unknown) => void,
+  controlRunner: ControlRunner | null,
+): Promise<void> {
+  if (!controlRunner) return send(503, { error: "control scan unavailable" });
+  // Bodies are tiny (a few ids); a generous small cap is plenty.
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for await (const chunk of req) {
+      size += (chunk as Buffer).length;
+      if (size > 64 * 1024) {
+        send(413, { error: "control body too large" });
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk as Buffer);
+    }
+  } catch {
+    return send(400, { error: "read error" });
+  }
+  let body: ControlScanRequest;
+  try {
+    const raw = chunks.length ? Buffer.concat(chunks).toString("utf8") : "{}";
+    body = JSON.parse(raw) as ControlScanRequest;
+  } catch {
+    return send(400, { error: "invalid json" });
+  }
+  const sessionIds = Array.isArray(body.session_ids)
+    ? body.session_ids.filter((s): s is string => typeof s === "string" && s.length > 0)
+    : undefined;
+  let file: string | undefined;
+  if (body.file !== undefined) {
+    if (typeof body.file !== "string" || !isAllowedTranscriptFile(body.file)) {
+      return send(400, { error: "file must be under ~/.claude/projects or ~/.codex/sessions" });
+    }
+    file = body.file;
+  }
+  const target = { sessionIds, file };
+  const run = controlRunner.run(target);
+  if (body.wait === true) {
+    try {
+      await run;
+      return send(200, { ok: true, scanned: true });
+    } catch (e) {
+      return send(500, { error: `scan failed: ${(e as Error).message}` });
+    }
+  }
+  // Fire-and-forget: don't let an unawaited rejection crash the process.
+  void run.catch((e) => logger.warn(`control scan failed: ${(e as Error).message}`));
+  return send(200, { ok: true, started: true });
 }

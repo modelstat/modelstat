@@ -9,10 +9,15 @@
  */
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { type LocalIngestReceiver, localQueueDepth, startLocalIngestReceiver } from "./receiver.js";
+import {
+  isAllowedTranscriptFile,
+  type LocalIngestReceiver,
+  localQueueDepth,
+  startLocalIngestReceiver,
+} from "./receiver.js";
 
 let recv: LocalIngestReceiver | null = null;
 let base = "";
@@ -112,4 +117,85 @@ test("an event missing a required field → 400", async () => {
 test("GET /healthz → 200, unknown path → 404", async () => {
   assert.equal((await fetch(`${base}/healthz`)).status, 200);
   assert.equal((await fetch(`${base}/nope`)).status, 404);
+});
+
+// ── Control-scan endpoint ──────────────────────────────────────────────
+
+test("control scan: path guard accepts known transcript roots, rejects others", () => {
+  const home = homedir();
+  assert.equal(isAllowedTranscriptFile(join(home, ".claude/projects/x/abc.jsonl")), true);
+  assert.equal(
+    isAllowedTranscriptFile(join(home, ".codex/sessions/2026/06/21/rollout-x-abc.jsonl")),
+    true,
+  );
+  // Traversal + arbitrary paths are refused.
+  assert.equal(isAllowedTranscriptFile(join(home, ".claude/projects/../../secrets")), false);
+  assert.equal(isAllowedTranscriptFile("/etc/passwd"), false);
+  assert.equal(isAllowedTranscriptFile(join(home, ".ssh/id_rsa")), false);
+});
+
+test("control scan: without a handler the route is unavailable (503)", async () => {
+  // The default receiver (this file's `recv`) wires no onControlScan.
+  const res = await fetch(`${base}/v1/control/scan`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session_ids: ["s1"] }),
+  });
+  assert.equal(res.status, 503);
+});
+
+test("control scan: wait:true resolves after the handler, single-flighted; bad file → 400", async () => {
+  const calls: Array<{ sessionIds?: string[]; file?: string }> = [];
+  let active = 0;
+  let maxConcurrent = 0;
+  const recv2 = await startLocalIngestReceiver({
+    port: 0,
+    onControlScan: async (target) => {
+      active++;
+      maxConcurrent = Math.max(maxConcurrent, active);
+      calls.push(target);
+      await new Promise((r) => setTimeout(r, 30));
+      active--;
+    },
+  });
+  assert.ok(recv2);
+  const b = `http://127.0.0.1:${recv2.port}`;
+  try {
+    // wait:true blocks until the handler finishes.
+    const waited = await fetch(`${b}/v1/control/scan`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_ids: ["sX"], wait: true }),
+    });
+    assert.equal(waited.status, 200);
+    assert.deepEqual(await waited.json(), { ok: true, scanned: true });
+    assert.deepEqual(calls.at(-1), { sessionIds: ["sX"], file: undefined });
+
+    // Two concurrent scans must coalesce — never overlap.
+    const before = calls.length;
+    await Promise.all([
+      fetch(`${b}/v1/control/scan`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session_ids: ["a"], wait: true }),
+      }),
+      fetch(`${b}/v1/control/scan`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session_ids: ["b"], wait: true }),
+      }),
+    ]);
+    assert.equal(calls.length, before + 2, "both scans ran");
+    assert.equal(maxConcurrent, 1, "control scans never run concurrently");
+
+    // A file outside the transcript roots is rejected before any scan.
+    const bad = await fetch(`${b}/v1/control/scan`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: "/etc/passwd", wait: true }),
+    });
+    assert.equal(bad.status, 400);
+  } finally {
+    await recv2.close();
+  }
 });
