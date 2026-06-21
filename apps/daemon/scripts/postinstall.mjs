@@ -25,7 +25,7 @@
  * skip-mode just see the download then, instead of now.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -144,12 +144,23 @@ async function rebootServiceIfInstalled() {
     "user",
     "modelstat.service",
   );
+  // Refresh if there's an installed service OR a daemon currently RUNNING. The
+  // latter catches a daemon that was hand-spawned (`modelstat start --force`) or
+  // whose plist was removed: it has a live pid in the lock file but no plist. We
+  // (re)install the MANAGED service for it too, so it ends up always-on instead
+  // of an unmanaged process that vanishes on the next reboot.
   const hasService = existsSync(launchdPlist) || existsSync(systemdUnit);
-  if (!hasService) {
+  const runningPid = liveDaemonPid(stateDir);
+  if (!hasService && !runningPid) {
     console.log(
       "[modelstat] no background service installed — run `modelstat connect` to set one up",
     );
     return;
+  }
+  if (!hasService && runningPid) {
+    console.log(
+      `[modelstat] found a running but UNMANAGED daemon (pid ${runningPid}, no service file) — converting it to a managed always-on service`,
+    );
   }
 
   // Locate the freshly-installed bundle in this package. From
@@ -185,47 +196,58 @@ async function rebootServiceIfInstalled() {
   // first, escalate to SIGKILL if it's still around 2 s later.
   await killStaleDaemon(stateDir);
 
-  // Re-stage the installed bundle AND its native summariser runtime in
-  // ONE canonical step by spawning the freshly-unpacked bundle's own
-  // `_setup-runtime` command. That runs the SAME service.ts staging the
-  // `modelstat connect` path uses: it copies dist/cli.mjs over
-  // ~/.modelstat/bin/modelstat.mjs and `npm install`s the complete
-  // node-llama-cpp closure (incl. this platform's prebuilt binary) into
-  // ~/.modelstat/bin/node_modules. freshBundle runs from the just-
-  // unpacked npm tree, so its installNativeRuntime() pins the version.
+  // (Re)install the MANAGED service from the fresh bundle in ONE canonical step.
+  // `_install-service` → installService() (see service.ts) stages the bundle +
+  // native runtime (copies dist/cli.mjs to ~/.modelstat/bin and npm-installs the
+  // node-llama-cpp + @huggingface/transformers closures into
+  // ~/.modelstat/bin/node_modules) AND (re)writes + loads the launchd plist /
+  // systemd unit, then kickstarts it.
   //
-  // This replaces the old hand-copy + symlink-the-npm-cache approach,
-  // whose symlinks dangled the moment the cache/global was pruned — the
-  // opposite of self-contained. One mechanism, every platform.
-  console.log("[modelstat] staging new bundle + native runtime…");
-  const setup = spawnSync(process.execPath, [freshBundle, "_setup-runtime"], {
+  // Why install, NOT a detached `start`: a hand-spawned `start` leaves an
+  // UNMANAGED daemon — it dies on reboot and has no crash-restart. Installing
+  // the service makes the daemon ALWAYS-ON (RunAtLoad + KeepAlive on macOS,
+  // Restart=always on Linux) and CONVERTS a previously hand-spawned daemon
+  // (running, no plist) into a managed one. launchd/systemd — not this script —
+  // owns the process, so it survives the npm install exiting. The `stop` +
+  // killStaleDaemon above already evicted the old daemon and bootout cleared
+  // KeepAlive, so nothing races this restage.
+  console.log("[modelstat] installing managed background service (always-on)…");
+  const inst = spawnSync(process.execPath, [freshBundle, "_install-service"], {
     stdio: "inherit",
     timeout: 300_000,
   });
-  if (setup.status !== 0) {
+  if (inst.status !== 0) {
     console.warn(
-      `[modelstat] couldn't stage the new bundle/runtime (exit ${setup.status ?? "?"}); the service may still be on the previous build`,
+      `[modelstat] couldn't (re)install the managed service (exit ${inst.status ?? "?"}); the daemon may be on the previous build or unmanaged — run \`modelstat connect\` to fix`,
+    );
+  } else {
+    console.log(
+      "[modelstat] ✓ managed background service installed + running the new build",
     );
   }
+}
 
-  // Start back up. `--force` is REQUIRED, not optional: the stop +
-  // killStaleDaemon above happen BEFORE the (slow, up-to-300 s) native
-  // `_setup-runtime` restage, and a launchd/systemd KeepAlive can respawn
-  // the OLD daemon during that window. A plain `start` would then see a live
-  // owner and no-op ("already running — to force-replace it: start --force"),
-  // leaving the service stuck on the previous build even though the global
-  // package upgraded. `--force` evicts whatever survived and guarantees the
-  // freshly-staged bundle is the one running. `start` re-runs preflight (incl.
-  // the processing-version reconcile that wipes cursors when we ship a new
-  // pipeline), so the upgrade picks up the new behaviour immediately. Detached
-  // so the daemon survives this script.
-  const { spawn } = await import("node:child_process");
-  const child = spawn(process.execPath, [freshBundle, "start", "--force"], {
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
-  console.log("[modelstat] ✓ background service restarted with new build");
+/**
+ * The pid of a currently-running daemon per ~/.modelstat/daemon.lock, or null if
+ * the lock is missing/stale/dead. Lets the refresh detect a daemon that's
+ * RUNNING but UNMANAGED (hand-spawned, or its plist was removed) so the upgrade
+ * can convert it into a managed always-on service. `kill(pid, 0)` probes
+ * liveness without signalling; EPERM (another user's process) still counts.
+ */
+function liveDaemonPid(stateDir) {
+  try {
+    const payload = JSON.parse(readFileSync(join(stateDir, "daemon.lock"), "utf8"));
+    const pid = Number(payload?.pid);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    try {
+      process.kill(pid, 0);
+      return pid;
+    } catch (e) {
+      return e && e.code === "EPERM" ? pid : null;
+    }
+  } catch {
+    return null;
+  }
 }
 
 /**

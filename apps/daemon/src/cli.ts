@@ -1029,6 +1029,18 @@ async function main(): Promise<void> {
       console.log(`✓ runtime staged at ${dest}`);
       return;
     }
+    case "_install-service": {
+      // Internal: stage the bundle + native runtime AND (re)install the managed
+      // launchd/systemd service in ONE idempotent step (installService does
+      // both — see service.ts). The result is an ALWAYS-ON daemon (RunAtLoad +
+      // KeepAlive on macOS, Restart=always on Linux) running the freshly-staged
+      // bundle — NOT a detached hand-spawned process. The upgrade postinstall
+      // calls this so every upgrade leaves a properly-managed service, and a
+      // previously hand-spawned daemon gets converted to a managed one.
+      const svc = installService();
+      console.log(`✓ managed background service installed + started (${svc.path})`);
+      return;
+    }
     case "_daemon-health": {
       // Internal: one-line JSON verdict for supervisors (the macOS
       // tray) deciding whether to adopt the live daemon, spawn a
