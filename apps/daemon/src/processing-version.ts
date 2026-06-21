@@ -87,8 +87,17 @@
  *      Switched to `Xenova/bert-base-NER` (q8), a supported architecture that
  *      loads on-device and redacts person/org/location entities. Re-scan so
  *      historical transcripts are re-redacted with the layer that finally works.
+ * v10 — richer abstracts + behavioral signal (Insights feature). The summariser
+ *      prompt now mandates the concrete action + object + target (repo/branch/
+ *      service), and the abstract cap rose 240→400 chars, so abstracts read like
+ *      "Triggered a GitHub Actions release for acme/acme" instead of a vague
+ *      one-liner. Each segment also carries a new privacy-preserving `behavior`
+ *      signal (user_turns / correction_count / frustration — counts only, never
+ *      raw text) for server-side prompt-friction detection. Re-scan so historical
+ *      segments get the richer abstract + the behavior signal (only the daemon
+ *      can, from the raw transcripts on disk).
  */
-export const PROCESSING_VERSION = 9;
+export const PROCESSING_VERSION = 10;
 
 export interface ProcessingState {
   processingVersion: number | null;

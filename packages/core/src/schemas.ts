@@ -166,6 +166,20 @@ export const Segment = z.object({
   /** Optional embedding of the abstract (BGE-small-en-v1.5, 384 dims).
    * Present when the daemon has an Embedder adapter configured. */
   abstract_embedding: z.array(z.number()).length(384).optional(),
+  /** Privacy-preserving on-device behavioral signal — COUNTS/RATIOS ONLY,
+   * never raw text (mirrors RedactionReport). Powers server-side prompt-
+   * friction detection. Optional so older daemons that omit it still validate. */
+  behavior: z
+    .object({
+      /** Developer messages in this segment. */
+      user_turns: z.number().int().nonnegative().default(0),
+      /** User messages that land right after the assistant — a re-prompt /
+       * correction proxy. */
+      correction_count: z.number().int().nonnegative().default(0),
+      /** 0-1 frustration estimate (re-prompt density + negative mood tags). */
+      frustration: z.number().min(0).max(1).default(0),
+    })
+    .optional(),
 });
 export type Segment = z.infer<typeof Segment>;
 

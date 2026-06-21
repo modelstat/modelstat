@@ -72,18 +72,21 @@ export const BROWSER_EMBED_MODEL = "Xenova/bge-small-en-v1.5" as const;
  * them it falls back to the metadata-only paraphrase.
  */
 export const SUMMARISER_SYSTEM_PROMPT =
-  "You summarise an AI coding session in ONE sentence, ≤ 240 characters. " +
-  "If the user message includes sampled conversation excerpts, base your " +
-  "summary on what the developer was actually working on (the substance — " +
-  "what was being built, debugged, refactored, or designed). If only " +
-  "metadata is given, paraphrase the metadata. Never quote the excerpts " +
-  "verbatim. No PII, no code literals, no file paths, no API keys. " +
-  "Reply with only the sentence.";
+  "You summarise an AI coding session in 1-2 sentences, ≤ 400 characters. " +
+  "Name the CONCRETE work: the action taken, WHAT it acted on, and the " +
+  "specific target — the repository (e.g. acme/acme), branch, service, or " +
+  "component — whenever the session facts or excerpts identify it. " +
+  'Good: "Triggered a GitHub Actions release for acme/acme"; "Fixed a null ' +
+  'dereference in the auth middleware of api-gateway". Lead with an outcome ' +
+  "verb and pack in concrete domain keywords (frameworks, features, " +
+  "decisions). Base the substance on the excerpts when present, else the " +
+  "metadata. Never quote excerpts verbatim. No PII, no secrets, no API keys, " +
+  "no absolute file paths. Reply with only the summary.";
 
 /** Hard cap on the tokens the summariser may emit. Keep well above
- * 240 chars worth so the model doesn't cut mid-word; the pipeline
- * slices to 240 chars after. */
-export const SUMMARISER_MAX_TOKENS = 120;
+ * 400 chars worth (~120 tokens at 3.3 chars/token) so the model doesn't
+ * cut mid-word; the pipeline slices to 400 chars after. */
+export const SUMMARISER_MAX_TOKENS = 180;
 
 /** Low temperature — same turns should yield the same abstract on
  * replay so our idempotency assertions in tests hold. */
@@ -100,7 +103,9 @@ export const SUMMARISER_TOP_K = 3;
 export const QWEN_CHARS_PER_TOKEN = 3.3;
 
 /** Hard cap the pipeline enforces on the abstract returned by the
- * summariser. Matches the "≤240 chars" instruction baked into
+ * summariser. Matches the "≤400 chars" instruction baked into
  * SUMMARISER_SYSTEM_PROMPT so the model and the post-processor
- * agree on the same limit. Re-exported from pipeline/index.ts. */
-export const ABSTRACT_OUTPUT_MAX_CHARS = 240;
+ * agree on the same limit (raised 240→400 so abstracts can name the
+ * concrete action + target — the Insights feature reads these). Stays
+ * under the 512 storage cap. Re-exported from pipeline/index.ts. */
+export const ABSTRACT_OUTPUT_MAX_CHARS = 400;

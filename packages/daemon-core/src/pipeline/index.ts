@@ -19,7 +19,7 @@ import type { Agent } from "@modelstat/core/enums";
 import { segmentId } from "@modelstat/core/ids";
 import { redact } from "@modelstat/core/redact";
 import type { RawEvent, Segment } from "@modelstat/core/schemas";
-import { type Cognizer, formatCognitionSuffix } from "./cognition.js";
+import { type CognitionTags, type Cognizer, formatCognitionSuffix } from "./cognition.js";
 import { ABSTRACT_OUTPUT_MAX_CHARS, SUMMARISER_MAX_TOKENS } from "./prompts.js";
 import type { LinkExtractor } from "./session-metadata.js";
 import type { Entitler } from "./title.js";
@@ -413,7 +413,7 @@ async function summariseSlice(
 Sampled excerpts from the conversation (already redacted of PII and secrets):
 ${excerptBlock}
 
-Write the SHORTEST keyword-dense paragraph (1-3 sentences, ≤${ABSTRACT_OUTPUT_MAX_CHARS} chars) naming exactly what was achieved. Lead with an outcome verb. Pack with concrete domain keywords (frameworks, features, components, decisions). Skip narration and filler.`;
+Write a ≤${ABSTRACT_OUTPUT_MAX_CHARS}-char summary (1-2 sentences) naming exactly what was achieved: the concrete action, what it acted on, and the specific target (repo/branch/service/component) when identifiable from the context above. Lead with an outcome verb and pack in concrete domain keywords (frameworks, features, decisions). Skip narration and filler.`;
 
   // Summarisation is core product output, not an optional polish
   // step. If the adapter throws, propagate — silently writing the
@@ -462,16 +462,25 @@ Write the SHORTEST keyword-dense paragraph (1-3 sentences, ≤${ABSTRACT_OUTPUT_
   // (no special primitives, no schema columns, no wire-format
   // additions). If the runtime is unavailable or returns null the
   // abstract is unchanged.
-  let abstractWithCognition = redacted.text;
+  let cognition: CognitionTags | null = null;
   if (adapters.cognize) {
     try {
-      const tags = await adapters.cognize({ abstract: redacted.text });
-      const suffix = formatCognitionSuffix(tags);
-      if (suffix) abstractWithCognition = `${redacted.text} ${suffix}`;
+      cognition = await adapters.cognize({ abstract: redacted.text });
     } catch {
       /* cognition pass is best-effort; keep the bare abstract */
     }
   }
+  const cognitionSuffix = cognition ? formatCognitionSuffix(cognition) : "";
+  const abstractWithCognition = cognitionSuffix
+    ? `${redacted.text} ${cognitionSuffix}`
+    : redacted.text;
+
+  // Privacy-preserving behavioral signal — COUNTS/RATIOS ONLY, never raw
+  // text (mirrors RedactionReport). Powers server-side prompt-friction
+  // detection: how many user turns / corrections happened plus a 0-1
+  // frustration estimate. Computed on-device from event structure +
+  // cognition mood tags; nothing identifiable leaves the machine.
+  const behavior = computeBehavior(slice, cognition);
 
   // Deterministic tags from event metadata — no LLM needed. These always apply.
   const tags: Segment["tags"] = [
@@ -568,10 +577,63 @@ Write the SHORTEST keyword-dense paragraph (1-3 sentences, ≤${ABSTRACT_OUTPUT_
     source_event_ids: sourceEventIds,
     abstract_embedding:
       segmentEmbedding && segmentEmbedding.length === 384 ? segmentEmbedding : undefined,
+    behavior,
   };
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
+
+/** Substrings that mark a frustrated/blocked mood in a cognition emotion
+ * tag (matched case-insensitively, so inflections like "frustrated" /
+ * "frustration" hit). A generic linguistic cue set — NOT domain/tool vocab. */
+const FRUSTRATION_MARKERS = [
+  "frustrat",
+  "annoy",
+  "stuck",
+  "confus",
+  "irritat",
+  "block",
+  "stress",
+  "angr",
+  "overwhelm",
+] as const;
+
+/** Privacy-preserving per-segment behavioral signal — COUNTS/RATIOS ONLY.
+ * `user_turns`: developer messages in the slice. `correction_count`: user
+ * messages that land right after an assistant message (a re-prompt /
+ * correction proxy). `frustration`: 0-1, raised by re-prompt density and by
+ * negative cognition mood tags. Never includes raw text. */
+function computeBehavior(
+  slice: RawEvent[],
+  cognition: CognitionTags | null,
+): { user_turns: number; correction_count: number; frustration: number } {
+  let userTurns = 0;
+  let correctionCount = 0;
+  let prevWasAssistant = false;
+  for (const ev of slice) {
+    if (ev.kind === "user_message") {
+      userTurns++;
+      if (prevWasAssistant) correctionCount++;
+      prevWasAssistant = false;
+    } else if (ev.kind === "assistant_message") {
+      prevWasAssistant = true;
+    }
+  }
+  const frustratedMood =
+    cognition?.emotions?.some((e) => {
+      const lower = e.toLowerCase();
+      return FRUSTRATION_MARKERS.some((m) => lower.includes(m));
+    }) ?? false;
+  const frustration = Math.min(
+    1,
+    Math.max(correctionCount / 4, frustratedMood ? 0.8 : 0),
+  );
+  return {
+    user_turns: userTurns,
+    correction_count: correctionCount,
+    frustration: Math.round(frustration * 100) / 100,
+  };
+}
 
 /**
  * Pick representative turn excerpts from a slice and re-redact them
