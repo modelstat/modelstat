@@ -87,6 +87,17 @@ struct LocalStatus: Decodable {
   let last_event_at: String?
   let daemon_version: String?
   let stats: LocalStatsCounters?
+  /// Server release verdict (the daemon sets this from the heartbeat response).
+  let update: UpdateInfo?
+  /// Effective auto-update setting — drives the tray's checkbox.
+  let auto_update: Bool?
+}
+
+struct UpdateInfo: Decodable {
+  /// "ok" | "update_available" | "upgrade_required".
+  let verdict: String?
+  /// Latest published version, when known.
+  let latest: String?
 }
 
 struct LocalStatsCounters: Decodable {
@@ -146,6 +157,11 @@ final class TrayController: NSObject {
   private let copyClaimMI = NSMenuItem(title: "Copy claim URL", action: #selector(copyClaimUrl), keyEquivalent: "c")
   private let jobsMI = NSMenuItem(title: "View pipeline…", action: #selector(openJobs), keyEquivalent: "j")
   private let pauseMI = NSMenuItem(title: "Pause", action: #selector(togglePaused), keyEquivalent: "p")
+  /// "Update now" — shown only when the server says this daemon is behind.
+  private let updateMI = NSMenuItem(title: "Update now", action: #selector(updateNow), keyEquivalent: "u")
+  /// Checkable "Auto-update" — reflects (and toggles) the daemon's setting.
+  private let autoUpdateMI = NSMenuItem(
+    title: "Auto-update", action: #selector(toggleAutoUpdate), keyEquivalent: "")
 
   override init() {
     self.cli = locateCli()
@@ -231,6 +247,11 @@ final class TrayController: NSObject {
     menu.addItem(copyClaimMI)
     menu.addItem(jobsMI)
     menu.addItem(pauseMI)
+    updateMI.target = self
+    autoUpdateMI.target = self
+    updateMI.isHidden = true
+    menu.addItem(updateMI)
+    menu.addItem(autoUpdateMI)
     menu.addItem(NSMenuItem.separator())
     let logsMI = NSMenuItem(title: "Open logs folder", action: #selector(openLogs), keyEquivalent: "l")
     logsMI.target = self
@@ -466,6 +487,9 @@ final class TrayController: NSObject {
     // Paused: togglePaused() owns the status line ("Paused"); don't let the
     // fast tick clobber it with a stale phase from the file.
     guard !paused else { return }
+    // Auto-update toggle + "Update now" read straight from the local heartbeat
+    // file, so render them before the loading/paired early-returns below.
+    renderUpdateItems()
     guard let s = latest else {
       setInfo(statusMI, "Loading…")
       return
@@ -570,6 +594,52 @@ final class TrayController: NSObject {
     } else {
       setInfo(detectedMI, "")
     }
+  }
+
+  /// Reflect the daemon's auto-update setting + any pending update in the menu.
+  /// Both come from ~/.modelstat/last-status.json (written by the daemon every
+  /// heartbeat), so a toggle made here shows up within a second once the daemon
+  /// re-reads the preference.
+  private func renderUpdateItems() {
+    autoUpdateMI.state = (localLatest?.auto_update ?? true) ? .on : .off
+    if let upd = localLatest?.update, let verdict = upd.verdict, verdict != "ok" {
+      let suffix = upd.latest.map { " (\($0))" } ?? ""
+      updateMI.title =
+        verdict == "upgrade_required"
+        ? "Update required — update now\(suffix)" : "Update now\(suffix)"
+      updateMI.isHidden = false
+    } else {
+      updateMI.isHidden = true
+    }
+  }
+
+  @objc private func toggleAutoUpdate() {
+    runManaged(["autoupdate", "toggle"])
+    // Optimistic flip; the next 1s tick confirms the real state from disk.
+    autoUpdateMI.state = (autoUpdateMI.state == .on) ? .off : .on
+  }
+
+  @objc private func updateNow() {
+    runManaged(["upgrade"])
+  }
+
+  /// Fire-and-forget a `modelstat <args>` invocation (autoupdate / upgrade).
+  /// Best-effort, non-blocking; output is appended to the daemon log.
+  private func runManaged(_ args: [String]) {
+    guard let cli else { return }
+    let p = Process()
+    if cli.pathExtension == "mjs" {
+      p.launchPath = "/usr/bin/env"
+      p.arguments = ["node", cli.path] + args
+    } else {
+      p.launchPath = cli.path
+      p.arguments = args
+    }
+    let logsDir = ("~/.modelstat/logs" as NSString).expandingTildeInPath
+    let out = FileHandle(forWritingAtPath: "\(logsDir)/out.log") ?? FileHandle.standardOutput
+    p.standardOutput = out
+    p.standardError = out
+    try? p.run()
   }
 
   /// Phases where the agent is doing visible work right now — drives the
