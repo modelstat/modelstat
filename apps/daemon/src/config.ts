@@ -164,7 +164,7 @@ export const state = {
   /** Drop every per-file cursor so the next scan re-reads every
    * JSONL from byte 0. Called when the local processing-pipeline
    * version bumps (see processing-version.ts) or via the
-   * `modelstat rescan` CLI command. */
+   * `modelstat reset` CLI command. */
   wipeCursors(): void {
     runtimeState.wipeCursors();
   },

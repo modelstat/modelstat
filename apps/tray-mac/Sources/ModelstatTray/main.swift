@@ -3,7 +3,7 @@
 // What it does:
 //   · puts a "◉" status item in the menu bar
 //   · runs `modelstat start` as a child process so the pipeline is live
-//   · polls `modelstat stats --json` every 5 s to refresh the dropdown
+//   · polls `modelstat status --json` every 5 s to refresh the dropdown
 //   · offers: Open dashboard, Copy claim URL, View pipeline, Pause/Resume,
 //     Quit
 //
@@ -137,7 +137,7 @@ final class TrayController: NSObject {
   private var latest: AgentStats?
   /// Live local heartbeat, read straight from ~/.modelstat/last-status.json
   /// on the fast timer. Decoupled from `latest` (the slower, network-backed
-  /// `stats --json` shell-out) so the menu's numbers move every second.
+  /// `status --json` shell-out) so the menu's numbers move every second.
   private var localLatest: LocalStatus?
   /// Advances once per fast tick to drive the "alive" pulse on the status
   /// line — a cheap, honest signal that the agent is doing work right now.
@@ -182,7 +182,7 @@ final class TrayController: NSObject {
     // stuck.
     //   · fast (1s): read last-status.json directly — cheap, no subprocess
     //     — and re-render so phase/segment numbers tick live.
-    //   · slow (15s): shell out to `modelstat stats --json` for the
+    //   · slow (15s): shell out to `modelstat status --json` for the
     //     network-backed paired/claimed/device/analyzed data that barely
     //     changes (and, for claimed devices, costs a 404 round-trip).
     let fast = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -468,17 +468,17 @@ final class TrayController: NSObject {
     renderStats()
   }
 
-  // ── Polling `modelstat stats --json` ────────────────────────────
+  // ── Polling `modelstat status --json` ────────────────────────────
 
   private func refreshStats() {
     guard let cli else { return }
     let p = Process()
     if cli.pathExtension == "mjs" {
       p.launchPath = "/usr/bin/env"
-      p.arguments = ["node", cli.path, "stats", "--json"]
+      p.arguments = ["node", cli.path, "status", "--json"]
     } else {
       p.launchPath = cli.path
-      p.arguments = ["stats", "--json"]
+      p.arguments = ["status", "--json"]
     }
     let pipe = Pipe()
     p.standardOutput = pipe
@@ -489,7 +489,7 @@ final class TrayController: NSObject {
       // Surface the failure in the menu instead of leaving the title
       // stuck on whatever it was last (e.g. "Starting…" forever). Most
       // likely cause is `node` not being on the launchd-inherited PATH.
-      statusMI.title = "stats failed: \(error.localizedDescription)"
+      statusMI.title = "status failed: \(error.localizedDescription)"
       return
     }
     // Run on a background queue so we don't block the main loop.

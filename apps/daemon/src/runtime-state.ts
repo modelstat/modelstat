@@ -115,7 +115,7 @@ export const runtimeState = {
     persist(s);
   },
   /** Drop every per-file cursor so the next scan re-reads each JSONL from byte 0
-   * (processing-version bump, or `modelstat rescan`). */
+   * (processing-version bump, or `modelstat reset`). */
   wipeCursors(): void {
     const s = load();
     s.cursor = {};

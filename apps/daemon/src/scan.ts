@@ -239,7 +239,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<ScanResult> {
 
 /**
  * Force-scan ONE session's transcript(s) immediately — the eager path behind
- * `modelstat scan --session` and the loopback control endpoint. A warm daemon
+ * `modelstat sync --session` and the loopback control endpoint. A warm daemon
  * (summariser already resident) can land a session you JUST finished in
  * seconds, instead of waiting for the watch/backstop cycle.
  *
@@ -250,7 +250,7 @@ export async function scanAll(cb: ScanCallbacks = {}): Promise<ScanResult> {
  *   - `file` — scan one explicit transcript path (already validated by the
  *     caller as living under a known transcript root).
  *   - neither — fall back to the single newest `.jsonl` across all roots, so a
- *     bare `modelstat scan --session` still does the useful thing.
+ *     bare `modelstat sync --session` still does the useful thing.
  *
  * Unlike {@link scanAll} this BYPASSES the per-file cursor unchanged-skip
  * (the daemon may have already uploaded this session) but still advances the

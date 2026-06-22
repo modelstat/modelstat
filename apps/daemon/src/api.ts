@@ -279,7 +279,7 @@ export function fetchBackfillDaySessions(day: string): Promise<BackfillDaySessio
 }
 
 /* ─── Loopback control plane ──────────────────────────────────────────
- * `modelstat scan --session` first asks a RUNNING daemon (warm summariser) to
+ * `modelstat sync --session` first asks a RUNNING daemon (warm summariser) to
  * force-scan, via the loopback control endpoint the receiver serves. Only when
  * no daemon is listening (ECONNREFUSED) does the CLI fall back to a cold
  * in-process scan. */

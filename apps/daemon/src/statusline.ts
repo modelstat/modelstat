@@ -16,7 +16,7 @@
  * HARD CONSTRAINTS (a statusline that blocks or throws wedges the prompt):
  *   - NEVER block: cache reads are synchronous + tiny; we never await the
  *     network. The eager scan that populates the cache is kicked elsewhere
- *     (the `/stat` plugin / `modelstat scan --session`), not here.
+ *     (the `/stat` plugin / `modelstat sync --session`), not here.
  *   - NEVER throw: every parse is defensive and the CLI wrapper swallows
  *     errors, printing a minimal line instead.
  */

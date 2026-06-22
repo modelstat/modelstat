@@ -55,9 +55,8 @@ npx modelstat@latest status              # pairing, service + live usage: sessio
 npx modelstat@latest jobs                # pipeline queue + recent processing ledger
 npx modelstat@latest paths [--json]      # state file + log dir + API URL
 
-npx modelstat@latest scan                # one-shot parse + upload of local logs
-npx modelstat@latest scan --session <id> # eager force-scan ONE session now (warms a running daemon)
-npx modelstat@latest rescan              # wipe cursors so the next scan re-reads everything
+npx modelstat@latest sync --session <id> # force-ingest ONE session now (warms a running daemon)
+npx modelstat@latest reset               # reset cursors so the daemon re-reads everything
 npx modelstat@latest watch               # foreground watcher (no service install)
 npx modelstat@latest discover            # report detected tool installs + identities
 modelstat statusline                     # Claude Code status line (reads its stdin JSON)
@@ -105,7 +104,7 @@ npx modelstat@latest
 - Reads local session logs the tools already write — nothing is intercepted.
 - **Uploaded:** token counts, model name, timestamps, provider-assigned session id, redactable git remote, and a redacted work-type abstract.
 - **Never uploaded:** prompt text, model responses, file contents, tool-call arguments, environment variables, SSH keys, secrets.
-- Redaction runs on-device; offline sessions buffer locally and upload when the network returns (`modelstat scan --dry-run` for local-only analytics).
+- Redaction runs on-device; offline sessions buffer locally and upload when the network returns.
 
 ## License
 

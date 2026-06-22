@@ -47,7 +47,7 @@ One logical conversation spans multiple session ids across compactions/resumes; 
    ```
 2. Call `session_insights` with **`eager: true`** and ALL chain ids as `session_ids`. The eager call force-scans the session locally first, so the first response already reflects it.
 3. **Re-poll while `status == "analyzing"`**: call `session_insights` again with the same ids and **`eager: false`** every ~2.5s, up to ~20s (≈8 tries), until `status` becomes `ready` (or you hit the cap — then render what you have and note "taxonomy still processing"). Taxonomy detection runs after tokens/cost land, so `analyzing` means "$ and tokens are ready, work-types are still being tagged."
-   - `status: "not_ingested"` (and `missing_session_ids`) → the daemon hasn't shipped this session yet. If it persists, the daemon may not be paired — tell the user to run `npx modelstat@latest`, or `npx -y modelstat@latest scan --session <id>` to force it, and stop.
+   - `status: "not_ingested"` (and `missing_session_ids`) → the daemon hasn't shipped this session yet. If it persists, the daemon may not be paired — tell the user to run `npx modelstat@latest`, or `npx -y modelstat@latest sync --session <id>` to force it, and stop.
 4. **Render** the result:
    - If the MCP host shows a `session_insights` widget (Claude Desktop / MCP-UI hosts render it from the tool result automatically), let it stand and add a one-line summary.
    - Otherwise (Claude Code) render the returned `structuredContent` / text as markdown: session header (ids, span, segment count), a token-split chart (input / output / cache read / cache create), the effective $ (and saved vs list if present), and the taxonomy chips detected.
@@ -74,4 +74,4 @@ Jun 03  ████████████▊         $2.57
 - Tokens ≥10k → `12.3k` / `1.2M`. Costs `$X.XX`.
 - Keep it tight: one chart + 2–4 insight bullets (biggest mover, cache hit rate, outliers). No filler prose.
 
-If a tool errors with 401/not-paired, the fix is `npx modelstat@latest` (connects the device — the MCP can also connect itself via the browser on first use). If results look empty, suggest `npx -y modelstat@latest scan` and note ingest lag.
+If a tool errors with 401/not-paired, the fix is `npx modelstat@latest` (connects the device — the MCP can also connect itself via the browser on first use). If results look empty, note ingest lag — the daemon ingests automatically; force a specific session with `npx -y modelstat@latest sync --session <id>`.

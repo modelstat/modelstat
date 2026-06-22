@@ -60,9 +60,8 @@ with a `[service]` tag so they're routed correctly.
 
 ## Hall of fame
 
-We credit reporters of confirmed vulnerabilities (with permission) on
-the changelog. No bounty program yet, but we're generous with swag and
-reference letters.
+We credit reporters of confirmed vulnerabilities (with permission). No
+bounty program yet, but we're generous with swag and reference letters.
 
 ## Signing
 

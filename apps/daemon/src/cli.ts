@@ -1,5 +1,5 @@
 /**
- * modelstat CLI: `connect`, `discover`, `scan`, `watch`, `status`, `jobs`.
+ * modelstat CLI: `connect`, `discover`, `sync`, `watch`, `status`, `jobs`.
  *
  * The bundled build (tsup → dist/cli.cjs) adds a `#!/usr/bin/env node`
  * shebang at pack time — keep this source shebang-free so we don't emit
@@ -21,7 +21,6 @@ import {
 import { state } from "./config.js";
 import { backupIdentity, hasIdentityFile, identityPath } from "./identity.js";
 import { deviceUuidFromMachineKey, machineKey, machineKeySource } from "./machine-key.js";
-import { scanAll } from "./scan.js";
 import {
   bundledTrayAppPath,
   installService,
@@ -711,52 +710,28 @@ async function cmdDiscover(): Promise<void> {
   console.log("✓ reported to backend");
 }
 
-async function cmdScan(rest: readonly string[]): Promise<void> {
-  // `--session <id>` (repeatable) / `--file <path>` → eager single-session
-  // scan. Otherwise the full incremental scan below.
+async function cmdSync(rest: readonly string[]): Promise<void> {
+  // Force-ingest specific sessions NOW — the manual / headless sibling of the
+  // Claude Desktop extension's eager scan (both go through the daemon's loopback
+  // control endpoint). The installed daemon already ingests every session
+  // automatically; reach for this only when you need ONE session right now.
   const sessionIds = flagValues(rest, "--session");
   const file = flagValue(rest, "--file");
-  if (sessionIds.length > 0 || file) {
-    return cmdScanSession({
-      sessionIds,
-      file,
-      wait: rest.includes("--wait"),
-      port: numericFlag(rest, "--port"),
-    });
-  }
-
-  // Check the summariser before producing segments so its state (real LLM vs
-  // degraded extractive fallback) is clear up front. The scan NO LONGER aborts
-  // when the LLM can't load — it degrades to the dependency-free fallback so
-  // ingest still happens (the background daemon re-summarises at model quality
-  // once the LLM is healthy; see apps/daemon/src/daemon.ts).
-  const { preflightSummariser } = await import("./pipeline.js");
-  const { label, degraded } = await preflightSummariser();
-  console.log(
-    degraded
-      ? `[modelstat] ⚠ summariser DEGRADED — ${label}; extractive fallback, ingest continues`
-      : `[modelstat] summariser preflight ok: ${label}`,
-  );
-  const { reconcileProcessingVersion } = await import("./processing-version.js");
-  const pv = reconcileProcessingVersion(state);
-  if (pv.changed) {
-    console.log(
-      `[modelstat] processing pipeline v${pv.from} → v${pv.to} — wiped file cursors so every session is re-processed`,
+  if (sessionIds.length === 0 && !file) {
+    console.error(
+      "usage: modelstat sync --session <id> [--session <id> …] [--file <path>] [--wait]",
     );
+    console.error(
+      "  (the background daemon ingests everything on its own; use sync to force one session now)",
+    );
+    process.exit(1);
   }
-  const r = await scanAll();
-  console.log();
-  console.log(
-    `Done: ${r.filesScanned} files scanned, ${r.filesUnchanged} unchanged, ${r.batchesUploaded} batches, ${r.segmentsUploaded} segments, ${r.eventsUploaded} events uploaded`,
-  );
-  // One-shot scan loaded the bundled summariser; dispose it so the process
-  // exits cleanly (avoids llama.cpp's Metal teardown GGML_ASSERT on macOS).
-  try {
-    const { disposeLlama } = await import("@modelstat/daemon-core/node");
-    await disposeLlama();
-  } catch {
-    /* best-effort */
-  }
+  return cmdSyncSession({
+    sessionIds,
+    file,
+    wait: rest.includes("--wait"),
+    port: numericFlag(rest, "--port"),
+  });
 }
 
 /**
@@ -767,7 +742,7 @@ async function cmdScan(rest: readonly string[]): Promise<void> {
  * and scan in-process. Refreshes the local insights cache either way (the
  * daemon does it on the control path; the standalone path does it here).
  */
-async function cmdScanSession(opts: {
+async function cmdSyncSession(opts: {
   sessionIds: string[];
   file?: string;
   wait: boolean;
@@ -833,14 +808,14 @@ async function cmdScanSession(opts: {
  * the user wants to backfill old sessions for a freshly-claimed
  * device).
  */
-async function cmdRescan(): Promise<void> {
+async function cmdReset(): Promise<void> {
   const { PROCESSING_VERSION } = await import("./processing-version.js");
   state.wipeCursors();
   state.setProcessingVersion(PROCESSING_VERSION);
   console.log(
-    `[modelstat] cursors wiped — next \`modelstat scan\` (or daemon scan cycle) will re-read every JSONL from the start and re-summarise every session at processing version v${PROCESSING_VERSION}.`,
+    `[modelstat] cursors reset — the daemon's next scan cycle will re-read every JSONL from the start and re-summarise every session at processing version v${PROCESSING_VERSION}.`,
   );
-  console.log("  If the daemon is running, kick it with: modelstat stop && modelstat start");
+  console.log("  If the daemon is running, kick it now with: modelstat stop && modelstat start");
 }
 
 async function cmdWatch(): Promise<void> {
@@ -889,11 +864,8 @@ async function cmdStop(): Promise<void> {
 
 // One command for "how's my daemon, and what has it tracked?" — local
 // pairing + service state, then the live usage summary (sessions · tokens ·
-// cost). Merged from the old `status` (local) + `stats` (network); `stats`
-// stays a hidden alias so the prebuilt tray and muscle memory keep working.
-// `--json` emits a SUPERSET of the old `stats --json` (claimed / dashboard /
-// analyzed / local at the top level, which the tray decodes) plus the local
-// service + pairing block — unknown keys are ignored by the tray.
+// cost). `--json` returns the whole object; the tray polls `status --json` and
+// decodes claimed / dashboard / analyzed / local from it.
 async function cmdStatus(args: readonly string[] = []): Promise<void> {
   const asJson = args.includes("--json");
   const s = serviceStatus();
@@ -1223,7 +1195,6 @@ async function main(): Promise<void> {
 
     // ── Diagnostics / dev one-shots ────────────────────────────
     case "status":
-    case "stats": // hidden alias — the prebuilt tray polls `stats --json`
       return cmdStatus(rest);
     case "jobs":
       return cmdJobs(rest);
@@ -1235,8 +1206,8 @@ async function main(): Promise<void> {
       return;
     case "discover":
       return cmdDiscover();
-    case "scan":
-      return cmdScan(rest);
+    case "sync":
+      return cmdSync(rest);
     case "statusline": {
       // Claude Code's always-on status line. Reads its stdin JSON, prints one
       // compact line from the LOCAL insights cache — never blocks, never hits
@@ -1246,8 +1217,8 @@ async function main(): Promise<void> {
       await runStatusline();
       return;
     }
-    case "rescan":
-      return cmdRescan();
+    case "reset":
+      return cmdReset();
     case "watch":
       return cmdWatch();
     case "self-register":
@@ -1299,15 +1270,14 @@ async function main(): Promise<void> {
       );
       console.log();
       console.log("Dev / one-shots:");
-      console.log("  npx modelstat@latest scan           — one-shot parse + upload of local JSONL");
       console.log(
-        "  npx modelstat@latest scan --session <id>  — eager force-scan ONE session now (--file <path>, --wait)",
+        "  npx modelstat@latest sync --session <id>  — force-ingest ONE session now (--file <path>, --wait)",
       );
       console.log(
-        "  npx modelstat@latest rescan         — wipe file cursors so the next scan re-reads & re-summarises everything",
+        "  npx modelstat@latest reset          — reset file cursors so the daemon re-reads & re-summarises everything",
       );
       console.log(
-        "  npx modelstat@latest watch          — continuous (chokidar) with periodic backstop",
+        "  npx modelstat@latest watch          — foreground watcher (chokidar + periodic backstop; no service)",
       );
       console.log("  npx modelstat@latest discover       — one-shot report of installs/identities");
       console.log();

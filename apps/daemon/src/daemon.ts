@@ -248,7 +248,7 @@ async function sendHeartbeat(): Promise<void> {
   // tray (and any other local consumer) can read fresh numbers
   // without an authenticated round-trip to the server. Critical for
   // CLAIMED devices: the public /v1/device/:claim_code endpoint 404s
-  // for non-owner viewers, so the tray's `modelstat stats --json`
+  // for non-owner viewers, so the tray's `modelstat status --json`
   // would otherwise see only `{paired, claimed, dashboard}` with no
   // segment / identity / installation counts.
   writeLocalStatus(body).catch(() => undefined);
@@ -582,7 +582,7 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   // segment abstracts leave the machine. Best-effort: a busy port just
   // disables this path (the file scan is the daemon's core duty).
   const localIngest: LocalIngestReceiver | null = await startLocalIngestReceiver({
-    // Serve the loopback control endpoint so `modelstat scan --session` can
+    // Serve the loopback control endpoint so `modelstat sync --session` can
     // warm this running daemon (summariser already loaded) instead of
     // cold-spawning its own — and so the eager scan refreshes the local
     // insights cache the statusline reads.

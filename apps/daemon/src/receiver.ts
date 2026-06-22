@@ -46,7 +46,7 @@ const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** What `POST /v1/control/scan` asks the daemon to force-scan. `file` is one
  * explicit transcript path; `session_ids` a compaction chain; neither = the
  * newest transcript. `wait` makes the response block until the scan + insight
- * refresh finish (used by `modelstat scan --session --wait`). */
+ * refresh finish (used by `modelstat sync --session --wait`). */
 export interface ControlScanRequest {
   session_ids?: string[];
   file?: string;
@@ -208,7 +208,7 @@ export interface LocalIngestReceiver {
 export interface StartReceiverOptions {
   port?: number;
   /** Optional force-scan worker. When provided, the receiver serves
-   * `POST /v1/control/scan` (loopback) so `modelstat scan --session` can warm
+   * `POST /v1/control/scan` (loopback) so `modelstat sync --session` can warm
    * a running daemon instead of cold-loading its own summariser. Omitted (e.g.
    * in tests) → that route 404s. */
   onControlScan?: ControlScanHandler;
