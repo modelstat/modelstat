@@ -27,6 +27,7 @@ import {
   installService,
   installTrayApp,
   logsDir,
+  openTrayApp,
   serviceStatus,
   setupRuntime,
   trayStatus,
@@ -502,6 +503,14 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
             ...(buildMs !== null ? { build_ms: buildMs } : {}),
           });
           ok(`tray at ${out.installedAt}`);
+          // Launch it now so the icon appears immediately AND the tray
+          // registers itself as a Login Item (ensureLoginItem in
+          // apps/tray-mac) so it returns after every reboot. Best-effort:
+          // the daemon is already running headless, so a failed open here
+          // costs only the menu-bar icon, not the pipeline.
+          const opened = openTrayApp();
+          emitEvent(opts, "tray_opened", { ok: opened });
+          if (opened) ok("menu-bar icon launched (and set to open at login)");
         }
       } else {
         emitEvent(opts, "tray_not_bundled", {});

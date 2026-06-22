@@ -477,10 +477,13 @@ export function absoluteBundlePath(): string {
 }
 
 /**
- * Copy a built ModelstatTray.app bundle to ~/Applications so the
- * launchd plist can pick it up. Used by `npx modelstat@latest` on macOS
- * when a source .app is available (the npm package ships one, and the
- * installer script build-compiles one if Swift is on $PATH).
+ * Copy a built ModelstatTray.app bundle to ~/Applications. The launchd
+ * service runs the headless daemon, not the tray (a GUI app exits
+ * 78/EX_CONFIG under launchd — see writePlist); the staged bundle is
+ * launched as a GUI Login Item instead (see openTrayApp). Used by
+ * `npx modelstat@latest` on macOS when a source .app is available (the
+ * npm package ships one, and the installer build-compiles one if Swift
+ * is on $PATH).
  *
  * The copy is rsync-like (subprocess: `cp -R`). We blow away any prior
  * install so a stale build doesn't silently linger — the bundle is
@@ -511,6 +514,32 @@ export function installTrayApp(sourceAppPath: string): { installedAt: string } |
   // or on-device `build-app.sh`, which already chmod +x's its output).
   chmodSync(join(dest, "Contents", "MacOS", "modelstat-tray"), 0o755);
   return { installedAt: dest };
+}
+
+/**
+ * Launch the staged menu-bar tray (best-effort, never throws).
+ *
+ * Copying the bundle into ~/Applications is not enough on its own —
+ * nothing else opens it, so the icon would only appear once the user
+ * launched it by hand, and never at all after a reboot. Opening it here
+ * (a) shows the icon immediately at install time, and (b) lets the tray
+ * register itself as a Login Item on first launch (ensureLoginItem() in
+ * apps/tray-mac), which is what brings the icon back on every subsequent
+ * reboot. Opening the tray does NOT start a second daemon: the tray
+ * detects the singleton lock (see lock.ts) held by the launchd-managed
+ * daemon and backs off.
+ *
+ * `open -g` launches without stealing focus from the installer terminal
+ * (the tray is an LSUIElement app with no window to foreground anyway).
+ * Returns true if `open` was invoked successfully; false on non-macOS, a
+ * missing bundle, or any `open` failure — callers treat it as optional.
+ */
+export function openTrayApp(): boolean {
+  if (platform() !== "darwin") return false;
+  const dest = join(home(), "Applications", "ModelstatTray.app");
+  if (!existsSync(dest)) return false;
+  const r = spawnSync("open", ["-g", dest], { encoding: "utf8" });
+  return r.status === 0;
 }
 
 /** Progress sink for an on-device tray build. `onLine` receives each

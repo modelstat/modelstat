@@ -15,6 +15,7 @@
 import AppKit
 import Darwin
 import Foundation
+import ServiceManagement
 
 // ── Resolve the `modelstat` CLI on $PATH, then at the install-path
 //    the agent-dev installer writes into (~/.modelstat/bin/modelstat.mjs)
@@ -167,6 +168,7 @@ final class TrayController: NSObject {
     self.cli = locateCli()
     self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     super.init()
+    ensureLoginItem()
     configureStatusItem()
     buildMenu()
     ensureDaemon()
@@ -202,6 +204,27 @@ final class TrayController: NSObject {
     }
     RunLoop.main.add(watchdog, forMode: .common)
     watchdogTimer = watchdog
+  }
+
+  /// Register ourselves as a macOS Login Item so the menu-bar icon
+  /// returns after every reboot. The headless daemon is launchd-managed
+  /// and comes back on its own, but the tray is a GUI app launchd can't
+  /// bring up — it exits 78/EX_CONFIG there (see writePlist() in
+  /// apps/daemon/src/service.ts) — so a Login Item is the only thing that
+  /// relaunches the tray in the user's GUI session. SMAppService.register()
+  /// is idempotent and shows no permission prompt; the user can still turn
+  /// it off in System Settings → General → Login Items. macOS < 13 lacks
+  /// the API and falls through — those users keep launching it by hand.
+  private func ensureLoginItem() {
+    if #available(macOS 13.0, *) {
+      let svc = SMAppService.mainApp
+      guard svc.status != .enabled else { return }
+      do {
+        try svc.register()
+      } catch {
+        NSLog("modelstat-tray: login-item registration failed: \(error)")
+      }
+    }
   }
 
   private func configureStatusItem() {

@@ -26,8 +26,9 @@
        menu-bar item. -->
   <key>LSUIElement</key>
   <true/>
-  <!-- Launch at login when the installer drops us into
-       ~/Library/LaunchAgents (actually driven by the launchd plist). -->
+  <!-- Not background-only: we register as a GUI Login Item (see
+       ensureLoginItem in main.swift) so the menu-bar icon returns after
+       every reboot. The headless daemon is the launchd-managed piece. -->
   <key>LSBackgroundOnly</key>
   <false/>
   <key>NSHighResolutionCapable</key>

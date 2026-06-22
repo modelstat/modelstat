@@ -11,10 +11,12 @@
 //   swift build -c release             (executable at .build/release/modelstat-tray)
 //   ./build-app.sh                     (wraps the binary in ModelstatTray.app)
 //
-// Wired into the macOS install path in apps/daemon/src/service.ts —
-// the launchd plist launches THIS instead of the headless daemon; the
-// tray then spawns `modelstat start` as a child so there's still only
-// one process managing the pipeline.
+// Wired into the macOS install path in apps/daemon/src/service.ts: the
+// installer stages this bundle (installTrayApp) and opens it (openTrayApp).
+// The launchd service runs the headless daemon — a GUI app exits
+// 78/EX_CONFIG under launchd — while the tray runs in the GUI session as a
+// Login Item (ensureLoginItem in main.swift) and spawns `modelstat start`
+// as a child, with the singleton lock keeping it to one live daemon.
 import PackageDescription
 
 let package = Package(

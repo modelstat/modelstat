@@ -14,7 +14,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { installTrayApp } from "./service.js";
+import { installTrayApp, openTrayApp } from "./service.js";
 
 test(
   "installTrayApp: makes the inner tray binary executable even when the source isn't",
@@ -38,6 +38,26 @@ test(
 
       const installed = join(tmp, "Applications", "ModelstatTray.app", "Contents", "MacOS", "modelstat-tray");
       assert.notEqual(statSync(installed).mode & 0o111, 0, "installed binary must be executable");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "openTrayApp: returns false (and never throws) when no bundle is staged",
+  () => {
+    // Point $HOME at an empty temp dir so ~/Applications/ModelstatTray.app
+    // is absent. The installer calls openTrayApp best-effort, so when the
+    // bundle isn't there (tray build skipped, non-macOS) it must quietly
+    // report failure rather than throw and abort the install.
+    const tmp = mkdtempSync(join(tmpdir(), "modelstat-opentray-"));
+    const prevHome = process.env.HOME;
+    process.env.HOME = tmp;
+    try {
+      assert.equal(openTrayApp(), false);
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
