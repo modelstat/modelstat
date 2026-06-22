@@ -353,11 +353,19 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
     // exits (clean Metal teardown).
     llamaInstance = llama;
     const model = await llama.loadModel({ modelPath });
-    // Metal init + model load survived → disarm the guard.
-    try {
-      rmSync(guardPath, { force: true });
-    } catch {
-      /* best-effort */
+    // Disarm the guard ONLY when we just proved METAL works (we probed it this
+    // start — i.e. the guard wasn't already set). A successful CPU load must NOT
+    // remove the "Metal is broken on this machine" marker: otherwise the next
+    // clean start re-probes Metal and aborts again, OSCILLATING crash↔CPU on
+    // every restart (a broken-Metal Mac never settles on CPU — exactly the
+    // crash-loop we hit). The guard now STICKS until a node-llama-cpp upgrade
+    // (or a manual delete) re-probes Metal.
+    if (!metalAborted) {
+      try {
+        rmSync(guardPath, { force: true });
+      } catch {
+        /* best-effort */
+      }
     }
     // Two contexts off the same model — one per chat session. The
     // cognition context can be smaller since its prompt + answer are

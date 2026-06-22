@@ -398,7 +398,14 @@ async function runScanOverJobs(
     // hiccup can't block the upload.
     for (const seg of segments) {
       const arr = runSegmentsBySession.get(seg.session_id) ?? [];
-      arr.push(seg);
+      // Drop the 384-float `abstract_embedding` from the RUN-LONG accumulator:
+      // titling, metadata, and call-attribution below only read the abstract +
+      // ids, and this Map is held for the WHOLE scan. On a full re-scan (a
+      // PROCESSING_VERSION bump wipes cursors) of a power-user's months of
+      // history, retaining an embedding per segment grew the heap unbounded —
+      // the 8GB-OOM crash-loop. The wire `segments` array (shipped this batch)
+      // still carries the embedding; only this auxiliary copy sheds it.
+      arr.push(seg.abstract_embedding === undefined ? seg : { ...seg, abstract_embedding: undefined });
       runSegmentsBySession.set(seg.session_id, arr);
     }
     const titleInput: Segment[] = [];
