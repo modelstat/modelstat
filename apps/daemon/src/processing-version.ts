@@ -103,8 +103,13 @@
  *      calls (which made every skill look like a git operation). Re-scan so
  *      historical segments gain user_intent — only the daemon can, from the raw
  *      messages on disk.
+ * v12 — local-time temporal hints: each segment carries `time_of_day`
+ *      (Morning/Midday/Evening/Night) + `cadence` (Weekday/Friday/Weekend),
+ *      computed from the engineer's LOCAL wall-clock (only the daemon can — the
+ *      server sees UTC). Feed the Time-of-Day + Cadence taxonomy dimensions.
+ *      Re-scan so historical segments gain them.
  */
-export const PROCESSING_VERSION = 11;
+export const PROCESSING_VERSION = 12;
 
 export interface ProcessingState {
   processingVersion: number | null;

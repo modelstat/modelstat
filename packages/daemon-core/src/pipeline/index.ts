@@ -508,6 +508,12 @@ Write a ≤${ABSTRACT_OUTPUT_MAX_CHARS}-char summary (1-2 sentences) naming exac
     tags.push({ root_key: "components", name: c, confidence: 0.6 });
   }
 
+  // Local-time dimensions (WHEN the work happened). The daemon runs on the
+  // engineer's machine, so it has their wall-clock; the server only ever sees
+  // UTC and could never derive these. The taxonomy temporal/cadence drivers turn
+  // them into Time-of-Day / Cadence nodes — only for buckets that actually occur.
+  tags.push(...temporalHints(startedAtMs));
+
   // Tool-call mix — aggregate the per-event count maps (canonical
   // identity → calls, see RawEvent.tool_calls) across the slice and
   // tag the top-8 identities. Confidence encodes share-of-calls
@@ -763,6 +769,32 @@ function inferEnvironment(branch: string): string | null {
   if (b === "staging" || b.startsWith("staging/")) return "Staging";
   if (b === "dev" || b === "develop" || b.startsWith("dev/")) return "Dev";
   return null;
+}
+
+/** Local-time taxonomy hints for a slice (WHEN the work happened). The daemon
+ *  runs on the engineer's OWN machine, so `getHours()`/`getDay()` give THEIR
+ *  wall-clock — the server only ever sees UTC and could never derive these. The
+ *  taxonomy temporal/cadence drivers turn these into Time-of-Day / Cadence nodes,
+ *  and only for the buckets that actually occur (an engineer who never codes at
+ *  night simply has no Night node). Friday is split out from the rest of the week
+ *  on purpose — it's the relatable one. */
+export function temporalHints(startedAtMs: number): Segment["tags"] {
+  const d = new Date(startedAtMs);
+  const h = d.getHours();
+  const timeOfDay =
+    h >= 5 && h < 12
+      ? "Morning"
+      : h >= 12 && h < 17
+        ? "Midday"
+        : h >= 17 && h < 21
+          ? "Evening"
+          : "Night";
+  const day = d.getDay(); // 0 = Sun … 6 = Sat
+  const cadence = day === 0 || day === 6 ? "Weekend" : day === 5 ? "Friday" : "Weekday";
+  return [
+    { root_key: "time_of_day", name: timeOfDay, confidence: 1 },
+    { root_key: "cadence", name: cadence, confidence: 1 },
+  ];
 }
 
 // Re-exports for convenience of consumers that previously imported

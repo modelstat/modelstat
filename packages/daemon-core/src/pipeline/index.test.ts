@@ -1,7 +1,33 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { RawEvent } from "@modelstat/core/schemas";
-import { buildSegmentsForSession, type PipelineAdapters } from "./index.js";
+import {
+  buildSegmentsForSession,
+  type PipelineAdapters,
+  temporalHints,
+} from "./index.js";
+
+describe("temporalHints", () => {
+  it("buckets the engineer's LOCAL time-of-day and cadence", () => {
+    // new Date(y, mIdx, d, h) is LOCAL, matching the daemon's getHours()/getDay(),
+    // so this is timezone-independent (built + read in the same local tz).
+    const friMorning = new Date(2026, 5, 26, 9, 0).getTime(); // Fri 2026-06-26 09:00
+    assert.deepEqual(temporalHints(friMorning), [
+      { root_key: "time_of_day", name: "Morning", confidence: 1 },
+      { root_key: "cadence", name: "Friday", confidence: 1 },
+    ]);
+    const satNight = new Date(2026, 5, 27, 23, 30).getTime(); // Sat 23:30
+    assert.deepEqual(temporalHints(satNight), [
+      { root_key: "time_of_day", name: "Night", confidence: 1 },
+      { root_key: "cadence", name: "Weekend", confidence: 1 },
+    ]);
+    const wedMidday = new Date(2026, 5, 24, 14, 0).getTime(); // Wed 14:00
+    assert.deepEqual(temporalHints(wedMidday), [
+      { root_key: "time_of_day", name: "Midday", confidence: 1 },
+      { root_key: "cadence", name: "Weekday", confidence: 1 },
+    ]);
+  });
+});
 
 /** Minimal RawEvent for pipeline tests. Carries a content_excerpt by
  * default — summariseSlice refuses slices with zero excerpts. */
