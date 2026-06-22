@@ -115,8 +115,13 @@
  *      server's Mood + Posture taxonomy dimensions populate — real-data-only, a
  *      bucket per tag that actually occurred. Re-scan so historical segments
  *      gain them.
+ * v14 — cognition MIND hint: the daemon now also ships the primary mental-mode
+ *      tag (the cognition `meta` field — focused / scattered / in-flow / deliberate)
+ *      as a structured `mind` hint, feeding the server's Mind taxonomy dimension
+ *      (the cognitive-mode counterpart to Mood + Posture). Re-scan so historical
+ *      segments gain it.
  */
-export const PROCESSING_VERSION = 13;
+export const PROCESSING_VERSION = 14;
 
 export interface ProcessingState {
   processingVersion: number | null;

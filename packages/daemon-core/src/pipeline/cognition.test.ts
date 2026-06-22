@@ -63,7 +63,7 @@ describe("formatCognitionSuffix — stance", () => {
 });
 
 describe("cognitionHints — structured mood + posture hints", () => {
-  it("emits the PRIMARY mood + posture, capitalised, as same-keyed hints", () => {
+  it("emits the PRIMARY mood + mind + posture, capitalised, as same-keyed hints", () => {
     assert.deepEqual(
       cognitionHints({
         emotions: ["frustrated", "curious"],
@@ -72,6 +72,7 @@ describe("cognitionHints — structured mood + posture hints", () => {
       }),
       [
         { root_key: "mood", name: "Frustrated", confidence: 0.7 },
+        { root_key: "mind", name: "Stuck", confidence: 0.7 },
         { root_key: "posture", name: "Cautious", confidence: 0.7 },
       ],
     );

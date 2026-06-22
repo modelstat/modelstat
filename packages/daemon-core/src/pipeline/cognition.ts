@@ -169,12 +169,12 @@ export function formatCognitionSuffix(c: CognitionTags | null | undefined): stri
 }
 
 /**
- * Structured `mood` + `posture` hints for the segment's `tags` array. Emits the
- * PRIMARY (first) tag of each so the server's Mood/Posture drivers create ONE leaf
- * per session — mirroring the one-node-per-segment temporal/cadence drivers. The
- * full set still travels in the human-readable suffix. Capitalised for display
- * ("frustrated" → "Frustrated"). Returns [] when there's nothing to emit, so the
- * caller can `tags.push(...cognitionHints(c))` unconditionally.
+ * Structured `mood` + `mind` + `posture` hints for the segment's `tags` array.
+ * Emits the PRIMARY (first) tag of each so the server's Mood/Mind/Posture drivers
+ * create ONE leaf per session — mirroring the one-node-per-segment temporal/cadence
+ * drivers. The full set still travels in the human-readable suffix. Capitalised for
+ * display ("frustrated" → "Frustrated"). Returns [] when there's nothing to emit, so
+ * the caller can `tags.push(...cognitionHints(c))` unconditionally.
  */
 export function cognitionHints(
   c: CognitionTags | null | undefined,
@@ -183,6 +183,7 @@ export function cognitionHints(
   const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
   const out: Array<{ root_key: string; name: string; confidence: number }> = [];
   if (c.emotions[0]) out.push({ root_key: "mood", name: cap(c.emotions[0]), confidence: 0.7 });
+  if (c.meta[0]) out.push({ root_key: "mind", name: cap(c.meta[0]), confidence: 0.7 });
   if (c.posture[0]) out.push({ root_key: "posture", name: cap(c.posture[0]), confidence: 0.7 });
   return out;
 }
