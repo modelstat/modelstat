@@ -1,6 +1,6 @@
 {
   "name": "@modelstat/sdk",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Privacy-first SDK for modelstat — wrap your backend LLM calls and ship redacted usage to a local daemon or the modelstat server, without touching live-request latency.",
   "license": "Apache-2.0",
   "type": "module",

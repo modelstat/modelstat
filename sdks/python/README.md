@@ -16,6 +16,8 @@
               ↑ raw prompts / completions / args never cross this line ↑
 ```
 
+<!-- dashboard screenshot: drop assets/activities-screenshot.png here when available -->
+
 ## Why a local daemon?
 
 - **Privacy by construction.** Summarization happens **on your machine**. Only a bounded, redacted abstract + token/cost numbers are uploaded — never raw text. That's what gives you content-level attribution (by project, feature, work-type) *without* sending content to a vendor.
@@ -126,7 +128,7 @@ Before any bytes leave the SDK process — in **every** mode — an in-process r
 
 What the floor redacts: Anthropic / OpenAI / Google / AWS / GitHub / Slack / Stripe / Discord keys and tokens, JWTs, PEM private-key blocks, modelstat device secrets, generic `NAME_KEY=value` env secrets (the name is kept, the value is dropped), `Bearer` tokens, database-URL passwords, lone 40-char AWS-style secret blobs, email addresses, and absolute `/Users/…`, `/home/…`, and `C:\Users\…` paths.
 
-## What's live today (v0.0.2)
+## What's live today (v0.0.3)
 
 Early release — the honest state, so nothing surprises you:
 

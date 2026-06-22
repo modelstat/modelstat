@@ -1,91 +1,97 @@
 # modelstat
 
-> **See every AI token your team spends.** Local daemon for [modelstat](https://modelstat.ai) — reads the session logs your AI coding tools already write (Claude Code, Codex, Cursor, Cline, Continue, Aider, Windsurf, Zed, Copilot, Claude Desktop), tokenises events on-device, and uploads only metadata to your modelstat dashboard.
+> **Know exactly what your AI coding spend bought.** modelstat turns the session logs Claude Code, Codex, and Cursor already write into dollar-precise spend & ROI — broken down by the real work it went to, by project, and by model.
 
-**Your prompts never leave your machine.** The daemon uploads only token counts, model ids, timestamps, and a provider-assigned session id. Source is auditable on [GitHub](https://github.com/modelstat/modelstat/tree/main/apps/daemon).
+<!-- dashboard screenshot: drop assets/activities-screenshot.png here when available -->
+
+**Local-first by construction.** A small model on *your* machine summarizes and redacts every session before anything is uploaded. Raw prompts, code, and secrets never leave the box — only token counts, cost, and a short scrubbed abstract. The source is auditable on [GitHub](https://github.com/modelstat/modelstat/tree/main/apps/daemon).
+
+## How it works
+
+```text
+    your AI coding tools                     on YOUR machine                     modelstat cloud
+┌──────────────────────────┐           ┌─────────────────────────┐           ┌──────────────────────┐
+│   Claude Code · Codex    │           │    modelstat daemon     │           │ analytics dashboard  │
+│ Cursor · Cline · Aider   │  session  │ • parse + price turns   │ redacted  │ spend & ROI grouped  │
+│ Windsurf · Zed · Copilot │ ───────▶  │ • redact (PII / keys)   │ ───────▶  │ by activity · repo · │
+│ Claude Desktop · …       │   logs    │ • summarize (local LLM) │   HTTPS   │ model · person —     │
+│ (logs already on disk)   │           │ → tokens + abstract     │           │ the charts above     │
+└──────────────────────────┘           └─────────────────────────┘           └──────────────────────┘
+
+                      ↑ raw prompts, code & secrets never leave your machine ↑
+```
 
 ## Install
 
-One command. Re-running it upgrades you to the newest published version (postinstall stops the running service, swaps the bundle, restarts it).
+One command pairs your machine, downloads the on-device model, and installs a background service. Re-run it any time to upgrade.
 
 ```bash
 npx modelstat@latest
 ```
 
-Same one-shot via Bun or pnpm:
+Prefer curl? Or another runner?
 
 ```bash
+curl -fsSL https://install.modelstat.ai | sh   # detects pnpm / bun / npm for you
 bunx modelstat@latest
 pnpm dlx modelstat@latest
 ```
 
-The first run downloads the on-device summariser model (~2.7 GB Qwen3.5-4B GGUF to `~/.modelstat/models/`), pairs the device, and installs a **launchd user daemon** on macOS (at `~/Library/LaunchAgents/ai.modelstat.daemon.plist`) or a **systemd user unit** on Linux (at `~/.config/systemd/user/modelstat.service`). The daemon starts automatically on login and watches your AI-tool session logs in the background. The CLI exits cleanly — there's no foreground process to keep open.
+The first run downloads the on-device summariser model (~2.7 GB Qwen GGUF to `~/.modelstat/models/`), pairs the device, and installs a **launchd** user daemon on macOS (`~/Library/LaunchAgents/ai.modelstat.daemon.plist`) or a **systemd** user unit on Linux (`~/.config/systemd/user/modelstat.service`). It starts on login and watches your AI-tool logs in the background; the CLI then exits — there's no foreground process to keep open.
 
-Requires Node 20+. macOS and Linux (x86_64, arm64) supported.
+Requires Node 20+. macOS and Linux (x86_64, arm64). Then open **[modelstat.ai/dashboard](https://modelstat.ai/dashboard)**.
+
+## Works with your real sessions
+
+Claude Code · Codex · Cursor · Cline · Continue · Aider · Windsurf · Zed · GitHub Copilot · Claude Desktop. Nothing to instrument and nothing to intercept — modelstat reads the logs these tools already write. Per-tool setup: [modelstat.ai/integrations](https://modelstat.ai/integrations).
 
 ## Commands
 
 ```bash
-npx modelstat@latest                    # install or upgrade. Default action.
-npx modelstat@latest remove             # stop and uninstall the background service
-npx modelstat@latest reinstall          # alias for the default — explicit form
+npx modelstat@latest                     # install or upgrade. Default action.
+npx modelstat@latest remove              # stop and uninstall the background service
 
-npx modelstat@latest status             # show pairing + service state
-npx modelstat@latest stats              # live device summary: sessions · tokens · cost
-npx modelstat@latest jobs               # pipeline queue + recent processing ledger
-npx modelstat@latest paths [--json]     # state file + log dir + API URL
+npx modelstat@latest status              # pairing, service + live usage: sessions · tokens · cost
+npx modelstat@latest jobs                # pipeline queue + recent processing ledger
+npx modelstat@latest paths [--json]      # state file + log dir + API URL
 
-npx modelstat@latest scan               # one-shot parse + upload of local JSONL
+npx modelstat@latest scan                # one-shot parse + upload of local logs
 npx modelstat@latest scan --session <id> # eager force-scan ONE session now (warms a running daemon)
-npx modelstat@latest rescan             # wipe file cursors so next scan re-reads & re-summarises everything
-npx modelstat@latest watch              # foreground watcher (no service install)
-npx modelstat@latest discover           # report detected tool installs + identities
-modelstat statusline                    # Claude Code status line (reads its stdin JSON)
+npx modelstat@latest rescan              # wipe cursors so the next scan re-reads everything
+npx modelstat@latest watch               # foreground watcher (no service install)
+npx modelstat@latest discover            # report detected tool installs + identities
+modelstat statusline                     # Claude Code status line (reads its stdin JSON)
 ```
+
+**Headless pairing:** `npx modelstat@latest --json --no-browser` emits one NDJSON event per line so a wrapper can drive pairing non-interactively.
 
 ## Claude Code status line
 
-The installer auto-enables a live status line in Claude Code so every turn shows
-your current session's **tokens · effective $ · taxonomy** at the bottom of the
-prompt. It reads only a small local cache (`~/.modelstat/sessions/<id>.json`) —
-it never blocks the prompt and never calls the network.
-
-It's added to your **user** `~/.claude/settings.json` (composing with — and
-restoring — any status line you already had):
+The installer auto-enables a live status line in Claude Code so every turn shows your current session's **tokens · effective $ · taxonomy**. It reads only a small local cache (`~/.modelstat/sessions/<id>.json`) — never blocks the prompt, never calls the network. It composes with (and restores) any status line you already had:
 
 ```json
 { "statusLine": { "type": "command", "command": "modelstat statusline" } }
 ```
 
-Opt out at install time with `MODELSTAT_NO_STATUSLINE=1`, or remove it later
-with `npx modelstat@latest remove`.
+Opt out at install with `MODELSTAT_NO_STATUSLINE=1`, or remove it later with `npx modelstat@latest remove`.
 
-**Programmatic pairing** (for scripted / headless setups that pair without a browser):
+## MCP — ask any AI client about your spend
 
-```bash
-npx modelstat@latest --json --no-browser
-```
-
-Emits one NDJSON event per line, so a wrapper can drive pairing non-interactively.
-
-## Shared state across install methods
-
-Installing via both Homebrew and npm on the same laptop produces the **same binary reading the same state** — all daemon state lives in one home directory, `~/.modelstat`, identical on every OS (no per-OS Preferences path). Inside it, `identity.json` holds your device UUID + bearer token (`0600`) and `state.json` holds runtime state (file cursors, …), side by side. Set `MODELSTAT_HOME` to relocate everything at once (e.g. `MODELSTAT_HOME=/opt/modelstat` for a system-wide, exactly-one-per-server install). Your device UUID, bearer token, and pairing state persist across install methods — and the service deduplicates the device server-side, so you won't see the same laptop twice in the dashboard.
-
-## MCP server
-
-Pair the daemon, then install [`@modelstat/mcp`](https://www.npmjs.com/package/@modelstat/mcp) to query your own spend from inside Claude Desktop, Cursor, Cline, Continue, or Zed:
+Pair the daemon, then add [`@modelstat/mcp`](https://www.npmjs.com/package/@modelstat/mcp) to query your own spend from inside Claude Code, Claude Desktop, Cursor, Cline, Continue, or Zed:
 
 ```bash
-# Claude Code
 claude mcp add modelstat -- npx -y @modelstat/mcp
 ```
 
-Full wire-up docs per client: https://modelstat.ai/mcp
+Full per-client docs: [modelstat.ai/mcp](https://modelstat.ai/mcp).
+
+## Shared state across install methods
+
+All daemon state lives in one home directory, `~/.modelstat`, identical on every OS. `identity.json` holds your device UUID + bearer token (`0600`); `state.json` holds runtime state (file cursors, …). Set `MODELSTAT_HOME` to relocate everything at once (e.g. `MODELSTAT_HOME=/opt/modelstat` for a system-wide, one-per-server install). Installing via both Homebrew and npm yields the **same binary reading the same state**, and the service deduplicates the device server-side — you won't see the same laptop twice.
 
 ## Self-host
 
-To point the daemon at your own modelstat API (not the hosted SaaS):
+Point the daemon at your own modelstat API instead of the hosted service:
 
 ```bash
 export DAEMON_API_URL=https://your-modelstat-api.example.com
@@ -96,17 +102,10 @@ npx modelstat@latest
 
 ## Privacy
 
-- Daemon reads local session logs written by the tools you use. Nothing is intercepted — the tools already write these files.
-- Upload payload: token counts, model name, timestamps, provider-assigned session id, git remote URL (redactable), redacted work-type summary.
-- Never uploaded: prompt text, model responses, file contents, tool-call arguments, environment variables, SSH keys, secrets.
-- Redaction is on-device via [`@modelstat/parsers`](https://github.com/modelstat/modelstat/tree/main/packages/parsers).
-- Offline mode: buffered locally, uploaded when network returns. `modelstat scan --dry-run` for local-only analytics.
-
-## Pricing
-
-- **Free**: 100M tokens/month, 1 device, no card.
-- **Team**: $5/seat/month with 250M pooled tokens; overage at $25/billion.
-- **Enterprise**: SSO/SCIM, on-prem ingest, SLAs — contact `hello@modelstat.ai`.
+- Reads local session logs the tools already write — nothing is intercepted.
+- **Uploaded:** token counts, model name, timestamps, provider-assigned session id, redactable git remote, and a redacted work-type abstract.
+- **Never uploaded:** prompt text, model responses, file contents, tool-call arguments, environment variables, SSH keys, secrets.
+- Redaction runs on-device; offline sessions buffer locally and upload when the network returns (`modelstat scan --dry-run` for local-only analytics).
 
 ## License
 

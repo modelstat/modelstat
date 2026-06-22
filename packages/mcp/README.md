@@ -1,11 +1,28 @@
 # @modelstat/mcp
 
-Ask any MCP-compatible AI tool — Claude Desktop, Claude Code, Cursor, Cline, Continue, Zed — about your token spend directly in the chat.
+Ask any MCP-compatible AI tool — Claude Desktop, Claude Code, Cursor, Cline, Continue, Zed — about your token spend directly in the chat. The same numbers you see on the [modelstat dashboard](https://modelstat.ai/dashboard), answered inline:
 
 - "How much did I spend on Cursor this week?"
 - "Total $ I spent debugging the acme-dash project."
 - "Show me recent sessions over $5."
 - "What's this session costing so far?"
+
+<!-- dashboard screenshot: drop assets/activities-screenshot.png here when available -->
+
+**Where the data comes from** — the MCP queries the right-hand box; the rest runs on your machine:
+
+```text
+    your AI coding tools                     on YOUR machine                     modelstat cloud
+┌──────────────────────────┐           ┌─────────────────────────┐           ┌──────────────────────┐
+│   Claude Code · Codex    │           │    modelstat daemon     │           │ analytics dashboard  │
+│ Cursor · Cline · Aider   │  session  │ • parse + price turns   │ redacted  │ spend & ROI grouped  │
+│ Windsurf · Zed · Copilot │ ───────▶  │ • redact (PII / keys)   │ ───────▶  │ by activity · repo · │
+│ Claude Desktop · …       │   logs    │ • summarize (local LLM) │   HTTPS   │ model · person —     │
+│ (logs already on disk)   │           │ → tokens + abstract     │           │ the charts above     │
+└──────────────────────────┘           └─────────────────────────┘           └──────────────────────┘
+
+                      ↑ raw prompts, code & secrets never leave your machine ↑
+```
 
 **No daemon required.** If the [modelstat daemon](https://modelstat.ai/install) is installed, the MCP reuses its device token automatically (fast path). If not, the first tool call opens a browser tab to connect this MCP to your account (one-time), then remembers it in `~/.modelstat/mcp-auth.json`.
 

@@ -1,5 +1,5 @@
 /**
- * modelstat CLI: `connect`, `discover`, `scan`, `watch`, `stats`, `jobs`.
+ * modelstat CLI: `connect`, `discover`, `scan`, `watch`, `status`, `jobs`.
  *
  * The bundled build (tsup → dist/cli.cjs) adds a `#!/usr/bin/env node`
  * shebang at pack time — keep this source shebang-free so we don't emit
@@ -657,13 +657,13 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     console.log(`    \x1b[1;36m${claimUrl}\x1b[0m`);
     console.log();
     console.log(`  Live numbers from this terminal:`);
-    console.log(`    \x1b[2mmodelstat stats\x1b[0m   # sessions · tokens · cost`);
+    console.log(`    \x1b[2mmodelstat status\x1b[0m  # pairing, service + sessions · tokens · cost`);
     console.log(`    \x1b[2mmodelstat jobs\x1b[0m    # pipeline queue + recent activity`);
     console.log();
     console.log(`  Agent-friendly (for LLMs / MCPs):`);
     console.log(`    \x1b[2m${agentUrl}\x1b[0m`);
     console.log();
-    console.log(`  Claim this device so it keeps analyzing past 100M tokens/mo:`);
+    console.log(`  Claim this device so it keeps analyzing past the free tier:`);
     console.log(`    \x1b[2m${claimUrl}/claim\x1b[0m`);
     console.log(line);
     console.log();
@@ -887,9 +887,55 @@ async function cmdStop(): Promise<void> {
   }
 }
 
-async function cmdStatus(): Promise<void> {
+// One command for "how's my daemon, and what has it tracked?" — local
+// pairing + service state, then the live usage summary (sessions · tokens ·
+// cost). Merged from the old `status` (local) + `stats` (network); `stats`
+// stays a hidden alias so the prebuilt tray and muscle memory keep working.
+// `--json` emits a SUPERSET of the old `stats --json` (claimed / dashboard /
+// analyzed / local at the top level, which the tray decodes) plus the local
+// service + pairing block — unknown keys are ignored by the tray.
+async function cmdStatus(args: readonly string[] = []): Promise<void> {
+  const asJson = args.includes("--json");
   const s = serviceStatus();
   const paired = !!state.bearer && !!state.deviceId;
+  const local = await readLocalStatus();
+  const claim = state.claimCode;
+  const dashboard = `${state.apiUrl.replace(/\/$/, "")}/dashboard`;
+
+  // Live usage for this device via the claim-code capability endpoint, so it
+  // works for unclaimed devices (the common "just ran connect" case). A
+  // claimed device's public view 404s (its data moved to the owner's org) →
+  // fall back to the local heartbeat snapshot + a dashboard pointer.
+  const view = claim ? await fetchDeviceViewByClaim(claim) : null;
+
+  if (asJson) {
+    const usage = !claim
+      ? { paired: false, reason: "no_claim_code", local }
+      : view
+        ? { ...view, local }
+        : { paired: true, claimed: true, dashboard, local };
+    process.stdout.write(
+      `${JSON.stringify({
+        ...usage,
+        service: { running: s.running, hint: s.hint },
+        pairing: paired
+          ? {
+              paired: true,
+              user: state.userEmail ?? null,
+              device: state.deviceId,
+              uuid: state.deviceUuid ?? null,
+            }
+          : { paired: false },
+        auto_update: { enabled: autoUpdateEnabled(), pinned_by_env: autoUpdatePinnedByEnv() },
+        api: state.apiUrl,
+        logs: logsDir(),
+        state: state.storePath,
+      })}\n`,
+    );
+    return;
+  }
+
+  // ── local: pairing + service ──────────────────────────────────────
   console.log(`paired:  ${paired ? "yes" : "no"}`);
   if (paired) {
     console.log(`  user:    ${state.userEmail ?? "(unknown)"}`);
@@ -903,12 +949,33 @@ async function cmdStatus(): Promise<void> {
   console.log(
     `auto-update: ${autoUpdateEnabled() ? "on" : "off"}${autoUpdatePinnedByEnv() ? " (pinned by env)" : ""}`,
   );
-  const ls = await readLocalStatus();
-  const upd = ls?.update as { verdict?: string; latest?: string | null } | null | undefined;
+  const upd = local?.update as { verdict?: string; latest?: string | null } | null | undefined;
   if (upd?.verdict && upd.verdict !== "ok") {
     const what = upd.verdict === "upgrade_required" ? "REQUIRED" : "available";
     console.log(`update:  ${what} — latest ${upd.latest ?? "?"} (run \`modelstat upgrade\`)`);
   }
+
+  // ── live usage: sessions · tokens · cost ──────────────────────────
+  console.log("");
+  if (!claim) {
+    console.log("usage:   not paired yet — run `npx modelstat@latest`");
+    return;
+  }
+  if (!view) {
+    console.log("usage:   device claimed — full numbers in your dashboard:");
+    console.log(`  ${dashboard}`);
+    if (local) {
+      const st = (local.stats as Record<string, number | string> | undefined) ?? {};
+      for (const [k, v] of Object.entries(st)) console.log(`  ${k}: ${v}`);
+    }
+    return;
+  }
+  console.log(
+    `claim:    ${view.status}${view.status === "unclaimed" ? ` — claim at ${view.claim_url}` : ""}`,
+  );
+  console.log(`sessions: ${fmtInt(view.analyzed.count)}`);
+  console.log(`tokens:   ${fmtTokens(view.analyzed.totalTokens)}`);
+  console.log(`cost:     ${fmtCost(view.analyzed.totalCostUsd)}`);
 }
 
 /** Show or change the daemon auto-update setting: on | off | toggle | status. */
@@ -962,11 +1029,6 @@ function fmtTokens(v: string | number): string {
   return String(n);
 }
 
-/** Live ingestion stats for the daemon's device. Pulled from the
- * claim-code capability endpoint so we work for unclaimed devices
- * (the common "I just ran connect" case). Claimed devices get a
- * "see the dashboard" pointer — the CLI doesn't carry the cookie
- * needed to read the authenticated dashboard endpoints. */
 /** Best-effort read of the daemon's heartbeat mirror. Returns the
  * parsed object or null if the file isn't there / can't be parsed. */
 async function readLocalStatus(): Promise<Record<string, unknown> | null> {
@@ -979,77 +1041,6 @@ async function readLocalStatus(): Promise<Record<string, unknown> | null> {
   } catch {
     return null;
   }
-}
-
-async function cmdStats(args: readonly string[]): Promise<void> {
-  const asJson = args.includes("--json");
-  const claim = state.claimCode;
-  // Read the daemon's local heartbeat snapshot so we can answer for
-  // claimed devices (where the public device-view endpoint 404s for
-  // non-owners) and so unclaimed devices get the live progress
-  // numbers the tray polls. File is written by sendHeartbeat() in
-  // daemon.ts every ~10s; absence just means the daemon hasn't
-  // started yet or this build is too old to write it.
-  const local = await readLocalStatus();
-  if (!claim) {
-    if (asJson) {
-      process.stdout.write(
-        `${JSON.stringify({
-          paired: false,
-          reason: "no_claim_code",
-          local,
-        })}\n`,
-      );
-    } else {
-      console.log("no claim code on record — run `npx modelstat@latest` first");
-    }
-    return;
-  }
-  const view = await fetchDeviceViewByClaim(claim);
-  if (!view) {
-    // 404 means the device was claimed and its data moved to the
-    // user's personal org. Return the local snapshot so the tray
-    // can still show segment / identity / installation counts.
-    const dashboard = `${state.apiUrl.replace(/\/$/, "")}/dashboard`;
-    if (asJson) {
-      process.stdout.write(
-        `${JSON.stringify({
-          paired: true,
-          claimed: true,
-          dashboard,
-          local,
-        })}\n`,
-      );
-    } else {
-      console.log("device is claimed — live stats available at:");
-      console.log(`  ${dashboard}`);
-      if (local) {
-        console.log(
-          `local daemon: ${local.status ?? "?"}${local.message ? ` · ${local.message}` : ""}`,
-        );
-        const stats = (local.stats as Record<string, number | string> | undefined) ?? {};
-        for (const [k, v] of Object.entries(stats)) console.log(`  ${k}: ${v}`);
-      }
-    }
-    return;
-  }
-  if (asJson) {
-    process.stdout.write(`${JSON.stringify({ ...view, local })}\n`);
-    return;
-  }
-  console.log(`device:   ${view.device.id}`);
-  console.log(`host:     ${view.device.hostname ?? "(unknown)"} (${view.device.os_family ?? "?"})`);
-  console.log(`daemon: ${view.device.daemon_version ?? "(unknown)"}`);
-  console.log(
-    `status:   ${view.device.daemon_status ?? "(unknown)"}${view.device.last_seen_at ? ` · last seen ${view.device.last_seen_at}` : ""}`,
-  );
-  console.log(
-    `claim:    ${view.status}${view.status === "unclaimed" ? ` (at ${view.claim_url})` : ""}`,
-  );
-  console.log(`sessions: ${fmtInt(view.analyzed.count)}`);
-  console.log(`tokens:   ${fmtTokens(view.analyzed.totalTokens)}`);
-  console.log(`cost:     ${fmtCost(view.analyzed.totalCostUsd)}`);
-  console.log(`quota:    ${fmtTokens(view.free_quota_tokens)} free-tier ceiling`);
 }
 
 /** Background-pipeline view: how many jobs are queued / in-flight +
@@ -1232,9 +1223,8 @@ async function main(): Promise<void> {
 
     // ── Diagnostics / dev one-shots ────────────────────────────
     case "status":
-      return cmdStatus();
-    case "stats":
-      return cmdStats(rest);
+    case "stats": // hidden alias — the prebuilt tray polls `stats --json`
+      return cmdStatus(rest);
     case "jobs":
       return cmdJobs(rest);
     case "paths":
@@ -1288,13 +1278,12 @@ async function main(): Promise<void> {
       );
       console.log();
       console.log("Diagnostics:");
-      console.log("  npx modelstat@latest status         — show pairing + service state");
+      console.log(
+        "  npx modelstat@latest status         — pairing, service + live usage: sessions · tokens · cost (--json)",
+      );
       console.log("  npx modelstat@latest upgrade        — update to the latest version now");
       console.log(
         "  npx modelstat@latest autoupdate     — show/set auto-update: on|off|toggle",
-      );
-      console.log(
-        "  npx modelstat@latest stats          — live device summary: sessions · tokens · cost (--json)",
       );
       console.log(
         "  npx modelstat@latest jobs           — pipeline queue + recent processing ledger (--json)",

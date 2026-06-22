@@ -19,7 +19,7 @@ You need:
 - **Node** 20.18+
 - **pnpm** 10.7+
 - **Swift** 5.9+ (only for the macOS tray)
-- A modelstat account to pair against ([free tier](https://modelstat.ai/pricing))
+- A modelstat account to pair against — sign up at [modelstat.ai](https://modelstat.ai)
 
 ```bash
 git clone https://github.com/modelstat/modelstat.git

@@ -16,6 +16,8 @@
               ↑ raw prompts / completions / args never cross this line ↑
 ```
 
+<!-- dashboard screenshot: drop assets/activities-screenshot.png here when available -->
+
 ## Why a local daemon?
 
 - **Privacy by construction.** Summarization happens **on your machine**. Only a bounded, redacted abstract + token/cost numbers are uploaded — never raw text. That is what gives you content-level attribution (by project, feature, work-type) *without* sending content to a vendor.

@@ -16,6 +16,8 @@
               ↑ raw prompts / completions / args never cross this line ↑
 ```
 
+<!-- dashboard screenshot: drop assets/activities-screenshot.png here when available -->
+
 ## Why a local daemon?
 
 - **Privacy by construction.** Summarization happens **on your machine**. Only a bounded, redacted abstract (≤512 chars) + token/cost numbers are uploaded — never raw text. That's what gives you content-level attribution (by project, feature, work-type) *without* sending content to a vendor.
@@ -27,7 +29,7 @@
 ```toml
 # Cargo.toml
 [dependencies]
-modelstat = "0.0.4"
+modelstat = "0.0.5"
 ```
 
 ## Guide: run a daemon locally, then point the SDK at it
@@ -113,7 +115,7 @@ cfg.auto_taxonomy = true; // force server-side taxonomy auto-detection on
 
 Before any bytes leave the SDK process — in **every** mode — an in-process redaction floor scrubs secrets (provider keys, tokens, JWTs, PEM blocks, DB passwords, …), emails, and absolute home paths. "Raw" mode means *full turns*, not *leaked credentials* — the floor still runs. Tool calls ship only hashes, byte sizes, and allowlisted command verbs — never raw args, results, paths, or command text.
 
-## What's live today (v0.0.4)
+## What's live today (v0.0.5)
 
 Early release — the honest state, so nothing surprises you:
 

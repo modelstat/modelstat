@@ -16,6 +16,8 @@ A modelstat SDK captures each LLM call your app makes, **redacts and summarizes 
               ↑ raw prompts / completions / args never cross this line ↑
 ```
 
+<!-- dashboard screenshot: drop assets/activities-screenshot.png here when available -->
+
 ## Pick your language
 
 | Language | Package | Install | Source |

@@ -1,11 +1,13 @@
 # modelstat for Claude Code
 
-Charts of your AI usage, inside your session.
+Charts of your AI usage, inside your session — dollar-precise spend broken down by the real work it went to.
 
 ```bash
 claude plugin marketplace add modelstat/modelstat
 claude plugin install modelstat@modelstat
 ```
+
+<!-- dashboard screenshot: drop assets/activities-screenshot.png here when available -->
 
 | Try | Get |
 |---|---|
@@ -14,6 +16,21 @@ claude plugin install modelstat@modelstat
 | `/stat models 7d` | model leaderboard |
 | `/stat $ debugging acme-dash` | resolve names → ids, then filter — anything `explore` can answer |
 | `/stat cache hit rate by day, 2 weeks` | per-class token math over any range |
+
+**Where the numbers come from** — the same on-device pipeline that powers the dashboard:
+
+```text
+    your AI coding tools                     on YOUR machine                     modelstat cloud
+┌──────────────────────────┐           ┌─────────────────────────┐           ┌──────────────────────┐
+│   Claude Code · Codex    │           │    modelstat daemon     │           │ analytics dashboard  │
+│ Cursor · Cline · Aider   │  session  │ • parse + price turns   │ redacted  │ spend & ROI grouped  │
+│ Windsurf · Zed · Copilot │ ───────▶  │ • redact (PII / keys)   │ ───────▶  │ by activity · repo · │
+│ Claude Desktop · …       │   logs    │ • summarize (local LLM) │   HTTPS   │ model · person —     │
+│ (logs already on disk)   │           │ → tokens + abstract     │           │ the charts above     │
+└──────────────────────────┘           └─────────────────────────┘           └──────────────────────┘
+
+                      ↑ raw prompts, code & secrets never leave your machine ↑
+```
 
 Bundles the [`@modelstat/mcp`](https://www.npmjs.com/package/@modelstat/mcp) server, so the tools also answer plain questions ("how much did Opus cost me this month?") without `/stat`.
 
