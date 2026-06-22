@@ -750,6 +750,29 @@ final class TrayController: NSObject {
   }
 }
 
+// ── Single-instance guard ──────────────────────────────────────────
+//
+// Two copies of the tray each draw their own menu-bar icon, so the user
+// sees TWO identical icons. A normal `npx modelstat@latest` install only
+// launches one, but launchd KeepAlive respawns and a stray manual launch
+// can briefly overlap — so we harden against it.
+//
+// Mechanism: ask Launch Services whether another process with our bundle
+// identifier is already running (NSRunningApplication). This is host-
+// agnostic — it queries the OS process table, not the filesystem, so it
+// behaves identically no matter where the home directory lives (local
+// disk, an NFS/SMB-mounted home, a read-only volume), whereas an flock
+// lock file under ~/.modelstat silently no-ops or misbehaves on network
+// filesystems. A crashed instance drops out of the process table at once,
+// so a genuine restart still wins; only a live duplicate is turned away.
+func anotherInstanceIsRunning() -> Bool {
+  let myPid = NSRunningApplication.current.processIdentifier
+  let bundleId = Bundle.main.bundleIdentifier ?? "ai.modelstat.tray"
+  return NSRunningApplication
+    .runningApplications(withBundleIdentifier: bundleId)
+    .contains { $0.processIdentifier != myPid && !$0.isTerminated }
+}
+
 // ── App bootstrap ──────────────────────────────────────────────────
 //
 // LSUIElement=true in Info.plist hides the Dock icon. Without it the
@@ -778,12 +801,20 @@ final class TrayController: NSObject {
 @MainActor
 private var controller: TrayController?
 
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+
+// Single-instance guard. Run it after connecting to the window server
+// (so Launch Services can enumerate us and any sibling) but before the
+// controller draws an icon or spawns `modelstat start`: if another copy
+// is already running, bow out quietly — no icon, no child, no dialog —
+// leaving the existing instance in charge.
+if anotherInstanceIsRunning() { exit(0) }
+
 DispatchQueue.main.async {
   MainActor.assumeIsolated {
     controller = TrayController()
   }
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
 app.run()
