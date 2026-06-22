@@ -15,6 +15,7 @@
 
 import { buildBatch, type LlmCall, type SeqRef } from "./capture.js";
 import type { Config } from "./config.js";
+import { ambientMetadata } from "./context.js";
 import type { Transport } from "./transport.js";
 
 /** Sleep for `ms` milliseconds. */
@@ -76,6 +77,16 @@ export class Worker {
       // Buffer full: drop the newest (the call we were just handed).
       this.droppedCount += 1;
       return;
+    }
+    // Snapshot the ambient metadata layer here, on the hot path, while any
+    // `withMetadata(...)` scope is still active — the actual merge runs later on
+    // the flush path, outside that scope. Only set when the caller didn't
+    // already pin a snapshot.
+    if (call.ambientMetadataSnapshot === undefined) {
+      const ambient = ambientMetadata();
+      if (ambient !== undefined) {
+        call.ambientMetadataSnapshot = ambient;
+      }
     }
     this.buffer.push(call);
     // Flush eagerly once a full batch has accumulated.

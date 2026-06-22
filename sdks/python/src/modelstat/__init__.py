@@ -43,8 +43,10 @@ from ._version import __version__
 from .capture import LlmCall, ToolCallInput, build_batch
 from .client import Client
 from .config import DEFAULT_DAEMON_URL, Config, Mode, RedactionPolicy
+from .context import metadata
 from .redact import Redacted, redact
 from .transport import FakeTransport, HttpTransport, Transport, TransportError
+from .wrap import wrap
 from .wire import (
     PricingMode,
     EventKind,
@@ -55,8 +57,12 @@ from .wire import (
     ToolCallStatus,
     ToolCallWire,
     batch_id,
+    cap_metadata,
     content_hash,
     source_event_id,
+    METADATA_MAX_ENTRIES,
+    METADATA_MAX_KEY_CHARS,
+    METADATA_MAX_VALUE_CHARS,
 )
 
 __all__ = [
@@ -71,6 +77,13 @@ __all__ = [
     "LlmCall",
     "ToolCallInput",
     "build_batch",
+    # metadata
+    "metadata",
+    "wrap",
+    "cap_metadata",
+    "METADATA_MAX_ENTRIES",
+    "METADATA_MAX_KEY_CHARS",
+    "METADATA_MAX_VALUE_CHARS",
     # redaction
     "redact",
     "Redacted",

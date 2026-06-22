@@ -111,6 +111,54 @@ export interface RawEvent {
    * remote-raw mode, where the server summarizes.
    */
   content_excerpt?: string;
+  /**
+   * Free-form attribution tags (`feature`, `customer_id`, `team`, …), merged
+   * from `Config` defaults, the ambient context layer, and per-call values.
+   * Capped before send (see {@link capMetadata}); omitted entirely when empty.
+   */
+  metadata?: Metadata;
+}
+
+/** A flat `string → string` attribution tag map. */
+export type Metadata = Record<string, string>;
+
+/**
+ * Client-side caps for the per-call `metadata` map, enforced before a batch
+ * leaves the process so an over-large map can never trip an HTTP 400 (or bloat
+ * the wire). At most {@link METADATA_MAX_ENTRIES} entries survive (excess keys
+ * dropped deterministically in sorted-key order); each key is truncated to
+ * {@link METADATA_MAX_KEY_CHARS} and each value to {@link METADATA_MAX_VALUE_CHARS}
+ * Unicode code points.
+ */
+export const METADATA_MAX_ENTRIES = 16;
+/** Max length of a metadata key, in Unicode code points. */
+export const METADATA_MAX_KEY_CHARS = 64;
+/** Max length of a metadata value, in Unicode code points. */
+export const METADATA_MAX_VALUE_CHARS = 256;
+
+/** Truncate `s` to at most `max` Unicode code points (no elision marker). */
+function truncateScalars(s: string, max: number): string {
+  const points = Array.from(s);
+  if (points.length <= max) {
+    return s;
+  }
+  return points.slice(0, max).join("");
+}
+
+/**
+ * Apply the metadata caps to a resolved map: keep at most
+ * {@link METADATA_MAX_ENTRIES} entries (the lexicographically-smallest keys, so
+ * the drop is deterministic), truncating each key and value. Returns a fresh
+ * object whose keys are in sorted order.
+ */
+export function capMetadata(map: Metadata): Metadata {
+  const out: Metadata = {};
+  const keys = Object.keys(map).sort();
+  for (const key of keys.slice(0, METADATA_MAX_ENTRIES)) {
+    const cappedKey = truncateScalars(key, METADATA_MAX_KEY_CHARS);
+    out[cappedKey] = truncateScalars(map[key]!, METADATA_MAX_VALUE_CHARS);
+  }
+  return out;
 }
 
 /** One tool invocation, privacy-reduced. Hashes and sizes only. */

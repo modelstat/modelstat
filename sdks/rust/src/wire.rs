@@ -111,6 +111,52 @@ pub struct RawEvent {
     /// remote-raw mode, where the server summarizes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_excerpt: Option<String>,
+    /// Free-form attribution tags (`feature`, `customer_id`, `team`, …), merged
+    /// from `Config` defaults and per-call values. Capped before send (see
+    /// [`cap_metadata`]); omitted entirely when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Client-side caps for the per-call `metadata` map, enforced before a batch
+/// leaves the process so an over-large map can never trip an HTTP 400 (or bloat
+/// the wire). At most [`METADATA_MAX_ENTRIES`] entries survive (excess keys
+/// dropped deterministically in sorted-key order); each key is truncated to
+/// [`METADATA_MAX_KEY_CHARS`] and each value to [`METADATA_MAX_VALUE_CHARS`]
+/// Unicode scalars.
+pub const METADATA_MAX_ENTRIES: usize = 16;
+/// Max length of a metadata key, in Unicode scalars.
+pub const METADATA_MAX_KEY_CHARS: usize = 64;
+/// Max length of a metadata value, in Unicode scalars.
+pub const METADATA_MAX_VALUE_CHARS: usize = 256;
+
+/// Truncate `s` to at most `max` Unicode scalars (no elision marker — metadata
+/// values are identifiers, not prose).
+fn truncate_scalars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max).collect()
+}
+
+/// Apply the metadata caps to a resolved map: keep at most
+/// [`METADATA_MAX_ENTRIES`] entries (the lexicographically-smallest keys, so the
+/// drop is deterministic), truncating each key and value. A `BTreeMap` iterates
+/// in sorted-key order, so taking the first N is exactly "drop excess keys by
+/// sorted key order".
+#[must_use]
+pub fn cap_metadata(
+    map: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    map.into_iter()
+        .take(METADATA_MAX_ENTRIES)
+        .map(|(k, v)| {
+            (
+                truncate_scalars(&k, METADATA_MAX_KEY_CHARS),
+                truncate_scalars(&v, METADATA_MAX_VALUE_CHARS),
+            )
+        })
+        .collect()
 }
 
 /// One tool invocation, privacy-reduced. Hashes and sizes only.
@@ -258,6 +304,7 @@ mod tests {
             duration_ms: Some(1200),
             pricing_mode: Some(PricingMode::Api),
             content_excerpt: Some("hello".into()),
+            metadata: None,
         };
         let j: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(j["kind"], "assistant_message");
@@ -267,5 +314,65 @@ mod tests {
         // Absent optionals must not serialize (additive wire contract).
         assert!(j.get("cwd").is_none());
         assert!(j.get("git").is_none());
+        assert!(j.get("metadata").is_none());
+    }
+
+    #[test]
+    fn metadata_serializes_when_present_and_omits_when_empty() {
+        use std::collections::BTreeMap;
+        let mut ev = RawEvent {
+            source_event_id: "evt_x".into(),
+            ts: "2026-06-19T00:00:00Z".parse().unwrap(),
+            kind: EventKind::AssistantMessage,
+            agent: "raw_sdk_openai".into(),
+            provider: "openai".into(),
+            model: None,
+            session_id: "sess_1".into(),
+            tokens: TokenUsage::default(),
+            cwd: None,
+            git: None,
+            duration_ms: None,
+            pricing_mode: None,
+            content_excerpt: None,
+            metadata: None,
+        };
+        // Absent → omitted.
+        let j: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert!(j.get("metadata").is_none());
+
+        // Present → a flat string→string object.
+        let mut m = BTreeMap::new();
+        m.insert("feature".to_string(), "search".to_string());
+        m.insert("team".to_string(), "growth".to_string());
+        ev.metadata = Some(m);
+        let j: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(j["metadata"]["feature"], "search");
+        assert_eq!(j["metadata"]["team"], "growth");
+    }
+
+    #[test]
+    fn cap_metadata_drops_excess_keys_by_sorted_order_and_truncates() {
+        use std::collections::BTreeMap;
+        // 20 keys "k00".."k19" → only the 16 smallest survive (k00..k15).
+        let mut m = BTreeMap::new();
+        for i in 0..20 {
+            m.insert(format!("k{i:02}"), "v".to_string());
+        }
+        let capped = cap_metadata(m);
+        assert_eq!(capped.len(), METADATA_MAX_ENTRIES);
+        assert!(capped.contains_key("k00"));
+        assert!(capped.contains_key("k15"));
+        assert!(!capped.contains_key("k16"));
+
+        // Over-long key + value are truncated (no elision marker).
+        let mut m = BTreeMap::new();
+        let long_key = "k".repeat(100);
+        let long_val = "v".repeat(500);
+        m.insert(long_key, long_val);
+        let capped = cap_metadata(m);
+        let (k, v) = capped.iter().next().unwrap();
+        assert_eq!(k.chars().count(), METADATA_MAX_KEY_CHARS);
+        assert_eq!(v.chars().count(), METADATA_MAX_VALUE_CHARS);
+        assert!(!v.ends_with('…'));
     }
 }

@@ -94,6 +94,79 @@ ms.record(
 ms.shutdown()  # flush what's buffered on the way out
 ```
 
+## Metadata tags (attribution)
+
+Attach free-form `string → string` tags to attribute spend — by `feature`, `customer_id`, `team`, `environment`, anything you slice on. The tags merge across layers, **later layer wins**: `Config` defaults (constant on every call) < an **ambient context layer** < per-call tags. Caps are enforced in-process before send (≤16 entries; keys ≤64 chars; values ≤256 chars; excess keys dropped deterministically in sorted-key order), and the merged map ships as the event's `metadata` field, omitted when empty.
+
+```python
+# Python — three layers
+import modelstat
+from modelstat import Config, LlmCall
+
+cfg = Config("msk_live_…", "raw_sdk_openai")
+cfg.metadata = {"environment": "prod"}                 # 1. Config defaults
+
+with modelstat.metadata({"customer_id": "cus_42"}):    # 2. ambient (contextvars)
+    ms.record(LlmCall("openai", "trace-123", metadata={"feature": "search"}))  # 3. per-call
+```
+
+```ts
+// TypeScript — three layers
+import { Config, LlmCall, withMetadata } from "@modelstat/sdk";
+
+const cfg = new Config("msk_live_…", "raw_sdk_openai");
+cfg.metadata = { environment: "prod" };                 // 1. Config defaults
+
+await withMetadata({ customer_id: "cus_42" }, async () => {   // 2. ambient (AsyncLocalStorage)
+  ms.record(new LlmCall("openai", "trace-123").metadata({ feature: "search" })); // 3. per-call
+});
+```
+
+```rust
+// Rust — two layers (no ambient layer; task-locals are awkward, see the crate README)
+use modelstat::{Config, LlmCall};
+
+let cfg = Config::new("msk_live_…", "raw_sdk_openai")
+    .with_metadata("environment", "prod");              // Config defaults
+ms.record(
+    LlmCall::new("openai", "trace-123")
+        .metadata("feature", "search")                  // per-call (wins on shared keys)
+        .with_metadata([("team", "growth")]),
+);
+```
+
+## Auto-recording with `wrap()` (Python + TypeScript)
+
+Don't want to hand-build an `LlmCall`? Wrap your OpenAI or Anthropic client and use it exactly as before — each completion call is forwarded untouched and auto-recorded (provider, model, tokens, prompt/completion) after it returns. Recording is **best-effort**: it never changes or breaks the wrapped call, and the helper detects the client dynamically (no hard dependency on `openai`/`@anthropic-ai/sdk` — they're optional peers). Rust has no `wrap()`; use `record()` directly (its builder is already concise).
+
+```python
+# Python
+from openai import OpenAI
+import modelstat
+from modelstat import Client, Config
+
+ms = Client(Config("msk_live_…", "raw_sdk_openai"))
+client = modelstat.wrap(OpenAI(), recorder=ms, metadata={"feature": "search"})
+resp = client.chat.completions.create(
+    model="gpt-x", messages=[{"role": "user", "content": "hello"}]
+)  # auto-recorded
+```
+
+```ts
+// TypeScript
+import OpenAI from "openai";
+import { Client, Config, wrap } from "@modelstat/sdk";
+
+const ms = new Client(new Config("msk_live_…", "raw_sdk_openai"));
+const openai = wrap(new OpenAI(), { client: ms, metadata: { feature: "search" } });
+const resp = await openai.chat.completions.create({
+  model: "gpt-x",
+  messages: [{ role: "user", content: "hello" }],
+}); // auto-recorded
+```
+
+For the Anthropic SDK, `wrap()` reads `messages.create` and the `input_tokens` / `output_tokens` usage shape; everything else is identical.
+
 ## Modes
 
 | Mode | Where summarization runs | What leaves your machine | Use when |

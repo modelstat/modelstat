@@ -79,6 +79,46 @@ const ms = new Client(cfg);
 | **Remote, `raw = true`** | modelstat server | Floor-redacted **full turns** → `/v1/ingest/raw` |
 | **Remote, `raw = false`** | (no summarization) | Just the floor-redacted **≤320-char** excerpt → `/v1/ingest` |
 
+## Auto-recording with `wrap()`
+
+Don't want to hand-build an `LlmCall`? Wrap your `openai` or `@anthropic-ai/sdk` client and keep using it exactly as before — each completion call is forwarded untouched and auto-recorded after it returns:
+
+```ts
+import OpenAI from "openai";
+import { Client, Config, wrap } from "@modelstat/sdk";
+
+const ms = new Client(new Config("msk_live_…", "raw_sdk_openai"));
+const openai = wrap(new OpenAI(), { client: ms, metadata: { feature: "search" } });
+
+// …unchanged usage; this is auto-recorded (provider, model, tokens, text)…
+const resp = await openai.chat.completions.create({
+  model: "gpt-x",
+  messages: [{ role: "user", content: "hello" }],
+});
+```
+
+`wrap(anthropicClient, { client: ms })` works the same for `@anthropic-ai/sdk` (it reads `messages.create`, and `usage.input_tokens` / `usage.output_tokens`). Recording is **best-effort**: it never alters the wrapped call's result or timing, and a recording fault is swallowed rather than surfaced. The wrap helper detects the client *structurally* — it does **not** import `openai`/`@anthropic-ai/sdk`, so they stay optional peer dependencies. `metadata` here is a wrap-default (the per-call layer); `Config` defaults and the ambient layer still apply underneath. Pass `sessionId` (a string or `() => string`) to set the grouping id.
+
+## Metadata tags (attribution)
+
+Attach free-form `string → string` tags to attribute spend — by `feature`, `customer_id`, `team`, `environment`, whatever you slice on. Three layers merge, **later layer wins**: `Config` defaults (constant) < an ambient context layer < per-call tags.
+
+```ts
+import { Config, LlmCall, withMetadata } from "@modelstat/sdk";
+
+// 1. Config defaults — on every call.
+const cfg = new Config("msk_live_…", "raw_sdk_openai");
+cfg.metadata = { environment: "prod", service: "checkout" };
+
+// 2. Ambient layer — scoped to an async region (auto-resets on exit/throw).
+await withMetadata({ customer_id: "cus_42" }, async () => {
+  // 3. Per-call — overrides the layers above on a shared key.
+  ms.record(new LlmCall("openai", "trace-123").metadata({ feature: "search" }));
+});
+```
+
+`withMetadata` uses `AsyncLocalStorage`, so any `record()` (or `wrap()` call) inside the region — even across `await`s — picks up the ambient tags; nested scopes merge. Caps are enforced in-process before send: at most **16** entries (excess keys dropped deterministically in sorted-key order), keys truncated to **64** chars, values to **256**. The merged map ships as the event's `metadata` field, omitted entirely when empty.
+
 ## Capturing tool calls
 
 If your call invoked tools, attach them — the SDK hashes and sizes the args, and ships **only** hashes, byte counts, and up to three allowlisted command verbs. Raw args, results, paths, and command text never ship.
@@ -122,9 +162,12 @@ Source-event and batch ids are derived with **blake3** (via `@noble/hashes`), ex
 
 ## API surface
 
-- `new Config(ingestKey, agent)` — `.withRemote(baseUrl, raw)`, `.withDeviceId(id)`; public fields `mode`, `redaction`, `bufferCapacity`, `flushIntervalMs`, `flushMaxBatch`, `deviceId`, `version`, `autoTaxonomy` (default `false`).
-- `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`; public fields `kind`, `startedAt`, `durationMs`, `cwd`, `git`, `pricing_mode`, `toolCalls`.
+- `new Config(ingestKey, agent)` — `.withRemote(baseUrl, raw)`, `.withDeviceId(id)`; public fields `mode`, `redaction`, `bufferCapacity`, `flushIntervalMs`, `flushMaxBatch`, `deviceId`, `version`, `autoTaxonomy` (default `false`), `metadata` (default `{}`).
+- `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`, `.metadata({…})`; public fields `kind`, `startedAt`, `durationMs`, `cwd`, `git`, `pricing_mode`, `toolCalls`, `metadataTags`.
 - `new Client(cfg)` / `Client.withTransport(cfg, transport)` — `record(call)`, `await flush()`, `await shutdown()`, `dropped()`.
+- `wrap(providerClient, { client, metadata?, sessionId? })` — auto-record an `openai` / `@anthropic-ai/sdk` client (returns a transparent proxy).
+- `withMetadata(tags, fn)` — run `fn` with ambient attribution tags in scope.
+- `capMetadata(map)` + `METADATA_MAX_ENTRIES` / `METADATA_MAX_KEY_CHARS` / `METADATA_MAX_VALUE_CHARS` — the client-side caps.
 - `FakeTransport` — an in-memory transport for tests (`.batches()`).
 - `redact(text)` — run the floor directly; returns `{ text, secrets, pii }`.
 

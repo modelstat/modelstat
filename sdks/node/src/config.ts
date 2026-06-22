@@ -4,6 +4,7 @@
  */
 
 import { CLIENT_VERSION } from "./version.js";
+import type { Metadata } from "./wire.js";
 
 /** The default local daemon loopback ingest URL. */
 export const DEFAULT_DAEMON_URL = "http://127.0.0.1:4319/v1/ingest";
@@ -99,6 +100,15 @@ export class Config {
    * in.
    */
   autoTaxonomy = false;
+
+  /**
+   * Constant attribution tags applied to **every** call (e.g.
+   * `{ environment: "prod", service: "checkout" }`). The lowest-priority layer:
+   * the ambient context layer ({@link withMetadata}) and per-call tags both win
+   * on a shared key. Capped before send (≤16 entries; keys ≤64 chars; values
+   * ≤256 chars). Empty by default.
+   */
+  metadata: Metadata = {};
 
   /**
    * A config with sane defaults: local-daemon mode, floor redaction, a 4096-

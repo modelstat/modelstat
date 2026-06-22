@@ -89,6 +89,30 @@ ms.shutdown().await;   // flush what's buffered on the way out
 
 **What flows where:** your prompt + completion go to the **local daemon only**. The daemon summarizes them with its local model, redacts, and uploads just the abstract + token/cost metadata to modelstat. The `source` label (`raw_sdk_openai`) records which integration produced the calls; `session_id` groups calls into a conversation/session downstream.
 
+## Metadata tags (attribution)
+
+Attach free-form `string → string` tags to attribute spend — by `feature`, `customer_id`, `team`, `environment`, whatever you slice on. Two layers merge, **per-call winning**: `Config` defaults (constant across every call) sit underneath, and per-call tags override them on a shared key.
+
+```rust
+use modelstat::{Config, LlmCall};
+
+// Constant tags on every call:
+let cfg = Config::new("msk_live_…", "raw_sdk_openai")
+    .with_metadata("environment", "prod")
+    .with_metadata("service", "checkout");
+
+// Per-call tags (override the defaults on a shared key):
+ms.record(
+    LlmCall::new("openai", "trace-123")
+        .metadata("feature", "search")
+        .with_metadata([("customer_id", "cus_42"), ("team", "growth")]),
+);
+```
+
+Caps are enforced in-process before anything ships: at most **16** entries (excess keys dropped deterministically in sorted-key order), keys truncated to **64** chars, values to **256**. The merged map ships as the event's `metadata` field, omitted entirely when empty.
+
+> **No ambient layer in Rust.** The TypeScript and Python SDKs add a middle "ambient context" tier (`withMetadata` / `with modelstat.metadata(...)`) built on task-locals; the Rust equivalent (task-locals) is awkward and easy to misuse across `.await` points, so the Rust SDK intentionally ships only the two layers above (`Config` defaults + per-call). Set a per-call tag where you'd otherwise reach for ambient context.
+
 ## Modes
 
 | Mode | Where summarization runs | What leaves your machine | Use when |

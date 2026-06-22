@@ -46,7 +46,40 @@ __all__ = [
     "source_event_id",
     "batch_id",
     "format_rfc3339",
+    "cap_metadata",
+    "METADATA_MAX_ENTRIES",
+    "METADATA_MAX_KEY_CHARS",
+    "METADATA_MAX_VALUE_CHARS",
 ]
+
+
+# ---- metadata caps ----------------------------------------------------------
+
+# Client-side caps for the per-call ``metadata`` map, enforced before a batch
+# leaves the process so an over-large map can never trip an HTTP 400 (or bloat
+# the wire). At most ``METADATA_MAX_ENTRIES`` entries survive (excess keys
+# dropped deterministically in sorted-key order); each key is truncated to
+# ``METADATA_MAX_KEY_CHARS`` and each value to ``METADATA_MAX_VALUE_CHARS``
+# Unicode code points.
+METADATA_MAX_ENTRIES = 16
+METADATA_MAX_KEY_CHARS = 64
+METADATA_MAX_VALUE_CHARS = 256
+
+
+def cap_metadata(metadata: Dict[str, str]) -> Dict[str, str]:
+    """Apply the metadata caps to a resolved map.
+
+    Keep at most :data:`METADATA_MAX_ENTRIES` entries -- the
+    lexicographically-smallest keys, so the drop is deterministic -- truncating
+    each key to :data:`METADATA_MAX_KEY_CHARS` and each value to
+    :data:`METADATA_MAX_VALUE_CHARS` code points (no elision marker; tags are
+    identifiers, not prose). Returns a fresh dict with keys in sorted order.
+    """
+    out: Dict[str, str] = {}
+    for key in sorted(metadata.keys())[:METADATA_MAX_ENTRIES]:
+        capped_key = key[:METADATA_MAX_KEY_CHARS]
+        out[capped_key] = str(metadata[key])[:METADATA_MAX_VALUE_CHARS]
+    return out
 
 
 # ---- RFC3339 timestamp formatting ------------------------------------------
@@ -186,6 +219,10 @@ class RawEvent:
     # in the standard (floor-redacted) path; carries the full redacted turns in
     # remote-raw mode, where the server summarizes.
     content_excerpt: Optional[str] = None
+    # Free-form attribution tags (``feature``, ``customer_id``, ``team``, ...),
+    # merged from Config defaults, the ambient context layer, and per-call
+    # values, then capped. Emitted only when non-empty.
+    metadata: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -210,6 +247,9 @@ class RawEvent:
             out["pricing_mode"] = self.pricing_mode.value
         if self.content_excerpt is not None:
             out["content_excerpt"] = self.content_excerpt
+        # Emit ``metadata`` only when non-empty (never send an empty object).
+        if self.metadata:
+            out["metadata"] = self.metadata
         return out
 
 

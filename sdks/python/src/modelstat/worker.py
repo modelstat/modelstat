@@ -19,6 +19,7 @@ from typing import List, Optional, Union
 from . import capture
 from .capture import LlmCall
 from .config import Config
+from .context import ambient_metadata
 from .transport import Transport, TransportError
 
 __all__ = ["Worker"]
@@ -75,6 +76,12 @@ class Worker:
         """Non-blocking enqueue. On overflow the *newest* record is dropped and
         the dropped counter increments -- the caller is never blocked and never
         does I/O or redaction here."""
+        # Snapshot the ambient metadata layer here, on the hot path, while any
+        # ``with modelstat.metadata(...)`` block is still active -- the actual
+        # merge runs later on the worker thread, outside that block. Only set
+        # when the caller hasn't already pinned a snapshot.
+        if call.ambient_metadata is None:
+            call.ambient_metadata = ambient_metadata()
         try:
             self._queue.put_nowait(call)
         except queue.Full:

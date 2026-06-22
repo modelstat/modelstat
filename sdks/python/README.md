@@ -99,6 +99,47 @@ Call `ms.flush()` to block until buffered calls are shipped, `ms.shutdown()` to 
 
 **What flows where:** your prompt + completion go to the **local daemon only**. The daemon summarizes them with its local model, redacts, and uploads just the abstract + token/cost metadata to modelstat. The `agent` label (`raw_sdk_openai`) records which integration produced the calls; `session_id` groups calls into a conversation/session downstream.
 
+## Auto-recording with `wrap()`
+
+Don't want to hand-build an `LlmCall`? Wrap your OpenAI or Anthropic client and keep using it exactly as before — each completion call is forwarded untouched and auto-recorded after it returns:
+
+```python
+from openai import OpenAI
+import modelstat
+from modelstat import Client, Config
+
+ms = Client(Config("msk_live_…", "raw_sdk_openai"))
+client = modelstat.wrap(OpenAI(), recorder=ms, metadata={"feature": "search"})
+
+# …unchanged usage; this is auto-recorded (provider, model, tokens, text)…
+resp = client.chat.completions.create(
+    model="gpt-x", messages=[{"role": "user", "content": "hello"}]
+)
+```
+
+`modelstat.wrap(anthropic_client, recorder=ms)` works the same for the `anthropic` SDK (it reads `messages.create`, and `usage.input_tokens` / `usage.output_tokens`). Recording is **best-effort**: it never alters the wrapped call's result or timing, and a recording fault is swallowed rather than surfaced. The wrap helper detects the client *dynamically* — it does **not** import `openai`/`anthropic`, so they stay optional peers. `metadata=` here is a wrap-default (the per-call layer); `Config` defaults and the ambient layer still apply underneath. Sync clients are fully supported; `AsyncOpenAI` / `AsyncAnthropic` are too (the coroutine is awaited and recorded on completion). Pass `session_id=` (a string or a zero-arg callable) to set the grouping id.
+
+## Metadata tags (attribution)
+
+Attach free-form `str → str` tags to attribute spend — by `feature`, `customer_id`, `team`, `environment`, whatever you slice on. Three layers merge, **later layer wins**: `Config` defaults (constant) < an ambient context layer < per-call tags.
+
+```python
+import modelstat
+from modelstat import Config, LlmCall
+
+# 1. Config defaults — on every call.
+cfg = Config("msk_live_…", "raw_sdk_openai")
+cfg.metadata = {"environment": "prod", "service": "checkout"}
+
+# 2. Ambient layer — scoped to a `with` block (auto-resets on exit/exception).
+with modelstat.metadata({"customer_id": "cus_42"}):
+    # 3. Per-call — overrides the layers above on a shared key.
+    ms.record(LlmCall("openai", "trace-123", metadata={"feature": "search"}))
+    # …or merge with .with_metadata({...}).
+```
+
+`modelstat.metadata(...)` uses `contextvars`, so any `record()` (or `wrap()` call) inside the block — including across `await`s under asyncio — picks up the ambient tags; nested blocks merge. Caps are enforced in-process before send: at most **16** entries (excess keys dropped deterministically in sorted-key order), keys truncated to **64** chars, values to **256**. The merged map ships as the event's `metadata` field, omitted entirely when empty.
+
 ## Modes
 
 | Mode | Where summarization runs | What leaves your machine | Use when |

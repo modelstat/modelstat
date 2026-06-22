@@ -27,6 +27,7 @@ from .wire import (
     TokenUsage,
     ToolCallStatus,
     ToolCallWire,
+    cap_metadata,
 )
 
 __all__ = ["LlmCall", "ToolCallInput", "build_batch"]
@@ -85,6 +86,16 @@ class LlmCall:
     git: Optional[GitContext] = None
     pricing_mode: Optional[PricingMode] = None
     tool_calls: List[ToolCallInput] = field(default_factory=list)
+    # Per-call attribution tags. The highest-priority layer: these override the
+    # ambient context layer and ``Config`` defaults on shared keys. Pass via the
+    # ``metadata=`` keyword or merge with :meth:`with_metadata`. Capped before
+    # send.
+    metadata: Dict[str, str] = field(default_factory=dict)
+    # Snapshot of the ambient (``with modelstat.metadata(...)``) tags captured on
+    # the hot path at ``record()`` time -- *not* set by callers. The worker fills
+    # this in because the merge runs later, off the ``with`` block. The middle
+    # layer: above ``Config`` defaults, below :attr:`metadata`.
+    ambient_metadata: Optional[Dict[str, str]] = None
 
     # ---- chainable builder helpers (ergonomic, mirror the Rust builder) -----
 
@@ -102,6 +113,13 @@ class LlmCall:
         """Set the prompt and completion text (raw; redacted on the worker)."""
         self.prompt = prompt
         self.completion = completion
+        return self
+
+    def with_metadata(self, tags: Dict[str, str]) -> "LlmCall":
+        """Merge per-call attribution tags (each key overwrites any previous
+        value, including a same-keyed default/ambient tag). Returns ``self`` for
+        chaining."""
+        self.metadata.update(tags)
         return self
 
 
@@ -168,6 +186,21 @@ def _build_excerpt(cfg: Config, call: LlmCall) -> Optional[str]:
     return _truncate_chars(scrubbed, EXCERPT_MAX_CHARS)
 
 
+def _resolve_metadata(cfg: Config, call: LlmCall) -> Dict[str, str]:
+    """Resolve the per-event metadata: ``Config`` defaults are the base layer,
+    the per-call ambient snapshot is the middle layer, and per-call tags are the
+    top layer (each later layer wins on a shared key). The caps are then applied.
+    Returns an empty dict when nothing is set (the wire key is then omitted)."""
+    merged: Dict[str, str] = dict(cfg.metadata)
+    if call.ambient_metadata:
+        merged.update(call.ambient_metadata)
+    if call.metadata:
+        merged.update(call.metadata)
+    if not merged:
+        return {}
+    return cap_metadata(merged)
+
+
 def _event_from_call(
     cfg: Config, call: LlmCall, seq: int
 ) -> Tuple[RawEvent, List[ToolCallWire]]:
@@ -195,6 +228,7 @@ def _event_from_call(
         duration_ms=call.duration_ms,
         pricing_mode=call.pricing_mode,
         content_excerpt=_build_excerpt(cfg, call),
+        metadata=_resolve_metadata(cfg, call),
     )
 
     tool_calls: List[ToolCallWire] = []

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Dict, Optional
 
 from ._version import __version__
 
@@ -114,6 +114,12 @@ class Config:
     # work-sessions, so taxonomy is **off by default**; set it to ``True`` to opt
     # in.
     auto_taxonomy: bool = False
+    # Constant attribution tags applied to **every** call (e.g.
+    # ``{"environment": "prod", "service": "checkout"}``). The lowest-priority
+    # layer: the ambient context layer (``with modelstat.metadata(...)``) and
+    # per-call tags both win on a shared key. Capped before send (<=16 entries;
+    # keys <=64 chars; values <=256 chars). Empty by default.
+    metadata: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # The wire field is constrained to 1..=40 chars; keep the SDK honest so

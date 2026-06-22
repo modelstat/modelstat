@@ -63,10 +63,15 @@ export {
 } from "./transport.js";
 export {
   batchId,
+  capMetadata,
   contentHash,
+  METADATA_MAX_ENTRIES,
+  METADATA_MAX_KEY_CHARS,
+  METADATA_MAX_VALUE_CHARS,
   sourceEventId,
   totalTokens,
   zeroTokens,
+  type Metadata,
   type PricingMode,
   type EventKind,
   type GitContext,
@@ -76,6 +81,8 @@ export {
   type ToolCallStatus,
   type ToolCallWire,
 } from "./wire.js";
+export { withMetadata } from "./context.js";
+export { wrap, type WrapOptions } from "./wrap.js";
 
 /**
  * The SDK handle. Construct one with `new Client(cfg)` and hand it to every

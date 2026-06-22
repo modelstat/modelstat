@@ -11,12 +11,15 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import type { Config } from "./config.js";
+import { ambientMetadata } from "./context.js";
 import { redact } from "./redact.js";
 import {
   batchId,
+  capMetadata,
   contentHash,
   sourceEventId,
   zeroTokens,
+  type Metadata,
   type PricingMode,
   type EventKind,
   type GitContext,
@@ -81,6 +84,19 @@ export class LlmCall {
   git?: GitContext;
   pricing_mode?: PricingMode;
   toolCalls: ToolCallInput[] = [];
+  /**
+   * Per-call attribution tags. The highest-priority layer: these override the
+   * ambient context layer and `Config` defaults on shared keys. Set via
+   * `.metadata({...})` (which merges) or assigned directly. Capped before send.
+   */
+  metadataTags: Metadata = {};
+  /**
+   * Snapshot of the ambient ({@link withMetadata}) tags captured on the hot
+   * path at `record()` time — *not* set by callers. The worker fills this in
+   * because the merge runs later, off the `withMetadata` scope. The middle
+   * layer: above `Config` defaults, below {@link LlmCall.metadataTags}.
+   */
+  ambientMetadataSnapshot?: Metadata;
 
   /** A call with `startedAt = now` and `kind = "assistant_message"`. */
   constructor(provider: string, sessionId: string) {
@@ -107,6 +123,20 @@ export class LlmCall {
   text(prompt: string, completion: string): this {
     this.prompt = prompt;
     this.completion = completion;
+    return this;
+  }
+
+  /**
+   * Fluent: merge per-call attribution tags (each key overwrites any previous
+   * value, including the same-keyed default/ambient tag). Returns `this` for
+   * chaining.
+   *
+   * The backing field is `metadataTags` (TypeScript can't share one name
+   * between this builder method and a data field), which you may also set or
+   * read directly.
+   */
+  metadata(tags: Metadata): this {
+    this.metadataTags = { ...this.metadataTags, ...tags };
     return this;
   }
 }
@@ -201,6 +231,25 @@ export function buildExcerpt(cfg: Config, call: LlmCall): string | undefined {
 }
 
 /**
+ * Resolve the per-event metadata: `Config` defaults are the base layer, the
+ * per-call ambient snapshot is the middle layer, and per-call tags are the top
+ * layer (each later layer wins on a shared key). The caps are then applied.
+ * Returns `undefined` when the merged map is empty so the wire key is omitted.
+ */
+export function resolveMetadata(cfg: Config, call: LlmCall): Metadata | undefined {
+  const merged: Metadata = {
+    ...cfg.metadata,
+    ...(call.ambientMetadataSnapshot ?? {}),
+    ...call.metadataTags,
+  };
+  if (Object.keys(merged).length === 0) {
+    return undefined;
+  }
+  const capped = capMetadata(merged);
+  return Object.keys(capped).length === 0 ? undefined : capped;
+}
+
+/**
  * Assign `key` on `target` only when `value` is defined. Keeps optional wire
  * keys *omitted entirely* when absent (never serialized as `null`).
  */
@@ -242,6 +291,7 @@ function eventFromCall(
   setIfPresent(event, "duration_ms", call.durationMs);
   setIfPresent(event, "pricing_mode", call.pricing_mode);
   setIfPresent(event, "content_excerpt", contentExcerpt);
+  setIfPresent(event, "metadata", resolveMetadata(cfg, call));
 
   const toolCalls: ToolCallWire[] = call.toolCalls.map((tc, i) => {
     const [argsHash, signatureHash, argsBytes] = hashArgs(tc.args);

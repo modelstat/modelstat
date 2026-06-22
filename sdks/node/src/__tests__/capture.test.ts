@@ -30,7 +30,7 @@ test("buildBatch redacts the excerpt and caps its length", () => {
   assert.ok(ev.source_event_id.startsWith("evt_"));
   assert.ok(batch.batch_id.startsWith("batch_"));
   // daemon_version is the producer version key (NOT client_version).
-  assert.equal(batch.daemon_version, "node-sdk/0.0.3");
+  assert.equal(batch.daemon_version, "node-sdk/0.0.4");
   assert.ok(batch.daemon_version.length <= 40);
 });
 

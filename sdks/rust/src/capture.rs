@@ -9,11 +9,12 @@
 use crate::config::{Config, RedactionPolicy};
 use crate::redact;
 use crate::wire::{
-    self, EventKind, GitContext, IngestBatch, PricingMode, RawEvent, TokenUsage, ToolCallStatus,
-    ToolCallWire,
+    self, cap_metadata, EventKind, GitContext, IngestBatch, PricingMode, RawEvent, TokenUsage,
+    ToolCallStatus, ToolCallWire,
 };
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// The excerpt cap for the standard (non-raw) path, in Unicode scalars.
@@ -73,6 +74,9 @@ pub struct LlmCall {
     pub git: Option<GitContext>,
     pub pricing_mode: Option<PricingMode>,
     pub tool_calls: Vec<ToolCallInput>,
+    /// Per-call attribution tags. Highest-priority layer: these override
+    /// `Config::metadata` for any shared key. Capped before send.
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl LlmCall {
@@ -93,6 +97,7 @@ impl LlmCall {
             git: None,
             pricing_mode: None,
             tool_calls: Vec::new(),
+            metadata: BTreeMap::new(),
         }
     }
 
@@ -115,6 +120,28 @@ impl LlmCall {
     pub fn text(mut self, prompt: impl Into<String>, completion: impl Into<String>) -> Self {
         self.prompt = Some(prompt.into());
         self.completion = Some(completion.into());
+        self
+    }
+
+    /// Attach a single per-call attribution tag (overwriting any previous value
+    /// for `key`). Per-call tags override [`Config::metadata`] for shared keys.
+    #[must_use]
+    pub fn metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Merge a map of per-call attribution tags (each overwriting any previous
+    /// value for the same key).
+    #[must_use]
+    pub fn with_metadata<K, V>(mut self, tags: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (k, v) in tags {
+            self.metadata.insert(k.into(), v.into());
+        }
         self
     }
 }
@@ -165,6 +192,7 @@ fn event_from_call(cfg: &Config, call: &LlmCall, seq: u64) -> (RawEvent, Vec<Too
     let source_event_id = wire::source_event_id(&cfg.device_id, &source_ref);
 
     let content_excerpt = build_excerpt(cfg, call);
+    let metadata = resolve_metadata(cfg, call);
 
     let event = RawEvent {
         source_event_id: source_event_id.clone(),
@@ -180,6 +208,7 @@ fn event_from_call(cfg: &Config, call: &LlmCall, seq: u64) -> (RawEvent, Vec<Too
         duration_ms: call.duration.map(|d| d.as_millis() as u64),
         pricing_mode: call.pricing_mode,
         content_excerpt,
+        metadata,
     };
 
     let tool_calls = call
@@ -216,6 +245,27 @@ fn event_from_call(cfg: &Config, call: &LlmCall, seq: u64) -> (RawEvent, Vec<Too
         .collect();
 
     (event, tool_calls)
+}
+
+/// Resolve the per-event metadata: `Config` defaults are the base layer and
+/// per-call tags override them (per-call wins on a shared key), then the caps
+/// are applied. Returns `None` when the merged map is empty so the wire key is
+/// omitted. (The Rust SDK has no ambient layer — see the crate README.)
+fn resolve_metadata(cfg: &Config, call: &LlmCall) -> Option<BTreeMap<String, String>> {
+    if cfg.metadata.is_empty() && call.metadata.is_empty() {
+        return None;
+    }
+    let mut merged = cfg.metadata.clone();
+    // Per-call wins: inserting overwrites any default with the same key.
+    for (k, v) in &call.metadata {
+        merged.insert(k.clone(), v.clone());
+    }
+    let capped = cap_metadata(merged);
+    if capped.is_empty() {
+        None
+    } else {
+        Some(capped)
+    }
 }
 
 /// Build the redacted excerpt from a call's prompt + completion, honoring the
@@ -367,6 +417,59 @@ mod tests {
         assert_eq!(batch.auto_taxonomy, Some(true));
         let j: serde_json::Value = serde_json::to_value(&batch).unwrap();
         assert_eq!(j["auto_taxonomy"], true);
+    }
+
+    #[test]
+    fn metadata_merges_with_per_call_winning_and_omits_when_empty() {
+        // No metadata anywhere → key omitted on the wire.
+        let mut seq = 0;
+        let batch = build_batch(&cfg(), [LlmCall::new("openai", "sess_1")], &mut seq);
+        assert!(batch.events[0].metadata.is_none());
+        let j: serde_json::Value = serde_json::to_value(&batch).unwrap();
+        assert!(j["events"][0].get("metadata").is_none());
+
+        // Config defaults < per-call: per-call `feature` overrides the default,
+        // the default-only `environment` survives, the per-call-only `team` is
+        // added.
+        let cfg = cfg()
+            .with_metadata("environment", "prod")
+            .with_metadata("feature", "default_feature");
+        let call = LlmCall::new("openai", "sess_1")
+            .metadata("feature", "search")
+            .with_metadata([("team", "growth")]);
+        let mut seq = 0;
+        let batch = build_batch(&cfg, [call], &mut seq);
+        let md = batch.events[0].metadata.as_ref().unwrap();
+        assert_eq!(md.get("environment").map(String::as_str), Some("prod"));
+        assert_eq!(md.get("feature").map(String::as_str), Some("search"));
+        assert_eq!(md.get("team").map(String::as_str), Some("growth"));
+        // It serializes as a flat object.
+        let j: serde_json::Value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(j["events"][0]["metadata"]["feature"], "search");
+    }
+
+    #[test]
+    fn metadata_caps_excess_keys_by_sorted_order() {
+        // 20 default keys "k00".."k19"; only the 16 smallest survive (k00..k15).
+        let mut over = cfg();
+        for i in 0..20 {
+            over = over.with_metadata(format!("k{i:02}"), "v");
+        }
+        let mut seq = 0;
+        let batch = build_batch(&over, [LlmCall::new("openai", "sess_1")], &mut seq);
+        let md = batch.events[0].metadata.as_ref().unwrap();
+        assert_eq!(md.len(), 16);
+        assert!(md.contains_key("k15"));
+        assert!(!md.contains_key("k16"));
+    }
+
+    #[test]
+    fn metadata_truncates_over_long_values_before_send() {
+        let call = LlmCall::new("openai", "sess_1").metadata("big", "v".repeat(500));
+        let mut seq = 0;
+        let batch = build_batch(&cfg(), [call], &mut seq);
+        let md = batch.events[0].metadata.as_ref().unwrap();
+        assert_eq!(md.get("big").unwrap().chars().count(), 256);
     }
 
     #[test]

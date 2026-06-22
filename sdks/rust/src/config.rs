@@ -1,6 +1,7 @@
 //! SDK configuration: where to ship, how to authenticate, how hard to redact,
 //! and how the background worker batches.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Where the SDK ships captured calls.
@@ -91,6 +92,11 @@ pub struct Config {
     /// interactive work-sessions, so taxonomy is **off by default**; set it to
     /// `true` to opt in.
     pub auto_taxonomy: bool,
+    /// Constant attribution tags applied to **every** call (e.g.
+    /// `environment=prod`, `service=checkout`). These form the lowest-priority
+    /// layer: a per-call tag with the same key wins. Capped before send (≤16
+    /// entries; keys ≤64 chars; values ≤256 chars). Empty by default.
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl Config {
@@ -111,7 +117,16 @@ impl Config {
             flush_interval: Duration::from_secs(2),
             flush_max_batch: 256,
             auto_taxonomy: false,
+            metadata: BTreeMap::new(),
         }
+    }
+
+    /// Add a constant attribution tag applied to every call (overwriting any
+    /// previous value for `key`). Returns `self` for chaining.
+    #[must_use]
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
     }
 
     /// Ship directly to the modelstat server instead of a local daemon.
