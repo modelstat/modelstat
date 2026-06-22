@@ -108,8 +108,15 @@
  *      computed from the engineer's LOCAL wall-clock (only the daemon can — the
  *      server sees UTC). Feed the Time-of-Day + Cadence taxonomy dimensions.
  *      Re-scan so historical segments gain them.
+ * v13 — cognition mood + posture hints: the cognition pass now also tags the
+ *      working STANCE (posture — ship-it / cautious / questioning / easygoing)
+ *      alongside mood, and the daemon ships the PRIMARY mood + posture as
+ *      structured `mood`/`posture` hints (not just the abstract suffix) so the
+ *      server's Mood + Posture taxonomy dimensions populate — real-data-only, a
+ *      bucket per tag that actually occurred. Re-scan so historical segments
+ *      gain them.
  */
-export const PROCESSING_VERSION = 12;
+export const PROCESSING_VERSION = 13;
 
 export interface ProcessingState {
   processingVersion: number | null;

@@ -36,18 +36,21 @@
  * vocabulary is one edit.
  */
 export const COGNITION_SYSTEM_PROMPT =
-  "You read a one-sentence summary of an AI-coding work session and identify the user's emotional state and meta-cognitive state. " +
+  "You read a one-sentence summary of an AI-coding work session and identify the user's emotional state, mental mode, and working stance. " +
   "Output JSON only — first character of reply is `{`. Schema: " +
-  '{"emotions":[],"meta":[]}. ' +
+  '{"emotions":[],"meta":[],"posture":[]}. ' +
   "emotions: ≤ 3 short lowercase MOOD tags — how the user FEELS — such as " +
-  "frustrated, curious, excited, calm, confused, anxious, satisfied, proud, bored, energised, overwhelmed, confident. " +
+  "frustrated, curious, excited, calm, confused, anxious, satisfied, proud, happy, worried, disappointed, overwhelmed, confident. " +
   "meta: ≤ 3 short lowercase MENTAL-MODE tags — HOW the user is THINKING, never what they are doing. Valid examples: " +
   "focused, scattered, in-flow, deliberate, hurried, stuck, open, exploratory, methodical, distracted. " +
   "DO NOT emit ACTIVITY verbs (debugging, refactoring, designing, reviewing, deploying, planning, documenting, implementing) under meta — those describe the WORK, not the MIND. " +
   "If the only candidate tag would be an activity verb, return [] for meta instead. " +
+  "posture: ≤ 2 short lowercase WORKING-STANCE tags — the user's risk appetite and how they treat the work, " +
+  "inferred from how boldly or carefully they move — such as " +
+  "ship-it, yolo, direct-to-prod, cautious, careful, methodical, questioning, skeptical, demanding, easygoing, trusting. " +
   "Each tag ≤ 24 chars, single word or hyphenated, no punctuation. " +
-  "Only emit a tag if the summary gives clear evidence — return [] for either field when unsure. " +
-  "Do not invent emotions or mental modes the user did not display. No prose, no markdown.";
+  "Only emit a tag if the summary gives clear evidence — return [] for any field when unsure. " +
+  "Do not invent emotions, mental modes, or stances the user did not display. No prose, no markdown.";
 
 /** Hard caps applied client-side regardless of what the LLM emits. */
 export const MAX_COGNITION_TAGS_PER_FIELD = 3;
@@ -58,9 +61,13 @@ export const COGNITION_TEMPERATURE = 0.2;
 export interface CognitionTags {
   emotions: string[];
   meta: string[];
+  /** Working-stance tags — the user's risk appetite / how they treat the work
+   * (ship-it, cautious, questioning, easygoing). Surfaced as the `Posture`
+   * taxonomy dimension. */
+  posture: string[];
 }
 
-export const EMPTY_COGNITION: CognitionTags = { emotions: [], meta: [] };
+export const EMPTY_COGNITION: CognitionTags = { emotions: [], meta: [], posture: [] };
 
 /**
  * The one input every Cognizer adapter accepts. Kept tiny on purpose:
@@ -108,10 +115,11 @@ export function parseCognitionReply(text: string): CognitionTags | null {
     return null;
   }
   if (!parsed || typeof parsed !== "object") return null;
-  const obj = parsed as { emotions?: unknown; meta?: unknown };
+  const obj = parsed as { emotions?: unknown; meta?: unknown; posture?: unknown };
   return {
     emotions: sanitiseTags(obj.emotions),
     meta: sanitiseTags(obj.meta),
+    posture: sanitiseTags(obj.posture),
   };
 }
 
@@ -156,7 +164,27 @@ export function formatCognitionSuffix(c: CognitionTags | null | undefined): stri
   const parts: string[] = [];
   if (c.emotions.length > 0) parts.push(`[Mood: ${c.emotions.join(", ")}]`);
   if (c.meta.length > 0) parts.push(`[Mind: ${c.meta.join(", ")}]`);
+  if (c.posture.length > 0) parts.push(`[Stance: ${c.posture.join(", ")}]`);
   return parts.join(" ");
+}
+
+/**
+ * Structured `mood` + `posture` hints for the segment's `tags` array. Emits the
+ * PRIMARY (first) tag of each so the server's Mood/Posture drivers create ONE leaf
+ * per session — mirroring the one-node-per-segment temporal/cadence drivers. The
+ * full set still travels in the human-readable suffix. Capitalised for display
+ * ("frustrated" → "Frustrated"). Returns [] when there's nothing to emit, so the
+ * caller can `tags.push(...cognitionHints(c))` unconditionally.
+ */
+export function cognitionHints(
+  c: CognitionTags | null | undefined,
+): Array<{ root_key: string; name: string; confidence: number }> {
+  if (!c) return [];
+  const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  const out: Array<{ root_key: string; name: string; confidence: number }> = [];
+  if (c.emotions[0]) out.push({ root_key: "mood", name: cap(c.emotions[0]), confidence: 0.7 });
+  if (c.posture[0]) out.push({ root_key: "posture", name: cap(c.posture[0]), confidence: 0.7 });
+  return out;
 }
 
 /**

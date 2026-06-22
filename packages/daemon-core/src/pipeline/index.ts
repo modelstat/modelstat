@@ -19,7 +19,12 @@ import type { Agent } from "@modelstat/core/enums";
 import { segmentId } from "@modelstat/core/ids";
 import { redact } from "@modelstat/core/redact";
 import type { RawEvent, Segment } from "@modelstat/core/schemas";
-import { type CognitionTags, type Cognizer, formatCognitionSuffix } from "./cognition.js";
+import {
+  type CognitionTags,
+  cognitionHints,
+  type Cognizer,
+  formatCognitionSuffix,
+} from "./cognition.js";
 import { ABSTRACT_OUTPUT_MAX_CHARS, SUMMARISER_MAX_TOKENS } from "./prompts.js";
 import type { LinkExtractor } from "./session-metadata.js";
 import type { Entitler } from "./title.js";
@@ -514,6 +519,13 @@ Write a ≤${ABSTRACT_OUTPUT_MAX_CHARS}-char summary (1-2 sentences) naming exac
   // them into Time-of-Day / Cadence nodes — only for buckets that actually occur.
   tags.push(...temporalHints(startedAtMs));
 
+  // Mood + Posture dimensions (the HUMAN behind the work) from the best-effort
+  // cognition pass — the PRIMARY emotion + stance become one leaf each via the
+  // server's Mood/Posture drivers (the full set stays in the abstract suffix). A
+  // no-op when cognition was unavailable or empty, so the dimensions are
+  // real-data-only by construction.
+  tags.push(...cognitionHints(cognition));
+
   // Tool-call mix — aggregate the per-event count maps (canonical
   // identity → calls, see RawEvent.tool_calls) across the slice and
   // tag the top-8 identities. Confidence encodes share-of-calls
@@ -808,6 +820,7 @@ export {
   type CognitionInput,
   type CognitionTags,
   type Cognizer,
+  cognitionHints,
   EMPTY_COGNITION,
   formatCognitionSuffix,
   MAX_COGNITION_TAG_CHARS,

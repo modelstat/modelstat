@@ -98,11 +98,11 @@ ${lines}
 Write the title.`;
 }
 
-/** Strip the `[Mood: …] [Mind: …]` cognition suffix the pipeline
- * appends to abstracts — mood tags describe the user, not the work,
- * and would otherwise leak into titles ("Frustrated debugging…"). */
+/** Strip the `[Mood: …] [Mind: …] [Stance: …]` cognition suffix the pipeline
+ * appends to abstracts — these describe the user, not the work, and would
+ * otherwise leak into titles ("Frustrated debugging…"). */
 export function stripCognitionSuffix(abstract: string): string {
-  return abstract.replace(/\s*\[(?:Mood|Mind):[^\]]*\]/g, "").trim();
+  return abstract.replace(/\s*\[(?:Mood|Mind|Stance):[^\]]*\]/g, "").trim();
 }
 
 /**
