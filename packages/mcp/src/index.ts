@@ -38,6 +38,7 @@ import { ApiError, api, type McpToolDecl } from "./api.js";
 import { browserClaim } from "./auth.js";
 import { kickDaemonScan } from "./control.js";
 import { loadState, type State, readToolsCache, writeToolsCache } from "./state.js";
+import { runWire } from "./wire.js";
 
 const RANGES = ["today", "7d", "30d", "90d", "mtd", "ytd"] as const;
 // Dimensions the explore tool can group/stack by — mirrors the server catalog.
@@ -335,7 +336,18 @@ async function main(): Promise<void> {
   process.stderr.write(`modelstat-mcp: ready (auth=${s.source})\n`);
 }
 
-main().catch((e) => {
-  process.stderr.write(`modelstat-mcp: fatal: ${(e as Error).message}\n`);
-  process.exit(1);
-});
+if (process.argv[2] === "wire") {
+  // `npx -y @modelstat/mcp wire` — configure the modelstat MCP into the local
+  // AI tools we can find, print a report, and exit (no server).
+  runWire()
+    .then((code) => process.exit(code))
+    .catch((e) => {
+      process.stderr.write(`modelstat-mcp: wire failed: ${(e as Error).message}\n`);
+      process.exit(1);
+    });
+} else {
+  main().catch((e) => {
+    process.stderr.write(`modelstat-mcp: fatal: ${(e as Error).message}\n`);
+    process.exit(1);
+  });
+}

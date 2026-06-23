@@ -37,10 +37,6 @@
   "engines": {
     "node": ">=20"
   },
-  "os": [
-    "darwin",
-    "linux"
-  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
   },

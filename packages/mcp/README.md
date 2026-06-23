@@ -39,9 +39,17 @@ modelstat-mcp
 
 ## Wire it up
 
+**One command wires every tool you have** — Claude Code, Claude Desktop, Cursor, VS Code (+ Insiders / VSCodium), Windsurf, Zed, Codex, Gemini CLI:
+
+```bash
+npx -y @modelstat/mcp wire
+```
+
+It writes the `modelstat` server into each detected tool's config — non-destructive (your other servers are untouched) and safe to re-run. Restart any open tool afterwards. (The [modelstat installer](https://modelstat.ai/install) runs this for you.) Prefer to configure one tool by hand? The recipes are below.
+
 ### Claude Desktop
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows, unsupported at the moment):
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `~/.config/Claude/claude_desktop_config.json` (Linux), or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```jsonc
 {
