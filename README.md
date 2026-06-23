@@ -28,19 +28,17 @@
 
 ## Install
 
-One command pairs your machine, downloads the on-device model, and installs a background service. Re-run it any time to upgrade.
+One command installs the daemon, pairs this machine, and wires the modelstat MCP into every AI tool you have (Claude Code, Claude Desktop, Cursor, Codex, …). Paste it into a terminal — or into Claude Code / Codex / Cursor and let it run.
 
 ```bash
-npx modelstat@latest
+curl -fsSL https://modelstat.ai/install.sh | sh
 ```
 
-Prefer curl?
+**Windows** (PowerShell): `irm https://modelstat.ai/install.ps1 | iex` — wires the MCP into your Windows tools (the local capture daemon is macOS/Linux).
 
-```bash
-curl -fsSL https://install.modelstat.ai | sh
-```
+Just the daemon (no MCP wiring)? `npx modelstat@latest` (also `bunx` / `pnpm dlx`). Re-run any installer to upgrade.
 
-That's it. Open your dashboard at **[modelstat.ai/dashboard](https://modelstat.ai/dashboard)**. Works on macOS and Linux with Node 20+.
+That's it. Open your dashboard at **[modelstat.ai/dashboard](https://modelstat.ai/dashboard)**. The daemon runs on macOS + every Linux distro (Node 20+).
 
 ---
 

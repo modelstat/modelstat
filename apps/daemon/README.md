@@ -23,18 +23,17 @@
 
 ## Install
 
-One command pairs your machine, downloads the on-device model, and installs a background service. Re-run it any time to upgrade.
+One command installs the daemon, pairs this machine, and wires the modelstat MCP into every AI tool you have. Paste it into a terminal — or into Claude Code / Codex / Cursor and let it run.
 
 ```bash
-npx modelstat@latest
+curl -fsSL https://modelstat.ai/install.sh | sh        # macOS / Linux
+irm https://modelstat.ai/install.ps1 | iex             # Windows (PowerShell) — MCP only
 ```
 
-Prefer curl? Or another runner?
+Just the daemon (no MCP wiring)? Any Node runner:
 
 ```bash
-curl -fsSL https://install.modelstat.ai | sh   # detects pnpm / bun / npm for you
-bunx modelstat@latest
-pnpm dlx modelstat@latest
+npx modelstat@latest        # or: bunx modelstat@latest  ·  pnpm dlx modelstat@latest
 ```
 
 The first run downloads the on-device summariser model (~2.7 GB Qwen GGUF to `~/.modelstat/models/`), pairs the device, and installs a **launchd** user daemon on macOS (`~/Library/LaunchAgents/ai.modelstat.daemon.plist`) or a **systemd** user unit on Linux (`~/.config/systemd/user/modelstat.service`). It starts on login and watches your AI-tool logs in the background; the CLI then exits — there's no foreground process to keep open.
