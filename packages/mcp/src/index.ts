@@ -94,7 +94,7 @@ const TOOLS: McpToolDecl[] = [
   {
     name: "explore",
     description:
-      "The analytics workhorse (event/segment grain): group-by (and optionally stack-by) any dimension, pick a metric, filter, get back cells + whole-set totals. Time series: group_by=day|hour. Leaderboards: group_by=model|tool|session|identity. The `taxonomy` filter takes AND-of-OR groups [[idA,idB],[idC]] (AND across groups, OR within; a flat array is one OR-group) — resolve ids first with find_taxonomy / find_projects. This is how you answer cross-cutting questions like 'total $ debugging the acme-dash project': find both ids, then explore with taxonomy:[[proj],[debug]]. Costs are exact decimal USD strings.",
+      "The analytics workhorse (event/segment grain): group-by (and optionally stack-by) any dimension, pick a metric, filter, get back cells + whole-set totals. Time series: group_by=day|hour. Leaderboards: group_by=model|tool|session|identity. The `taxonomy` filter takes AND-of-OR groups [[idA,idB],[idC]] (AND across groups, OR within; a flat array is one OR-group) — resolve ids first with find_taxonomy / find_projects. This is how you answer cross-cutting questions like 'total $ debugging the acme project': find both ids, then explore with taxonomy:[[proj],[debug]]. Costs are exact decimal USD strings.",
     inputSchema: {
       type: "object",
       properties: {

@@ -90,7 +90,7 @@
  * v10 — richer abstracts + behavioral signal (Insights feature). The summariser
  *      prompt now mandates the concrete action + object + target (repo/branch/
  *      service), and the abstract cap rose 240→400 chars, so abstracts read like
- *      "Triggered a GitHub Actions release for acme/acme" instead of a vague
+ *      "Triggered a GitHub Actions release for acme/web" instead of a vague
  *      one-liner. Each segment also carries a new privacy-preserving `behavior`
  *      signal (user_turns / correction_count / frustration — counts only, never
  *      raw text) for server-side prompt-friction detection. Re-scan so historical

@@ -14,12 +14,12 @@ test("mainRepoPath: strips an ephemeral .claude worktree to the main repo", () =
     "/Users/dev/Projects/acme",
   );
   // A plain repo cwd is unchanged.
-  assert.equal(mainRepoPath("/Users/dev/Projects/modelstat/core"), "/Users/dev/Projects/modelstat/core");
+  assert.equal(mainRepoPath("/Users/dev/Projects/acme/web"), "/Users/dev/Projects/acme/web");
 });
 
 test("guessRepoSlugFromPath: owner/repo, but strips .claude/worktrees noise", () => {
   // A real owner/repo layout passes through.
-  assert.equal(guessRepoSlugFromPath("/Users/x/Projects/modelstat/core/src"), "modelstat/core");
+  assert.equal(guessRepoSlugFromPath("/Users/x/Projects/acme/web/src"), "acme/web");
   // Ephemeral worktree noise collapses to the repo.
   assert.equal(guessRepoSlugFromPath("/Users/dev/Projects/acme/.claude/worktrees/x"), "acme");
   assert.equal(guessRepoSlugFromPath("/home/x/src/globex-infra/.claude"), "globex-infra");

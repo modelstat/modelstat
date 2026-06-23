@@ -74,9 +74,9 @@ export const BROWSER_EMBED_MODEL = "Xenova/bge-small-en-v1.5" as const;
 export const SUMMARISER_SYSTEM_PROMPT =
   "You summarise an AI coding session in 1-2 sentences, ≤ 400 characters. " +
   "Name the CONCRETE work: the action taken, WHAT it acted on, and the " +
-  "specific target — the repository (e.g. acme/acme), branch, service, or " +
+  "specific target — the repository (e.g. acme/web), branch, service, or " +
   "component — whenever the session facts or excerpts identify it. " +
-  'Good: "Triggered a GitHub Actions release for acme/acme"; "Fixed a null ' +
+  'Good: "Triggered a GitHub Actions release for acme/web"; "Fixed a null ' +
   'dereference in the auth middleware of api-gateway". Lead with an outcome ' +
   "verb and pack in concrete domain keywords (frameworks, features, " +
   "decisions). Base the substance on the excerpts when present, else the " +

@@ -14,7 +14,7 @@ claude plugin install modelstat@modelstat
 | `/stat` | 30-day dashboard: spend, daily trend, top models |
 | `/stat session` | the session you're in — eagerly scanned + merged across compactions: tokens, $ assigned, work-types detected |
 | `/stat models 7d` | model leaderboard |
-| `/stat $ debugging acme-dash` | resolve names → ids, then filter — anything `explore` can answer |
+| `/stat $ debugging acme` | resolve names → ids, then filter — anything `explore` can answer |
 | `/stat cache hit rate by day, 2 weeks` | per-class token math over any range |
 
 **Where the numbers come from** — the same on-device pipeline that powers the dashboard:

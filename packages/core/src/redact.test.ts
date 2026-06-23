@@ -75,8 +75,10 @@ test("the consolidated floor catches what used to be caught by only one redactor
 
 test("env_secret catches BARE keyword names, not just prefixed ones", () => {
   // Regression: the name pattern's mandatory leading [A-Z] used to eat the first
-  // letter, so a bare `SECRET=` / `TOKEN=` / `KEY=` never matched and shipped raw
-  // (this is the real leak found in prod `command_redacted`).
+  // letter, so a bare `SECRET=` / `TOKEN=` / `KEY=` never matched and shipped the
+  // value raw. Fixtures below are FICTIONAL — synthetic values that match only the
+  // format of the credential shapes this rule must catch (the rule keys on the
+  // variable NAME + length, not the literal value).
   for (const [cmd, secret] of [
     ['SECRET="xk_edge_examplefake0000key0000"', "xk_edge_examplefake0000key0000"],
     ['TOKEN="1000000000:examplefake0000tgtoken0000"', "examplefake0000tgtoken0000"],
@@ -95,7 +97,7 @@ test("env_secret does not redact non-secret assignments", () => {
   // are useful analytic signal, not secrets.
   for (const cmd of [
     "AWS_PROFILE=dev",
-    "CHAIN_ID=42220",
+    "CHAIN_ID=1337",
     'export PATH="$HOME/.fly/bin:/opt/homebrew/bin:$PATH"',
     "MONKEY=banana",
   ]) {

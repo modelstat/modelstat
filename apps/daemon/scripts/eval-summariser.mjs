@@ -40,8 +40,8 @@
  *
  * Real fixtures (containing the user's own session content) are kept
  * in `~/.modelstat/evals/`. Synthetic fixtures alongside this script
- * (`./eval-fixtures/*.json`) are inspired by real eRPC patterns but
- * use fully-randomised names/numbers/labels so they're publishable.
+ * (`./eval-fixtures/*.json`) are inspired by generic backend/RPC service
+ * patterns but use fully-randomised names/numbers/labels so they're publishable.
  */
 
 import {

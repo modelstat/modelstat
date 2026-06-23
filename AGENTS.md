@@ -57,6 +57,26 @@ Things to know:
   timer; new server-delivered config kinds ride this loader instead of forcing a
   release.
 
+## Test fixtures & examples — ALWAYS fictional
+
+This is a **public** repo. Every example, test fixture, sample command, comment
+snippet, and doc must be **fictional**. Never paste anything real — not even "a
+redaction of" real data, and not even a value you believe is dead or harmless.
+
+- **Secrets** — never a real key/token/password. Synthesize a value that matches
+  only the *format* (`sk_live_…`, `1000000000:…`, `phc_…`). The redactor floor
+  keys on the variable **name** and length, not the literal value, so a fabricated
+  value exercises exactly the same path. Make fakes obviously fake (`examplefake`,
+  `EXAMPLE`, sequential `0123…`).
+- **Project / app / host names** — use placeholders (`acme`, `globex`,
+  `acme-web`, `acme.fly.dev`), never a real repo, Fly app, chain, or any other
+  project you (or a user) actually work on.
+- **Paths & usernames** — `/Users/dev/Projects/acme`, never a real home dir,
+  username, or private-repo layout.
+
+When a parser/redactor bug shows up in real production data, reproduce its
+*shape* with a fabricated input — never copy the real string into a test. (never paste a real one — a secret committed to a public package or git history can't be unpublished.)
+
 ## Releasing (npm + Homebrew)
 
 Releases are **zero-touch**. Every push to main runs `release`

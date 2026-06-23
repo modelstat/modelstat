@@ -16,8 +16,8 @@ modelstat's analytics filter on **ids**, not names. So when a request names a pr
 
 Then `explore`'s `taxonomy` filter takes **AND-of-OR** id groups: `[[a,b],[c]]` means tagged (a OR b) AND c; a flat array `[a,b]` is a single OR-group.
 
-> "total $ debugging the acme-dash project, last 30d" →
-> `find_projects {q:"acme-dash"}` → `PROJ`; `find_taxonomy {q:"debugging"}` → `DEBUG`;
+> "total $ debugging the acme project, last 30d" →
+> `find_projects {q:"acme"}` → `PROJ`; `find_taxonomy {q:"debugging"}` → `DEBUG`;
 > `explore {metric:"cost", range:"30d", group_by:"day", taxonomy:[[PROJ],[DEBUG]]}` → `totals.cost_usd` is the answer (+ the daily trend).
 
 ## Interpreting the request

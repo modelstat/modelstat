@@ -3,8 +3,8 @@ import { test } from "node:test";
 import { OTHER_BUCKET, extractExecutable } from "./executable.js";
 
 /**
- * Cases drawn from the real `shell.v1` garbage in production ClickHouse — each
- * input is (a redaction of) an actual command whose v1 executable was wrong.
+ * Cases model the shape of real `shell.v1` parsing failures whose v1 executable
+ * was wrong. Inputs are FICTIONAL — synthetic commands, never real user data.
  * `eq(cmd, want)` asserts the normalized executable.
  */
 const eq = (cmd: string, want: string) =>
@@ -22,7 +22,7 @@ test("cd masking — the real program follows cd (was the #1 garbage, ~52%)", ()
 
 test("cd masking — multi-line scripts skip cd/source/echo to the real program", () => {
   eq(
-    'cd ~/Documents/prism\nsource "$HOME/.cargo/env" 2>/dev/null\necho "=== cargo build ==="\ncargo build',
+    'cd ~/Documents/acme-app\nsource "$HOME/.cargo/env" 2>/dev/null\necho "=== cargo build ==="\ncargo build',
     "cargo",
   );
   eq("cd \nnohup env SKIP_BASE_BUILD=1 SKIP_FRESH_SNAPSHOT=1 bash deploy/fly/x.sh", "bash");
@@ -54,8 +54,8 @@ test("exec wrappers (sudo/env/time/nohup) peel to the real program", () => {
 test("env-var assignment prefixes — peel to the program (was high-cardinality noise)", () => {
   eq("AWS_PROFILE=dev terraform -chdir=./x plan -input=false", "terraform");
   eq("GIT_PAGER=cat git log --oneline", "git");
-  eq("M=2862d21ce1d618; APP=acme-dash; flyctl machine restart $M -a $APP", "flyctl");
-  eq("CHAIN_ID=42220 node scripts/probe.js", "node");
+  eq("M=abcdef0123456; APP=acme-dash; flyctl machine restart $M -a $APP", "flyctl");
+  eq("CHAIN_ID=1337 node scripts/probe.js", "node");
 });
 
 test("command-substitution assignments resolve to the inner program", () => {
@@ -71,13 +71,14 @@ test("arithmetic assignments are NOT command substitutions (no `seconds+560` jun
 });
 
 test("SECRET LEAK — secrets in assignment prefixes never reach executable", () => {
+  // All fixtures FICTIONAL — synthetic values matching the credential shapes only.
   const stripe = "sk_live_examplefake0000stripe0000";
   const tg = "1000000000:examplefake0000tgtoken0000";
   const gs = "xk_edge_examplefake0000key0000";
 
-  const a = extractExecutable(`CK="${stripe}"; curl -s https://api.clerk.com/v1/instance`);
+  const a = extractExecutable(`CK="${stripe}"; curl -s https://api.example.com/v1/instance`);
   assert.equal(a, "curl");
-  assert.ok(!a.includes("sk_live"), "stripe key must not leak into executable");
+  assert.ok(!a.includes("sk_live"), "secret key must not leak into executable");
 
   const b = extractExecutable(`TOKEN="${tg}"; curl -s "https://api.telegram.org/bot$TOKEN/getMe"`);
   assert.equal(b, "curl");
@@ -86,7 +87,7 @@ test("SECRET LEAK — secrets in assignment prefixes never reach executable", ()
   // all-assignment script with no program → bucket, secret still gone
   const c = extractExecutable(`SECRET="${gs}"\nBLK="0x23e5910"\nTXH="0xb3101e"`);
   assert.equal(c, OTHER_BUCKET);
-  assert.ok(!c.includes("gs_edge"), "secret must not leak even when bucketed");
+  assert.ok(!c.includes("xk_edge"), "secret must not leak even when bucketed");
 });
 
 test("comments run to end of line — a `;` inside a comment yields no phantom program", () => {
@@ -115,7 +116,7 @@ test("unparseable fragments → the generic bucket, never a raw fragment", () =>
 });
 
 test("hostnames / data-file fragments are not mistaken for programs", () => {
-  eq("acme-svm-test-gs.fly.dev", OTHER_BUCKET); // ≥2 dots ⇒ hostname
+  eq("acme-api-staging.fly.dev", OTHER_BUCKET); // ≥2 dots ⇒ hostname
   eq("run-b8o4ln0wm.output", OTHER_BUCKET); // data-file extension
   eq("localhost:4012", OTHER_BUCKET); // ':' is not a program char
 });

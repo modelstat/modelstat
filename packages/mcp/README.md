@@ -3,7 +3,7 @@
 Ask any MCP-compatible AI tool — Claude Desktop, Claude Code, Cursor, Cline, Continue, Zed — about your token spend directly in the chat. The same numbers you see on the [modelstat dashboard](https://modelstat.ai/dashboard), answered inline:
 
 - "How much did I spend on Cursor this week?"
-- "Total $ I spent debugging the acme-dash project."
+- "Total $ I spent debugging the acme project."
 - "Show me recent sessions over $5."
 - "What's this session costing so far?"
 
