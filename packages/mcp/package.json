@@ -10,7 +10,7 @@
     "observability",
     "token-tracking"
   ],
-  "homepage": "https://modelstat.ai/mcp",
+  "homepage": "https://mcp.modelstat.ai",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/modelstat/modelstat.git",

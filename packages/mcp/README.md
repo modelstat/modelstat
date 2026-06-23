@@ -110,7 +110,7 @@ The pattern: **resolve names → ids with the `find_*` tools, then pass the ids 
 
 `range` accepts: `today`, `7d`, `30d`, `90d`, `mtd`, `ytd` — or pass explicit RFC3339 `from`/`to`. Omit both for all-time.
 
-Prefer remote? The same tools are served over streamable HTTP at `https://modelstat.ai/mcp` — auth with `Authorization: Bearer $(npx -y modelstat@latest token)`. Claude Code users: the [modelstat plugin](https://modelstat.ai/dashboard/mcp) bundles this server and adds the `/stat` charts command.
+Prefer remote? The same tools are served over streamable HTTP at `https://mcp.modelstat.ai` — auth with `Authorization: Bearer $(npx -y modelstat@latest token)`. Claude Code users: the [modelstat plugin](https://modelstat.ai/dashboard/mcp) bundles this server and adds the `/stat` charts command.
 
 Your MCP client may see additional tools beyond the ones listed above — the live catalog comes from the modelstat backend, and the bridge forwards it verbatim. Ask your client to list available tools to see what's actually exposed for your account.
 

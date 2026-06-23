@@ -82,7 +82,7 @@ Pair the daemon, then add [`@modelstat/mcp`](https://www.npmjs.com/package/@mode
 claude mcp add modelstat -- npx -y @modelstat/mcp
 ```
 
-Full per-client docs: [modelstat.ai/mcp](https://modelstat.ai/mcp).
+Full per-client docs: [mcp.modelstat.ai](https://mcp.modelstat.ai).
 
 ## Shared state across install methods
 

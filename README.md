@@ -14,7 +14,7 @@
   <a href="https://modelstat.ai"><b>modelstat.ai</b></a>
   · <a href="https://modelstat.ai/install">Install</a>
   · <a href="https://modelstat.ai/integrations">Integrations</a>
-  · <a href="https://modelstat.ai/mcp">MCP server</a>
+  · <a href="https://mcp.modelstat.ai">MCP server</a>
   · <a href="https://modelstat.ai/guides">Guides</a>
 </p>
 
@@ -127,7 +127,7 @@ Once paired, any MCP-compatible client can query your spend in natural language:
 > *"Which project is driving my Cursor cost?"*
 > *"Recommend a model for a code-review task — based on what worked for us before."*
 
-No in-band auth — the server reuses the token `npx modelstat@latest` already wrote locally. Details: **[modelstat.ai/mcp](https://modelstat.ai/mcp)** · source in [`packages/mcp/`](packages/mcp/).
+No in-band auth — the server reuses the token `npx modelstat@latest` already wrote locally. Details: **[mcp.modelstat.ai](https://mcp.modelstat.ai)** · source in [`packages/mcp/`](packages/mcp/).
 
 ---
 
