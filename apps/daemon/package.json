@@ -1,6 +1,6 @@
 {
   "name": "modelstat",
-  "version": "0.19.1",
+  "version": "0.19.2",
   "description": "modelstat daemon — reads local AI-tool usage and ships tokenised events to modelstat.",
   "license": "Apache-2.0",
   "type": "module",
