@@ -75,7 +75,15 @@ redaction of" real data, and not even a value you believe is dead or harmless.
   username, or private-repo layout.
 
 When a parser/redactor bug shows up in real production data, reproduce its
-*shape* with a fabricated input — never copy the real string into a test. (never paste a real one — a secret committed to a public package or git history can't be unpublished.)
+*shape* with a fabricated input — never copy the real string into a test. A
+secret committed to a public package or git history can't be unpublished.
+
+**Enforcement.** A `secret-scan` CI job and a gitleaks pre-commit hook (both read
+`.gitleaks.toml`) block any real-secret-shaped string; GitHub push protection is
+on as well. Fixtures pass because the config allowlists obviously-synthetic
+markers by VALUE (`examplefake`, `EXAMPLE`, sequential `0123…`) — never by file
+path, so a real secret in a test file still fails. Enable the local hook once
+with `pipx install pre-commit && pre-commit install`.
 
 ## Releasing (npm + Homebrew)
 

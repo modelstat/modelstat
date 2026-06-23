@@ -1,0 +1,39 @@
+# gitleaks config — used by the `secret-scan` CI gate and the gitleaks
+# pre-commit hook. Extends gitleaks' built-in rule set.
+#
+# Fixture values are allowlisted by VALUE (obviously-synthetic markers), NOT by
+# code/test path — a real secret committed to a test file must still fail. Keep
+# fixtures fictional (AGENTS.md → "Test fixtures & examples — ALWAYS fictional")
+# and they pass automatically. The ONLY path allowlist is the vendored tiktoken
+# vocab data, which is third-party token data, not source.
+title = "modelstat"
+
+[extend]
+useDefault = true
+
+# Vendored tiktoken BPE vocab — base64 token strings that trip generic-api-key.
+# Pure third-party data, regenerated from the encoder, never hand-edited.
+[[allowlists]]
+description = "tiktoken vendored vocab data assets"
+paths = ['''apps/extension/public/assets/tiktoken/.*''']
+
+# Synthetic fixture values used across redaction/parser test corpora. Each marker
+# is distinctive to a textbook/obviously-fake value — a real credential won't match.
+[[allowlists]]
+description = "Synthetic, format-only fixture values"
+regexTarget = "match"
+regexes = [
+  '''examplefake''',                            # our fictional-fixture convention
+  '''AKIAIOSFODNN7EXAMPLE''',                   # canonical AWS example access key
+  '''abcd1234efgh''',                           # fake AWS secret fixture (abcd1234efgh5678…)
+  '''0123456789''',                             # sequential placeholders (sk_live_0123…, ghp_0123…)
+  '''1234567890''',                             # sequential placeholders (AIzaSy…1234…, xoxb-1234…)
+  '''abcdefghij''',                             # sequential placeholders (xoxb-…-abcdefghijkl)
+  '''hunter2''',                                # joke password fixture
+  '''VERYSECRET''',                             # fake bearer token fixture (sk-VERYSECRET, old history)
+  '''blahblah''',                               # fake PEM body (node SDK)
+  '''MIIEowIBAAKCAQEA\.\.\.''',                 # truncated fake PEM body (python SDK) — the literal "..." can't appear in a real key
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9''',   # textbook jwt.io HS256 header (node SDK)
+  '''SflKxwRJSMeKKF2QT4''',                     # textbook jwt.io signature (python SDK fake JWT)
+  '''dozjgNryP4J3''',                           # node SDK fake JWT signature
+]
