@@ -591,7 +591,18 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   const LOCAL_DRAIN_INTERVAL_MS = 5_000;
   let localDrainTimer: NodeJS.Timeout | null = null;
   if (localIngest) {
+    // Secondary backoff: the 5s timer fires steadily, but after a failed drain we
+    // SKIP an increasing number of ticks (capped) so a sustained backend outage
+    // isn't retried every 5s for hours. uploadBatch already backs off WITHIN an
+    // attempt; this spaces the attempts too (≈5s → up to ~30s while down). A
+    // success (or an empty queue, which doesn't throw) resets it immediately.
+    let drainFails = 0;
+    let drainSkip = 0;
     const drainTick = async (): Promise<void> => {
+      if (drainSkip > 0) {
+        drainSkip--;
+        return;
+      }
       try {
         const { events } = await drainLocalQueue({
           deviceId: state.deviceId as string,
@@ -599,10 +610,13 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
         });
         if (events > 0) bumpStat("sdk_events_uploaded", events);
         setStat("sdk_queue", await localQueueDepth());
+        drainFails = 0;
       } catch (e) {
-        // Backend unreachable: events stay durably queued and the next tick
+        // Backend unreachable: events stay durably queued and a later tick
         // retries. Surface it without flipping the whole daemon to "offline"
         // (the file-scan path owns that top-level signal).
+        drainFails = Math.min(drainFails + 1, 6);
+        drainSkip = drainFails;
         setMessage(`SDK ingest upload deferred: ${describeErrorWithCause(e)}`);
       }
     };

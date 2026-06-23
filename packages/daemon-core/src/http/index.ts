@@ -28,7 +28,11 @@ export function classifyStatus(status: number, attempt: number): UploadDecision 
   if (status >= 200 && status < 300) return { type: "commit" };
   if (status === 400 || status === 422) return { type: "drop", reason: `http_${status}` };
   if (status === 401 || status === 403) return { type: "reauth" };
-  if (status === 408 || status === 429 || status >= 500) {
+  // 426 = daemon too old (the server's min-version gate). Transient by nature:
+  // the daemon auto-updates via its heartbeat, after which the retry succeeds —
+  // so back off and HOLD the batch, never drop it. (Dropping logged an error and
+  // re-spun the same data every scan cycle until the update landed.)
+  if (status === 408 || status === 426 || status === 429 || status >= 500) {
     return { type: "backoff", delayMs: expBackoff(attempt) };
   }
   // Any other 4xx is treated as permanent — drop so we don't spin.
