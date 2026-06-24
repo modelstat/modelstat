@@ -30,11 +30,13 @@ curl -fsSL https://modelstat.ai/install.sh | sh        # macOS / Linux
 irm https://modelstat.ai/install.ps1 | iex             # Windows (PowerShell) — MCP only
 ```
 
-Just the daemon (no MCP wiring)? Any Node runner:
+Already have Node? The package runner does the same — pairs the daemon **and** wires the MCP:
 
 ```bash
 npx modelstat@latest        # or: bunx modelstat@latest  ·  pnpm dlx modelstat@latest
 ```
+
+The only thing the curl script adds is bootstrapping Node when it's missing; with a runner you bring your own. Skip the MCP wiring with `MODELSTAT_NO_WIRE=1` (or run it standalone any time: `npx -y @modelstat/mcp wire`).
 
 The first run downloads the on-device summariser model (~2.7 GB Qwen GGUF to `~/.modelstat/models/`), pairs the device, and installs a **launchd** user daemon on macOS (`~/Library/LaunchAgents/ai.modelstat.daemon.plist`) or a **systemd** user unit on Linux (`~/.config/systemd/user/modelstat.service`). It starts on login and watches your AI-tool logs in the background; the CLI then exits — there's no foreground process to keep open.
 
@@ -47,7 +49,7 @@ Claude Code · Codex · Cursor · Cline · Continue · Aider · Windsurf · Zed 
 ## Commands
 
 ```bash
-npx modelstat@latest                     # install or upgrade. Default action.
+npx modelstat@latest                     # install/upgrade + wire the MCP. Default action.
 npx modelstat@latest remove              # stop and uninstall the background service
 
 npx modelstat@latest status              # pairing, service + live usage: sessions · tokens · cost

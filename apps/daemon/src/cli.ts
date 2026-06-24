@@ -78,6 +78,47 @@ function tryOpenBrowser(url: string): boolean {
   }
 }
 
+/**
+ * Wire the modelstat MCP into every local AI tool, by shelling out to the
+ * single source of truth — `npx -y @modelstat/mcp wire`, the exact same
+ * entry point install.sh / install.ps1 call. This is what lets a bare
+ * `npx modelstat@latest` (no curl installer) configure Claude Code / Cursor
+ * / Codex / VS Code / Zed / Windsurf, so the user can *ask* about the usage
+ * the daemon is now streaming. Best-effort + idempotent: a missing `npx`, a
+ * non-zero exit, or a hang (120s cap) never blocks onboarding.
+ *
+ * In `--json` mode wire's human report is swallowed (it would corrupt the
+ * NDJSON stream) and the caller emits a structured event instead; otherwise
+ * wire prints its own per-tool report under our step line, like install.sh.
+ */
+function wireMcpTools(json: boolean): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("npx", ["-y", "@modelstat/mcp", "wire"], {
+        stdio: json ? ["ignore", "ignore", "pipe"] : "inherit",
+        timeout: 120_000,
+      });
+    } catch (e) {
+      resolve({ ok: false, error: (e as Error).message });
+      return;
+    }
+    let stderr = "";
+    child.stderr?.on("data", (b: Buffer) => {
+      stderr += String(b);
+    });
+    child.on("error", (e: Error) => resolve({ ok: false, error: e.message }));
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      if (code === 0) resolve({ ok: true });
+      else
+        resolve({
+          ok: false,
+          error: stderr.trim() || (signal ? `killed (${signal})` : `exit ${code}`),
+        });
+    });
+  });
+}
+
 /** Substituted by tsup's `define` (see tsup.config.ts) — a string
  * literal like "daemon-0.0.33" in the bundle. Falls back to "daemon-dev"
  * when run unbundled (tsx / tests), where the define isn't applied. */
@@ -631,6 +672,29 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     }
   }
 
+  // ── 6. Wire the modelstat MCP into your local AI tools ────────
+  // The daemon is now streaming usage; wiring the MCP lets the user *ask*
+  // about it from inside Claude Code / Cursor / Codex / VS Code / Zed /
+  // Windsurf. We shell out to the single source of truth —
+  // `npx -y @modelstat/mcp wire`, the same entry point install.sh /
+  // install.ps1 call — so a bare `npx modelstat@latest` (no curl installer)
+  // configures every detected tool too. Best-effort + idempotent; opt out
+  // with MODELSTAT_NO_WIRE=1 (managed fleets that own their MCP config).
+  let mcpWired = false;
+  if (process.env.MODELSTAT_NO_WIRE) {
+    emitEvent(opts, "mcp_wire_skipped", { reason: "MODELSTAT_NO_WIRE" });
+  } else {
+    step("Wiring the modelstat MCP into your AI tools");
+    const w = await wireMcpTools(opts.json);
+    mcpWired = w.ok;
+    if (w.ok) {
+      emitEvent(opts, "mcp_wired", {});
+    } else {
+      emitEvent(opts, "mcp_wire_failed", { error: w.error });
+      warn(`MCP wiring skipped — run \`npx -y @modelstat/mcp wire\` later (${w.error})`);
+    }
+  }
+
   if (!opts.json) {
     const tray = trayStatus();
     const line = "━".repeat(60);
@@ -661,6 +725,11 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     console.log();
     console.log(`  Agent-friendly (for LLMs / MCPs):`);
     console.log(`    \x1b[2m${agentUrl}\x1b[0m`);
+    if (mcpWired) {
+      console.log(
+        `    \x1b[32m✓\x1b[0m \x1b[2mMCP wired into your AI tools — ask them about your spend directly\x1b[0m`,
+      );
+    }
     console.log();
     console.log(`  Claim this device so it keeps analyzing past the free tier:`);
     console.log(`    \x1b[2m${claimUrl}/claim\x1b[0m`);
@@ -675,7 +744,7 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     emitEvent(opts, "browser_open_attempted", { opened });
   }
 
-  emitEvent(opts, "done", { claim_url: claimUrl, agent_url: agentUrl });
+  emitEvent(opts, "done", { claim_url: claimUrl, agent_url: agentUrl, mcp_wired: mcpWired });
 
   if (serviceOk) {
     return; // exit cleanly
@@ -1236,7 +1305,7 @@ async function main(): Promise<void> {
     default:
       console.log("usage:");
       console.log(
-        "  npx modelstat@latest                — install or upgrade. Registers the device, installs the background service, exits.",
+        "  npx modelstat@latest                — install or upgrade. Registers the device, installs the background service, wires the MCP into your AI tools, exits.",
       );
       console.log(
         "                                        flags: --json (NDJSON events on stdout), --no-browser, --fresh, -y",
