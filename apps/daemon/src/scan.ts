@@ -93,6 +93,10 @@ export interface ScanCallbacks {
   /** Called after the POST is confirmed accepted. `events` is the
    * server-accepted count; `segments` is what we sent. */
   onUploaded?: (counts: BatchCounts) => void;
+  /** Called when a batch is PERMANENTLY rejected (400/422) and quarantined —
+   * skipped so newer data keeps flowing. Surfaced loudly (it's daemon-side data
+   * loss for an un-encodable batch); the tray/statusline can show a drop count. */
+  onDropped?: (info: BatchCounts & { reason: string }) => void;
   /** Per-segment progress while a batch is being summarised — the slow,
    * previously-opaque phase. Forwarded straight from the pipeline so the
    * daemon can keep the heartbeat (and the tray) ticking. */
@@ -180,6 +184,9 @@ export interface ScanResult {
   batchesUploaded: number;
   eventsUploaded: number;
   segmentsUploaded: number;
+  /** Batches PERMANENTLY rejected (400/422) and quarantined this run — skipped so
+   * the scan keeps flowing. Non-zero = daemon-side data loss worth investigating. */
+  batchesDropped: number;
   /** True when the per-cycle file cap was hit and older files still remain —
    * the caller should re-scan promptly to drain the rest (newest-first).
    * Always false for an uncapped {@link scanSession}. */
@@ -294,6 +301,7 @@ export async function scanSession(
       batchesUploaded: 0,
       eventsUploaded: 0,
       segmentsUploaded: 0,
+      batchesDropped: 0,
       morePending: false,
     };
   }
@@ -361,6 +369,7 @@ async function runScanOverJobs(
   let batchesUploaded = 0;
   let eventsUploaded = 0;
   let segmentsUploaded = 0;
+  let batchesDropped = 0;
 
   let buffer: RawEvent[] = [];
   // Per-call tool invocations travelling with the events in `buffer`.
@@ -463,6 +472,24 @@ async function runScanOverJobs(
     // These segments are now in-flight.
     cb.onUpload?.({ events: events.length, segments: segments.length });
     const res = await uploadBatch(batch);
+    if (!res.committed) {
+      // PERMANENT server reject (400/422 — an un-encodable batch the server will
+      // never accept). QUARANTINE it: advance these files' cursors PAST the poison
+      // batch so the newest-first scan isn't wedged behind it forever (one bad
+      // batch was blocking every newer file's events). A TRANSIENT failure would
+      // have thrown above instead — held + retried — so good data is never lost on
+      // a blip; only a genuinely-rejected batch is skipped, and loudly.
+      batchesDropped += 1;
+      console.error(
+        `dropped ${events.length} event(s) / ${segments.length} segment(s) — server rejected the batch (${res.reason}); skipping so newer data keeps flowing`,
+      );
+      cb.onDropped?.({ events: events.length, segments: segments.length, reason: res.reason });
+      for (const pc of pendingCursors) state.setCursor(pc.path, pc.cs);
+      pendingCursors = [];
+      buffer = [];
+      toolCallBuffer = [];
+      return;
+    }
     batchesUploaded += 1;
     eventsUploaded += res.accepted;
     segmentsUploaded += segments.length;
@@ -566,6 +593,7 @@ async function runScanOverJobs(
     batchesUploaded,
     eventsUploaded,
     segmentsUploaded,
+    batchesDropped,
     morePending,
   };
 }

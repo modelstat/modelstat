@@ -181,12 +181,20 @@ export async function drainLocalQueue(opts: {
         ...batch,
         events: batch.events.map(({ content_excerpt: _excerpt, ...rest }) => rest),
       };
-      await uploadBatch(shipped);
+      const res = await uploadBatch(shipped);
+      if (!res.committed) {
+        // PERMANENT reject (400/422). Mark sent anyway so this one poison batch
+        // doesn't wedge the queue — a TRANSIENT failure throws above and is
+        // retried, never marked. Loud: it's daemon-side data loss.
+        console.error(
+          `SDK ingest batch ${batch.batch_id} dropped — server rejected it (${res.reason}); skipping so the queue keeps draining`,
+        );
+      }
       await q.markSent(
         batch.events.map((e) => e.source_event_id),
         batch.batch_id,
       );
-      events += batch.events.length;
+      if (res.committed) events += batch.events.length;
     }
     return { batches: batches.length, events };
   } finally {

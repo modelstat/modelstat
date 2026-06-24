@@ -220,22 +220,37 @@ function ingestClient(): IngestClient {
   return _ingest;
 }
 
-export async function uploadBatch(batch: IngestBatch): Promise<{
-  accepted: number;
-  new_sessions: number;
-  updated_sessions: number;
-  batch_id: string;
-}> {
+export type UploadOutcome =
+  | {
+      committed: true;
+      accepted: number;
+      new_sessions: number;
+      updated_sessions: number;
+      batch_id: string;
+    }
+  // The server PERMANENTLY rejected this batch (400/422 — malformed). The caller
+  // must QUARANTINE it (skip past + alert), not retry — see scan.ts.
+  | { committed: false; reason: string };
+
+export async function uploadBatch(batch: IngestBatch): Promise<UploadOutcome> {
   const result = await ingestClient().upload(batch);
-  if (result.kind !== "commit") {
-    throw new Error(`upload failed: ${result.reason}`);
+  if (result.kind === "commit") {
+    return {
+      committed: true,
+      accepted: result.response.accepted,
+      new_sessions: result.response.new_sessions,
+      updated_sessions: result.response.updated_sessions,
+      batch_id: result.response.batch_id,
+    };
   }
-  return {
-    accepted: result.response.accepted,
-    new_sessions: result.response.new_sessions,
-    updated_sessions: result.response.updated_sessions,
-    batch_id: result.response.batch_id,
-  };
+  // A PERMANENT reject is returned (not thrown) so the scan loop can advance past
+  // this one poison batch and keep newer data flowing. A TRANSIENT failure (no
+  // token / reauth / 5xx-exhausted / network) still throws → the batch is held
+  // and retried next cycle, never dropped on a server/network blip.
+  if (result.permanent) {
+    return { committed: false, reason: result.reason };
+  }
+  throw new Error(`upload failed: ${result.reason}`);
 }
 
 /* ─── Self-healing reconcile (anti-entropy) ───────────────────────────
