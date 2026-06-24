@@ -104,7 +104,7 @@ export class IngestClient {
       const token = await this.opts.auth.getToken();
       if (!token) {
         const reauthed = await this.opts.auth.onInvalidToken();
-        if (!reauthed) return { kind: "drop", reason: "no_token" };
+        if (!reauthed) return { kind: "drop", reason: "no_token", permanent: false };
         continue;
       }
       let res: Response;
@@ -143,7 +143,9 @@ export class IngestClient {
           reason: decision.reason,
           body: text.slice(0, 500),
         });
-        return { kind: "drop", reason: decision.reason };
+        // A 400/422 (or other permanent 4xx) — the server will never accept this
+        // payload. Permanent so the caller quarantines it, not holds it.
+        return { kind: "drop", reason: decision.reason, permanent: true };
       }
       if (decision.type === "reauth") {
         // Release the unread body before retrying — with global fetch
@@ -152,7 +154,7 @@ export class IngestClient {
         // loop during a long backfill.
         await res.body?.cancel().catch(() => {});
         const ok = await this.opts.auth.onInvalidToken();
-        if (!ok) return { kind: "drop", reason: "reauth_failed" };
+        if (!ok) return { kind: "drop", reason: "reauth_failed", permanent: false };
         continue; // retry with new token
       }
       // backoff — drain the unread body first (see reauth note). A
@@ -171,13 +173,19 @@ export class IngestClient {
     // "Upload failed: X" message becomes actionable
     // (ECONNREFUSED/ENOTFOUND/etc) instead of "fetch failed".
     const reason = lastFetchError ? `network: ${lastFetchError}` : "max_attempts_exceeded";
-    return { kind: "drop", reason };
+    // Transient: the batch is fine, the server/network wasn't — HOLD + retry.
+    return { kind: "drop", reason, permanent: false };
   }
 }
 
 export type UploadResult =
   | { kind: "commit"; response: IngestResponse }
-  | { kind: "drop"; reason: string };
+  // `permanent`: the server will NEVER accept this exact batch (400/422 — a
+  // malformed/un-encodable payload), so the caller must QUARANTINE it (skip past
+  // it + alert) rather than block the newest-first scan behind it forever.
+  // `!permanent` = transient (no token / reauth failed / 5xx-exhausted / network)
+  // → HOLD the batch and retry next cycle; never drop good data on a blip.
+  | { kind: "drop"; reason: string; permanent: boolean };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => {
