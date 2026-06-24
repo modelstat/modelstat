@@ -110,7 +110,7 @@ The pattern: **resolve names → ids with the `find_*` tools, then pass the ids 
 | `overview` | Spend/usage headline: effective cost, list price, savings, tokens, sessions, taxonomy roots. |
 | `explore` | The analytics workhorse — group/stack by `day`, `hour`, `model`, `tool`, `provider`, `session`, `identity`, `taxonomy`; metrics from cost to per-class tokens; filter by providers/models/tools/identities/session_ids and a `taxonomy` AND-of-OR filter (`[[projId],[debugId]]` = tagged BOTH). |
 | `sessions` | Search/list sessions — filter by taxonomy groups, identity, device, free-text `q`, range (cursor-paginated). |
-| `session_insights` | Live per-session insights for the CURRENT session: tokens, effective $, taxonomy detected, + a `ready`/`analyzing`/`not_ingested` status. `eager:true` force-scans the session locally first; then re-poll while `analyzing`. |
+| `session_insights` | Live per-session insights for the CURRENT session: tokens, effective $, taxonomy detected, + a `ready`/`analyzing`/`not_ingested` status. `eager:true` force-scans the session locally first; then re-poll while `analyzing`. In [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) hosts (Claude Desktop/web) this renders as an inline card; elsewhere it's text + structured data. |
 | `find_taxonomy` | Resolve taxonomy node names → ids (optional `root_key`). |
 | `find_projects` | List/search projects (the `workstreams` root) → node ids, with spend. |
 | `find_people` | Search identities → ids for the `identities` filter. |

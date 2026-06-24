@@ -23,21 +23,32 @@
  * Usage (Claude Desktop claude_desktop_config.json / Claude Code .mcp.json):
  *   { "mcpServers": { "modelstat": { "command": "npx", "args": ["-y", "@modelstat/mcp"] } } }
  *
- * TODO (deferred — see PR notes): an MCP-UI HTML widget for session_insights
- * (ui://modelstat/session-insights). The installed @modelcontextprotocol/sdk
- * (1.x) has no MCP-UI primitive, and MCP-UI lives in a separate, still-evolving
- * package (@mcp-ui/server / @modelcontextprotocol/ext-apps); associating a
- * widget with a tool result also needs the SERVER to stamp the result `_meta`.
- * Rather than ship guessed/broken widget code, the tool returns the server's
- * well-formatted TEXT + structuredContent (works everywhere incl Claude Code).
+ * MCP Apps widget: `session_insights` is tagged with a `ui://` resource
+ * (see widget.ts) so MCP-Apps hosts (Claude Desktop/web) render the live card
+ * in src/view; other clients (Claude Code, etc.) keep the text +
+ * structuredContent fallback. The bridge serves the resource over stdio and
+ * stamps the UI metadata, so core stays UI-agnostic and the data is unchanged.
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  ReadResourceRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { ApiError, api, type McpToolDecl } from "./api.js";
 import { browserClaim } from "./auth.js";
 import { kickDaemonScan } from "./control.js";
 import { loadState, type State, readToolsCache, writeToolsCache } from "./state.js";
+import {
+  WIDGET_TOOL,
+  WIDGET_URI,
+  readWidgetResource,
+  widgetResourceEntry,
+  withResultMeta,
+  withWidgetMeta,
+} from "./widget.js";
 import { runWire } from "./wire.js";
 
 const RANGES = ["today", "7d", "30d", "90d", "mtd", "ytd"] as const;
@@ -232,27 +243,49 @@ const TOOLS: McpToolDecl[] = [
   },
 ];
 
-const server = new Server({ name: "modelstat", version: "0.0.3" }, { capabilities: { tools: {} } });
+const server = new Server(
+  { name: "modelstat", version: "0.0.3" },
+  { capabilities: { tools: {}, resources: {} } },
+);
 
 // ─── ListTools: prefer live catalog, fall back gracefully ────────
+// `withWidgetMeta` tags `session_insights` with its `ui://` resource so
+// MCP-Apps hosts render the widget. The remote catalog is UI-agnostic, so the
+// tag is applied here regardless of source (remote / cached / static).
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const state = loadState();
+  let tools: McpToolDecl[];
   try {
     const live = await api.listTools(state, { timeoutMs: 1500 });
     writeToolsCache(state, live);
     log(`tools=remote count=${live.tools.length}`);
-    return { tools: live.tools };
+    tools = live.tools;
   } catch (err) {
     const reason = (err as Error).message;
     const cached = readToolsCache(state);
     if (cached) {
       log(`tools=cached count=${cached.tools.length} (remote=${reason})`);
-      return { tools: cached.tools };
+      tools = cached.tools;
+    } else {
+      log(`tools=static count=${TOOLS.length} (remote=${reason})`);
+      tools = TOOLS;
     }
-    log(`tools=static count=${TOOLS.length} (remote=${reason})`);
-    return { tools: TOOLS };
   }
+  return { tools: withWidgetMeta(tools) };
+});
+
+// ─── Resources: the one MCP-UI widget (ui://modelstat/session-insights) ──
+
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  resources: [widgetResourceEntry()],
+}));
+
+server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+  if (req.params.uri !== WIDGET_URI) {
+    throw new Error(`Unknown resource: ${req.params.uri}`);
+  }
+  return readWidgetResource();
 });
 
 // ─── CallTool: (eager pre-scan) → forward → pass response through ─
@@ -280,7 +313,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   try {
-    return await api.callTool(state, name, args);
+    const result = await api.callTool(state, name, args);
+    return name === WIDGET_TOOL ? withResultMeta(result) : result;
   } catch (err) {
     if (err instanceof ApiError) {
       if (err.status === 401) {
