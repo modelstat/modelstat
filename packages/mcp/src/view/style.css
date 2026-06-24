@@ -1,0 +1,267 @@
+/*
+ * Session-insights widget styles.
+ *
+ * Colours map to the host's MCP-UI CSS variables (`--color-*`, `--font-*`,
+ * which Claude injects) with self-contained fallbacks so the card also renders
+ * correctly in hosts that don't provide them. Dark mode follows the host theme
+ * (`<html data-theme="dark">`, set by ext-apps `applyDocumentTheme`).
+ */
+
+:root {
+  --ms-bg: var(--color-background-primary, #ffffff);
+  --ms-surface: var(--color-background-secondary, #f7f7f8);
+  --ms-surface-2: var(--color-background-tertiary, #efeff1);
+  --ms-text: var(--color-text-primary, #18181b);
+  --ms-dim: var(--color-text-secondary, #6b7280);
+  --ms-faint: var(--color-text-tertiary, #9ca3af);
+  --ms-border: var(--color-border-primary, #e5e7eb);
+  --ms-accent: #d97706; /* modelstat amber */
+  --ms-ok: var(--color-text-success, #16a34a);
+  --ms-warn: var(--color-text-warning, #d97706);
+  --ms-radius: var(--border-radius-lg, 12px);
+  --ms-font: var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  --ms-mono: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+}
+
+:root[data-theme="dark"] {
+  --ms-bg: var(--color-background-primary, #1a1a1d);
+  --ms-surface: var(--color-background-secondary, #232327);
+  --ms-surface-2: var(--color-background-tertiary, #2c2c31);
+  --ms-text: var(--color-text-primary, #f4f4f5);
+  --ms-dim: var(--color-text-secondary, #a1a1aa);
+  --ms-faint: var(--color-text-tertiary, #71717a);
+  --ms-border: var(--color-border-primary, #3a3a40);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+body {
+  font-family: var(--ms-font);
+  color: var(--ms-text);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+.card {
+  background: var(--ms-bg);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius);
+  padding: 14px 16px;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* header */
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.logo {
+  color: var(--ms-accent);
+  font-size: 14px;
+  line-height: 1;
+}
+.title {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+/* status pill */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--ms-surface);
+  color: var(--ms-dim);
+  white-space: nowrap;
+}
+.pill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ms-faint);
+}
+.pill-ready {
+  color: var(--ms-ok);
+}
+.pill-ready .dot {
+  background: var(--ms-ok);
+}
+.pill-analyzing {
+  color: var(--ms-warn);
+}
+.pill-analyzing .dot {
+  background: var(--ms-warn);
+  animation: pulse 1.3s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* hero metrics */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.hero {
+  display: flex;
+  align-items: baseline;
+  gap: 22px;
+}
+.metric {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.metric-v {
+  font-size: 22px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.metric-r .metric-v {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ms-text);
+}
+.metric-l {
+  font-size: 11px;
+  color: var(--ms-faint);
+}
+
+/* token breakdown */
+.tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tok {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: var(--ms-surface);
+  font-variant-numeric: tabular-nums;
+}
+.tok-n {
+  font-weight: 600;
+  font-size: 12px;
+}
+.tok-l {
+  font-size: 10.5px;
+  color: var(--ms-faint);
+  text-transform: lowercase;
+}
+
+/* taxonomy nodes */
+.nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.node {
+  --chip: var(--ms-accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ms-text);
+  background: color-mix(in srgb, var(--chip) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--chip) 34%, transparent);
+}
+.node-mark {
+  font-size: 12px;
+  line-height: 1;
+}
+.node-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* empty / muted */
+.empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 2px;
+}
+.empty-t {
+  font-weight: 600;
+}
+.empty-s,
+.muted {
+  font-size: 12px;
+  color: var(--ms-dim);
+}
+
+/* footer */
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 14px;
+}
+.foot-l {
+  font-size: 11px;
+  color: var(--ms-faint);
+  font-variant-numeric: tabular-nums;
+}
+.spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ms-surface-2);
+  border-top-color: var(--ms-warn);
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill-analyzing .dot,
+  .spinner {
+    animation: none;
+  }
+}
