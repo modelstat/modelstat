@@ -36,7 +36,7 @@ curl -fsSL https://modelstat.ai/install.sh | sh
 
 **Windows** (PowerShell): `irm https://modelstat.ai/install.ps1 | iex` — wires the MCP into your Windows tools (the local capture daemon is macOS/Linux).
 
-Just the daemon (no MCP wiring)? `npx modelstat@latest` (also `bunx` / `pnpm dlx`). Re-run any installer to upgrade.
+Already have Node? `npx modelstat@latest` (also `bunx` / `pnpm dlx`) does the same — pairs the daemon **and** wires the MCP. Re-run any installer to upgrade.
 
 That's it. Open your dashboard at **[modelstat.ai/dashboard](https://modelstat.ai/dashboard)**. The daemon runs on macOS + every Linux distro (Node 20+).
 
