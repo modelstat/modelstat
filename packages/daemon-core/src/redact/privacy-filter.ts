@@ -101,7 +101,9 @@ export async function createPrivacyFilterRedactor(
   // Loose typing — the pipeline() return type is a complex union and
   // typing it strictly drags in @huggingface/transformers as a hard
   // dependency. We only need the call signature here.
-  type TokenClassifier = (text: string) => Promise<Array<{ entity: string; word: string }>>;
+  type TokenClassifier = (
+    text: string,
+  ) => Promise<Array<{ entity: string; word: string; start?: number; end?: number }>>;
 
   const importModule = opts.importModule ?? ((id: string) => import(/* @vite-ignore */ id));
 
@@ -195,43 +197,74 @@ export async function createPrivacyFilterRedactor(
       return empty;
     }
 
-    // Decode entities from the BIO tags. Transformers.js returns one entry
-    // per subword (O tokens already dropped) and no character offsets for
-    // bert-base-NER, so we group by tag: a `B-` tag or a type change starts
-    // a new entity; an `I-` of the same type extends it. This covers
-    // multi-word names and `##` subwords alike.
-    const spans: Array<{ type: string; words: string[] }> = [];
+    // Decode entities from the BIO tags: a `B-` tag or a type change starts a
+    // new entity, an `I-` of the same type extends it. Transformers.js
+    // returns one entry per subword (O tokens already dropped); we keep each
+    // token's word + character offsets so redaction can use whichever the
+    // model actually provides.
+    type NerToken = { word: string; start?: number; end?: number };
+    const spans: Array<{ type: string; tokens: NerToken[] }> = [];
     for (const t of tokens) {
       const ent = t.entity ?? "";
       if (!ent || ent === "O" || ent === "0") continue;
       const type = ent.replace(/^[BILUE]-/, "").toUpperCase();
       const last = spans[spans.length - 1];
-      if (last && last.type === type && !/^B-/i.test(ent)) last.words.push(t.word);
-      else spans.push({ type, words: [t.word] });
+      if (last && last.type === type && !/^B-/i.test(ent)) last.tokens.push(t);
+      else spans.push({ type, tokens: [t] });
     }
 
-    // Redact each entity by its reconstructed surface text. With no offsets
-    // we match every WORD-BOUNDARY occurrence (Unicode "not flanked by a
-    // letter/digit"). This trades precision for recall — an identical name
-    // elsewhere is also redacted — but word boundaries (NOT raw substring)
-    // keep it from mangling a superstring: the person "Mark" must not touch
-    // "Marketing". Longest surface first so "Ada Lovelace" is redacted
-    // before a standalone "Ada".
-    const surfaces = new Map<string, string>();
-    for (const s of spans) {
-      const surface = reconstructSurface(s.words);
-      if (surface && !surfaces.has(surface)) surfaces.set(surface, s.type);
-    }
     let out = text;
     const extra: Record<string, number> = {};
-    for (const [surface, type] of [...surfaces].sort((a, b) => b[0].length - a[0].length)) {
-      const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(surface)}(?![\\p{L}\\p{N}])`, "gu");
-      let n = 0;
-      out = out.replace(re, () => {
-        n += 1;
-        return `[REDACTED:${type}]`;
-      });
-      if (n > 0) extra[`pf_${type.toLowerCase()}`] = (extra[`pf_${type.toLowerCase()}`] ?? 0) + n;
+    const bump = (type: string, n = 1): void => {
+      const key = `pf_${type.toLowerCase()}`;
+      extra[key] = (extra[key] ?? 0) + n;
+    };
+
+    const haveOffsets =
+      spans.length > 0 &&
+      spans.every((s) =>
+        s.tokens.every((t) => t.start != null && t.end != null && t.end > t.start),
+      );
+
+    if (haveOffsets) {
+      // Precise: redact exactly the detected span — an identical name
+      // elsewhere in the text is left untouched. Right-to-left so each
+      // splice keeps the remaining offsets valid.
+      const ranges = spans
+        .map((s) => ({
+          type: s.type,
+          start: Math.min(...s.tokens.map((t) => t.start as number)),
+          end: Math.max(...s.tokens.map((t) => t.end as number)),
+        }))
+        .sort((a, b) => b.start - a.start);
+      for (const r of ranges) {
+        bump(r.type);
+        out = `${out.slice(0, r.start)}[REDACTED:${r.type}]${out.slice(r.end)}`;
+      }
+    } else {
+      // No offsets: reconstruct each entity's surface text and redact every
+      // WORD-BOUNDARY occurrence (Unicode "not flanked by a letter/digit").
+      // Trades precision for recall — an identical name elsewhere is also
+      // redacted — but word boundaries (NOT raw substring) keep "Mark" from
+      // mangling "Marketing". Longest surface first so "Ada Lovelace" is
+      // redacted before a standalone "Ada".
+      const surfaces = new Map<string, string>();
+      for (const s of spans) {
+        const surface = reconstructSurface(s.tokens.map((t) => t.word));
+        if (surface && !surfaces.has(surface)) surfaces.set(surface, s.type);
+      }
+      for (const [surface, type] of [...surfaces].sort((a, b) => b[0].length - a[0].length)) {
+        const re = new RegExp(
+          `(?<![\\p{L}\\p{N}])${escapeRegExp(surface)}(?![\\p{L}\\p{N}])`,
+          "gu",
+        );
+        let n = 0;
+        out = out.replace(re, () => {
+          n += 1;
+          return `[REDACTED:${type}]`;
+        });
+        if (n > 0) bump(type, n);
+      }
     }
 
     return {

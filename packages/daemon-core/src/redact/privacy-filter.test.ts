@@ -11,8 +11,10 @@ import { test } from "node:test";
 import { OPTIONAL_MODULE_MAX_LOAD_ATTEMPTS } from "../optional-module.js";
 import { createPrivacyFilterRedactor, reconstructSurface } from "./privacy-filter.js";
 
-/** The only fields the redactor reads off a transformers.js token. */
-type FakeToken = { entity: string; word: string };
+/** The fields the redactor reads off a transformers.js token. `start`/`end`
+ * are optional: the redactor uses them when present (precise slicing) and
+ * falls back to surface reconstruction when they're absent. */
+type FakeToken = { entity: string; word: string; start?: number; end?: number };
 
 /** A fake @huggingface/transformers whose token-classifier returns a fixed
  * token list, so we exercise the REAL redaction logic against the actual
@@ -106,6 +108,30 @@ test("offset-less: word boundary — a name must NOT corrupt a superstring", asy
   );
   const out = await redactor("Marketing lead Mark owns the Markdown docs.");
   assert.equal(out.text, "Marketing lead [REDACTED:PER] owns the Markdown docs.");
+  assert.equal((out.counts as Record<string, number>).pf_per, 1);
+});
+
+test("offsets present: redacts ONLY the detected span, not other identical words", async () => {
+  // The maintainer's precise flow. "Paris" appears twice; the model flags
+  // only the person at 20..25, so the city earlier survives — something the
+  // surface fallback (which redacts every occurrence) cannot do.
+  const redactor = await createPrivacyFilterRedactor(
+    fakeTransformers([{ entity: "B-PER", word: "Paris", start: 20, end: 25 }]),
+  );
+  const out = await redactor("We met in Paris and Paris signed off.");
+  assert.equal(out.text, "We met in Paris and [REDACTED:PER] signed off.");
+  assert.equal((out.counts as Record<string, number>).pf_per, 1);
+});
+
+test("offsets present: merges multi-token spans by min-start/max-end", async () => {
+  const redactor = await createPrivacyFilterRedactor(
+    fakeTransformers([
+      { entity: "B-PER", word: "Bob", start: 3, end: 6 },
+      { entity: "I-PER", word: "Smith", start: 7, end: 12 },
+    ]),
+  );
+  const out = await redactor("Hi Bob Smith");
+  assert.equal(out.text, "Hi [REDACTED:PER]");
   assert.equal((out.counts as Record<string, number>).pf_per, 1);
 });
 
