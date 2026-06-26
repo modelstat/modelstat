@@ -92,7 +92,7 @@ test("redacts offset-LESS BIO tokens (the real transformers.js bert-base-NER sha
   assert.equal(counts.pf_org, 1);
 });
 
-test("offset-less: redacts EVERY occurrence of a detected surface (fail-safe)", async () => {
+test("offset-less: redacts every WORD-BOUNDARY occurrence of a detected surface", async () => {
   const redactor = await createPrivacyFilterRedactor(
     fakeTransformers([
       { entity: "B-PER", score: 0.99, index: 0, word: "Ada" },
@@ -102,6 +102,17 @@ test("offset-less: redacts EVERY occurrence of a detected surface (fail-safe)", 
   const out = await redactor("Ada Lovelace paired with Ada Lovelace again.");
   assert.equal(out.text, "[REDACTED:PER] paired with [REDACTED:PER] again.");
   assert.equal((out.counts as Record<string, number>).pf_per, 2);
+});
+
+test("offset-less: word boundary — a name must NOT corrupt a superstring", async () => {
+  // Raw substring redaction would turn "Marketing" into "[REDACTED:PER]eting".
+  // The standalone person "Mark" is redacted; "Marketing"/"Markdown" are not.
+  const redactor = await createPrivacyFilterRedactor(
+    fakeTransformers([{ entity: "B-PER", score: 0.99, index: 2, word: "Mark" }]),
+  );
+  const out = await redactor("Marketing lead Mark owns the Markdown docs.");
+  assert.equal(out.text, "Marketing lead [REDACTED:PER] owns the Markdown docs.");
+  assert.equal((out.counts as Record<string, number>).pf_per, 1);
 });
 
 test("uses precise character offsets when the model provides them", async () => {

@@ -60,6 +60,11 @@ export interface PrivacyFilterAdapterOptions {
   importModule?: (id: string) => Promise<unknown>;
 }
 
+/** Escape a string for literal use inside a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** Reconstruct an entity's surface text from its WordPiece tokens.
  * `##`-prefixed tokens are continuations of the previous word (joined
  * with no space); every other token starts a new word (space-joined).
@@ -237,9 +242,13 @@ export async function createPrivacyFilterRedactor(
     // Redact each span. Prefer precise character offsets when the model
     // provides them; otherwise — the common case on Transformers.js, which
     // omits offsets for bert-base-NER — reconstruct the entity's surface
-    // text from its WordPiece tokens and redact EVERY occurrence by
-    // substring. Substring redaction can over-redact an identical string
-    // elsewhere, which is the safe direction for a privacy filter.
+    // text from its WordPiece tokens and redact its WORD-BOUNDARY
+    // occurrences. This trades precision for recall: an identical name
+    // appearing elsewhere is also redacted (the model emits one entity per
+    // occurrence anyway, and over-redacting a lossy summary abstract is an
+    // acceptable cost). Word boundaries — NOT raw substring — are what keep
+    // it from mangling a superstring (redacting the person "Mark" must not
+    // touch "Marketing").
     let out = text;
     const extra: Record<string, number> = {};
     const bump = (type: string, n = 1): void => {
@@ -274,11 +283,19 @@ export async function createPrivacyFilterRedactor(
         if (surface && !surfaces.has(surface)) surfaces.set(surface, s.type);
       }
       for (const [surface, type] of [...surfaces].sort((a, b) => b[0].length - a[0].length)) {
-        const parts = out.split(surface);
-        if (parts.length > 1) {
-          bump(type, parts.length - 1);
-          out = parts.join(`[REDACTED:${type}]`);
-        }
+        // Boundary = "not flanked by a letter or digit" (Unicode-aware), so
+        // "Mark" matches the standalone name but not the "Mark" inside
+        // "Marketing"/"Markdown".
+        const re = new RegExp(
+          `(?<![\\p{L}\\p{N}])${escapeRegExp(surface)}(?![\\p{L}\\p{N}])`,
+          "gu",
+        );
+        let n = 0;
+        out = out.replace(re, () => {
+          n += 1;
+          return `[REDACTED:${type}]`;
+        });
+        if (n > 0) bump(type, n);
       }
     }
 
