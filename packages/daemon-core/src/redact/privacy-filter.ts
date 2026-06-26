@@ -60,10 +60,17 @@ export interface PrivacyFilterAdapterOptions {
   importModule?: (id: string) => Promise<unknown>;
 }
 
-interface MergedSpan {
-  type: string;
-  start: number;
-  end: number;
+/** Reconstruct an entity's surface text from its WordPiece tokens.
+ * `##`-prefixed tokens are continuations of the previous word (joined
+ * with no space); every other token starts a new word (space-joined).
+ * e.g. ["Globe", "##x", "Corporation"] → "Globex Corporation". */
+export function reconstructSurface(words: string[]): string {
+  let s = "";
+  for (const w of words) {
+    if (w.startsWith("##")) s += w.slice(2);
+    else s += s ? ` ${w}` : w;
+  }
+  return s.trim();
 }
 
 /**
@@ -89,20 +96,23 @@ export async function createPrivacyFilterRedactor(
   // Loose typing — the pipeline() return type is a complex union and
   // typing it strictly drags in @huggingface/transformers as a hard
   // dependency. We only need the call signature here.
-  type TokenClassifier = (
-    text: string,
-  ) => Promise<
+  type TokenClassifier = (text: string) => Promise<
     Array<{
       entity: string;
       score: number;
       word: string;
+      /** Position of the token in the tokenised sequence. A gap between
+       * two entity tokens means an `O` token was dropped between them. */
+      index?: number;
+      /** Character offsets into the input. Transformers.js OMITS these for
+       * several models (incl. bert-base-NER) — the redactor falls back to
+       * surface-string reconstruction when they're absent. */
       start?: number;
       end?: number;
     }>
   >;
 
-  const importModule =
-    opts.importModule ?? ((id: string) => import(/* @vite-ignore */ id));
+  const importModule = opts.importModule ?? ((id: string) => import(/* @vite-ignore */ id));
 
   let cached: TokenClassifier | null = null;
   let loadPromise: Promise<TokenClassifier | null> | null = null;
@@ -136,9 +146,7 @@ export async function createPrivacyFilterRedactor(
           const p = await tjs.pipeline("token-classification", modelId, {
             device,
             dtype,
-            ...(opts.onProgress
-              ? { progress_callback: opts.onProgress }
-              : {}),
+            ...(opts.onProgress ? { progress_callback: opts.onProgress } : {}),
           });
           cached = p;
           return p;
@@ -166,9 +174,7 @@ export async function createPrivacyFilterRedactor(
     return loadPromise;
   }
 
-  return async function redactWithPrivacyFilter(
-    text: string,
-  ): Promise<RedactionResult> {
+  return async function redactWithPrivacyFilter(text: string): Promise<RedactionResult> {
     const empty: RedactionResult = {
       text,
       counts: {
@@ -198,31 +204,82 @@ export async function createPrivacyFilterRedactor(
       return empty;
     }
 
-    // Merge BIO-tagged tokens. Transformers.js 3.x doesn't expose
-    // aggregation_strategy on the JS pipeline (Python-only), so the
-    // model returns one entry per subword. We do span-merging here so
-    // the redaction is deterministic for a given input.
-    const spans: MergedSpan[] = [];
+    // Group consecutive entity tokens into spans. Transformers.js doesn't
+    // expose Python's aggregation_strategy, so it returns one entry per
+    // subword (O tokens already dropped) each with its position `index`.
+    // Same `type` + contiguous `index` + not a fresh `B-` tag = one entity
+    // (covers multi-word names AND `##` subwords); an index gap marks a
+    // dropped O token between two adjacent entities.
+    type NerToken = Awaited<ReturnType<TokenClassifier>>[number];
+    const spans: Array<{ type: string; tokens: NerToken[] }> = [];
+    let prevIndex: number | null = null;
     for (const t of tokens) {
       const ent = t.entity ?? "";
-      if (!ent || ent === "O" || ent === "0") continue;
-      if (t.start == null || t.end == null || t.end <= t.start) continue;
-      const type = ent.replace(/^[BILUE]-/, "").toUpperCase();
-      const last = spans[spans.length - 1];
-      if (last && last.type === type && t.start - last.end <= 2) {
-        last.end = t.end;
-      } else {
-        spans.push({ type, start: t.start, end: t.end });
+      if (!ent || ent === "O" || ent === "0") {
+        prevIndex = null;
+        continue;
       }
+      const type = ent.replace(/^[BILUE]-/, "").toUpperCase();
+      const idx = typeof t.index === "number" ? t.index : null;
+      const last = spans[spans.length - 1];
+      const continues =
+        last != null &&
+        last.type === type &&
+        !/^B-/i.test(ent) &&
+        idx != null &&
+        prevIndex != null &&
+        idx === prevIndex + 1;
+      if (continues) last.tokens.push(t);
+      else spans.push({ type, tokens: [t] });
+      prevIndex = idx;
     }
 
-    spans.sort((a, b) => b.start - a.start);
+    // Redact each span. Prefer precise character offsets when the model
+    // provides them; otherwise — the common case on Transformers.js, which
+    // omits offsets for bert-base-NER — reconstruct the entity's surface
+    // text from its WordPiece tokens and redact EVERY occurrence by
+    // substring. Substring redaction can over-redact an identical string
+    // elsewhere, which is the safe direction for a privacy filter.
     let out = text;
     const extra: Record<string, number> = {};
-    for (const s of spans) {
-      extra[`pf_${s.type.toLowerCase()}`] =
-        (extra[`pf_${s.type.toLowerCase()}`] ?? 0) + 1;
-      out = out.slice(0, s.start) + `[REDACTED:${s.type}]` + out.slice(s.end);
+    const bump = (type: string, n = 1): void => {
+      const key = `pf_${type.toLowerCase()}`;
+      extra[key] = (extra[key] ?? 0) + n;
+    };
+
+    const haveOffsets =
+      spans.length > 0 &&
+      spans.every((s) =>
+        s.tokens.every((t) => t.start != null && t.end != null && t.end > t.start),
+      );
+
+    if (haveOffsets) {
+      const ranges = spans
+        .map((s) => ({
+          type: s.type,
+          start: Math.min(...s.tokens.map((t) => t.start as number)),
+          end: Math.max(...s.tokens.map((t) => t.end as number)),
+        }))
+        // Apply right-to-left so earlier offsets stay valid as we splice.
+        .sort((a, b) => b.start - a.start);
+      for (const r of ranges) {
+        bump(r.type);
+        out = `${out.slice(0, r.start)}[REDACTED:${r.type}]${out.slice(r.end)}`;
+      }
+    } else {
+      // Longest surface first so "Ada Lovelace" is redacted before "Ada".
+      const surfaces = new Map<string, string>();
+      for (const s of spans) {
+        const surface = reconstructSurface(s.tokens.map((t) => t.word));
+        if (surface && !surfaces.has(surface)) surfaces.set(surface, s.type);
+      }
+      for (const [surface, type] of [...surfaces].sort((a, b) => b[0].length - a[0].length)) {
+        const parts = out.split(surface);
+        if (parts.length > 1) {
+          bump(type, parts.length - 1);
+          out = parts.join(`[REDACTED:${type}]`);
+        }
+      }
     }
 
     return {
