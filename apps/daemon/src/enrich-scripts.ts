@@ -7,9 +7,13 @@
  * compacts it to one factual sentence with the bundled model, and attaches the
  * (redacted) abstract to `ToolAction.scripts` as `{ token, summary }`.
  *
- * PRIVACY: the raw command and the file CONTENTS never leave the device. Only
- * the model's one-sentence abstract ships, and only after `redact()` strips any
- * secret/PII it might still contain. `token` is the script's token AS IT APPEARS
+ * PRIVACY: on the default LOCAL path the raw command and the file CONTENTS never
+ * leave the device — only the model's one-sentence abstract ships, and only after
+ * `redact()` strips any secret/PII it might still contain. On the opt-in REMOTE
+ * path (MODELSTAT_LLM_PROVIDER=openai) the script body IS sent to the endpoint to
+ * be summarised, but only after the daemon's pre-send scrubber (regex floor +
+ * on-device NER/PII) runs over it first — see `makeRemotePreSend` in pipeline.ts.
+ * `token` is the script's token AS IT APPEARS
  * IN `command_redacted` (verified to be a substring), so the backend zips each
  * abstract to its place in the redacted command deterministically — no fuzzy
  * matching, no raw paths.

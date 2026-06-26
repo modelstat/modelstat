@@ -30,6 +30,20 @@ export {
   ollamaSummarize,
   ollamaTokenize,
 } from "./ollama.js";
+// Remote OpenAI-compatible summariser — opt-in alternative to the bundled
+// local model, selected by the daemon via MODELSTAT_LLM_PROVIDER=openai.
+export {
+  DEFAULT_LLM_TIMEOUT_MS,
+  defaultOpenAICompatConfig,
+  type OpenAICompatConfig,
+  OpenAICompatConfigError,
+  OpenAICompatRequestError,
+  openaiCognize,
+  openaiEntitle,
+  openaiExtractLinks,
+  openaiScriptSummarize,
+  openaiSummarize,
+} from "./openai-compat.js";
 // Transformers.js BGE-small-en-v1.5 embedder — the wire embedding is
 // 384-dim (BGE-small), so CLI and browser segment vectors land in the
 // same space.
