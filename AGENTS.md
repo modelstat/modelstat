@@ -41,8 +41,22 @@ Things to know:
   for local error/notice messages is passed through as-is (the server
   decides what to hide; the daemon never drops data). The one exception:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
-- The summariser is npm-only, single-path (no Ollama, no fallbacks),
-  staged via `installNativeRuntime`/`_setup-runtime`.
+- The summariser default is the bundled npm path — a Qwen GGUF run via
+  `node-llama-cpp`, staged via `installNativeRuntime`/`_setup-runtime`. It is
+  **not** the only path: if the native runtime can't load, the pipeline degrades
+  to the dependency-free extractive fallback (`resilientSummarize` in
+  `apps/daemon/src/pipeline.ts`) so ingest never blocks — the same fallback
+  catches a **misconfigured** remote provider (bad/incomplete `MODELSTAT_LLM_*`),
+  loudly, instead of crashing a scan. For constrained machines (sandbox, CI, thin
+  laptops) an **opt-in remote** OpenAI-compatible provider is selectable via
+  `MODELSTAT_LLM_PROVIDER=openai` (+ `MODELSTAT_LLM_BASE_URL` / `_MODEL` /
+  `_API_KEY`) — see `packages/daemon-core/src/node/openai-compat.ts`. The remote
+  path is an explicit egress: excerpts + script bodies leave the box, but only
+  after the on-device pre-send scrub (regex floor + NER/PII, `makeRemotePreSend`)
+  runs over them first; embeddings and the output PII redactor stay local. Remote
+  requests retry with bounded backoff (honouring `Retry-After`) and send
+  `max_completion_tokens` (no `temperature`) to o-series/gpt-5 reasoning models.
+  The legacy `ollama.ts` adapter remains exported but is unwired in the daemon.
 - Redaction has **one floor**. The secret-pattern catalogue lives in
   `@modelstat/core/redact-floor` (dependency-free) and is the single source of
   truth for the wire redactor (`@modelstat/core/redact`) and the daemon — add a

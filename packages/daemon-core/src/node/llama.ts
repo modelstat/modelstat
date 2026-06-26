@@ -31,7 +31,16 @@ import {
   type Cognizer,
   parseCognitionReply,
 } from "../pipeline/cognition.js";
+import type { Redactor } from "../pipeline/index.js";
 import { SUMMARISER_SYSTEM_PROMPT, SUMMARISER_TEMPERATURE } from "../pipeline/prompts.js";
+import {
+  applyLlmRedactions,
+  parseRedactReply,
+  REDACT_MAX_TOKENS,
+  REDACT_SYSTEM_PROMPT,
+  REDACT_TEMPERATURE,
+  shouldDeepRedact,
+} from "../pipeline/redaction.js";
 import {
   buildScriptSummaryUserPrompt,
   SCRIPT_SUMMARY_MAX_TOKENS,
@@ -47,15 +56,7 @@ import {
   LINK_EXTRACT_TEMPERATURE,
   type LinkExtractor,
 } from "../pipeline/session-metadata.js";
-import {
-  applyLlmRedactions,
-  parseRedactReply,
-  REDACT_MAX_TOKENS,
-  REDACT_SYSTEM_PROMPT,
-  REDACT_TEMPERATURE,
-  shouldDeepRedact,
-} from "../pipeline/redaction.js";
-import type { Redactor } from "../pipeline/index.js";
+import { stripThinking, THINKING_HEADROOM_TOKENS } from "../pipeline/thinking.js";
 import {
   buildTitleUserPrompt,
   type Entitler,
@@ -124,18 +125,6 @@ export function defaultLlamaConfig(): Required<LlamaConfig> {
     // older machines.
     contextSize: Number(env.MODELSTAT_LLAMA_CONTEXT ?? 4096),
   };
-}
-
-/** Strip `<think>...</think>` reasoning blocks from a Qwen3.5 chat
- * response. The model emits its scratchpad first, then the actual
- * answer. node-llama-cpp v3's chat session returns both verbatim;
- * we want only the answer. Tolerates malformed/unclosed tags by
- * removing trailing open tags too. */
-function stripThinking(text: string): string {
-  return text
-    .replace(/<think>[\s\S]*?<\/think>/gi, "")
-    .replace(/<think>[\s\S]*$/i, "")
-    .trim();
 }
 
 function basenameFromUrl(url: string): string {
@@ -516,7 +505,7 @@ export function llamaCognize(cfg: Required<LlamaConfig> = defaultLlamaConfig()):
         // Qwen3.5 likes to "think" before answering. Give it a small
         // budget — the JSON answer is ~30 tokens but the thinking can
         // run 200-400. The strip below removes the <think> block.
-        maxTokens: COGNITION_MAX_TOKENS + 400,
+        maxTokens: COGNITION_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
       });
       const stripped = stripThinking(raw ?? "");
       return parseCognitionReply(stripped);
@@ -560,7 +549,7 @@ export function llamaEntitle(cfg: Required<LlamaConfig> = defaultLlamaConfig()):
         temperature: TITLER_TEMPERATURE,
         // Same thinking-budget rationale as the cognition pass: the
         // answer is tiny but Qwen3.5 reasons first.
-        maxTokens: TITLER_MAX_TOKENS + 400,
+        maxTokens: TITLER_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
       });
       return stripThinking(raw ?? "") || null;
     });
@@ -605,7 +594,7 @@ export function llamaScriptSummarize(
         temperature: SCRIPT_SUMMARY_TEMPERATURE,
         // Qwen3.5 reasons before answering — give it room on top of the
         // one-sentence answer budget; the slice below enforces the cap.
-        maxTokens: SCRIPT_SUMMARY_MAX_TOKENS + 400,
+        maxTokens: SCRIPT_SUMMARY_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
       });
       const oneLine = stripThinking(raw ?? "")
         .replace(/\s+/g, " ")
@@ -653,7 +642,7 @@ export function llamaExtractLinks(
         temperature: LINK_EXTRACT_TEMPERATURE,
         // Same thinking-budget rationale as cognition/title: the answer is a
         // few short lines but Qwen3.5 reasons first.
-        maxTokens: LINK_EXTRACT_MAX_TOKENS + 400,
+        maxTokens: LINK_EXTRACT_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
       });
       return stripThinking(raw ?? "") || null;
     });
@@ -690,7 +679,7 @@ export function llamaRedact(cfg: Required<LlamaConfig> = defaultLlamaConfig()): 
       const raw = await redactor.prompt(text, {
         temperature: REDACT_TEMPERATURE,
         // Thinking budget on top of the short list of substrings.
-        maxTokens: REDACT_MAX_TOKENS + 400,
+        maxTokens: REDACT_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
       });
       return stripThinking(raw ?? "");
     });
