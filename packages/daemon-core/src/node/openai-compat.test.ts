@@ -235,9 +235,12 @@ test("openaiSummarize: throws OpenAICompatRequestError on a non-2xx reply", asyn
 test("openaiSummarize: throws when the model returns only a <think> block", async () => {
   const ep = await startEndpoint(() => chatReply("<think>only thinking, no answer</think>"));
   try {
+    // Empty-after-strip is a summariser-CONTRACT failure (raised by the
+    // shared makeSummarizer), not an HTTP/transport error — so it surfaces
+    // as a generic Error. It still THROWS so resilientSummarize degrades.
     await assert.rejects(
       () => openaiSummarize(ep.cfg)({ prompt: "p", maxTokens: 64 }),
-      OpenAICompatRequestError,
+      /no answer text/,
     );
   } finally {
     await ep.close();

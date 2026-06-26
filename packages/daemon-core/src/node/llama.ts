@@ -23,16 +23,17 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { COGNITION_SYSTEM_PROMPT, type Cognizer } from "../pipeline/cognition.js";
+import type { Redactor, Summarizer } from "../pipeline/index.js";
 import {
-  buildCognitionUserPrompt,
-  COGNITION_MAX_TOKENS,
-  COGNITION_SYSTEM_PROMPT,
-  COGNITION_TEMPERATURE,
-  type Cognizer,
-  parseCognitionReply,
-} from "../pipeline/cognition.js";
-import type { Redactor } from "../pipeline/index.js";
-import { SUMMARISER_SYSTEM_PROMPT, SUMMARISER_TEMPERATURE } from "../pipeline/prompts.js";
+  type ChatComplete,
+  makeCognizer,
+  makeEntitler,
+  makeLinkExtractor,
+  makeScriptSummarizer,
+  makeSummarizer,
+} from "../pipeline/passes.js";
+import { SUMMARISER_SYSTEM_PROMPT } from "../pipeline/prompts.js";
 import {
   applyLlmRedactions,
   parseRedactReply,
@@ -41,29 +42,10 @@ import {
   REDACT_TEMPERATURE,
   shouldDeepRedact,
 } from "../pipeline/redaction.js";
-import {
-  buildScriptSummaryUserPrompt,
-  SCRIPT_SUMMARY_MAX_TOKENS,
-  SCRIPT_SUMMARY_OUTPUT_MAX_CHARS,
-  SCRIPT_SUMMARY_SYSTEM_PROMPT,
-  SCRIPT_SUMMARY_TEMPERATURE,
-  type ScriptSummarizer,
-} from "../pipeline/script-summary.js";
-import {
-  buildLinkExtractUserPrompt,
-  LINK_EXTRACT_MAX_TOKENS,
-  LINK_EXTRACT_SYSTEM_PROMPT,
-  LINK_EXTRACT_TEMPERATURE,
-  type LinkExtractor,
-} from "../pipeline/session-metadata.js";
+import { SCRIPT_SUMMARY_SYSTEM_PROMPT, type ScriptSummarizer } from "../pipeline/script-summary.js";
+import { LINK_EXTRACT_SYSTEM_PROMPT, type LinkExtractor } from "../pipeline/session-metadata.js";
 import { stripThinking, THINKING_HEADROOM_TOKENS } from "../pipeline/thinking.js";
-import {
-  buildTitleUserPrompt,
-  type Entitler,
-  TITLER_MAX_TOKENS,
-  TITLER_SYSTEM_PROMPT,
-  TITLER_TEMPERATURE,
-} from "../pipeline/title.js";
+import { type Entitler, TITLER_SYSTEM_PROMPT } from "../pipeline/title.js";
 
 export interface LlamaConfig {
   /** Filesystem path to a GGUF model. If absent, we download `modelUrl`
@@ -102,12 +84,6 @@ export interface LlamaConfig {
  */
 export const DEFAULT_LLAMA_MODEL_URL =
   "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf";
-
-/** Token budget for one summarise call. The Qwen3.5 thinking pass
- * routinely uses 400-800 tokens before producing the answer; ceil at
- * 1024 so we have ~200 tokens left for the actual sentence. The
- * pipeline still slices the post-`<think>` text to 240 chars. */
-const LLAMA_MAX_TOKENS = 1024;
 
 export function defaultLlamaConfig(): Required<LlamaConfig> {
   const env =
@@ -422,43 +398,31 @@ async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
 }
 
 /**
- * Summariser adapter — drop-in for `ollamaSummarize`. Same prompt
- * contract, same output cap (≤240 chars). On first call, pulls the
- * GGUF model to disk and warms up the llama context; subsequent calls
- * are queued through a single in-process serialiser.
+ * A {@link ChatComplete} backed by one preloaded chat session — the
+ * bundled runtime's single point of variation; the per-pass logic lives
+ * in `../pipeline/passes.ts`. `pick` selects which session runs the
+ * completion (each was created in `loadOnce` with its pass's system
+ * prompt baked in, so the port ignores `req.system`).
+ *
+ * Serialisation invariant (do not change lightly): the chat session has
+ * ONE context sequence, so concurrent prompts would interleave. We chain
+ * every call through the module `inflight` queue — `resetChatHistory()`
+ * runs INSIDE the `.then` callback (never before queuing, or a later
+ * caller could reset a call mid-flight), and `inflight` is reassigned to
+ * THIS call's promise so the next caller awaits us. `loadOnce` throws
+ * propagate: the summariser pass surfaces them (→ degrade), best-effort
+ * passes catch them (→ null), exactly as before.
  */
-export function llamaSummarize(
-  cfg: Required<LlamaConfig> = defaultLlamaConfig(),
-): (input: { prompt: string; maxTokens: number }) => Promise<string> {
-  return async ({ prompt, maxTokens }) => {
-    const { summarizer } = await loadOnce(cfg);
-    // Serialise: the chat session has one context sequence and
-    // concurrent prompts would interleave. Replace `inflight` with
-    // this call's promise so the next caller awaits us, not the one
-    // before us.
+function llamaChat(cfg: Required<LlamaConfig>, pick: (l: Loaded) => Session): ChatComplete {
+  return async (req) => {
+    const session = pick(await loadOnce(cfg));
     const run = inflight.then(async () => {
-      summarizer.resetChatHistory();
-      // Ignore the caller's tiny `maxTokens` (≈80) when running the
-      // bundled thinking model — it'd starve the reasoning pass and
-      // we'd ship empty abstracts. The sentence cap is enforced by
-      // the post-strip slice below, not the token budget.
-      void maxTokens;
-      const raw = await summarizer.prompt(prompt, {
-        temperature: SUMMARISER_TEMPERATURE,
-        maxTokens: LLAMA_MAX_TOKENS,
+      session.resetChatHistory();
+      const raw = await session.prompt(req.user, {
+        temperature: req.temperature,
+        maxTokens: req.maxTokens,
       });
-      const stripped = stripThinking(raw ?? "");
-      if (stripped.length === 0) {
-        // Either the model produced only thinking and ran out of
-        // budget, or the chat template isn't recognised and we got
-        // garbage. Either way the caller (daemon-core/pipeline)
-        // throws on empty — surface a clearer reason here so the
-        // operator can act on it.
-        throw new Error(
-          `bundled summariser produced no answer text after stripping <think> blocks (raw length=${(raw ?? "").length}). The thinking budget may be too low or the model template is misconfigured.`,
-        );
-      }
-      return stripped.slice(0, 240);
+      return stripThinking(raw ?? "");
     });
     inflight = run.catch(() => undefined);
     return run;
@@ -466,193 +430,48 @@ export function llamaSummarize(
 }
 
 /**
- * Cognition adapter — drop-in for `ollamaCognize`. Reads the post-
- * redaction abstract and tags `{ emotions, meta }` via the same Qwen
- * model that did the summarise pass, but on a separate
- * `LlamaChatSession` whose system prompt is `COGNITION_SYSTEM_PROMPT`.
- *
- * Best-effort: any failure (model not loaded, JSON parse fail, empty
- * answer after stripping <think>) returns null and the segment ships
- * without a `[Mood: …] [Mind: …]` suffix. The pipeline catches null
- * and continues — see `daemon-core/pipeline/index.ts` for the
- * append logic.
- *
- * Cost: one extra model call per segment, serialised through the same
- * `inflight` queue as the summariser. Typical latency on Apple Silicon
- * is 200-500 ms because the answer is tiny (~30 tokens of JSON) and
- * the thinking budget is capped low. The model itself is already
- * resident in memory, so the marginal RAM cost is just the second
- * 2K-token KV-cache (~tens of MB).
+ * Summariser adapter — REQUIRED output, drop-in for `ollamaSummarize`.
+ * Same prompt contract, same ≤240-char cap (both owned by
+ * `makeSummarizer`). On first call, pulls the GGUF to disk and warms the
+ * llama context; subsequent calls queue through the `inflight` serialiser.
  */
+export function llamaSummarize(cfg: Required<LlamaConfig> = defaultLlamaConfig()): Summarizer {
+  return makeSummarizer(llamaChat(cfg, (l) => l.summarizer));
+}
+
+/** Cognition adapter — best-effort `{ emotions, meta }` tags from the
+ * post-redaction abstract, on the `COGNITION_SYSTEM_PROMPT` session.
+ * Failure ⇒ null and the segment ships without the suffix. */
 export function llamaCognize(cfg: Required<LlamaConfig> = defaultLlamaConfig()): Cognizer {
-  return async ({ abstract }) => {
-    if (!abstract || abstract.trim().length < 12) return null;
-    let loadedSessions: Loaded;
-    try {
-      loadedSessions = await loadOnce(cfg);
-    } catch {
-      // If the model isn't loadable here, the summariser would have
-      // raised already and the agent wouldn't be running. Still:
-      // best-effort by contract — fall through to null rather than
-      // throwing during a post-summarise hook.
-      return null;
-    }
-    const { cognizer } = loadedSessions;
-    const run = inflight.then(async () => {
-      cognizer.resetChatHistory();
-      const raw = await cognizer.prompt(buildCognitionUserPrompt(abstract), {
-        temperature: COGNITION_TEMPERATURE,
-        // Qwen3.5 likes to "think" before answering. Give it a small
-        // budget — the JSON answer is ~30 tokens but the thinking can
-        // run 200-400. The strip below removes the <think> block.
-        maxTokens: COGNITION_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
-      });
-      const stripped = stripThinking(raw ?? "");
-      return parseCognitionReply(stripped);
-    });
-    inflight = run.catch(() => undefined);
-    try {
-      return await run;
-    } catch {
-      return null;
-    }
-  };
+  return makeCognizer(llamaChat(cfg, (l) => l.cognizer));
 }
 
-/**
- * Session-title adapter — one short call per session per upload, on a
- * third `LlamaChatSession` whose system prompt is `TITLER_SYSTEM_PROMPT`.
- * Reads the session's segment abstracts (already produced + redacted by
- * the summarise pass) and names the session's dominant theme(s).
- *
- * Best-effort, same contract as `llamaCognize`: any failure returns
- * null and the caller (`buildSessionTitles`) falls back to its
- * deterministic title. The model is already resident, so the marginal
- * cost is one ~40-token answer plus thinking budget — well under a
- * second per session on Apple Silicon.
- */
+/** Session-title adapter — best-effort, on the `TITLER_SYSTEM_PROMPT`
+ * session. Failure ⇒ null and `buildSessionTitles` uses its
+ * deterministic fallback. */
 export function llamaEntitle(cfg: Required<LlamaConfig> = defaultLlamaConfig()): Entitler {
-  return async (input) => {
-    if (input.abstracts.length === 0) return null;
-    let loadedSessions: Loaded;
-    try {
-      loadedSessions = await loadOnce(cfg);
-    } catch {
-      // Best-effort by contract — if the model can't load here the
-      // summariser already surfaced the failure at startup.
-      return null;
-    }
-    const { entitler } = loadedSessions;
-    const run = inflight.then(async () => {
-      entitler.resetChatHistory();
-      const raw = await entitler.prompt(buildTitleUserPrompt(input), {
-        temperature: TITLER_TEMPERATURE,
-        // Same thinking-budget rationale as the cognition pass: the
-        // answer is tiny but Qwen3.5 reasons first.
-        maxTokens: TITLER_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
-      });
-      return stripThinking(raw ?? "") || null;
-    });
-    inflight = run.catch(() => undefined);
-    try {
-      return await run;
-    } catch {
-      return null;
-    }
-  };
+  return makeEntitler(llamaChat(cfg, (l) => l.entitler));
 }
 
-/**
- * Per-script content-summary adapter — the fourth chat session, system prompt
- * `SCRIPT_SUMMARY_SYSTEM_PROMPT`. Reads a script/bash FILE's (capped) contents
- * and returns one factual sentence (≤200 chars) describing what running it does,
- * so the backend understands a command's real effect without seeing the file.
- *
- * Best-effort, same contract as `llamaCognize`/`llamaEntitle`: any failure
- * (model not loadable, empty answer after stripping <think>) returns null and
- * the agent ships that script without an abstract — the call still carries its
- * redacted command. The agent redacts the returned sentence before it goes on
- * the wire; the file contents themselves never leave the device.
- */
+/** Per-script content-summary adapter — best-effort, on the
+ * `SCRIPT_SUMMARY_SYSTEM_PROMPT` session. One factual sentence per script
+ * FILE; failure ⇒ null and the call ships without a script abstract. The
+ * file contents never leave the device on this local path. */
 export function llamaScriptSummarize(
   cfg: Required<LlamaConfig> = defaultLlamaConfig(),
 ): ScriptSummarizer {
-  return async ({ ref, content }) => {
-    if (!content || content.trim().length === 0) return null;
-    let loadedSessions: Loaded;
-    try {
-      loadedSessions = await loadOnce(cfg);
-    } catch {
-      // Best-effort by contract — if the model can't load here the
-      // summariser already surfaced the failure at startup.
-      return null;
-    }
-    const { scriptSummarizer } = loadedSessions;
-    const run = inflight.then(async () => {
-      scriptSummarizer.resetChatHistory();
-      const raw = await scriptSummarizer.prompt(buildScriptSummaryUserPrompt({ ref, content }), {
-        temperature: SCRIPT_SUMMARY_TEMPERATURE,
-        // Qwen3.5 reasons before answering — give it room on top of the
-        // one-sentence answer budget; the slice below enforces the cap.
-        maxTokens: SCRIPT_SUMMARY_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
-      });
-      const oneLine = stripThinking(raw ?? "")
-        .replace(/\s+/g, " ")
-        .trim();
-      return oneLine ? oneLine.slice(0, SCRIPT_SUMMARY_OUTPUT_MAX_CHARS) : null;
-    });
-    inflight = run.catch(() => undefined);
-    try {
-      return await run;
-    } catch {
-      return null;
-    }
-  };
+  return makeScriptSummarizer(llamaChat(cfg, (l) => l.scriptSummarizer));
 }
 
-/**
- * Link-extraction adapter — one short call per session, on a fifth
- * `LlamaChatSession` whose system prompt is `LINK_EXTRACT_SYSTEM_PROMPT`.
- * Reads the session's redacted abstracts and emits any PR/issue/commit/repo
- * references it sees as plain text (one per line, or `none`). The caller
- * (`buildSessionMetadata`) re-parses that text deterministically, so a
- * hallucinated line that isn't a valid reference is simply dropped.
- *
- * This is the provider-agnostic channel: it works for clients whose logs
- * carry no structured git data (web chat, Cursor), since it reads the same
- * summarised text the dashboard shows. Best-effort, same contract as
- * `llamaEntitle`: any failure returns null and detection falls back to the
- * deterministic git + content channels.
- */
+/** Link-extraction adapter — best-effort, on the
+ * `LINK_EXTRACT_SYSTEM_PROMPT` session. Surfaces PR/issue/commit/repo
+ * refs from the redacted abstracts for clients whose logs carry no git
+ * data; failure ⇒ null and detection falls back to the deterministic
+ * git + content channels. */
 export function llamaExtractLinks(
   cfg: Required<LlamaConfig> = defaultLlamaConfig(),
 ): LinkExtractor {
-  return async ({ abstracts }) => {
-    if (abstracts.length === 0) return null;
-    let loadedSessions: Loaded;
-    try {
-      loadedSessions = await loadOnce(cfg);
-    } catch {
-      return null;
-    }
-    const { linkExtractor } = loadedSessions;
-    const run = inflight.then(async () => {
-      linkExtractor.resetChatHistory();
-      const raw = await linkExtractor.prompt(buildLinkExtractUserPrompt(abstracts), {
-        temperature: LINK_EXTRACT_TEMPERATURE,
-        // Same thinking-budget rationale as cognition/title: the answer is a
-        // few short lines but Qwen3.5 reasons first.
-        maxTokens: LINK_EXTRACT_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
-      });
-      return stripThinking(raw ?? "") || null;
-    });
-    inflight = run.catch(() => undefined);
-    try {
-      return await run;
-    } catch {
-      return null;
-    }
-  };
+  return makeLinkExtractor(llamaChat(cfg, (l) => l.linkExtractor));
 }
 
 /**

@@ -71,6 +71,15 @@ import { runtimeState } from "./runtime-state.js";
 
 let adapters: PipelineAdapters | null = null;
 
+// The local 384-dim BGE-small embedder + the Qwen-family tokenizer
+// heuristic are identical across every adapter set (bundled, remote,
+// degraded) — embeddings ALWAYS stay on-device regardless of summariser
+// provider. The embedder factory returns a closure that does its real
+// (async, cached) work on first call, so constructing it once here is
+// free until the first segment.
+const localEmbed = createTransformersJsEmbedder();
+const tokenize = (text: string): number => Math.max(1, Math.ceil(text.length / 4));
+
 // ── Always-works summariser ────────────────────────────────────────────────
 // The bundled Qwen LLM is the quality path, but it must NEVER block ingest. If
 // it can't run on this machine (native runtime missing, model not downloaded,
@@ -160,9 +169,9 @@ async function bundledAdapters(): Promise<PipelineAdapters> {
     // across runtimes via cosine similarity. (This path used to ship
     // vector-less with empty arrays; hooking embeddings here attaches a
     // real abstract embedding to each segment.)
-    embed: createTransformersJsEmbedder(),
+    embed: localEmbed,
     summarize: resilientSummarize(llamaSummarize(llamaCfg), LLM_RETRY_COOLDOWN_LOCAL_MS),
-    tokenize: (text: string) => Math.max(1, Math.ceil(text.length / 4)),
+    tokenize,
     cognize: llamaCognize(llamaCfg),
     // Session-title pass — same bundled model, third chat session with
     // TITLER_SYSTEM_PROMPT. One short call per session per upload (the
@@ -279,9 +288,9 @@ async function remoteAdapters(cfg: OpenAICompatConfig): Promise<PipelineAdapters
   const privacyFilter = await createPrivacyFilterRedactor();
   const preSend = makeRemotePreSend(privacyFilter);
   return {
-    embed: createTransformersJsEmbedder(),
+    embed: localEmbed,
     summarize: resilientSummarize(openaiSummarize(cfg, preSend), LLM_RETRY_COOLDOWN_REMOTE_MS),
-    tokenize: (text: string) => Math.max(1, Math.ceil(text.length / 4)),
+    tokenize,
     cognize: openaiCognize(cfg),
     entitle: openaiEntitle(cfg),
     extractLinks: openaiExtractLinks(cfg),
@@ -296,9 +305,9 @@ async function remoteAdapters(cfg: OpenAICompatConfig): Promise<PipelineAdapters
  * operator explicitly opted out of by choosing the remote provider. */
 async function degradedAdapters(): Promise<PipelineAdapters> {
   return {
-    embed: createTransformersJsEmbedder(),
+    embed: localEmbed,
     summarize: heuristicSummarize(),
-    tokenize: (text: string) => Math.max(1, Math.ceil(text.length / 4)),
+    tokenize,
     redact: await createPrivacyFilterRedactor(),
   };
 }

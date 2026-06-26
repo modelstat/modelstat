@@ -22,38 +22,21 @@
  */
 
 import { z } from "zod";
+import type { Cognizer } from "../pipeline/cognition.js";
+import type { Summarizer } from "../pipeline/index.js";
 import {
-  buildCognitionUserPrompt,
-  COGNITION_MAX_TOKENS,
-  COGNITION_SYSTEM_PROMPT,
-  COGNITION_TEMPERATURE,
-  type Cognizer,
-  parseCognitionReply,
-} from "../pipeline/cognition.js";
-import { SUMMARISER_SYSTEM_PROMPT, SUMMARISER_TEMPERATURE } from "../pipeline/prompts.js";
-import {
-  buildScriptSummaryUserPrompt,
-  SCRIPT_SUMMARY_MAX_TOKENS,
-  SCRIPT_SUMMARY_OUTPUT_MAX_CHARS,
-  SCRIPT_SUMMARY_SYSTEM_PROMPT,
-  SCRIPT_SUMMARY_TEMPERATURE,
-  type ScriptSummarizer,
-} from "../pipeline/script-summary.js";
-import {
-  buildLinkExtractUserPrompt,
-  LINK_EXTRACT_MAX_TOKENS,
-  LINK_EXTRACT_SYSTEM_PROMPT,
-  LINK_EXTRACT_TEMPERATURE,
-  type LinkExtractor,
-} from "../pipeline/session-metadata.js";
-import { stripThinking, THINKING_HEADROOM_TOKENS } from "../pipeline/thinking.js";
-import {
-  buildTitleUserPrompt,
-  type Entitler,
-  TITLER_MAX_TOKENS,
-  TITLER_SYSTEM_PROMPT,
-  TITLER_TEMPERATURE,
-} from "../pipeline/title.js";
+  type ChatComplete,
+  type ChatRequest,
+  makeCognizer,
+  makeEntitler,
+  makeLinkExtractor,
+  makeScriptSummarizer,
+  makeSummarizer,
+} from "../pipeline/passes.js";
+import type { ScriptSummarizer } from "../pipeline/script-summary.js";
+import type { LinkExtractor } from "../pipeline/session-metadata.js";
+import { stripThinking } from "../pipeline/thinking.js";
+import type { Entitler } from "../pipeline/title.js";
 
 /**
  * Scrubs a string of PII/secrets BEFORE it is POSTed to the remote
@@ -116,12 +99,6 @@ const MAX_BACKOFF_MS = 8_000;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Token budget for the summarise call. Generous so a thinking model
- * doesn't starve its reasoning pass; non-thinking models stop at EOS
- * well before this. The sentence cap is enforced by the slice, not the
- * budget. */
-const SUMMARY_MAX_TOKENS = 1024;
-
 /**
  * Resolve the remote-LLM config from the environment. Throws
  * {@link OpenAICompatConfigError} when `MODELSTAT_LLM_BASE_URL` or
@@ -158,13 +135,6 @@ const ChatCompletionResponse = z.object({
     .array(z.object({ message: z.object({ content: z.string().nullish() }).optional() }))
     .default([]),
 });
-
-interface ChatRequest {
-  readonly system: string;
-  readonly user: string;
-  readonly temperature: number;
-  readonly maxTokens: number;
-}
 
 /** Reasoning models (OpenAI o-series, gpt-5) reject the classic
  * `max_tokens` field — they require `max_completion_tokens` — and reject
@@ -289,128 +259,55 @@ async function chatComplete(
 }
 
 /**
- * Summariser adapter — drop-in for `llamaSummarize`/`ollamaSummarize`.
- * Throws on transport failure or empty output so the resilient wrapper
- * in apps/daemon can degrade to the extractive fallback.
- *
- * `preSend` runs the on-device NER/PII pass over the prompt (which
- * embeds the sampled conversation excerpts) BEFORE it is POSTed — the
- * remote path's egress guard. The local llama path needs no equivalent
- * because the prompt never leaves the machine.
+ * A {@link ChatComplete} backed by this endpoint — the remote runtime's
+ * single point of variation; the per-pass logic lives in
+ * `../pipeline/passes.ts`. `preSend` scrubs the user content (PII/secrets)
+ * before it leaves the machine: pass it for passes that carry RAW content
+ * (summarise, script-summary) and OMIT it for passes over already-redacted
+ * abstracts (cognition, title, link-extract) so we never re-run NER on
+ * clean input.
  */
-export function openaiSummarize(
-  cfg: OpenAICompatConfig,
-  preSend?: PreSendRedactor,
-): (input: { prompt: string; maxTokens: number }) => Promise<string> {
-  return async ({ prompt }) => {
-    const out = await chatComplete(
-      cfg,
-      {
-        system: SUMMARISER_SYSTEM_PROMPT,
-        user: prompt,
-        temperature: SUMMARISER_TEMPERATURE,
-        maxTokens: SUMMARY_MAX_TOKENS,
-      },
-      preSend,
-    );
-    if (out.length === 0) {
-      throw new OpenAICompatRequestError(
-        0,
-        `remote summariser (${cfg.model}) returned no answer text after stripping <think> blocks`,
-      );
-    }
-    return out.slice(0, 240);
-  };
+export function openaiChat(cfg: OpenAICompatConfig, preSend?: PreSendRedactor): ChatComplete {
+  return (req) => chatComplete(cfg, req, preSend);
 }
 
-/** Cognition adapter — best-effort mood/mind/posture tags from the
- * already-redacted abstract. Any failure ⇒ null (segment ships without
- * the suffix). Mirrors `llamaCognize`. */
+/**
+ * Summariser adapter — REQUIRED output, drop-in for `llamaSummarize`.
+ * Throws on transport failure or empty output so the resilient wrapper in
+ * apps/daemon can degrade to the extractive fallback. `preSend` is the
+ * remote path's egress guard: the prompt (which embeds the sampled
+ * conversation excerpts) is NER/PII-scrubbed on-device before it is
+ * POSTed — the local llama path needs no equivalent because the prompt
+ * never leaves the machine.
+ */
+export function openaiSummarize(cfg: OpenAICompatConfig, preSend?: PreSendRedactor): Summarizer {
+  return makeSummarizer(openaiChat(cfg, preSend));
+}
+
+/** Cognition adapter — best-effort mood/mind/posture tags over the
+ * already-redacted abstract (no `preSend`). Mirrors `llamaCognize`. */
 export function openaiCognize(cfg: OpenAICompatConfig): Cognizer {
-  return async ({ abstract }) => {
-    if (!abstract || abstract.trim().length < 12) return null;
-    try {
-      const out = await chatComplete(cfg, {
-        system: COGNITION_SYSTEM_PROMPT,
-        user: buildCognitionUserPrompt(abstract),
-        temperature: COGNITION_TEMPERATURE,
-        maxTokens: COGNITION_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
-      });
-      return parseCognitionReply(out);
-    } catch {
-      // best-effort by contract: any transport/parse failure ⇒ no signal.
-      return null;
-    }
-  };
+  return makeCognizer(openaiChat(cfg));
 }
 
-/** Session-title adapter — best-effort, one short call per session over
- * the redacted abstracts. Failure ⇒ null and the caller falls back to a
- * deterministic title. Mirrors `llamaEntitle`. */
+/** Session-title adapter — best-effort, over already-redacted abstracts.
+ * Mirrors `llamaEntitle`. */
 export function openaiEntitle(cfg: OpenAICompatConfig): Entitler {
-  return async (input) => {
-    if (input.abstracts.length === 0) return null;
-    try {
-      const out = await chatComplete(cfg, {
-        system: TITLER_SYSTEM_PROMPT,
-        user: buildTitleUserPrompt(input),
-        temperature: TITLER_TEMPERATURE,
-        maxTokens: TITLER_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
-      });
-      return out || null;
-    } catch {
-      // best-effort by contract: failure ⇒ deterministic fallback title.
-      return null;
-    }
-  };
+  return makeEntitler(openaiChat(cfg));
 }
 
-/** Link-extraction adapter — best-effort, surfaces PR/issue/commit refs
- * from the redacted abstracts as free text the caller re-parses
- * deterministically. Failure ⇒ null. Mirrors `llamaExtractLinks`. */
+/** Link-extraction adapter — best-effort, over already-redacted
+ * abstracts. Mirrors `llamaExtractLinks`. */
 export function openaiExtractLinks(cfg: OpenAICompatConfig): LinkExtractor {
-  return async ({ abstracts }) => {
-    if (abstracts.length === 0) return null;
-    try {
-      const out = await chatComplete(cfg, {
-        system: LINK_EXTRACT_SYSTEM_PROMPT,
-        user: buildLinkExtractUserPrompt(abstracts),
-        temperature: LINK_EXTRACT_TEMPERATURE,
-        maxTokens: LINK_EXTRACT_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
-      });
-      return out || null;
-    } catch {
-      // best-effort by contract: failure ⇒ deterministic git/content channels.
-      return null;
-    }
-  };
+  return makeLinkExtractor(openaiChat(cfg));
 }
 
-/** Per-script content-summary adapter — best-effort. The agent reads
- * the file and redacts the returned sentence; failure ⇒ null and the
- * call ships without a script abstract. Mirrors `llamaScriptSummarize`. */
+/** Per-script content-summary adapter — best-effort. `preSend` scrubs the
+ * raw script body before it is POSTed (remote egress guard). Mirrors
+ * `llamaScriptSummarize`. */
 export function openaiScriptSummarize(
   cfg: OpenAICompatConfig,
   preSend?: PreSendRedactor,
 ): ScriptSummarizer {
-  return async ({ ref, content }) => {
-    if (!content || content.trim().length === 0) return null;
-    try {
-      const out = await chatComplete(
-        cfg,
-        {
-          system: SCRIPT_SUMMARY_SYSTEM_PROMPT,
-          user: buildScriptSummaryUserPrompt({ ref, content }),
-          temperature: SCRIPT_SUMMARY_TEMPERATURE,
-          maxTokens: SCRIPT_SUMMARY_MAX_TOKENS + THINKING_HEADROOM_TOKENS,
-        },
-        preSend,
-      );
-      const oneLine = out.replace(/\s+/g, " ").trim();
-      return oneLine ? oneLine.slice(0, SCRIPT_SUMMARY_OUTPUT_MAX_CHARS) : null;
-    } catch {
-      // best-effort by contract: failure ⇒ ship the call without a script abstract.
-      return null;
-    }
-  };
+  return makeScriptSummarizer(openaiChat(cfg, preSend));
 }
