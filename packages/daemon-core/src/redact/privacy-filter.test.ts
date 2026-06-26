@@ -11,14 +11,8 @@ import { test } from "node:test";
 import { OPTIONAL_MODULE_MAX_LOAD_ATTEMPTS } from "../optional-module.js";
 import { createPrivacyFilterRedactor, reconstructSurface } from "./privacy-filter.js";
 
-type FakeToken = {
-  entity: string;
-  score: number;
-  word: string;
-  index?: number;
-  start?: number;
-  end?: number;
-};
+/** The only fields the redactor reads off a transformers.js token. */
+type FakeToken = { entity: string; word: string };
 
 /** A fake @huggingface/transformers whose token-classifier returns a fixed
  * token list, so we exercise the REAL redaction logic against the actual
@@ -76,11 +70,11 @@ test("redacts offset-LESS BIO tokens (the real transformers.js bert-base-NER sha
   const text = "Escalate the incident to Katherine Johnson at Globex Corporation.";
   const redactor = await createPrivacyFilterRedactor(
     fakeTransformers([
-      { entity: "B-PER", score: 0.99, index: 7, word: "Katherine" },
-      { entity: "I-PER", score: 0.99, index: 8, word: "Johnson" },
-      { entity: "B-ORG", score: 0.99, index: 10, word: "Globe" },
-      { entity: "I-ORG", score: 0.99, index: 11, word: "##x" },
-      { entity: "I-ORG", score: 0.99, index: 12, word: "Corporation" },
+      { entity: "B-PER", word: "Katherine" },
+      { entity: "I-PER", word: "Johnson" },
+      { entity: "B-ORG", word: "Globe" },
+      { entity: "I-ORG", word: "##x" },
+      { entity: "I-ORG", word: "Corporation" },
     ]),
   );
   const out = await redactor(text);
@@ -95,8 +89,8 @@ test("redacts offset-LESS BIO tokens (the real transformers.js bert-base-NER sha
 test("offset-less: redacts every WORD-BOUNDARY occurrence of a detected surface", async () => {
   const redactor = await createPrivacyFilterRedactor(
     fakeTransformers([
-      { entity: "B-PER", score: 0.99, index: 0, word: "Ada" },
-      { entity: "I-PER", score: 0.99, index: 1, word: "Lovelace" },
+      { entity: "B-PER", word: "Ada" },
+      { entity: "I-PER", word: "Lovelace" },
     ]),
   );
   const out = await redactor("Ada Lovelace paired with Ada Lovelace again.");
@@ -108,24 +102,10 @@ test("offset-less: word boundary — a name must NOT corrupt a superstring", asy
   // Raw substring redaction would turn "Marketing" into "[REDACTED:PER]eting".
   // The standalone person "Mark" is redacted; "Marketing"/"Markdown" are not.
   const redactor = await createPrivacyFilterRedactor(
-    fakeTransformers([{ entity: "B-PER", score: 0.99, index: 2, word: "Mark" }]),
+    fakeTransformers([{ entity: "B-PER", word: "Mark" }]),
   );
   const out = await redactor("Marketing lead Mark owns the Markdown docs.");
   assert.equal(out.text, "Marketing lead [REDACTED:PER] owns the Markdown docs.");
-  assert.equal((out.counts as Record<string, number>).pf_per, 1);
-});
-
-test("uses precise character offsets when the model provides them", async () => {
-  // The other branch: a model that DOES return start/end gets exact slicing
-  // (no over-redaction of identical strings elsewhere).
-  const redactor = await createPrivacyFilterRedactor(
-    fakeTransformers([
-      { entity: "B-PER", score: 0.99, index: 1, word: "Bob", start: 3, end: 6 },
-      { entity: "I-PER", score: 0.99, index: 2, word: "Smith", start: 7, end: 12 },
-    ]),
-  );
-  const out = await redactor("Hi Bob Smith");
-  assert.equal(out.text, "Hi [REDACTED:PER]");
   assert.equal((out.counts as Record<string, number>).pf_per, 1);
 });
 
