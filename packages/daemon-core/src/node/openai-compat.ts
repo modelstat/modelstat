@@ -96,6 +96,10 @@ export const DEFAULT_LLM_TIMEOUT_MS = 60_000;
 const MAX_RETRY_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 8_000;
+/** Floor on any retry wait so a `Retry-After: 0` (or a tiny value) can't
+ * fire all attempts back-to-back in a microsecond burst against a
+ * rate-limited endpoint. */
+const MIN_RETRY_WAIT_MS = 250;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -119,6 +123,21 @@ export function defaultOpenAICompatConfig(): OpenAICompatConfig {
       'MODELSTAT_LLM_MODEL is required when MODELSTAT_LLM_PROVIDER=openai (e.g. "gpt-4o-mini").',
     );
   }
+  // Validate the URL up front: a typo or a non-http(s) scheme should surface
+  // as a clear config error (which the daemon degrades on) rather than a
+  // mid-scan transport failure — and rejecting non-http(s) keeps the operator
+  // from accidentally pointing the egress at a file:// or other scheme.
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(baseUrl);
+  } catch {
+    throw new OpenAICompatConfigError(`MODELSTAT_LLM_BASE_URL is not a valid URL: "${baseUrl}".`);
+  }
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new OpenAICompatConfigError(
+      `MODELSTAT_LLM_BASE_URL must use http(s): "${baseUrl}" (got "${parsedUrl.protocol}").`,
+    );
+  }
   const timeoutRaw = Number(env.MODELSTAT_LLM_TIMEOUT_MS ?? DEFAULT_LLM_TIMEOUT_MS);
   return {
     baseUrl,
@@ -139,9 +158,12 @@ const ChatCompletionResponse = z.object({
 /** Reasoning models (OpenAI o-series, gpt-5) reject the classic
  * `max_tokens` field — they require `max_completion_tokens` — and reject
  * any non-default `temperature`. Detect them by name so the request body
- * matches the endpoint's contract instead of 400-ing on every call. */
+ * matches the endpoint's contract instead of 400-ing on every call.
+ * `o\d+` covers o1…o9 and future two-digit o-series (o10+); `gpt-5(-|$)`
+ * matches gpt-5 and gpt-5-* without false-matching gpt-50. The optional
+ * `[/:]`-prefix allows vendor-namespaced ids like `openai/o3`. */
 function isReasoningModel(model: string): boolean {
-  return /(^|[/:])(o[1-9](-|$)|gpt-5)/i.test(model.trim());
+  return /(^|[/:])(o\d+(-|$)|gpt-5(-|$))/i.test(model.trim());
 }
 
 /** Build the provider-correct chat-completions body. Reasoning models
@@ -166,7 +188,11 @@ function retryAfterMs(res: Response): number | null {
   const header = res.headers.get("retry-after");
   if (!header) return null;
   const secs = Number(header);
-  return Number.isFinite(secs) && secs >= 0 ? Math.min(secs * 1000, MAX_BACKOFF_MS) : null;
+  if (!Number.isFinite(secs) || secs < 0) return null;
+  // Clamp into [MIN_RETRY_WAIT_MS, MAX_BACKOFF_MS]: a 0 must still pause
+  // briefly, and a multi-minute quota window is capped so a hard-down
+  // endpoint surfaces to the extractive fallback quickly.
+  return Math.min(Math.max(secs * 1000, MIN_RETRY_WAIT_MS), MAX_BACKOFF_MS);
 }
 
 function transportError(cfg: OpenAICompatConfig, err: unknown): OpenAICompatRequestError {
@@ -180,12 +206,14 @@ function transportError(cfg: OpenAICompatConfig, err: unknown): OpenAICompatRequ
   return new OpenAICompatRequestError(0, `request to ${cfg.baseUrl} failed: ${reason}`);
 }
 
-async function httpError(res: Response): Promise<OpenAICompatRequestError> {
-  const body = await res.text().catch(() => "");
-  return new OpenAICompatRequestError(
-    res.status,
-    `chat completion failed: ${res.status} ${body.slice(0, 200)}`,
-  );
+function httpError(res: Response): OpenAICompatRequestError {
+  // Status + reason phrase ONLY — deliberately NOT the response body. On a
+  // content-policy rejection some endpoints echo the offending prompt
+  // fragment in the body, and this message propagates to the local daemon
+  // log via `markDegraded`. The status (e.g. 401/404/429) is enough to
+  // diagnose a misconfigured endpoint without risking a redacted-PII echo.
+  const reason = res.statusText ? ` ${res.statusText}` : "";
+  return new OpenAICompatRequestError(res.status, `chat completion failed: ${res.status}${reason}`);
 }
 
 /** Parse a 2xx reply into the answer text, wrapping a non-JSON body or
@@ -244,7 +272,7 @@ async function chatComplete(
     }
     // Retryable server-side conditions: rate limit + transient 5xx.
     if (res.status === 429 || res.status >= 500) {
-      lastErr = await httpError(res);
+      lastErr = httpError(res);
       if (!isLast) {
         const wait = retryAfterMs(res) ?? Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
         await delay(wait);
@@ -252,7 +280,7 @@ async function chatComplete(
       continue;
     }
     // 4xx (bad model name, auth, malformed request) won't fix on retry.
-    if (!res.ok) throw await httpError(res);
+    if (!res.ok) throw httpError(res);
     return await parseReply(cfg, res);
   }
   throw lastErr;

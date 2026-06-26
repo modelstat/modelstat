@@ -129,6 +129,32 @@ test("chatComplete: reasoning model sends max_completion_tokens and omits temper
   }
 });
 
+test("chatComplete: two-digit o-series (o10) is treated as a reasoning model", async () => {
+  const ep = await startEndpoint(() => chatReply("ok"));
+  try {
+    await openaiSummarize({ ...ep.cfg, model: "o10" })({ prompt: "p", maxTokens: 64 });
+    const req = ep.captured[0];
+    assert.ok(req);
+    assert.equal(typeof req.body.max_completion_tokens, "number");
+    assert.equal(req.body.max_tokens, undefined);
+  } finally {
+    await ep.close();
+  }
+});
+
+test("chatComplete: gpt-50 is NOT a reasoning model (no false gpt-5 prefix match)", async () => {
+  const ep = await startEndpoint(() => chatReply("ok"));
+  try {
+    await openaiSummarize({ ...ep.cfg, model: "gpt-50" })({ prompt: "p", maxTokens: 64 });
+    const req = ep.captured[0];
+    assert.ok(req);
+    assert.equal(typeof req.body.max_tokens, "number");
+    assert.equal(req.body.max_completion_tokens, undefined);
+  } finally {
+    await ep.close();
+  }
+});
+
 test("chatComplete: retries a transient 503 then succeeds", async () => {
   let calls = 0;
   const ep = await startEndpoint(() => {
@@ -303,6 +329,36 @@ test("defaultOpenAICompatConfig: parses env when base url + model are set", () =
     restoreEnv("MODELSTAT_LLM_BASE_URL", prev.base);
     restoreEnv("MODELSTAT_LLM_MODEL", prev.model);
     restoreEnv("MODELSTAT_LLM_API_KEY", prev.key);
+  }
+});
+
+test("defaultOpenAICompatConfig: rejects a non-http(s) base url", () => {
+  const prev = {
+    base: process.env.MODELSTAT_LLM_BASE_URL,
+    model: process.env.MODELSTAT_LLM_MODEL,
+  };
+  try {
+    process.env.MODELSTAT_LLM_BASE_URL = "file:///etc/passwd";
+    process.env.MODELSTAT_LLM_MODEL = "gpt-4o-mini";
+    assert.throws(() => defaultOpenAICompatConfig(), OpenAICompatConfigError);
+  } finally {
+    restoreEnv("MODELSTAT_LLM_BASE_URL", prev.base);
+    restoreEnv("MODELSTAT_LLM_MODEL", prev.model);
+  }
+});
+
+test("defaultOpenAICompatConfig: rejects a malformed base url", () => {
+  const prev = {
+    base: process.env.MODELSTAT_LLM_BASE_URL,
+    model: process.env.MODELSTAT_LLM_MODEL,
+  };
+  try {
+    process.env.MODELSTAT_LLM_BASE_URL = "not a url";
+    process.env.MODELSTAT_LLM_MODEL = "gpt-4o-mini";
+    assert.throws(() => defaultOpenAICompatConfig(), OpenAICompatConfigError);
+  } finally {
+    restoreEnv("MODELSTAT_LLM_BASE_URL", prev.base);
+    restoreEnv("MODELSTAT_LLM_MODEL", prev.model);
   }
 });
 

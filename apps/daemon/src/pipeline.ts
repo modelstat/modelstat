@@ -275,17 +275,34 @@ function warnRemoteEgress(cfg: OpenAICompatConfig): void {
   );
 }
 
+/** Probe the on-device NER redactor with a sentinel PERSON entity to prove
+ * it actually runs. `createPrivacyFilterRedactor` degrades to a SILENT
+ * pass-through when its `@huggingface/transformers` peer dep is missing —
+ * which on the remote path would let names/orgs the regex floor can't catch
+ * leave the box unredacted. The sentinel name is not a regex-floor target,
+ * so a redacted result proves the NER model is live. */
+async function nerRedactorActive(nerRedact: Redactor): Promise<boolean> {
+  const sentinel = "Escalate the incident to Katherine Johnson at Globex Corporation.";
+  try {
+    const out = (await nerRedact(sentinel)).text;
+    return !out.includes("Katherine Johnson");
+  } catch {
+    return false;
+  }
+}
+
 /** Remote OpenAI-compatible adapter set. Chat passes go to the endpoint;
  * the embedder stays local (preserving the 384-dim wire vector) and the
  * redactor is the local Privacy Filter ONLY — no remote redaction
  * backstop, since asking a third party to scrub a likely-secret string
- * would exfiltrate the very secret. */
-async function remoteAdapters(cfg: OpenAICompatConfig): Promise<PipelineAdapters> {
+ * would exfiltrate the very secret. Takes the already-built (and
+ * NER-verified) Privacy Filter so the egress scrubber and the output
+ * redactor share one proven-live instance. */
+function remoteAdapters(cfg: OpenAICompatConfig, privacyFilter: Redactor): PipelineAdapters {
   // One Privacy-Filter instance backs BOTH the pre-send egress scrubber
   // (excerpts + script bodies, on the way out) and the output `redact`
   // adapter (the returned abstract). cognize/entitle/extractLinks run over
   // already-redacted abstracts, so they need no pre-send pass.
-  const privacyFilter = await createPrivacyFilterRedactor();
   const preSend = makeRemotePreSend(privacyFilter);
   return {
     embed: localEmbed,
@@ -333,8 +350,26 @@ async function getAdapters(): Promise<PipelineAdapters> {
   // machines where a 2.7 GB local model isn't viable. Explicit egress — warn
   // loudly, then build the remote set (embeddings + PII redaction stay local).
   if (provider.kind === "openai") {
+    // FAIL-CLOSED on the egress guard. The remote path's privacy promise is
+    // that raw excerpts/script bodies are NER/PII-scrubbed on-device before
+    // they leave the box. If that NER redactor is a silent pass-through
+    // (its optional dep is missing), we must NOT ship raw content to a third
+    // party with only the regex floor — so we refuse the remote path and
+    // degrade to the extractive fallback (local, no egress) instead.
+    const privacyFilter = await createPrivacyFilterRedactor();
+    if (!(await nerRedactorActive(privacyFilter))) {
+      markDegraded(
+        "remote NER redactor unavailable",
+        "[modelstat] ⚠ remote summariser DISABLED — the on-device NER/PII redactor " +
+          "(@huggingface/transformers) isn't available, so session excerpts + script bodies " +
+          "can't be scrubbed before leaving the machine. Shipping extractive fallback abstracts " +
+          "(no egress) instead. Install @huggingface/transformers to enable the remote model.",
+      );
+      adapters = await degradedAdapters();
+      return adapters;
+    }
     warnRemoteEgress(provider.cfg);
-    adapters = await remoteAdapters(provider.cfg);
+    adapters = remoteAdapters(provider.cfg, privacyFilter);
     return adapters;
   }
   // The bundled node-llama-cpp summariser is the quality path, staged beside the

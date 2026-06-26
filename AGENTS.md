@@ -53,7 +53,11 @@ Things to know:
   `_API_KEY`) — see `packages/daemon-core/src/node/openai-compat.ts`. The remote
   path is an explicit egress: excerpts + script bodies leave the box, but only
   after the on-device pre-send scrub (regex floor + NER/PII, `makeRemotePreSend`)
-  runs over them first; embeddings and the output PII redactor stay local. Remote
+  runs over them first; embeddings and the output PII redactor stay local. The
+  remote path is **fail-closed** on that guard — if the on-device NER redactor
+  (`@huggingface/transformers`) is a silent pass-through, the daemon REFUSES the
+  remote egress and degrades to the extractive fallback rather than ship raw
+  content with regex-floor-only redaction. Remote
   requests retry with bounded backoff (honouring `Retry-After`) and send
   `max_completion_tokens` (no `temperature`) to o-series/gpt-5 reasoning models.
   The legacy `ollama.ts` adapter remains exported but is unwired in the daemon.
