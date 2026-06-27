@@ -142,7 +142,9 @@ function shouldAttempt(): boolean {
 }
 
 async function selfRegister(apiUrl: string): Promise<SelfRegisterResponse> {
-  const res = await fetch(new URL("/v1/devices/self-register", apiUrl), {
+  // The ONE register door is POST /v1/tokens (it folds device self-register);
+  // it returns the agentic `{ data: … }` envelope and a `ds_live_` secret.
+  const res = await fetch(new URL("/v1/tokens", apiUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -158,7 +160,8 @@ async function selfRegister(apiUrl: string): Promise<SelfRegisterResponse> {
   if (!res.ok) {
     throw new Error(`${res.status} ${res.statusText}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
   }
-  return (await res.json()) as SelfRegisterResponse;
+  const body = (await res.json()) as { data: SelfRegisterResponse };
+  return body.data;
 }
 
 async function fetchDeviceMe(apiUrl: string, secret: string): Promise<DeviceMeResponse> {
@@ -166,5 +169,6 @@ async function fetchDeviceMe(apiUrl: string, secret: string): Promise<DeviceMeRe
     headers: { authorization: `Bearer ${secret}` },
   });
   if (!res.ok) throw new Error(`devices/me ${res.status}`);
-  return (await res.json()) as DeviceMeResponse;
+  const body = (await res.json()) as { data: DeviceMeResponse };
+  return body.data;
 }

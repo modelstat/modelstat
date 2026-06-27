@@ -29,8 +29,15 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, platform } from "node:os";
+import { arch as cpuArch, homedir, hostname, platform, release } from "node:os";
 import { join } from "node:path";
+
+// Substituted by tsup's `define` at build time (see tsup.config.ts). A string
+// literal like "daemon-0.0.33" in the bundle; "daemon-dev" when run unbundled
+// (tsx / tests). Mirrors the macro cli.ts / daemon.ts / scan.ts use — declared
+// here so buildFingerprint can stamp the version without importing from cli.ts.
+const DAEMON_VERSION: string =
+  typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "daemon-dev";
 
 /** Domain-separation salt so our hash can't be cross-referenced with
  * any other product that hashes the same OS machine id. Baked-in, not
@@ -181,4 +188,65 @@ export function deviceUuidFromMachineKey(key: string = machineKey()): string {
   return [h.slice(0, 8), h.slice(8, 12), h.slice(12, 16), h.slice(16, 20), h.slice(20, 32)].join(
     "-",
   );
+}
+
+/**
+ * The device UUID this machine SHOULD use, derived deterministically from
+ * its stable hardware/OS machine key. Same machine → same UUID forever, so a
+ * machine that lost `~/.modelstat` re-derives the exact UUID it had and the
+ * server maps it back to the existing device row instead of minting a
+ * duplicate.
+ *
+ * Escape hatch: set MODELSTAT_DEVICE_SALT to run a SECOND logical device on
+ * one machine (CI matrices, multi-tenant boxes). It's a deterministic salt,
+ * not randomness — so even that stays idempotent across reinstalls. Absent it,
+ * one machine is exactly one device.
+ *
+ * Lives here (not in cli.ts) alongside `machineKey()` so the machine_id /
+ * device-UUID derivation can never drift between the register path, the
+ * heartbeat path, and the machine-stable recovery path — they all read the
+ * same source.
+ */
+export function intendedDeviceUuid(): string {
+  const salt = process.env.MODELSTAT_DEVICE_SALT?.trim();
+  const key = salt ? `${machineKey()}:${salt}` : machineKey();
+  return deviceUuidFromMachineKey(key);
+}
+
+function osFamily(): "macos" | "linux" | "other" {
+  const p = platform();
+  if (p === "darwin") return "macos";
+  if (p === "linux") return "linux";
+  return "other";
+}
+
+function osArch(): "x86_64" | "arm64" | "other" {
+  const a = cpuArch();
+  if (a === "x64") return "x86_64";
+  if (a === "arm64") return "arm64";
+  return "other";
+}
+
+/**
+ * The single device fingerprint, shared by BOTH register (`POST /v1/tokens`)
+ * and heartbeat. `fingerprint.machine_id` is the server's dedupe anchor — the
+ * one field that maps this physical machine back to its existing device row —
+ * so it MUST be byte-identical everywhere it's sent. Factoring it here means
+ * register and heartbeat can't disagree on it (the bug that turned one Mac
+ * into three dashboard rows).
+ */
+export function buildFingerprint(): Record<string, string | number | boolean> {
+  return {
+    hostname: hostname(),
+    os_family: osFamily(),
+    os_version: release(),
+    arch: osArch(),
+    daemon: "modelstat-daemon",
+    daemon_version: DAEMON_VERSION,
+    // Stable, install-method-independent machine key — see machineKey(). The
+    // server dedupes on this so the same physical machine can never become two
+    // device rows, even if the UUID somehow differs (legacy random UUID →
+    // deterministic UUID transition).
+    machine_id: machineKey(),
+  };
 }
