@@ -14,34 +14,50 @@
  */
 import { spawn } from "node:child_process";
 import { hostname, platform, release } from "node:os";
+import { deviceIdentity } from "./device-id.js";
 import { persistMcpAuth, type State } from "./state.js";
 
-/** Server self-register response (unauth). Mirrors the daemon's proven
- * contract (apps/daemon/src/api.ts SelfRegisterResponse). */
+/** Response from the ONE register door, `POST /v1/tokens`. Mirrors the daemon's
+ * contract (apps/daemon/src/api.ts SelfRegisterResponse). `claim_code` /
+ * `claim_url` are null once the device is already claimed (a re-registered,
+ * known machine) — the server returns no fresh claim handle for it. */
 interface SelfRegisterResponse {
-  device_uuid: string;
   device_id: string;
+  device_uuid: string;
+  /** Opaque device secret — `ds_live_<…>`. Stored + sent verbatim as a
+   * Bearer; we make no assumption about its format. */
   device_secret: string;
-  claim_code: string;
-  claim_url: string;
-  status: string;
+  secret_prefix: string;
+  claim_code: string | null;
+  claim_url: string | null;
+  status: "unclaimed" | "claimed";
+  user_id: string | null;
+  /** Set when the server reused an existing row (same machine_id) and minted a
+   * fresh secret instead of creating a new device. */
+  re_registered?: boolean;
 }
 
-/** `GET /v1/devices/me` — we only need the claimed signal. */
+/** `GET /v1/devices/me` — we only need the claimed signal. The full payload
+ * also carries `last_active_at` (renamed from `last_seen_at`), which the MCP
+ * does not consume. */
 interface DeviceMeResponse {
-  status?: string;
+  status?: "unclaimed" | "claimed";
   user_id?: string | null;
+  last_active_at?: string | null;
+}
+
+/** Every device-endpoint payload is wrapped in `{ data: … }`. Unwrap it,
+ * tolerating a bare body (older server / test stub) so we never crash. Mirrors
+ * apps/daemon/src/api.ts `unwrapData`. */
+function unwrapData<T>(body: unknown): T {
+  if (body && typeof body === "object" && "data" in (body as Record<string, unknown>)) {
+    return (body as { data: T }).data;
+  }
+  return body as T;
 }
 
 function err(line: string): void {
   process.stderr.write(`modelstat-mcp: ${line}\n`);
-}
-
-/** RFC4122-ish v4 uuid — the MCP's device is a distinct logical device, so a
- * random id is correct (no need to mirror the daemon's machine-derived one). */
-function randomUuid(): string {
-  // Node 20 has global crypto.randomUUID.
-  return globalThis.crypto.randomUUID();
 }
 
 /** Best-effort open a URL in the default browser; false if we couldn't spawn an
@@ -85,7 +101,24 @@ export async function browserClaim(state: State): Promise<State> {
   try {
     reg = await selfRegister(state.apiUrl);
   } catch (e) {
-    err(`device self-register failed: ${(e as Error).message}`);
+    err(`device registration failed: ${(e as Error).message}`);
+    return state;
+  }
+
+  // Already claimed: the server recognised this machine (machine_id dedupe) and
+  // minted a fresh secret for the existing, already-bound device. No browser
+  // round-trip is needed — the secret is immediately usable. Persist and return.
+  if (reg.status === "claimed") {
+    return connected(state, reg, "this MCP is already linked to your modelstat account.");
+  }
+
+  // Unclaimed but no claim URL — the server gave us nothing to open, so there's
+  // no way to pair from here. Surface the daemon as the fallback.
+  if (!reg.claim_url) {
+    err(
+      "device registered but the server returned no claim URL — cannot pair from the MCP. " +
+        "Install the daemon instead: npx modelstat@latest.",
+    );
     return state;
   }
 
@@ -108,19 +141,7 @@ export async function browserClaim(state: State): Promise<State> {
       // transient — keep polling
     }
     if (me && (me.status === "claimed" || (me.user_id && me.user_id.length > 0))) {
-      persistMcpAuth({
-        bearer: reg.device_secret,
-        deviceId: reg.device_id,
-        deviceUuid: reg.device_uuid,
-      });
-      err("✓ connected — this MCP is now linked to your modelstat account.");
-      return {
-        ...state,
-        bearer: reg.device_secret,
-        deviceId: reg.device_id,
-        deviceUuid: reg.device_uuid,
-        source: "mcp-auth",
-      };
+      return connected(state, reg, "this MCP is now linked to your modelstat account.");
     }
   }
 
@@ -129,6 +150,24 @@ export async function browserClaim(state: State): Promise<State> {
       "or install the daemon: npx modelstat@latest.",
   );
   return state;
+}
+
+/** Persist the freshly-registered bearer and return a connected State. Shared by
+ * the already-claimed fast path and the post-poll success path. */
+function connected(state: State, reg: SelfRegisterResponse, tail: string): State {
+  persistMcpAuth({
+    bearer: reg.device_secret,
+    deviceId: reg.device_id,
+    deviceUuid: reg.device_uuid,
+  });
+  err(`✓ connected — ${tail}`);
+  return {
+    ...state,
+    bearer: reg.device_secret,
+    deviceId: reg.device_id,
+    deviceUuid: reg.device_uuid,
+    source: "mcp-auth",
+  };
 }
 
 const POLL_INTERVAL_MS = 2500;
@@ -143,25 +182,29 @@ function shouldAttempt(): boolean {
 
 async function selfRegister(apiUrl: string): Promise<SelfRegisterResponse> {
   // The ONE register door is POST /v1/tokens (it folds device self-register);
-  // it returns the agentic `{ data: … }` envelope and a `ds_live_` secret.
+  // it returns the agentic `{ data: … }` envelope and a `ds_live_` secret. We
+  // send a STABLE `fingerprint.machine_id` (and matching `device_uuid`) so the
+  // server dedupes repeated registrations of this machine onto one device row
+  // instead of leaking a fresh unclaimed device on every claim attempt.
+  const id = deviceIdentity();
   const res = await fetch(new URL("/v1/tokens", apiUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      device_uuid: randomUuid(),
+      device_uuid: id.deviceUuid,
       fingerprint: {
         source: "mcp",
         hostname: hostname(),
         platform: platform(),
         release: release(),
+        machine_id: id.machineId,
       },
     }),
   });
   if (!res.ok) {
     throw new Error(`${res.status} ${res.statusText}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
   }
-  const body = (await res.json()) as { data: SelfRegisterResponse };
-  return body.data;
+  return unwrapData<SelfRegisterResponse>(await res.json());
 }
 
 async function fetchDeviceMe(apiUrl: string, secret: string): Promise<DeviceMeResponse> {
@@ -169,6 +212,5 @@ async function fetchDeviceMe(apiUrl: string, secret: string): Promise<DeviceMeRe
     headers: { authorization: `Bearer ${secret}` },
   });
   if (!res.ok) throw new Error(`devices/me ${res.status}`);
-  const body = (await res.json()) as { data: DeviceMeResponse };
-  return body.data;
+  return unwrapData<DeviceMeResponse>(await res.json());
 }
