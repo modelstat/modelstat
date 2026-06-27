@@ -26,6 +26,7 @@ export const AGENTS = [
   "opencode",
   "crush",
   "kimi",
+  "pi",
   "openclaw",
   "hermes",
   "ollama",
