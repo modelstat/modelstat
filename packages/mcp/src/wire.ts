@@ -14,9 +14,11 @@
  * it.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
 import { dirname, join } from "node:path";
+
+import { modelstatHome } from "./state.js";
 
 const NPX_COMMAND = "npx";
 const NPX_ARGS = ["-y", "@modelstat/mcp"];
@@ -186,4 +188,88 @@ export async function runWire(opts: RunWireOptions = {}): Promise<number> {
       : "Nothing new to configure (already set up, or no supported tools detected).",
   );
   return 0;
+}
+
+// ─── self-heal (`wire --heal`, run by the daemon on startup) ───────
+// Tracks the clients we've wired in a small state file so heal configures ONLY
+// clients we haven't wired before — a tool installed after modelstat, or one
+// missed by a transient install-time `wire` failure, gets picked up, while a
+// client the user deliberately removed (already tracked) is left alone. A normal
+// `wire` ignores this state and (re)configures everything (user-initiated, force).
+
+/** Where the heal state lives — beside the daemon's other files (~/.modelstat). */
+export function wiredStatePath(): string {
+  return join(modelstatHome(), "mcp-wired.json");
+}
+
+function readWiredSet(path: string): Set<string> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { wired?: unknown };
+    if (Array.isArray(parsed.wired)) {
+      return new Set(parsed.wired.filter((n): n is string => typeof n === "string"));
+    }
+  } catch {
+    // absent or malformed → nothing tracked yet
+  }
+  return new Set();
+}
+
+function writeWiredSet(path: string, names: Iterable<string>): void {
+  const tmp = `${path}.tmp-${process.pid}`;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(tmp, `${JSON.stringify({ wired: [...names] })}\n`, { encoding: "utf8" });
+    renameSync(tmp, path);
+  } catch {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export interface HealResult {
+  /** Clients newly configured this run. */
+  configured: string[];
+  /** Clients already tracked (skipped — may have been removed by the user; we never re-add). */
+  tracked: number;
+}
+
+export interface HealWireOptions {
+  home?: string;
+  platform?: Plat;
+  includeClaudeCode?: boolean;
+  /** Override the heal state file (tests). */
+  statePath?: string;
+}
+
+/**
+ * Self-heal wiring. Configures ONLY clients not already tracked, then records
+ * every currently-installed client so a later run won't touch them again
+ * (respecting a user who removed our entry). Synchronous + best-effort.
+ */
+export function healWire(opts: HealWireOptions = {}): HealResult {
+  const home = opts.home ?? homedir();
+  const plat = opts.platform ?? osPlatform();
+  const includeClaudeCode = opts.includeClaudeCode ?? true;
+  const statePath = opts.statePath ?? wiredStatePath();
+
+  const recorded = readWiredSet(statePath);
+  const runners: Array<{ name: string; run: () => WireStatus }> = [];
+  if (includeClaudeCode) runners.push({ name: "Claude Code", run: wireClaudeCode });
+  for (const t of jsonTargets(home, plat)) runners.push({ name: t.name, run: () => wireJsonTarget(t) });
+  runners.push({ name: "Codex", run: () => wireCodex(home) });
+
+  const configured: string[] = [];
+  const next = new Set(recorded);
+  for (const { name, run } of runners) {
+    if (recorded.has(name)) continue; // wired once already — never re-add (respect removal)
+    const status = run();
+    if (status === "configured") configured.push(name);
+    // Mark every detected (installed) client as seen, so we don't reconsider it.
+    if (status === "configured" || status === "already") next.add(name);
+  }
+  if (next.size !== recorded.size) writeWiredSet(statePath, next);
+  return { configured, tracked: recorded.size };
 }

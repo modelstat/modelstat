@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { jsonTargets, runWire, wireCodex, wireJsonTarget } from "./wire.js";
+import { healWire, jsonTargets, runWire, wireCodex, wireJsonTarget } from "./wire.js";
 
 function tmpHome(): string {
   return mkdtempSync(join(tmpdir(), "ms-wire-"));
@@ -99,4 +99,40 @@ test("runWire returns 0 and reports per-tool status without throwing", async () 
   assert.equal(code, 0);
   assert.ok(lines.some((l) => /VS Code — configured/.test(l)));
   assert.ok(lines.some((l) => /Cursor — not detected/.test(l)));
+});
+
+test("healWire configures a detected client once, then never re-adds after removal", () => {
+  const home = tmpHome();
+  const statePath = join(tmpHome(), "mcp-wired.json");
+  const vscode = target(home, "darwin", "VS Code");
+  mkdirSync(vscode.detect, { recursive: true });
+
+  // First heal: VS Code is new → configured + recorded.
+  const r1 = healWire({ home, platform: "darwin", includeClaudeCode: false, statePath });
+  assert.deepEqual(r1.configured, ["VS Code"]);
+  assert.equal(JSON.parse(readFileSync(vscode.file, "utf8")).servers.modelstat.command, "npx");
+
+  // The user deliberately removes our entry.
+  writeFileSync(vscode.file, JSON.stringify({ servers: {} }));
+
+  // Second heal: VS Code is already tracked → left alone (removal respected).
+  const r2 = healWire({ home, platform: "darwin", includeClaudeCode: false, statePath });
+  assert.deepEqual(r2.configured, []);
+  assert.equal(JSON.parse(readFileSync(vscode.file, "utf8")).servers.modelstat, undefined);
+});
+
+test("healWire picks up a tool installed after the first run", () => {
+  const home = tmpHome();
+  const statePath = join(tmpHome(), "mcp-wired.json");
+
+  // Nothing installed yet → nothing to do.
+  const r1 = healWire({ home, platform: "darwin", includeClaudeCode: false, statePath });
+  assert.deepEqual(r1.configured, []);
+
+  // Cursor gets installed later.
+  const cursor = target(home, "darwin", "Cursor");
+  mkdirSync(cursor.detect, { recursive: true });
+  const r2 = healWire({ home, platform: "darwin", includeClaudeCode: false, statePath });
+  assert.deepEqual(r2.configured, ["Cursor"]);
+  assert.equal(JSON.parse(readFileSync(cursor.file, "utf8")).mcpServers.modelstat.command, "npx");
 });
