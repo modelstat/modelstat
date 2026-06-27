@@ -135,6 +135,16 @@ ms.record(
 );
 ```
 
+## Slicing by source + tags
+
+The **source label** (the 2nd `Config` arg) and your **metadata tags** aren't just stored — they're the axes you filter and break down by in modelstat, on every surface (dashboard, MCP, REST), with generic primitives:
+
+- **Filter** — show only one source's traffic: analytics and the Sessions list accept `agents=<source-label>` and `metadata=<key>=<value>` (e.g. `source=conjure`).
+- **Break down** — `group_by=agent` or `group_by=metadata:<key>` splits spend by source or any tag value.
+- **Discover** — `metadata_keys` lists your tag keys; `facets` (`dims=agent` or `dims=metadata:<key>`) lists the live values to filter on.
+
+This is how modelstat dogfoods its own dashboard Assistant: it records through this SDK with source label `conjure_assistant` and a `source=conjure` tag, then filters `agents=conjure_assistant` to see exactly that traffic — the same primitives you'd use, nothing bespoke.
+
 ## Auto-recording with `wrap()` (Python + TypeScript)
 
 Don't want to hand-build an `LlmCall`? Wrap your OpenAI or Anthropic client and use it exactly as before — each completion call is forwarded untouched and auto-recorded (provider, model, tokens, prompt/completion) after it returns. Recording is **best-effort**: it never changes or breaks the wrapped call, and the helper detects the client dynamically (no hard dependency on `openai`/`@anthropic-ai/sdk` — they're optional peers). Rust has no `wrap()`; use `record()` directly (its builder is already concise).
