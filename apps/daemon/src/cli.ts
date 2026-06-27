@@ -6,13 +6,16 @@
  * two of them.
  */
 import { spawn } from "node:child_process";
-import { arch as cpuArch, hostname, platform, release } from "node:os";
+import { platform } from "node:os";
 import { createInterface } from "node:readline";
-import { discover } from "@modelstat/parsers";
-import { DeviceMeUnauthorized, fetchDeviceMe, reportDiscovery, selfRegister } from "./api.js";
+import { DeviceMeUnauthorized, fetchDeviceMe, recoverIdentity, selfRegister } from "./api.js";
 import { state } from "./config.js";
 import { backupIdentity, hasIdentityFile, identityPath } from "./identity.js";
-import { deviceUuidFromMachineKey, machineKey, machineKeySource } from "./machine-key.js";
+import {
+  buildFingerprint,
+  intendedDeviceUuid,
+  machineKeySource,
+} from "./machine-key.js";
 import {
   bundledTrayAppPath,
   installService,
@@ -117,20 +120,6 @@ function wireMcpTools(json: boolean): Promise<{ ok: boolean; error?: string }> {
 const DAEMON_VERSION =
   typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "daemon-dev";
 
-function osFamily(): "macos" | "linux" | "other" {
-  const p = platform();
-  if (p === "darwin") return "macos";
-  if (p === "linux") return "linux";
-  return "other";
-}
-
-function osArch(): "x86_64" | "arm64" | "other" {
-  const a = cpuArch();
-  if (a === "x64") return "x86_64";
-  if (a === "arm64") return "arm64";
-  return "other";
-}
-
 /** First value after `--flag` (supports `--flag v` and `--flag=v`), or
  * undefined. */
 function flagValue(args: readonly string[], flag: string): string | undefined {
@@ -165,24 +154,6 @@ function numericFlag(args: readonly string[], flag: string): number | undefined 
   return Number.isFinite(n) ? n : undefined;
 }
 
-/**
- * The device UUID this machine SHOULD use, derived deterministically
- * from its stable hardware/OS machine key (see machine-key.ts). Same
- * machine → same UUID forever, so a machine that lost ~/.modelstat
- * re-derives the exact UUID it had and the server maps it back to the
- * existing device row instead of minting a duplicate.
- *
- * Escape hatch: set MODELSTAT_DEVICE_SALT to run a SECOND logical
- * device on one machine (CI matrices, multi-tenant boxes). It's a
- * deterministic salt, not randomness — so even that stays idempotent
- * across reinstalls. Absent it, one machine is exactly one device.
- */
-function intendedDeviceUuid(): string {
-  const salt = process.env.MODELSTAT_DEVICE_SALT?.trim();
-  const key = salt ? `${machineKey()}:${salt}` : machineKey();
-  return deviceUuidFromMachineKey(key);
-}
-
 /** No human at the keyboard: a CI runner, or stdin isn't a TTY. */
 function isNonInteractive(): boolean {
   return Boolean(process.env.CI) || process.stdin.isTTY !== true;
@@ -200,13 +171,15 @@ function prodRegisterOptIn(): boolean {
 }
 
 /**
- * Self-register: generate a UUIDv7 client-side, POST it to the server, and
- * cache the returned device_secret + claim_code in the local state file.
+ * Register this device through the ONE register door, POST /v1/tokens: derive a
+ * machine-stable device_uuid + fingerprint, POST them, and cache the returned
+ * device_secret (ds_live_…) + claim handle in the local identity file.
  *
- * After this returns, the daemon is "registered but unclaimed" — it can
- * heartbeat, report discovery, and poll its own state. The operator (or
- * a human admin) needs to visit `claim_url` and sign in to attach the
- * device to an org. Until then, ingest of session data is rejected.
+ * After this returns, an UNCLAIMED device can heartbeat (which folds in
+ * discovery) and poll its own state; the operator visits `claim_url`, signs in,
+ * and attaches it to an org. A device the server recognises by machine_id comes
+ * back already CLAIMED with a fresh secret (re_registered) — no duplicate row,
+ * no dead claim link.
  */
 async function cmdSelfRegister(): Promise<void> {
   // Device UUID resolution, in order of preference:
@@ -239,28 +212,17 @@ async function cmdSelfRegister(): Promise<void> {
     process.exit(2);
   }
 
-  const mid = machineKey();
-
-  const fingerprint: Record<string, string | number | boolean> = {
-    hostname: hostname(),
-    os_family: osFamily(),
-    os_version: release(),
-    arch: osArch(),
-    daemon: "modelstat-daemon",
-    daemon_version: DAEMON_VERSION,
-    // Stable, install-method-independent machine key. The server
-    // dedupes self-register on this so the same physical machine can
-    // never become two device rows, even if the UUID somehow differs
-    // (legacy random UUID → deterministic UUID transition).
-    machine_id: mid,
-  };
+  // ONE fingerprint, shared with the heartbeat — see buildFingerprint().
+  // `fingerprint.machine_id` is the server's dedupe anchor; it MUST be
+  // byte-identical on register + heartbeat, so both read the same source.
+  const fingerprint = buildFingerprint();
 
   if (derived) {
     process.stdout.write(
       `  \x1b[2mdevice id derived from machine key (${machineKeySource()}): ${deviceUuid.slice(0, 8)}…\x1b[0m\n`,
     );
   }
-  process.stdout.write(`  \x1b[2m→ POST ${state.apiUrl}/v1/devices/self-register\x1b[0m\n`);
+  process.stdout.write(`  \x1b[2m→ POST ${state.apiUrl}/v1/tokens\x1b[0m\n`);
 
   const res = await selfRegister({
     device_uuid: deviceUuid,
@@ -269,7 +231,8 @@ async function cmdSelfRegister(): Promise<void> {
 
   // Seed the canonical identity file atomically. Single write
   // (not five separate setters) so the file is never half-populated
-  // if the process dies mid-sequence.
+  // if the process dies mid-sequence. The device_secret is stored verbatim
+  // (ds_live_…) and sent as the Bearer — no client-side format assumptions.
   state.saveFreshIdentity({
     deviceUuid: res.device_uuid,
     deviceId: res.device_id,
@@ -278,11 +241,22 @@ async function cmdSelfRegister(): Promise<void> {
     claimUrl: res.claim_url,
   });
 
-  process.stdout.write(`  \x1b[32m✓\x1b[0m registered  device_id=${res.device_id}\n`);
+  process.stdout.write(
+    `  \x1b[32m✓\x1b[0m ${res.re_registered ? "re-registered" : "registered"}  device_id=${res.device_id}\n`,
+  );
   process.stdout.write(
     `  \x1b[32m✓\x1b[0m secret      ${res.secret_prefix}…  (hashed on server, never re-sent)\n`,
   );
-  process.stdout.write(`  \x1b[32m✓\x1b[0m claim code  ${res.claim_code}\n`);
+  if (res.status === "claimed") {
+    // Already attached to an account — there is NO live claim code/URL to print
+    // (the server returns null), so don't dangle a dead link. Point at the
+    // dashboard instead.
+    process.stdout.write(
+      `  \x1b[32m✓\x1b[0m already claimed${res.user_id ? ` by user_id=${res.user_id}` : ""} — open ${state.apiUrl.replace(/\/$/, "")}/dashboard\n`,
+    );
+  } else if (res.claim_code) {
+    process.stdout.write(`  \x1b[32m✓\x1b[0m claim code  ${res.claim_code}\n`);
+  }
 }
 
 /** Poll the server until the device shows up as claimed (or the operator
@@ -298,8 +272,27 @@ async function cmdAwaitClaim(): Promise<void> {
   while (true) {
     let me;
     try {
-      me = await fetchDeviceMe(secret);
+      // Always read the CURRENT bearer — recoverIdentity() below may rotate it.
+      me = await fetchDeviceMe(state.bearer ?? secret);
     } catch (e) {
+      if (e instanceof DeviceMeUnauthorized) {
+        // The server no longer accepts our bearer (revoked / row deleted). The
+        // OLD code logged "poll failed" and re-polled the dead secret every 5s —
+        // a busy-loop that could never recover. Recover the identity by
+        // machine-stable re-register (recoverIdentity self-rate-limits with its
+        // own exponential backoff so a truly-deleted row can't hot-loop), then
+        // poll the fresh bearer.
+        const recovered = await recoverIdentity();
+        console.error(
+          recovered
+            ? "re-registered after the server rejected our credentials — resuming claim wait"
+            : "couldn't re-register yet (server rejecting registration) — backing off",
+        );
+        // recoverIdentity already backed off internally on failure; add a small
+        // floor so a same-tick success still paces the next poll.
+        await new Promise((r) => setTimeout(r, recovered ? 2000 : 5000));
+        continue;
+      }
       console.error(`poll failed: ${(e as Error).message}`);
       await new Promise((r) => setTimeout(r, 5000));
       continue;
@@ -412,13 +405,15 @@ function createTrayBuildUi(opts: ConnectOpts): {
  * at a blank terminal wondering if they just hung their shell.
  *
  * Steps (each prints a live progress line):
- *   1. Generate or reuse a UUIDv7 device identity.
- *   2. POST /v1/devices/self-register → get device_secret + claim_code.
+ *   1. Derive (or reuse) a machine-stable device identity.
+ *   2. POST /v1/tokens → get device_secret (ds_live_…) + claim_code.
  *   3. Install the macOS tray + background service (launchd/systemd).
- *   4. Print the /device/:claim_code URL and try to open it in a browser.
+ *   4. Print the dashboard / claim URL and try to open it in a browser.
  *
- * The claim_code IS the capability — the user visits
- * /device/:claim_code, signs in, and clicks "Claim this device".
+ * For an UNCLAIMED device the claim_code IS the capability — the user visits
+ * /device/:claim_code, signs in, and clicks "Claim this device". An already
+ * CLAIMED device has no live claim handle, so the banner points at the
+ * dashboard instead of a dead claim link.
  */
 async function cmdConnect(opts: ConnectOpts): Promise<void> {
   const step = (msg: string) => {
@@ -503,14 +498,32 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     }
   }
 
+  // Determine whether this device is already attached to an account. A claimed
+  // device has NO live claim code/URL (the server returns null), so the final
+  // banner must point at the dashboard rather than dangle a dead claim link.
+  // Best-effort: a failed probe (offline) falls back to the unclaimed banner.
+  let claimed = false;
+  if (state.bearer) {
+    try {
+      const me = await fetchDeviceMe(state.bearer);
+      claimed = me.status === "claimed";
+    } catch {
+      /* offline / transient — assume unclaimed for banner purposes */
+    }
+  }
+
   const apiBase = state.apiUrl.replace(/\/$/, "");
+  const dashboardUrl = `${apiBase}/dashboard`;
   const claimCode = state.claimCode ?? "(unknown)";
-  const claimUrl = state.claimUrl ?? `${apiBase}/device/${claimCode}`;
+  const claimUrl = claimed
+    ? dashboardUrl
+    : (state.claimUrl ?? `${apiBase}/device/${claimCode}`);
   const agentUrl = `${apiBase}/device/${claimCode}/agent`;
   emitEvent(opts, "registered", {
     device_uuid: state.deviceUuid,
     device_id: state.deviceId,
-    claim_code: claimCode,
+    claimed,
+    claim_code: claimed ? null : claimCode,
     claim_url: claimUrl,
     agent_url: agentUrl,
   });
@@ -634,24 +647,18 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
   }
 
   // ── 5. Detect local AI installs + signed-in accounts ──────────
-  // Idempotent: a second `npx modelstat@latest` after the user signs
-  // into a new account (e.g. fresh codex login, new Claude Keychain
-  // entry) re-enumerates everything and reports it now, instead of
-  // waiting up to a minute for the daemon's discovery interval to
-  // fire on the next tick. The daemon also picks this up on restart,
-  // but doing it inline here means the success banner can show the
-  // real count and the user gets immediate confirmation.
+  // Discovery now RIDES the daemon's heartbeat (the standalone
+  // /v1/devices/discovery endpoint is gone), so the just-installed service
+  // will upsert the snapshot on its first heartbeat within seconds. We still
+  // run discover() locally here — purely so the success banner can show the
+  // real count and the user gets immediate confirmation — but we no longer
+  // POST it from the CLI.
   step("Detecting installed AI tools and signed-in accounts");
   let discovered: { installations: number; identities: number } | null = null;
   if (state.deviceId) {
     try {
+      const { discover } = await import("@modelstat/parsers");
       const d = await discover();
-      await reportDiscovery({
-        device_id: state.deviceId,
-        installations: d.installations,
-        identities: d.identities,
-        scanned_at: new Date().toISOString(),
-      });
       discovered = {
         installations: d.installations.length,
         identities: d.identities.length,
@@ -708,7 +715,9 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
       );
     }
     console.log();
-    console.log(`  Open your dashboard (no sign-up needed):`);
+    console.log(
+      claimed ? `  Open your dashboard:` : `  Open your dashboard (no sign-up needed):`,
+    );
     console.log(`    \x1b[1;36m${claimUrl}\x1b[0m`);
     console.log();
     console.log(`  Live numbers from this terminal:`);
@@ -722,9 +731,11 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
         `    \x1b[32m✓\x1b[0m \x1b[2mMCP wired into your AI tools — ask them about your spend directly\x1b[0m`,
       );
     }
-    console.log();
-    console.log(`  Claim this device so it keeps analyzing past the free tier:`);
-    console.log(`    \x1b[2m${claimUrl}/claim\x1b[0m`);
+    if (!claimed) {
+      console.log();
+      console.log(`  Claim this device so it keeps analyzing past the free tier:`);
+      console.log(`    \x1b[2m${claimUrl}/claim\x1b[0m`);
+    }
     console.log(line);
     console.log();
   }
@@ -758,17 +769,16 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
 }
 
 async function cmdDiscover(): Promise<void> {
-  const deviceId = state.deviceId;
-  if (!deviceId) throw new Error("run `register` first");
+  // One-shot diagnostic enumeration of local installs + signed-in accounts.
+  // Discovery is REPORTED to the server only via the daemon's heartbeat now (the
+  // standalone /v1/devices/discovery endpoint is gone), so this command just
+  // prints what the heartbeat would attach — it doesn't POST anything itself.
+  const { discover } = await import("@modelstat/parsers");
   const out = await discover();
   console.log(`→ ${out.installations.length} installations, ${out.identities.length} identities`);
-  await reportDiscovery({
-    device_id: deviceId,
-    installations: out.installations,
-    identities: out.identities,
-    scanned_at: new Date().toISOString(),
-  });
-  console.log("✓ reported to backend");
+  console.log(
+    "(the running daemon reports this to the server on its next heartbeat — `modelstat discover` is read-only)",
+  );
 }
 
 async function cmdSync(rest: readonly string[]): Promise<void> {

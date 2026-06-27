@@ -28,7 +28,7 @@ import { modelstatHome } from "./paths.js";
 export interface DeviceIdentity {
   /** Daemon-generated UUIDv7. Stable across reinstalls. */
   deviceUuid: string;
-  /** Server UUID returned from /v1/devices/self-register. */
+  /** Server UUID returned from the register door, POST /v1/tokens. */
   deviceId: string;
   /** Long-lived Bearer (ds_live_…). Rotate via /v1/devices/me/rotate-secret. */
   bearerToken: string;

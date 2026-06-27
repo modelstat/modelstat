@@ -15,12 +15,12 @@
  *   6. Report phase + progress + queue size via heartbeat at every
  *      stage so the dashboard shows precise activity.
  */
+import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { describeErrorWithCause } from "@modelstat/daemon-core/logger";
-import type { DiscoveryReport } from "@modelstat/core";
+import type { DetectedIdentity, DetectedInstallation } from "@modelstat/core";
 import { discover } from "@modelstat/parsers";
-import { request } from "undici";
-import { reportDiscovery } from "./api.js";
+import { postHeartbeat } from "./api.js";
 import { state } from "./config.js";
 import { acquireDaemonLock, formatAge } from "./lock.js";
 import { machineKey } from "./machine-key.js";
@@ -46,7 +46,10 @@ const DAEMON_VERSION: string =
   typeof __MODELSTAT_VERSION__ === "string" ? __MODELSTAT_VERSION__ : "daemon-dev";
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const SCAN_INTERVAL_MS = 5 * 60 * 1000; // backstop periodic scan
-const DISCOVERY_INTERVAL_MS = 60_000; // re-enumerate installs + identities
+/** Discovery now RIDES the heartbeat: the snapshot is attached only when it
+ * changed, plus a periodic backstop so the server's installs/identities can't
+ * go stale even if a probe momentarily misses something. */
+const DISCOVERY_BACKSTOP_MS = 5 * 60 * 1000;
 // When the LLM recovers after a degraded run, re-scan to upgrade extractive
 // abstracts — but at most this often, so a flaky LLM (preflight passes, scans
 // fail) can't re-scan the whole history on every restart.
@@ -83,6 +86,12 @@ interface Heartbeat {
   /** Effective auto-update setting (env override or stored pref) — the tray
    * reads this to render its checkbox. */
   auto_update?: boolean;
+  /** Discovery snapshot — installs + signed-in accounts. FOLDED INTO the
+   * heartbeat (the standalone /v1/devices/discovery endpoint is gone). Attached
+   * only when the snapshot changed (or on the periodic backstop), so a steady
+   * state ships a tiny liveness body. */
+  installations?: DetectedInstallation[];
+  identities?: DetectedIdentity[];
 }
 
 /** Shared mutable state the heartbeat reporter reads. Each subsystem
@@ -143,7 +152,8 @@ function setUpdate(u: { verdict: string; latest: string | null } | null): void {
 
 /** Snapshot the shared mutable `status` into the wire/heartbeat shape.
  * Used by both the network heartbeat and the local-file mirror so the
- * two never drift. */
+ * two never drift. The local mirror keeps a `device_id` for the tray;
+ * the wire body sent to the server omits it (it's in the URL path). */
 function snapshotBody(): Heartbeat & { device_id: string | null } {
   return {
     device_id: state.deviceId ?? null,
@@ -159,6 +169,53 @@ function snapshotBody(): Heartbeat & { device_id: string | null } {
     update: status.update,
     auto_update: autoUpdateEnabled(),
   };
+}
+
+/* ─── Discovery folded into the heartbeat ──────────────────────────────────
+ * The standalone POST /v1/devices/discovery is gone server-side. The daemon
+ * now attaches its installs/identities snapshot to the heartbeat:
+ *   • on the FIRST heartbeat after boot,
+ *   • whenever the snapshot CHANGES (hash differs), and
+ *   • at most every DISCOVERY_BACKSTOP_MS as a backstop (so a momentarily-
+ *     incomplete probe can't pin a stale snapshot on the server forever).
+ * A discover() failure is best-effort: it must NEVER block liveness — the
+ * heartbeat still goes out, just without the discovery arrays this tick. */
+let lastDiscoveryHash: string | null = null;
+let lastDiscoveryAttachedAt = 0;
+
+function hashDiscovery(d: { installations: DetectedInstallation[]; identities: DetectedIdentity[] }): string {
+  // Stable JSON over the parts that matter; cheap SHA-256 to detect change.
+  return createHash("sha256").update(JSON.stringify({ i: d.installations, a: d.identities })).digest("hex");
+}
+
+/**
+ * Best-effort discovery snapshot for the heartbeat. Returns the
+ * installations/identities arrays to attach, or `null` to send a bare liveness
+ * heartbeat (unchanged snapshot, or a discover() failure). NEVER throws.
+ */
+async function discoverySnapshotForHeartbeat(): Promise<{
+  installations: DetectedInstallation[];
+  identities: DetectedIdentity[];
+} | null> {
+  let d: { installations: DetectedInstallation[]; identities: DetectedIdentity[] };
+  try {
+    d = await discover();
+  } catch (e) {
+    // Discovery is best-effort — a probe failure can't block liveness. Surface
+    // it on the status line but still send the heartbeat (caller attaches null).
+    setMessage(`discovery deferred: ${describeErrorWithCause(e)}`);
+    return null;
+  }
+  status.stats["installations_detected"] = d.installations.length;
+  status.stats["identities_detected"] = d.identities.length;
+  const hash = hashDiscovery(d);
+  const now = Date.now();
+  const changed = hash !== lastDiscoveryHash;
+  const backstopDue = now - lastDiscoveryAttachedAt >= DISCOVERY_BACKSTOP_MS;
+  if (!changed && !backstopDue) return null; // steady state — bare heartbeat
+  lastDiscoveryHash = hash;
+  lastDiscoveryAttachedAt = now;
+  return { installations: d.installations, identities: d.identities };
 }
 
 // Write last-status.json on every status change (coalesced), decoupled
@@ -220,33 +277,37 @@ async function sendHeartbeat(): Promise<void> {
   const bearer = state.bearer;
   const deviceId = state.deviceId;
   if (!bearer || !deviceId) return; // pre-enrollment
-  const body = { ...snapshotBody(), device_id: deviceId };
-  try {
-    const res = await request(`${state.apiUrl}/v1/daemon/heartbeat`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
-      body: JSON.stringify(body),
-    });
-    if (res.statusCode >= 300) {
-      // eat the body so we don't leak a handle
-      await res.body.text();
-    } else {
-      // The server returns our release verdict (ok / update_available /
-      // upgrade_required) in the 200 body — act on it (alert + auto-update).
-      try {
-        const data = (await res.body.json()) as {
-          daemon_release?: { verdict?: string; latest?: string | null };
-        };
-        await handleRelease(data?.daemon_release);
-      } catch {
-        // non-JSON / read error — ignore; the next heartbeat retries.
-      }
-    }
-  } catch {
-    // Network blip — dashboard will see stale heartbeat and mark us
-    // offline. The *local* phase will switch via the scanner's catch
-    // block on the next upload attempt.
+
+  // The local-mirror snapshot carries device_id for the tray; the WIRE body
+  // does NOT (device_id is in the URL path now), so strip it before sending.
+  const local = snapshotBody();
+  const { device_id: _omit, ...liveness } = local;
+
+  // Fold discovery into the heartbeat — attach the snapshot only when it changed
+  // (or on the periodic backstop). Best-effort: a discover() failure returns
+  // null and the bare liveness heartbeat still goes out.
+  const snap = await discoverySnapshotForHeartbeat();
+  const wireBody: Record<string, unknown> = { ...liveness };
+  if (snap) {
+    wireBody.installations = snap.installations;
+    wireBody.identities = snap.identities;
   }
+
+  // Route through the shared device client: POST the path-style URL, get the
+  // SAME 401→recoverIdentity + 5xx-backoff handling as every other device call.
+  // postHeartbeat returns the unwrapped `.data` (or null on a non-recoverable
+  // failure / network blip — in which case the dashboard sees a stale heartbeat
+  // and the local phase flips via the scanner's catch on the next upload).
+  try {
+    const data = await postHeartbeat(deviceId, wireBody);
+    // The server returns our release verdict (ok / update_available /
+    // upgrade_required) — act on it (alert + auto-update).
+    if (data?.daemon_release) await handleRelease(data.daemon_release);
+  } catch {
+    // postHeartbeat already absorbs network/HTTP errors into null; a throw here
+    // would be unexpected — ignore so the next tick retries.
+  }
+
   // Mirror the heartbeat to ~/.modelstat/last-status.json so the
   // tray + CLI (`modelstat status`/`jobs`) can read fresh numbers
   // without an authenticated round-trip to the server. This is now the
@@ -254,7 +315,7 @@ async function sendHeartbeat(): Promise<void> {
   // /v1/device/:claim_code capability endpoint was removed server-side
   // (it returns the SPA HTML now), so the snapshot's phase / queue /
   // segment-upload stats are what `modelstat status --json` reports.
-  writeLocalStatus(body).catch(() => undefined);
+  writeLocalStatus(local).catch(() => undefined);
 }
 
 /** Cap on ~/.modelstat/logs/{out,err}.log before boot-time rotation.
@@ -325,27 +386,6 @@ async function writeLocalStatus(snapshot: object): Promise<void> {
     await rename(tmp, lastStatusPath);
   } catch {
     /* fs blip — next tick will retry */
-  }
-}
-
-/** Discover installs + report. Safe to call repeatedly. */
-async function runDiscovery(): Promise<void> {
-  const deviceId = state.deviceId;
-  if (!deviceId) return;
-  setPhase("discovering", "Enumerating local AI tools");
-  try {
-    const d = await discover();
-    const report: DiscoveryReport = {
-      device_id: deviceId,
-      installations: d.installations,
-      identities: d.identities,
-      scanned_at: new Date().toISOString(),
-    };
-    await reportDiscovery(report);
-    status.stats["installations_detected"] = d.installations.length;
-    status.stats["identities_detected"] = d.identities.length;
-  } catch (e) {
-    setPhase("error", `discovery failed: ${describeErrorWithCause(e)}`);
   }
 }
 
@@ -682,7 +722,9 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
     );
   }
 
-  await runDiscovery();
+  // Discovery now rides the heartbeat (the primed heartbeat above already
+  // attaches the first snapshot, since lastDiscoveryHash starts null), so there
+  // is no separate startup discovery pass any more. Go straight to scanning.
   await requestScan("startup");
 
   // Signed redaction-policy augment: fetch the additive `policies`
@@ -750,17 +792,12 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   const backstop = setInterval(() => void requestScan("interval"), SCAN_INTERVAL_MS);
   backstop.unref();
 
-  // Periodic re-discovery so newly-added accounts (e.g. user just
-  // signed into a second codex/gemini account, or the Claude
-  // Keychain item appeared) show up on the dashboard without
-  // restarting the daemon. The probe reads 4 small JSON files +
-  // one Keychain query — cheap enough to do every minute.
-  //
-  // Without this, identities are enumerated ONCE at daemon boot
-  // (line ~282 above) and the dashboard's "Accounts" panel stays
-  // stuck on the snapshot taken at install time.
-  const discoveryTimer = setInterval(() => void runDiscovery(), DISCOVERY_INTERVAL_MS);
-  discoveryTimer.unref();
+  // Re-discovery is no longer a standalone timer/POST: the heartbeat (every
+  // HEARTBEAT_INTERVAL_MS) re-runs discover() and attaches the snapshot only
+  // when it CHANGES (newly-added account / fresh install) or on the
+  // DISCOVERY_BACKSTOP_MS backstop — see discoverySnapshotForHeartbeat. So a
+  // user who signs into a second codex/gemini account still shows up on the
+  // dashboard within a heartbeat, without a separate discovery scheduler.
 
   // Self-healing reconcile: periodically verify the server still holds what we
   // shipped and re-ship precisely what it's missing (e.g. after a DB/raw-log
