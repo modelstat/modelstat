@@ -30,6 +30,16 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// How long to let the OLD daemon exit on SIGTERM before escalating to SIGKILL.
+// This MUST comfortably exceed a Metal model load + in-flight drain: the old
+// daemon's shutdown quiesces its scanner and frees the llama.cpp Metal device
+// (see daemon.ts shutdown + disposeLlama's ≤8s drain), and if we SIGKILL while
+// it's still holding the device, the freshly-kickstarted daemon initialises
+// Metal concurrently and the process aborts. 45s matches the `stop` timeout and
+// leaves headroom over a cold model load. SIGKILL is a true last resort.
+const DAEMON_TERM_GRACE_MS = 45_000;
+const DAEMON_POLL_INTERVAL_MS = 250;
+
 function inThisMonorepo() {
   // Walk up from this script looking for the repo's pnpm-workspace.yaml.
   // When npm installs us into a global node_modules, this file isn't an
@@ -183,17 +193,21 @@ async function rebootServiceIfInstalled() {
   console.log("[modelstat] refreshing background service…");
 
   // Stop the SERVICE (launchctl bootout / systemctl --user disable)
-  // via the fresh bundle's own knowledge of each platform.
+  // via the fresh bundle's own knowledge of each platform. Give it room to
+  // run the daemon's graceful shutdown (quiesce scanner + free Metal device)
+  // — the same grace we allow the manual SIGTERM below.
   spawnSync(process.execPath, [freshBundle, "stop"], {
     stdio: "ignore",
-    timeout: 30_000,
+    timeout: DAEMON_TERM_GRACE_MS + 5_000,
   });
 
   // Belt-and-braces: kill any stray daemon process that the service
   // supervisor didn't reap (stale lock, killed parent, KeepAlive
   // race during the bundle swap below). Lock file at
-  // ~/.modelstat/daemon.lock has the live PID; SIGTERM it gently
-  // first, escalate to SIGKILL if it's still around 2 s later.
+  // ~/.modelstat/daemon.lock has the live PID; SIGTERM it gently and WAIT
+  // until it's actually gone before we kickstart the new service — two
+  // daemons initialising the Metal device at once aborts the process
+  // (`libc++abi … mutex lock failed`). SIGKILL only as a last resort.
   await killStaleDaemon(stateDir);
 
   // (Re)install the MANAGED service from the fresh bundle in ONE canonical step.
@@ -264,13 +278,40 @@ function liveDaemonPid(stateDir) {
  *       (`modelstat\\.mjs`) so we don't kill `modelstatd` or any
  *       other process that happens to share a substring.
  *
- * SIGTERM first, escalate to SIGKILL after 2 s. All failures
- * tolerated — we just want the new bundle to be the only modelstat
- * process holding the lock when we restart.
+ * SIGTERM first, then POLL `kill(pid, 0)` until the pid is GONE, up to
+ * DAEMON_TERM_GRACE_MS (≈45 s) so the old daemon can run its graceful
+ * shutdown — quiesce its scanner and free the llama.cpp Metal device —
+ * BEFORE the caller kickstarts the new service. Escalate to SIGKILL only
+ * if that grace lapses (a wedged process). All failures tolerated — we
+ * just want the new bundle to be the only modelstat process holding the
+ * Metal device when we restart, so we don't get two daemons initialising
+ * Metal at once (the `libc++abi … mutex lock failed` abort).
  */
 async function killStaleDaemon(stateDir) {
   await killByLockfile(stateDir);
   await killByProcessScan();
+}
+
+/**
+ * Poll `kill(pid, 0)` for up to `graceMs`, resolving early the instant the
+ * process is gone. Returns true if it exited within the grace, false if it's
+ * still alive (caller should SIGKILL). EPERM ⇒ alive (someone else's process).
+ */
+async function waitForExit(pid, graceMs) {
+  const deadline = Date.now() + graceMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0); // signal 0 = existence check
+    } catch (e) {
+      if (e && e.code === "EPERM") {
+        // Alive but not ours — we can't reap it. Treat as "still here".
+      } else {
+        return true; // ESRCH / no such process — gone
+      }
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, DAEMON_POLL_INTERVAL_MS));
+  }
 }
 
 async function killByProcessScan() {
@@ -292,26 +333,26 @@ async function killByProcessScan() {
       /* gone or not ours */
     }
   }
-  // Wait up to 2 s for graceful exits.
-  for (let i = 0; i < 20; i++) {
-    let alive = 0;
-    for (const pid of pids) {
-      try {
-        process.kill(pid, 0);
-        alive += 1;
-      } catch {
-        /* exited */
-      }
-    }
-    if (alive === 0) return;
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  // Wait until EVERY pid is gone (or the grace lapses), then SIGKILL the
+  // survivors. We poll each pid to its own deadline rather than a single shared
+  // 2 s budget — a daemon mid-Metal-load needs the full grace to shut clean.
+  const survivors = [];
   for (const pid of pids) {
+    const exited = await waitForExit(pid, DAEMON_TERM_GRACE_MS);
+    if (!exited) survivors.push(pid);
+  }
+  for (const pid of survivors) {
+    console.warn(
+      `[modelstat] daemon pid ${pid} didn't exit within ${DAEMON_TERM_GRACE_MS / 1000}s of SIGTERM — sending SIGKILL`,
+    );
     try {
       process.kill(pid, "SIGKILL");
     } catch {
       /* gone or denied */
     }
+    // Give the SIGKILL a beat to land so the new service doesn't kickstart on
+    // top of a still-dying process holding the Metal device.
+    await waitForExit(pid, 5_000);
   }
 }
 
@@ -334,20 +375,20 @@ async function killByLockfile(stateDir) {
     // EPERM: not our process — leave it alone.
     return;
   }
-  // Wait up to 2 s for graceful exit.
-  for (let i = 0; i < 20; i++) {
-    try {
-      process.kill(pid, 0); // signal 0 = existence check
-    } catch {
-      return; // exited
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  // Poll until the daemon has actually exited — it needs the full grace to run
+  // its graceful shutdown (free the Metal device) so the new daemon doesn't
+  // init Metal concurrently. SIGKILL only if the grace lapses.
+  const exited = await waitForExit(pid, DAEMON_TERM_GRACE_MS);
+  if (exited) return;
+  console.warn(
+    `[modelstat] daemon pid ${pid} didn't exit within ${DAEMON_TERM_GRACE_MS / 1000}s of SIGTERM — sending SIGKILL`,
+  );
   try {
     process.kill(pid, "SIGKILL");
   } catch {
     /* gone or denied */
   }
+  await waitForExit(pid, 5_000);
 }
 
 main().catch((err) => {

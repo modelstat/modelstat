@@ -111,83 +111,42 @@ export async function reportDiscovery(report: DiscoveryReport): Promise<void> {
   }
 }
 
-/* ─── Claim-code capability endpoints ─────────────────────────────
- * The /v1/device/:claim_code/* surface is authorised by the claim_code
- * itself — no bearer required. These helpers let the local CLI pull
- * its own stats without a second round-trip through auth. Once the
- * device is claimed, the endpoint 404s and callers fall back to a
- * "see the dashboard at …" message.
+/* ─── Defensive authenticated JSON GET ────────────────────────────────
+ * The server is a single origin that serves both the JSON API and the SPA: a
+ * removed/renamed route falls through to the SPA fallback and returns 200 +
+ * `text/html`, so a naive `res.body.json()` throws "Unexpected token <". This
+ * helper makes every read DEGRADE instead of crash — a `text/html` content-type
+ * (the SPA fallback) OR a JSON-parse failure ⇒ the endpoint is gone ⇒ `null`.
+ * Bearer-authed; `null` on no-bearer / non-2xx / SPA-fallback / parse failure.
  */
-
-export interface DeviceViewSummary {
-  claim_code: string;
-  status: "claimed" | "unclaimed";
-  device: {
-    id: string;
-    hostname: string | null;
-    os_family: string | null;
-    daemon_version: string | null;
-    daemon_status: string | null;
-    last_seen_at: string | null;
-  };
-  analyzed: { count: number; totalTokens: string; totalCostUsd: number };
-  free_quota_tokens: string;
-  claim_url: string;
-  agent_url: string;
-}
-
-export async function fetchDeviceViewByClaim(
-  claimCode: string,
-): Promise<DeviceViewSummary | null> {
-  const res = await request(`${state.apiUrl}/v1/device/${encodeURIComponent(claimCode)}`, {
-    method: "GET",
-  });
-  if (res.statusCode === 404) return null;
-  if (res.statusCode >= 300) {
-    throw new Error(`device-view failed: ${res.statusCode} ${await res.body.text()}`);
+async function authedJsonGet<T>(url: string): Promise<T | null> {
+  const bearer = state.bearer;
+  if (!bearer) return null;
+  let res: Awaited<ReturnType<typeof request>>;
+  try {
+    res = await request(url, { method: "GET", headers: { authorization: `Bearer ${bearer}` } });
+  } catch {
+    return null; // network blip — caller treats as "unavailable", retries later
   }
-  return (await res.body.json()) as DeviceViewSummary;
-}
-
-export interface DeviceViewJobs {
-  pending: number;
-  running: number;
-}
-
-export async function fetchDeviceViewJobsByClaim(
-  claimCode: string,
-): Promise<DeviceViewJobs | null> {
-  const res = await request(
-    `${state.apiUrl}/v1/device/${encodeURIComponent(claimCode)}/jobs`,
-    { method: "GET" },
-  );
-  if (res.statusCode === 404) return null;
   if (res.statusCode >= 300) {
-    throw new Error(`device-view jobs failed: ${res.statusCode} ${await res.body.text()}`);
+    await res.body.dump();
+    return null;
   }
-  return (await res.body.json()) as DeviceViewJobs;
-}
-
-export interface DeviceViewLedgerRow {
-  id: string;
-  occurred_at: string;
-  kind: string;
-  session_id: string | null;
-  tokens: string;
-}
-
-export async function fetchDeviceViewLedgerByClaim(
-  claimCode: string,
-): Promise<{ recent: DeviceViewLedgerRow[] } | null> {
-  const res = await request(
-    `${state.apiUrl}/v1/device/${encodeURIComponent(claimCode)}/ledger`,
-    { method: "GET" },
-  );
-  if (res.statusCode === 404) return null;
-  if (res.statusCode >= 300) {
-    throw new Error(`device-view ledger failed: ${res.statusCode} ${await res.body.text()}`);
+  // The SPA fallback returns 200 + text/html for a route the server no longer
+  // exposes. Detect it BEFORE parsing so a future route removal degrades to null
+  // rather than throwing "Unexpected token <" deep in a caller.
+  const ctype = (res.headers["content-type"] ?? "").toString().toLowerCase();
+  if (ctype.includes("text/html")) {
+    await res.body.dump();
+    return null;
   }
-  return (await res.body.json()) as { recent: DeviceViewLedgerRow[] };
+  try {
+    return (await res.body.json()) as T;
+  } catch {
+    // Non-JSON body despite a non-html content-type (or a truncated read) — the
+    // route is effectively gone from this caller's perspective.
+    return null;
+  }
 }
 
 // Shared IngestClient wired once and reused for the process lifetime.
@@ -269,18 +228,11 @@ export interface BackfillDaySessions {
   sessions: Array<{ session_id: string; events: number }>;
 }
 
-async function backfillGet<T>(query: string): Promise<T | null> {
-  const bearer = state.bearer;
-  if (!bearer) return null;
-  const res = await request(`${state.apiUrl}/v1/backfill/digests${query}`, {
-    method: "GET",
-    headers: { authorization: `Bearer ${bearer}` },
-  });
-  if (res.statusCode >= 300) {
-    await res.body.dump();
-    return null;
-  }
-  return (await res.body.json()) as T;
+function backfillGet<T>(query: string): Promise<T | null> {
+  // Routed through the defensive GET so a future removal of /v1/backfill/digests
+  // degrades reconcile to a no-op (null ⇒ "skip this pass") instead of crashing
+  // on the SPA-fallback HTML.
+  return authedJsonGet<T>(`${state.apiUrl}/v1/backfill/digests${query}`);
 }
 
 /** Per-day digest for this device's scope (top of the reconcile tree). */

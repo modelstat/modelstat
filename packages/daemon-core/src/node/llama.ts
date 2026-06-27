@@ -150,6 +150,16 @@ let inflight: Promise<unknown> = Promise.resolve();
 // every model/context spun off it) before the process exits — see
 // disposeLlama() for why that matters on macOS/Metal.
 let llamaInstance: { dispose: () => Promise<void> } | null = null;
+// Set once disposeLlama() begins teardown. Once armed, loadOnce() and the
+// per-pass adapters REFUSE to admit new inference so we don't keep a context
+// busy while we're trying to free the Metal device underneath it — the exact
+// race that fired `libc++abi: terminating … mutex lock failed` on auto-update
+// (the updater calls disposeLlama() while a scan segment was still in-flight).
+let disposing = false;
+// Hard cap on how long disposeLlama() waits for in-flight inference to drain
+// before it frees the device anyway. A wedged prompt must not block process
+// exit forever; 8s comfortably exceeds a single ≤4K-token completion.
+const DISPOSE_DRAIN_TIMEOUT_MS = 8_000;
 
 /**
  * Tear the bundled summariser down cleanly before the process exits.
@@ -165,13 +175,37 @@ let llamaInstance: { dispose: () => Promise<void> } | null = null;
  * No-op when the bundled summariser was never loaded (e.g. the Ollama
  * path, or a process that never summarised), so it is always safe to call
  * from a shutdown handler / before a one-shot command returns.
+ *
+ * Drains BEFORE freeing: `inst.dispose()` tears down the contexts + model +
+ * Metal device, and llama.cpp aborts (`libc++abi … mutex lock failed`, or the
+ * Metal `GGML_ASSERT`) if a context is mid-prompt when its device is freed.
+ * The updater/shutdown path calls us while a scan segment can still be running,
+ * so we (1) arm `disposing` to stop NEW work being admitted, then (2) await the
+ * current `inflight` chain to settle — capped at {@link DISPOSE_DRAIN_TIMEOUT_MS}
+ * so a wedged prompt can't block process exit forever — and only then dispose.
  */
 export async function disposeLlama(): Promise<void> {
+  disposing = true;
   const inst = llamaInstance;
   llamaInstance = null;
   loaded = null;
   loadPromise = null;
   if (!inst) return;
+  // Drain whatever inference is in flight so no context is mid-prompt when we
+  // free the device. `inflight` is the serialiser tail every adapter chains
+  // onto; awaiting it (errors swallowed) means the last queued prompt has
+  // returned. Race it against a hard timeout so a stuck prompt still exits.
+  try {
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const drainCap = new Promise<void>((resolve) => {
+      drainTimer = setTimeout(resolve, DISPOSE_DRAIN_TIMEOUT_MS);
+      drainTimer.unref?.();
+    });
+    await Promise.race([inflight.catch(() => undefined), drainCap]);
+    if (drainTimer) clearTimeout(drainTimer);
+  } catch {
+    /* best-effort drain — fall through to dispose regardless */
+  }
   try {
     await inst.dispose();
   } catch {
@@ -272,6 +306,11 @@ export async function ensureLlamaModel(
 }
 
 async function loadOnce(cfg: Required<LlamaConfig>): Promise<Loaded> {
+  // Teardown has started — refuse to (re)load. Admitting a fresh model/context
+  // here would race disposeLlama() freeing the device. Throwing matches the
+  // existing contract: best-effort passes catch → null, the summariser surfaces
+  // → extractive fallback. Either way nothing touches a half-freed device.
+  if (disposing) throw new Error("llama summariser is shutting down");
   if (loaded) return loaded;
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
@@ -417,6 +456,10 @@ function llamaChat(cfg: Required<LlamaConfig>, pick: (l: Loaded) => Session): Ch
   return async (req) => {
     const session = pick(await loadOnce(cfg));
     const run = inflight.then(async () => {
+      // Re-check at the head of the queue: disposeLlama() may have armed
+      // teardown while we were waiting our turn, and starting a prompt now
+      // would race the device being freed.
+      if (disposing) throw new Error("llama summariser is shutting down");
       session.resetChatHistory();
       const raw = await session.prompt(req.user, {
         temperature: req.temperature,
@@ -494,6 +537,7 @@ export function llamaRedact(cfg: Required<LlamaConfig> = defaultLlamaConfig()): 
     }
     const { redactor } = loadedSessions;
     const run = inflight.then(async () => {
+      if (disposing) throw new Error("llama summariser is shutting down");
       redactor.resetChatHistory();
       const raw = await redactor.prompt(text, {
         temperature: REDACT_TEMPERATURE,
