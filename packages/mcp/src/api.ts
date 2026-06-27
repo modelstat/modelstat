@@ -39,6 +39,28 @@ export type McpCallResult = {
   structuredContent?: unknown;
 };
 
+export type McpPromptArg = {
+  name: string;
+  description?: string;
+  required?: boolean;
+};
+
+export type McpPromptDecl = {
+  name: string;
+  description: string;
+  arguments: McpPromptArg[];
+};
+
+export type McpPromptMessage = {
+  role: string;
+  content: { type: "text"; text: string };
+};
+
+export type McpGetPromptResult = {
+  description?: string;
+  messages: McpPromptMessage[];
+};
+
 function assertPaired(state: State): void {
   if (!state.bearer) {
     throw new Error(
@@ -100,6 +122,28 @@ export const api = {
     args: Record<string, unknown>,
   ): Promise<McpCallResult> {
     return request(state, "POST", "/v1/mcp/call", {
+      body: { name, arguments: args },
+    });
+  },
+  /** Fetch the authoritative prompt (slash-command) catalog. Short timeout for
+   * the same reason as `listTools` — fall back to an empty list rather than
+   * block launch. */
+  listPrompts(
+    state: State,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<{ prompts: McpPromptDecl[] }> {
+    return request(state, "GET", "/v1/mcp/prompts", {
+      timeoutMs: opts.timeoutMs ?? 1500,
+    });
+  },
+  /** Expand one prompt template server-side (`prompts/get`) and forward the
+   * resulting messages verbatim. */
+  getPrompt(
+    state: State,
+    name: string,
+    args: Record<string, string>,
+  ): Promise<McpGetPromptResult> {
+    return request(state, "POST", "/v1/mcp/prompt", {
       body: { name, arguments: args },
     });
   },
