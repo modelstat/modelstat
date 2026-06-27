@@ -2,10 +2,12 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   type DetectedRefs,
+  dedupeFiles,
   dedupeSessionMetadata,
   detectBranchTickets,
   detectEventReferences,
   detectReferences,
+  type FileRef,
   isEmptySessionMetadata,
   repoRefFromGit,
   SessionMetadata,
@@ -262,4 +264,45 @@ test("detectEventReferences does NOT mine bare ticket keys (UTF-8 / SHA-256 safe
     detectEventReferences("ticket https://linear.app/acme/issue/ENG-9")?.issues[0]?.key,
     "ENG-9",
   );
+});
+
+test("dedupeFiles sums line counts per (slug, path) and keeps the same path in different repos separate", () => {
+  const files: FileRef[] = [
+    { slug: "acme/api", path: "src/forward.ts", lines_added: 10, lines_deleted: 2, source: "git" },
+    { slug: "acme/api", path: "src/forward.ts", lines_added: 5, lines_deleted: 1, source: "git" },
+    { slug: "acme/api", path: "src/util.ts", lines_added: 3, lines_deleted: 0, source: "git" },
+    { slug: "acme/web", path: "src/forward.ts", lines_added: 1, lines_deleted: 0, source: "git" },
+  ];
+  const out = dedupeFiles(files);
+  assert.equal(out.length, 3);
+  const fwd = out.find((f) => f.slug === "acme/api" && f.path === "src/forward.ts");
+  assert.equal(fwd?.lines_added, 15);
+  assert.equal(fwd?.lines_deleted, 3);
+});
+
+test("dedupeFiles drops malformed refs and caps at 500", () => {
+  const tooMany: FileRef[] = Array.from({ length: 600 }, (_, i) => ({
+    slug: "acme/api",
+    path: `src/f${i}.ts`,
+    lines_added: 1,
+    lines_deleted: 0,
+    source: "git",
+  }));
+  assert.equal(dedupeFiles(tooMany).length, 500);
+  // An over-long path violates the wire cap → that one ref is dropped, not thrown.
+  const bad: FileRef[] = [
+    { slug: "acme/api", path: "x".repeat(401), lines_added: 1, lines_deleted: 0, source: "git" },
+    { slug: "acme/api", path: "ok.ts", lines_added: 1, lines_deleted: 0, source: "git" },
+  ];
+  const out = dedupeFiles(bad);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]?.path, "ok.ts");
+});
+
+test("isEmptySessionMetadata accounts for files", () => {
+  const withFiles = SessionMetadata.parse({
+    files: [{ slug: "acme/api", path: "src/a.ts", lines_added: 1, lines_deleted: 0, source: "git" }],
+  });
+  assert.equal(isEmptySessionMetadata(withFiles), false);
+  assert.equal(isEmptySessionMetadata(SessionMetadata.parse({})), true);
 });

@@ -93,6 +93,23 @@ export const IssueRef = z.object({
 });
 export type IssueRef = z.infer<typeof IssueRef>;
 
+/** A file a session changed, with the lines added/deleted across the session's
+ * window (git `--numstat`). The raw signal behind the per-file *token re-spend*
+ * heatmap: a path that keeps reappearing across sessions is re-spend — a likely
+ * redesign candidate. Always `git`-sourced + repo-relative, the same public-shape
+ * safety class as a slug (no file contents, no home paths). */
+export const FileRef = z.object({
+  /** `org/repo` this file belongs to — ties the path to a repo for the per-repo
+   * rollup (one session can span several repos). Null when the slug is unknown. */
+  slug: z.string().max(200).nullable().default(null),
+  /** Repo-relative path. Never absolute / home — git emits repo-relative. */
+  path: z.string().max(400),
+  lines_added: z.number().int().nonnegative().default(0),
+  lines_deleted: z.number().int().nonnegative().default(0),
+  source: RefSource.default("git"),
+});
+export type FileRef = z.infer<typeof FileRef>;
+
 /**
  * The deterministic metadata for one session. Attached to the ingest batch
  * under `session_metadata[session_id]`. Every collection is plural and
@@ -102,6 +119,7 @@ export const SessionMetadata = z.object({
   repos: z.array(RepoRef).max(50).default([]),
   pull_requests: z.array(PullRequestRef).max(100).default([]),
   issues: z.array(IssueRef).max(100).default([]),
+  files: z.array(FileRef).max(500).default([]),
 });
 export type SessionMetadata = z.infer<typeof SessionMetadata>;
 
@@ -442,7 +460,30 @@ export function dedupeSessionMetadata(parts: DetectedRefs[]): SessionMetadata {
     repos: keepValid(RepoRef, repos).slice(0, 50),
     pull_requests: keepValid(PullRequestRef, pull_requests).slice(0, 100),
     issues: keepValid(IssueRef, reconciledIssues).slice(0, 100),
+    // Files are git-collected per repo *after* dedupe (like the PR-outcome
+    // enrichment), so the fold leaves them empty; the daemon fills them via
+    // dedupeFiles.
+    files: [],
   };
+}
+
+/** Fold a session's {@link FileRef}s (collected per repo from git) into one
+ * deduped, capped list: the same `(slug, path)` sums its line counts and keeps
+ * the strongest source. Separate from {@link dedupeSessionMetadata} because
+ * files aren't mined from the detected `parts` — they're collected after dedupe. */
+export function dedupeFiles(files: FileRef[]): FileRef[] {
+  const merged = dedupe(
+    files,
+    (f) => `${(f.slug ?? "").toLowerCase()}:${f.path}`,
+    (a, b) => ({
+      slug: a.slug ?? b.slug,
+      path: a.path,
+      lines_added: a.lines_added + b.lines_added,
+      lines_deleted: a.lines_deleted + b.lines_deleted,
+      source: stronger(a.source, b.source),
+    }),
+  );
+  return merged.filter((f) => FileRef.safeParse(f).success).slice(0, 500);
 }
 
 /** True when a {@link SessionMetadata} carries no references — callers use
@@ -451,7 +492,8 @@ export function isEmptySessionMetadata(m: SessionMetadata): boolean {
   return (
     m.repos.length === 0 &&
     m.pull_requests.length === 0 &&
-    m.issues.length === 0
+    m.issues.length === 0 &&
+    m.files.length === 0
   );
 }
 
