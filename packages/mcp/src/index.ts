@@ -33,6 +33,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
@@ -245,7 +247,7 @@ const TOOLS: McpToolDecl[] = [
 
 const server = new Server(
   { name: "modelstat", version: "0.0.3" },
-  { capabilities: { tools: {}, resources: {} } },
+  { capabilities: { tools: {}, resources: {}, prompts: {} } },
 );
 
 // ─── ListTools: prefer live catalog, fall back gracefully ────────
@@ -286,6 +288,31 @@ server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
     throw new Error(`Unknown resource: ${req.params.uri}`);
   }
   return readWidgetResource();
+});
+
+// ─── Prompts: slash commands, fetched live + expanded server-side ────
+// The catalog lives at GET /v1/mcp/prompts; GetPrompt expands one template at
+// POST /v1/mcp/prompt and we forward the messages verbatim — so a new server
+// command appears with no npm publish, exactly like the tool surface. A remote
+// failure degrades to an empty list rather than blocking launch.
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  const state = loadState();
+  try {
+    const live = await api.listPrompts(state, { timeoutMs: 1500 });
+    log(`prompts=remote count=${live.prompts.length}`);
+    return { prompts: live.prompts };
+  } catch (err) {
+    log(`prompts=none (remote=${(err as Error).message})`);
+    return { prompts: [] };
+  }
+});
+
+server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+  const state = loadState();
+  const name = req.params.name;
+  const args = (req.params.arguments ?? {}) as Record<string, string>;
+  return api.getPrompt(state, name, args);
 });
 
 // ─── CallTool: (eager pre-scan) → forward → pass response through ─
