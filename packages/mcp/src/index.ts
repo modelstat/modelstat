@@ -51,7 +51,7 @@ import {
   withResultMeta,
   withWidgetMeta,
 } from "./widget.js";
-import { runWire } from "./wire.js";
+import { healWire, runWire } from "./wire.js";
 
 const RANGES = ["today", "7d", "30d", "90d", "mtd", "ytd"] as const;
 // Dimensions the explore tool can group/stack by — mirrors the server catalog.
@@ -397,7 +397,21 @@ async function main(): Promise<void> {
   process.stderr.write(`modelstat-mcp: ready (auth=${s.source})\n`);
 }
 
-if (process.argv[2] === "wire") {
+if (process.argv[2] === "wire" && process.argv.includes("--heal")) {
+  // `wire --heal` — the daemon runs this on startup. Configure ONLY clients we
+  // haven't wired before (state-tracked), so a tool installed after modelstat
+  // gets picked up while a deliberately-removed one is left alone. Quiet + always
+  // exit 0 (best-effort; a non-zero would just alarm the daemon for nothing).
+  try {
+    const r = healWire();
+    if (r.configured.length > 0) {
+      process.stdout.write(`modelstat-mcp: wired ${r.configured.join(", ")}\n`);
+    }
+  } catch (e) {
+    process.stderr.write(`modelstat-mcp: wire --heal failed: ${(e as Error).message}\n`);
+  }
+  process.exit(0);
+} else if (process.argv[2] === "wire") {
   // `npx -y @modelstat/mcp wire` — configure the modelstat MCP into the local
   // AI tools we can find, print a report, and exit (no server).
   runWire()

@@ -15,6 +15,7 @@
  *   6. Report phase + progress + queue size via heartbeat at every
  *      stage so the dashboard shows precise activity.
  */
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { describeErrorWithCause } from "@modelstat/daemon-core/logger";
@@ -557,6 +558,25 @@ function basename(p: string): string {
 /** The main loop. Never returns unless blocked by an already-running
  * daemon (in which case returns 0 with a friendly "already running"
  * message and no side effects). */
+/** Best-effort: re-wire any newly-installed AI tools on startup, self-healing a
+ * transient install-time `wire` miss (or a tool the user installed after
+ * modelstat). `wire --heal` only touches clients we haven't wired before, so it
+ * never re-adds an entry the user removed. Detached + fully swallowed — never
+ * blocks or fails the daemon; a failed cold `npx` fetch just retries next start. */
+function healMcpWiring(): void {
+  try {
+    const child = spawn("npx", ["-y", "@modelstat/mcp", "wire", "--heal"], {
+      stdio: "ignore",
+      detached: true,
+      windowsHide: true,
+    });
+    child.on("error", () => {}); // npx absent/offline — ignore (retried next start)
+    child.unref();
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   if (!state.bearer || !state.deviceId) {
     throw new Error("not enrolled — run `npx modelstat@latest` first");
@@ -608,6 +628,11 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   // shows the running total from the first heartbeat, not 0 until the
   // first upload of this run.
   setStat("segments_sent", state.segmentsSent);
+
+  // Self-heal MCP wiring in the background — picks up tools installed after
+  // modelstat, or recovers a transient install-time `wire` miss. Detached +
+  // best-effort; never blocks the boot below.
+  healMcpWiring();
 
   // Start heartbeat ticker immediately
   const hb = setInterval(() => void sendHeartbeat(), HEARTBEAT_INTERVAL_MS);
