@@ -16,7 +16,7 @@
  * heartbeat) and the CLI only ever writes has no such race.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { platform } from "node:os";
 import { homePath, modelstatHome } from "./paths.js";
 
@@ -25,6 +25,65 @@ const PACKAGE = "modelstat";
 
 function prefPath(): string {
   return homePath("auto-update.json");
+}
+
+/** Short-lived marker dropped the moment we spawn `npm i -g` so a daemon the
+ * supervisor (launchd KeepAlive / systemd Restart) respawns ON THE SAME VERSION
+ * while the install is mid-flight doesn't ALSO kick off its own `npm i -g`. The
+ * postinstall stops + replaces the binary, so a respawn during that window is
+ * expected; without this guard the respawn sees `upgrade_required` again and
+ * stacks a second concurrent global install. */
+function upgradeMarkerPath(): string {
+  return homePath("upgrade-in-progress.json");
+}
+
+/** How long the upgrade marker is honoured. A normal stop→reinstall→restart
+ * cycle finishes well inside this; after it lapses we assume the upgrade died
+ * and allow a fresh attempt rather than wedging on a stale marker. */
+const UPGRADE_MARKER_TTL_MS = 5 * 60_000;
+
+/** True when a recent upgrade marker exists — i.e. THIS process is very likely a
+ * supervisor respawn during an in-flight `npm i -g`. The caller should skip
+ * spawning another install and let the postinstall finish swapping the binary.
+ * A marker older than the TTL is treated as stale (cleared) so a genuinely stuck
+ * upgrade can be retried. */
+export function upgradeInProgress(): boolean {
+  try {
+    const raw = readFileSync(upgradeMarkerPath(), "utf8");
+    const o = JSON.parse(raw) as { at?: number };
+    const at = Number(o?.at ?? 0);
+    if (at > 0 && Date.now() - at < UPGRADE_MARKER_TTL_MS) return true;
+    // Stale — clear it so it can't wedge future upgrades.
+    clearUpgradeMarker();
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function writeUpgradeMarker(target: string | null): void {
+  try {
+    mkdirSync(modelstatHome(), { recursive: true, mode: 0o700 });
+    const tmp = `${upgradeMarkerPath()}.${process.pid}.tmp`;
+    writeFileSync(
+      tmp,
+      JSON.stringify({ pid: process.pid, at: Date.now(), target: target ?? null }),
+      { mode: 0o600 },
+    );
+    renameSync(tmp, upgradeMarkerPath());
+  } catch {
+    /* best-effort — the worst case without the marker is a duplicate install */
+  }
+}
+
+/** Remove the upgrade marker. Called when an upgrade fails to start (so it
+ * isn't blocked forever) and when a stale marker is detected. */
+export function clearUpgradeMarker(): void {
+  try {
+    rmSync(upgradeMarkerPath(), { force: true });
+  } catch {
+    /* best-effort */
+  }
 }
 
 /** The stored auto-update preference (default: on). Read fresh from disk so a
@@ -87,10 +146,14 @@ export type UpgradeResult = { started: true } | { started: false; reason: string
  * killed mid-flight. Used by both `modelstat upgrade` (manual) and the
  * auto-updater. Best-effort: never throws.
  */
-export function runUpgrade(): UpgradeResult {
+export function runUpgrade(target: string | null = null): UpgradeResult {
   if (!canSelfUpdate()) {
     return { started: false, reason: "npm not found on PATH" };
   }
+  // Drop the in-progress marker BEFORE spawning so a supervisor respawn that
+  // races the install (postinstall stops + replaces us mid-flight) sees it and
+  // doesn't stack a second `npm i -g`.
+  writeUpgradeMarker(target);
   try {
     // Scrub leaking npm_config_* (e.g. when invoked from inside an npm run) so
     // the global install resolves the real global prefix, not a nested one.
@@ -105,6 +168,9 @@ export function runUpgrade(): UpgradeResult {
     child.unref();
     return { started: true };
   } catch (e) {
+    // The install never launched — clear the marker so the next verdict can
+    // retry rather than being suppressed for the whole TTL.
+    clearUpgradeMarker();
     return { started: false, reason: (e as Error).message };
   }
 }
@@ -119,9 +185,24 @@ const handled = new Set<string>();
  * upgrade; if off, return a one-time "upgrade manually" nudge. Returns a short
  * human-readable note to log the first time we see a given (verdict, target),
  * or null when there's nothing new to do. Never throws.
+ *
+ * `quiesce` (optional) runs RIGHT BEFORE the `npm i -g` spawn, only on the path
+ * that actually upgrades. The daemon passes a callback that stops accepting new
+ * scans, drains the in-flight scan, and frees the bundled summariser's Metal
+ * device — so the to-be-killed process is already off the device when the
+ * postinstall SIGTERMs it and the new daemon initialises Metal. Async, so this
+ * function is async too.
  */
-export function maybeAutoUpdate(verdict: string, target: string | null): string | null {
+export async function maybeAutoUpdate(
+  verdict: string,
+  target: string | null,
+  quiesce?: () => Promise<void>,
+): Promise<string | null> {
   if (verdict !== "update_available" && verdict !== "upgrade_required") return null;
+  // A supervisor respawn during an in-flight install must NOT stack a second
+  // `npm i -g`. The marker is short-lived (TTL) so a genuinely stuck upgrade
+  // still retries later.
+  if (upgradeInProgress()) return null;
   const key = `${verdict}:${target ?? ""}`;
   if (handled.has(key)) return null;
   handled.add(key);
@@ -130,7 +211,17 @@ export function maybeAutoUpdate(verdict: string, target: string | null): string 
   if (!autoUpdateEnabled()) {
     return `${required ? "upgrade required" : "update available"} (latest ${target ?? "?"}); auto-update is off — run \`modelstat upgrade\` or \`npm i -g modelstat@latest\``;
   }
-  const r = runUpgrade();
+  // Quiesce BEFORE spawning the install: free the Metal device so the
+  // postinstall can SIGTERM us cleanly and the replacement daemon doesn't race
+  // two processes onto the device. Best-effort — never block the upgrade on it.
+  if (quiesce) {
+    try {
+      await quiesce();
+    } catch {
+      /* a failed drain shouldn't stop the upgrade — proceed */
+    }
+  }
+  const r = runUpgrade(target);
   return r.started
     ? `auto-updating to ${target ?? "latest"} — \`npm i -g modelstat@latest\`; the service will restart on the new version`
     : `auto-update could not start (${r.reason}); upgrade manually: \`npm i -g modelstat@latest\``;

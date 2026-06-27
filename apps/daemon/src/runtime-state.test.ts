@@ -53,6 +53,19 @@ test("missing state file ⇒ defaults (fresh install / relocation)", () => {
     assert.equal(runtimeState.getCursor("/nope"), undefined);
     assert.equal(runtimeState.getApiUrl(), "");
     assert.equal(runtimeState.getSegmentsSent(), 0);
+    assert.deepEqual(runtimeState.getReshipState(), {});
+  });
+});
+
+test("reshipState (self-heal backoff bookkeeping) round-trips through disk", () => {
+  withTempHome(() => {
+    runtimeState.setReshipState({ "2026-06-01\0sess-1": { attempts: 2, lastAt: 1234 } });
+    runtimeState._resetCacheForTests();
+    assert.deepEqual(runtimeState.getReshipState(), {
+      "2026-06-01\0sess-1": { attempts: 2, lastAt: 1234 },
+    });
+    const onDisk = JSON.parse(readFileSync(statePath(), "utf8"));
+    assert.equal(onDisk.reshipState["2026-06-01\0sess-1"].attempts, 2);
   });
 });
 

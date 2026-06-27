@@ -35,7 +35,7 @@ import { reconcileBackfill } from "./reconcile.js";
 import { runtimeState } from "./runtime-state.js";
 import { scanAll, scanSession } from "./scan.js";
 import { createCoalescingRunner } from "./single-flight.js";
-import { autoUpdateEnabled, maybeAutoUpdate } from "./update.js";
+import { autoUpdateEnabled, clearUpgradeMarker, maybeAutoUpdate } from "./update.js";
 
 // Substituted by tsup's `define` at build time (see tsup.config.ts).
 // Replaces an older runtime parent-walk for package.json that broke
@@ -190,7 +190,7 @@ function scheduleLocalFlush(): void {
 // Track the last verdict so a transition is logged once (heartbeat fires every
 // 10s); maybeAutoUpdate self-dedups the action per (verdict, target).
 let lastVerdict = "ok";
-function handleRelease(rel?: { verdict?: string; latest?: string | null }): void {
+async function handleRelease(rel?: { verdict?: string; latest?: string | null }): Promise<void> {
   const verdict = rel?.verdict ?? "ok";
   const latest = rel?.latest ?? null;
   if (verdict === "ok") {
@@ -206,7 +206,10 @@ function handleRelease(rel?: { verdict?: string; latest?: string | null }): void
     );
   }
   lastVerdict = verdict;
-  const note = maybeAutoUpdate(verdict, latest);
+  // On the auto-update path, quiesce (stop scans + drain + free Metal) BEFORE
+  // the install spawns, so the postinstall's SIGTERM finds us already off the
+  // device and the replacement daemon doesn't race two processes onto Metal.
+  const note = await maybeAutoUpdate(verdict, latest, quiesceSummariser);
   if (note) {
     // biome-ignore lint/suspicious/noConsole: one-time auto-update note for the logs
     console.log(`[modelstat] ${note}`);
@@ -234,7 +237,7 @@ async function sendHeartbeat(): Promise<void> {
         const data = (await res.body.json()) as {
           daemon_release?: { verdict?: string; latest?: string | null };
         };
-        handleRelease(data?.daemon_release);
+        await handleRelease(data?.daemon_release);
       } catch {
         // non-JSON / read error — ignore; the next heartbeat retries.
       }
@@ -245,12 +248,12 @@ async function sendHeartbeat(): Promise<void> {
     // block on the next upload attempt.
   }
   // Mirror the heartbeat to ~/.modelstat/last-status.json so the
-  // tray (and any other local consumer) can read fresh numbers
-  // without an authenticated round-trip to the server. Critical for
-  // CLAIMED devices: the public /v1/device/:claim_code endpoint 404s
-  // for non-owner viewers, so the tray's `modelstat status --json`
-  // would otherwise see only `{paired, claimed, dashboard}` with no
-  // segment / identity / installation counts.
+  // tray + CLI (`modelstat status`/`jobs`) can read fresh numbers
+  // without an authenticated round-trip to the server. This is now the
+  // SOLE source of local usage numbers: the old public
+  // /v1/device/:claim_code capability endpoint was removed server-side
+  // (it returns the SPA HTML now), so the snapshot's phase / queue /
+  // segment-upload stats are what `modelstat status --json` reports.
   writeLocalStatus(body).catch(() => undefined);
 }
 
@@ -422,8 +425,35 @@ async function runScanCycle(reason: string): Promise<void> {
  * during long backfills.
  */
 const scanRunner = createCoalescingRunner<string>(runScanCycle);
+// Set once we begin quiescing for a self-update (or shutdown). Once armed, no
+// new scan is admitted — the process is about to be replaced/killed and we must
+// not start fresh work on a Metal device we're about to free.
+let quiescing = false;
 function requestScan(reason: string): Promise<void> {
+  if (quiescing) return Promise.resolve();
   return scanRunner.trigger(reason);
+}
+
+/**
+ * Make the process safe to kill: stop admitting new scans, let the in-flight
+ * scan drain, then free the bundled summariser's Metal device. Called before a
+ * self-update spawns `npm i -g` (so the to-be-killed daemon is already off the
+ * device when its replacement initialises Metal) and reusable by shutdown.
+ * Idempotent + best-effort: never throws.
+ */
+async function quiesceSummariser(): Promise<void> {
+  quiescing = true;
+  try {
+    await scanRunner.idle();
+  } catch {
+    /* idle() can't reject; never block on it */
+  }
+  try {
+    const { disposeLlama } = await import("@modelstat/daemon-core/node");
+    await disposeLlama();
+  } catch {
+    /* best-effort */
+  }
 }
 
 /**
@@ -526,6 +556,10 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   }
 
   setPhase("starting", "Booting");
+  // We hold the singleton lock, so we ARE the live daemon now — any in-flight
+  // upgrade has landed (the postinstall stopped the old one and kickstarted us).
+  // Clear the upgrade marker so a future verdict isn't suppressed by a stale one.
+  clearUpgradeMarker();
   // Trim runaway logs before anything else writes to them — a daemon
   // that died spamming one warn line must not boot back up on top of a
   // gigabyte-scale err.log.
@@ -742,22 +776,25 @@ export async function runDaemon(opts: { force?: boolean } = {}): Promise<void> {
   setTimeout(() => void reconcileBackfill(requestScan), 60_000).unref();
 
   // Handle Ctrl-C / service restarts
+  let shuttingDown = false;
   const shutdown = async (): Promise<void> => {
+    if (shuttingDown) return; // a second SIGTERM/SIGINT mustn't race the teardown
+    shuttingDown = true;
     setPhase("offline", "Shutting down");
     await sendHeartbeat();
+    // Stop admitting new file events before we drain — otherwise the watcher
+    // could trigger a fresh scan while we're trying to quiesce.
     await watcher.close();
     if (localDrainTimer) clearInterval(localDrainTimer);
     await localIngest?.close();
-    // Free the bundled summariser before exit so llama.cpp's Metal device
-    // doesn't hit a teardown GGML_ASSERT during static destruction (which
-    // turned every launchd stop/restart into a "failed" exit). No-op when
-    // the summariser was never loaded.
-    try {
-      const { disposeLlama } = await import("@modelstat/daemon-core/node");
-      await disposeLlama();
-    } catch {
-      /* best-effort — exit cleanly regardless */
-    }
+    // Quiesce the scanner THEN free the summariser. A scan can be mid
+    // segment-inference right now; disposing the Metal device underneath a live
+    // llama context is exactly what aborted the process (`libc++abi … mutex lock
+    // failed` / GGML_ASSERT) on every launchd stop/restart and on auto-update.
+    // quiesceSummariser stops new scans, drains the in-flight one (idle()), then
+    // disposeLlama frees contexts + model + device (with its own ≤8s drain cap).
+    // No-op when the summariser was never loaded.
+    await quiesceSummariser();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

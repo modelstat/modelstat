@@ -9,15 +9,7 @@ import { spawn } from "node:child_process";
 import { arch as cpuArch, hostname, platform, release } from "node:os";
 import { createInterface } from "node:readline";
 import { discover } from "@modelstat/parsers";
-import {
-  DeviceMeUnauthorized,
-  fetchDeviceMe,
-  fetchDeviceViewByClaim,
-  fetchDeviceViewJobsByClaim,
-  fetchDeviceViewLedgerByClaim,
-  reportDiscovery,
-  selfRegister,
-} from "./api.js";
+import { DeviceMeUnauthorized, fetchDeviceMe, reportDiscovery, selfRegister } from "./api.js";
 import { state } from "./config.js";
 import { backupIdentity, hasIdentityFile, identityPath } from "./identity.js";
 import { deviceUuidFromMachineKey, machineKey, machineKeySource } from "./machine-key.js";
@@ -940,24 +932,21 @@ async function cmdStatus(args: readonly string[] = []): Promise<void> {
   const s = serviceStatus();
   const paired = !!state.bearer && !!state.deviceId;
   const local = await readLocalStatus();
-  const claim = state.claimCode;
   const dashboard = `${state.apiUrl.replace(/\/$/, "")}/dashboard`;
 
-  // Live usage for this device via the claim-code capability endpoint, so it
-  // works for unclaimed devices (the common "just ran connect" case). A
-  // claimed device's public view 404s (its data moved to the owner's org) →
-  // fall back to the local heartbeat snapshot + a dashboard pointer.
-  const view = claim ? await fetchDeviceViewByClaim(claim) : null;
+  // Usage is driven entirely off the daemon's LOCAL heartbeat snapshot
+  // (~/.modelstat/last-status.json, written by daemon.ts every status change)
+  // plus a dashboard pointer for the authoritative numbers. The old
+  // claim-code capability endpoint (/v1/device/:claim) was removed server-side —
+  // it now returns the SPA HTML, so there's nothing to fetch here.
+  const stats = (local?.stats as Record<string, number | string> | undefined) ?? {};
 
   if (asJson) {
-    const usage = !claim
-      ? { paired: false, reason: "no_claim_code", local }
-      : view
-        ? { ...view, local }
-        : { paired: true, claimed: true, dashboard, local };
     process.stdout.write(
       `${JSON.stringify({
-        ...usage,
+        paired,
+        dashboard,
+        local,
         service: { running: s.running, hint: s.hint },
         pairing: paired
           ? {
@@ -996,27 +985,22 @@ async function cmdStatus(args: readonly string[] = []): Promise<void> {
     console.log(`update:  ${what} — latest ${upd.latest ?? "?"} (run \`modelstat upgrade\`)`);
   }
 
-  // ── live usage: sessions · tokens · cost ──────────────────────────
+  // ── live usage: from the local heartbeat snapshot + dashboard pointer ──
   console.log("");
-  if (!claim) {
+  if (!paired) {
     console.log("usage:   not paired yet — run `npx modelstat@latest`");
     return;
   }
-  if (!view) {
-    console.log("usage:   device claimed — full numbers in your dashboard:");
-    console.log(`  ${dashboard}`);
-    if (local) {
-      const st = (local.stats as Record<string, number | string> | undefined) ?? {};
-      for (const [k, v] of Object.entries(st)) console.log(`  ${k}: ${v}`);
-    }
-    return;
+  console.log("usage:   full numbers in your dashboard:");
+  console.log(`  ${dashboard}`);
+  if (local) {
+    const phase = local.status as string | undefined;
+    const message = local.message as string | null | undefined;
+    if (phase) console.log(`  phase: ${phase}${message ? ` — ${message}` : ""}`);
+    for (const [k, v] of Object.entries(stats)) console.log(`  ${k}: ${v}`);
+  } else {
+    console.log("  (no local heartbeat yet — is the daemon running?)");
   }
-  console.log(
-    `claim:    ${view.status}${view.status === "unclaimed" ? ` — claim at ${view.claim_url}` : ""}`,
-  );
-  console.log(`sessions: ${fmtInt(view.analyzed.count)}`);
-  console.log(`tokens:   ${fmtTokens(view.analyzed.totalTokens)}`);
-  console.log(`cost:     ${fmtCost(view.analyzed.totalCostUsd)}`);
 }
 
 /** Show or change the daemon auto-update setting: on | off | toggle | status. */
@@ -1053,23 +1037,6 @@ function cmdUpgrade(): void {
   }
 }
 
-function fmtInt(n: number | string): string {
-  return Number(n).toLocaleString("en-US");
-}
-
-function fmtCost(usd: number): string {
-  return `$${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function fmtTokens(v: string | number): string {
-  const n = typeof v === "string" ? Number(v) : v;
-  if (!Number.isFinite(n)) return "—";
-  if (n >= 1e9) return `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)}B`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`;
-  return String(n);
-}
-
 /** Best-effort read of the daemon's heartbeat mirror. Returns the
  * parsed object or null if the file isn't there / can't be parsed. */
 async function readLocalStatus(): Promise<Record<string, unknown> | null> {
@@ -1084,51 +1051,44 @@ async function readLocalStatus(): Promise<Record<string, unknown> | null> {
   }
 }
 
-/** Background-pipeline view: how many jobs are queued / in-flight +
- * the last handful of ledger events (ingest / reanalyze / credit). */
+/** Background-pipeline view. The authoritative job queue + ledger live in the
+ * dashboard (the old claim-code capability endpoints were removed server-side —
+ * they now return the SPA HTML). Locally we surface the daemon's own pipeline
+ * activity from its heartbeat snapshot (phase + queue depth + upload stats) and
+ * point at the dashboard for the full picture. */
 async function cmdJobs(args: readonly string[]): Promise<void> {
   const asJson = args.includes("--json");
-  const claim = state.claimCode;
-  if (!claim) {
+  const paired = !!state.bearer && !!state.deviceId;
+  const dashboard = `${state.apiUrl.replace(/\/$/, "")}/dashboard/jobs`;
+  if (!paired) {
     if (asJson) {
-      process.stdout.write(`${JSON.stringify({ paired: false, reason: "no_claim_code" })}\n`);
+      process.stdout.write(`${JSON.stringify({ paired: false, reason: "not_paired" })}\n`);
     } else {
-      console.log("no claim code on record — run `modelstat` first");
+      console.log("not paired yet — run `npx modelstat@latest` first");
     }
     return;
   }
-  const [jobs, ledger] = await Promise.all([
-    fetchDeviceViewJobsByClaim(claim),
-    fetchDeviceViewLedgerByClaim(claim),
-  ]);
-  if (!jobs && !ledger) {
-    const dashboard = `${state.apiUrl.replace(/\/$/, "")}/dashboard/jobs`;
-    if (asJson) {
-      process.stdout.write(`${JSON.stringify({ paired: true, claimed: true, dashboard })}\n`);
-    } else {
-      console.log("device is claimed — job queue at:");
-      console.log(`  ${dashboard}`);
-    }
-    return;
-  }
+  const local = await readLocalStatus();
+  const stats = (local?.stats as Record<string, number | string> | undefined) ?? {};
+  const phase = (local?.status as string | undefined) ?? null;
+  const queue = Number(local?.queue_size ?? 0);
   if (asJson) {
     process.stdout.write(
-      `${JSON.stringify({ jobs: jobs ?? null, ledger: ledger?.recent ?? [] })}\n`,
+      `${JSON.stringify({ paired: true, dashboard, phase, queue_size: queue, stats })}\n`,
     );
     return;
   }
-  console.log(`queue:   ${jobs?.pending ?? 0} pending · ${jobs?.running ?? 0} running`);
-  const recent = ledger?.recent ?? [];
-  if (recent.length === 0) {
-    console.log("ledger:  (no activity yet)");
-    return;
-  }
-  console.log(`ledger:  (last ${recent.length})`);
-  for (const r of recent.slice(0, 15)) {
-    const ts = r.occurred_at.slice(0, 19).replace("T", " ");
-    console.log(
-      `  ${ts}  ${r.kind.padEnd(16)}  ${fmtTokens(r.tokens).padStart(7)} tok  ${r.session_id ?? ""}`,
-    );
+  console.log("jobs:    full job queue + ledger in your dashboard:");
+  console.log(`  ${dashboard}`);
+  console.log("");
+  console.log("local pipeline (this device):");
+  if (local) {
+    const message = local.message as string | null | undefined;
+    if (phase) console.log(`  phase: ${phase}${message ? ` — ${message}` : ""}`);
+    console.log(`  queue: ${queue}`);
+    for (const [k, v] of Object.entries(stats)) console.log(`  ${k}: ${v}`);
+  } else {
+    console.log("  (no local heartbeat yet — is the daemon running?)");
   }
 }
 

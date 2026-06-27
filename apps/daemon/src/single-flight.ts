@@ -49,6 +49,14 @@ export interface CoalescingRunner<A> {
   isRunning: () => boolean;
   /** True while a follow-up run is queued behind the active one. */
   isPending: () => boolean;
+  /**
+   * Resolve once the runner is idle — the active chain (plus any coalesced
+   * follow-up it picks up) has fully drained. Resolves immediately when idle.
+   * Used at shutdown to let an in-flight scan settle before tearing down the
+   * bundled summariser's Metal device (a scan mid-inference + a device free =
+   * the llama.cpp teardown abort). Never rejects — the chain swallows errors.
+   */
+  idle: () => Promise<void>;
 }
 
 export function createCoalescingRunner<A>(
@@ -94,9 +102,18 @@ export function createCoalescingRunner<A>(
     return chain;
   }
 
+  // Await the current chain to its end. `chain` is reassigned per fresh run, so
+  // awaiting the latest reference settles after the active run AND any follow-up
+  // it coalesces. `chain` never rejects (the loop swallows task errors), so this
+  // resolves cleanly even on a failing scan.
+  async function idle(): Promise<void> {
+    await chain;
+  }
+
   return {
     trigger,
     isRunning: () => running,
     isPending: () => next !== null,
+    idle,
   };
 }

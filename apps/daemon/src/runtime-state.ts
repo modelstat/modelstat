@@ -47,6 +47,13 @@ export interface RuntimeState {
    * flaky LLM to at most once per window so a preflight-passes/scan-fails loop
    * can't re-scan the world every restart. */
   summariserRecoveryAt: number;
+  /** Per-(day,session) self-heal re-ship bookkeeping, keyed `${day}\0${sid}`.
+   * `attempts` is how many times we've re-shipped this session that the server
+   * still reports short; `lastAt` is the ms-epoch of the last re-ship. Together
+   * they drive an exponential backoff so a session the server DEDUPES (re-ship
+   * never reduces the reported deficit) stops re-shipping every pass instead of
+   * looping forever. GC'd to the current (day,session) set each pass. */
+  reshipState: Record<string, { attempts: number; lastAt: number }>;
 }
 
 const DEFAULTS: RuntimeState = {
@@ -57,6 +64,7 @@ const DEFAULTS: RuntimeState = {
   reconcileCache: {},
   summariserDegraded: false,
   summariserRecoveryAt: 0,
+  reshipState: {},
 };
 
 export function statePath(): string {
@@ -79,6 +87,7 @@ function load(): RuntimeState {
       reconcileCache: obj.reconcileCache ?? {},
       summariserDegraded: obj.summariserDegraded ?? false,
       summariserRecoveryAt: obj.summariserRecoveryAt ?? 0,
+      reshipState: obj.reshipState ?? {},
     };
   } catch {
     // Missing/corrupt ⇒ fresh defaults (a new install, or post-`MODELSTAT_HOME`
@@ -191,6 +200,17 @@ export const runtimeState = {
   setReconcileCache(c: RuntimeState["reconcileCache"]): void {
     const s = load();
     s.reconcileCache = c;
+    persist(s);
+  },
+
+  /** Per-(day,session) re-ship backoff bookkeeping (see
+   * {@link RuntimeState.reshipState}). */
+  getReshipState(): RuntimeState["reshipState"] {
+    return load().reshipState;
+  },
+  setReshipState(r: RuntimeState["reshipState"]): void {
+    const s = load();
+    s.reshipState = r;
     persist(s);
   },
 

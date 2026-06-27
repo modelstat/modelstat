@@ -26,6 +26,30 @@ import { discoverJobs } from "./scan.js";
 /** day → session → event count. */
 type PerDaySession = Record<string, Record<string, number>>;
 
+/**
+ * Grace band so a server that DEDUPES a re-shipped session (its reported count
+ * never reaches local) doesn't make us re-ship forever. Three guards, all
+ * erring toward loss-PROOF — a small threshold + backoff, never suppression:
+ *
+ *   1. Settle window — skip days at/after this cutoff. The server ingests
+ *      asynchronously, so "today" (and the last few hours) legitimately lags
+ *      local; reconciling it would re-ship sessions that are merely in flight.
+ *      We only act on calendar days STRICTLY OLDER than this, where a real
+ *      deficit means genuine loss, not lag.
+ *   2. Min deficit — ignore a per-(day,session) shortfall of ≤ this many events.
+ *      Off-by-a-few counts come from benign skew (a tail event the server
+ *      hasn't folded yet, an extractive-vs-model segment-count diff); re-shipping
+ *      for them churns without ever converging.
+ *   3. Per-session backoff — once we've re-shipped a (day,session) and the
+ *      server is STILL short next pass, wait exponentially longer before trying
+ *      again (cap MAX). A genuinely-missing session refills on the first attempt;
+ *      a server-deduped one stops hammering after a couple of tries.
+ */
+const RESHIP_SETTLE_MS = 6 * 60 * 60_000; // 6h — events older than this should have settled server-side
+const RESHIP_MIN_DEFICIT = 2; // ignore a shortfall of ≤2 events (benign skew)
+const RESHIP_BACKOFF_BASE_MS = 30 * 60_000; // first retry no sooner than ~30min after a re-ship
+const RESHIP_BACKOFF_MAX_MS = 24 * 60 * 60_000; // never wait longer than a day between retries
+
 export interface ReconcileOutcome {
   /** True when the server already holds everything local — no re-ship. */
   inSync: boolean;
@@ -35,8 +59,13 @@ export interface ReconcileOutcome {
   filesParsed: number;
   /** Divergent days drilled into. */
   daysChecked: number;
-  /** Sessions the server was short on. */
+  /** Sessions the server was short on AND that cleared the grace band (eligible
+   * to re-ship this pass). */
   sessionsShort: number;
+  /** Sessions short but HELD back this pass by the grace band (settle window,
+   * sub-threshold deficit, or backoff) — counted so a deferral is observable,
+   * not silent. */
+  sessionsDeferred: number;
   /** Cursors invalidated so the next scan re-ships them. */
   filesInvalidated: number;
 }
@@ -126,33 +155,88 @@ export async function reconcileBackfill(
     filesParsed,
     daysChecked: 0,
     sessionsShort: 0,
+    sessionsDeferred: 0,
     filesInvalidated: 0,
   };
   if (localEvents <= serverDays.total_events) return base;
 
-  // 4. Drill only into days the server is short on.
+  // Settle cutoff: only reconcile calendar days STRICTLY OLDER than this. The
+  // server ingests asynchronously, so recent days legitimately lag local — a
+  // shortfall there is in-flight data, not loss. `utcDay` of (now − settle).
+  const now = Date.now();
+  const cutoffDay = utcDay(new Date(now - RESHIP_SETTLE_MS).toISOString());
+
+  // 4. Drill only into days the server is short on AND old enough to have settled.
   const serverDayMap = new Map(serverDays.days.map((d) => [d.day, d.events]));
+  const reship = runtimeState.getReshipState();
+  const seenKeys = new Set<string>(); // (day,session) keys observed this pass — for GC
   const filesToReship = new Set<string>();
   let sessionsShort = 0;
+  let sessionsDeferred = 0;
   let daysChecked = 0;
   for (const [day, localCount] of localDay) {
     if (localCount <= (serverDayMap.get(day) ?? 0)) continue; // day in sync
+    if (day >= cutoffDay) {
+      // Too recent to trust the digest (still settling server-side) — defer the
+      // whole day to a later pass. Count its sessions as deferred so the
+      // deferral is observable; no per-session digest fetch needed.
+      sessionsDeferred += localDaySession.get(day)?.size ?? 0;
+      continue;
+    }
     daysChecked += 1;
     const serverSessions = await fetchBackfillDaySessions(day);
-    const have = new Map((serverSessions?.sessions ?? []).map((s) => [s.session_id, s.events]));
+    const serverHave = new Map(
+      (serverSessions?.sessions ?? []).map((s) => [s.session_id, s.events]),
+    );
     for (const [sid, n] of localDaySession.get(day) ?? []) {
-      if (n > (have.get(sid) ?? 0)) {
-        sessionsShort += 1;
-        for (const f of filesOf.get(`${day}\0${sid}`) ?? []) filesToReship.add(f);
+      const key = `${day}\0${sid}`;
+      seenKeys.add(key);
+      const deficit = n - (serverHave.get(sid) ?? 0);
+      if (deficit <= 0) {
+        // In sync — drop any stale backoff bookkeeping for it.
+        if (reship[key]) delete reship[key];
+        continue;
       }
+      // Guard 2: ignore a tiny shortfall (benign skew, not loss).
+      if (deficit <= RESHIP_MIN_DEFICIT) {
+        sessionsDeferred += 1;
+        continue;
+      }
+      // Guard 3: exponential backoff once we've already re-shipped this
+      // (day,session) and the server is STILL short (i.e. it deduped). The
+      // first time we see a session short there's no record, so it re-ships
+      // immediately; subsequent passes wait 30min·2^(attempts-1) (capped 24h).
+      const rec = reship[key];
+      if (rec && rec.attempts > 0) {
+        const wait = Math.min(
+          RESHIP_BACKOFF_BASE_MS * 2 ** (rec.attempts - 1),
+          RESHIP_BACKOFF_MAX_MS,
+        );
+        if (now - rec.lastAt < wait) {
+          sessionsDeferred += 1;
+          continue; // still inside the backoff window
+        }
+      }
+      sessionsShort += 1;
+      reship[key] = { attempts: (rec?.attempts ?? 0) + 1, lastAt: now };
+      for (const f of filesOf.get(key) ?? []) filesToReship.add(f);
     }
   }
+  // GC: drop backoff records for (day,session) pairs we no longer see as short
+  // OR no longer have locally, so the map tracks the current short set, not
+  // every session ever re-shipped.
+  for (const key of Object.keys(reship)) {
+    if (!seenKeys.has(key)) delete reship[key];
+  }
+  runtimeState.setReshipState(reship);
 
-  if (filesToReship.size === 0) return { ...base, daysChecked };
+  if (filesToReship.size === 0) {
+    return { ...base, daysChecked, sessionsDeferred };
+  }
   for (const f of filesToReship) runtimeState.clearCursor(f);
   console.log(
-    `[modelstat] self-heal: server short ${sessionsShort} session(s) across ${daysChecked} day(s); ` +
-      `re-shipping ${filesToReship.size} file(s) from local logs`,
+    `[modelstat] self-heal: server short ${sessionsShort} session(s) across ${daysChecked} day(s) ` +
+      `(${sessionsDeferred} deferred by grace band); re-shipping ${filesToReship.size} file(s) from local logs`,
   );
   await requestScan("self-heal");
   return {
@@ -160,6 +244,7 @@ export async function reconcileBackfill(
     inSync: false,
     daysChecked,
     sessionsShort,
+    sessionsDeferred,
     filesInvalidated: filesToReship.size,
   };
 }

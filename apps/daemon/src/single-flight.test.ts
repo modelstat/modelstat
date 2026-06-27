@@ -101,6 +101,49 @@ test("a throwing task still drains the coalesced follow-up and never rejects", a
   assert.equal(runner.isRunning(), false);
 });
 
+test("idle() resolves only after the active run AND its coalesced follow-up drain", async () => {
+  const argsSeen: string[] = [];
+  const gates: Array<ReturnType<typeof deferred>> = [];
+  const runner = createCoalescingRunner<string>(async (arg) => {
+    argsSeen.push(arg);
+    const g = deferred();
+    gates.push(g);
+    await g.promise;
+  });
+
+  // Idle when nothing has ever run → resolves immediately.
+  await assert.doesNotReject(runner.idle());
+
+  runner.trigger("a"); // parks on gate[0]
+  await drain();
+  runner.trigger("b"); // coalesced follow-up
+  await drain();
+
+  let settled = false;
+  const idle = runner.idle().then(() => {
+    settled = true;
+  });
+  await drain();
+  assert.equal(settled, false, "idle() must not resolve while a run is in flight");
+
+  gates[0]!.resolve(); // run #1 done → follow-up "b" starts
+  await drain();
+  assert.equal(settled, false, "idle() still pending until the follow-up drains");
+
+  gates[1]!.resolve(); // follow-up done → runner idle
+  await idle;
+  assert.equal(settled, true, "idle() resolves once the runner is fully drained");
+  assert.deepEqual(argsSeen, ["a", "b"]);
+});
+
+test("idle() never rejects even when the active task throws", async () => {
+  const runner = createCoalescingRunner<string>(async () => {
+    throw new Error("boom");
+  });
+  runner.trigger("a");
+  await assert.doesNotReject(runner.idle(), "idle() swallows task errors like the chain");
+});
+
 test("a burst of concurrent triggers never overlaps (the backfill OOM invariant)", async () => {
   let active = 0;
   let maxActive = 0;
