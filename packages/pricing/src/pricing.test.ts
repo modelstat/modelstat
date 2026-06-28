@@ -52,3 +52,34 @@ test("cache-read is cheaper than fresh input", async () => {
   const input = computeCostUsd("anthropic", "claude-opus-4-6", { input: 1_000_000 });
   assert.ok(cache < input, `cache ${cache} should be < input ${input}`);
 });
+
+test("reasoning + cache_read are billed once each, not on top of output/input (G7/G8)", async () => {
+  await loadPrices();
+  const p = priceFor("openai", "o3", AT);
+  assert.ok(p, "o3 should have a price point");
+  // The parser now stores buckets DISJOINT (input excl. cache, output excl.
+  // reasoning). The pricer sums each bucket once — this is the correct cost.
+  const fixed = computeCostUsd(
+    "openai",
+    "o3",
+    { input: 60, output: 400, cache_read: 40, reasoning: 600 },
+    AT,
+  );
+  const expected =
+    ((p.input ?? 0) * 60 +
+      (p.output ?? 0) * 400 +
+      (p.cache_read ?? 0) * 40 +
+      (p.reasoning ?? p.output ?? 0) * 600) /
+    1_000_000;
+  assert.ok(Math.abs(fixed - expected) < 1e-12, `got ${fixed}, expected ${expected}`);
+  // The OLD parser stored inclusive totals (output ⊇ reasoning, input ⊇ cache),
+  // so the same turn billed reasoning + cached twice. The fix must cost strictly
+  // less than that double-count.
+  const doubleCounted = computeCostUsd(
+    "openai",
+    "o3",
+    { input: 100, output: 1000, cache_read: 40, reasoning: 600 },
+    AT,
+  );
+  assert.ok(fixed < doubleCounted, `fixed ${fixed} should be < double-counted ${doubleCounted}`);
+});
