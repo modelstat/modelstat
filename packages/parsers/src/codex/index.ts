@@ -443,8 +443,17 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
               }
             : null,
           tokens: {
-            input: tk.input_tokens ?? 0,
-            output: tk.output_tokens ?? 0,
+            // OpenAI's `input_tokens` / `output_tokens` are INCLUSIVE totals:
+            // `cached_input_tokens` is a subset of input, `reasoning_output_tokens`
+            // a subset of output. Store the buckets DISJOINT (input excl. cache,
+            // output excl. reasoning) so the pricer bills input + cache_read +
+            // output + reasoning as non-overlapping line items — otherwise cached
+            // AND reasoning tokens are paid for twice (up to ~2× on a reasoning-heavy
+            // turn). Matches the Claude parser, whose provider already reports these
+            // buckets disjoint. Total is preserved: each subset is re-added as its
+            // own bucket, so input+output+cache_read+reasoning == the original sum.
+            input: Math.max(0, (tk.input_tokens ?? 0) - (tk.cached_input_tokens ?? 0)),
+            output: Math.max(0, (tk.output_tokens ?? 0) - (tk.reasoning_output_tokens ?? 0)),
             cache_creation: 0,
             cache_read: tk.cached_input_tokens ?? 0,
             reasoning: tk.reasoning_output_tokens ?? 0,

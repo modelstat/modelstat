@@ -293,3 +293,36 @@ test("unmatched call stays status unknown with no ended_at", async () => {
   assert.equal(call.ended_at, null);
   assert.equal(call.result_bytes, 0);
 });
+
+test("token_count buckets are stored DISJOINT (no reasoning/cache double-count)", async () => {
+  // OpenAI reports input_tokens INCLUSIVE of cached, output_tokens INCLUSIVE of
+  // reasoning. The parser must store them disjoint so the pricer (which bills
+  // input + cache_read + output + reasoning as separate line items) doesn't pay
+  // for cached and reasoning tokens twice (G7/G8).
+  const file = writeRollout([
+    sessionMeta(),
+    turnContext("o3"),
+    {
+      timestamp: "2026-06-08T15:50:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        input_tokens: 100, // INCLUSIVE of the 40 cached
+        cached_input_tokens: 40,
+        output_tokens: 1000, // INCLUSIVE of the 600 reasoning
+        reasoning_output_tokens: 600,
+      },
+    },
+  ]);
+  const { events } = await parseCodexRollout({ deviceId: "dev_1", sourceFile: file });
+  const e = events.find((x) => x.tokens);
+  assert.ok(e?.tokens, "token_count emits an event carrying tokens");
+  const t = e.tokens;
+  assert.equal(t.input, 60, "input excludes the 40 cached");
+  assert.equal(t.output, 400, "output excludes the 600 reasoning");
+  assert.equal(t.cache_read, 40);
+  assert.equal(t.reasoning, 600);
+  // Total is preserved — the disjoint buckets re-add to OpenAI's inclusive totals.
+  assert.equal(t.input + t.cache_read, 100, "input + cache_read == input_tokens");
+  assert.equal(t.output + t.reasoning, 1000, "output + reasoning == output_tokens");
+});
