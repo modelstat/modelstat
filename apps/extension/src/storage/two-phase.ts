@@ -206,6 +206,18 @@ async function finaliseRow(row: PendingMessage, ctx: CommitterCtx): Promise<void
     }
   }
 
+  // OpenAI reports input_tokens / output_tokens INCLUSIVE of their cached /
+  // reasoning subsets; the pricer bills input + cache_read + output + reasoning
+  // as DISJOINT line items, so subtract the subsets for OpenAI — otherwise cached
+  // and reasoning tokens are paid for twice (G7/G8), in BOTH the popup price
+  // (costUsd below) and the ingested tokens (this StoredEvent feeds the server).
+  // Mirrors the Codex parser. Anthropic already reports these buckets disjoint.
+  // No-op when usage wasn't captured (subtracting 0) or text was tokenized.
+  if (ctx.vendor === "openai") {
+    input = Math.max(0, input - (row.usage.cache_read ?? 0));
+    output = Math.max(0, output - (row.usage.reasoning ?? 0));
+  }
+
   const conversationId = row.conversationId ?? row.messageId;
   const session_id = `${ctx.agent}::${conversationId}`;
   const source_event_id = `${row.host}::${row.messageId}`;
