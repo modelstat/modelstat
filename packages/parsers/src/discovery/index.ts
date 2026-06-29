@@ -124,6 +124,16 @@ const SOURCES: SourceSpec[] = [
     bundleIds: ["com.electron.ollama"],
   },
   {
+    agent: "pi",
+    dataDirs: {
+      macos: ["~/.pi/agent"],
+      linux: ["$XDG_CONFIG_HOME/pi/agent", "~/.pi/agent"],
+    },
+    dataDirEnv: ["PI_HOME"],
+    binaries: ["pi"],
+    fileSignatures: [{ filenameGlob: "sessions/**/*.jsonl", firstLineHasKey: "cwd" }],
+  },
+  {
     agent: "openclaw",
     dataDirs: { macos: ["~/.openclaw", "~/.claw"], linux: ["~/.openclaw", "~/.claw"] },
     binaries: ["openclaw", "claw", "clawdbot", "moltbot"],

@@ -18,6 +18,7 @@ import { test } from "node:test";
 import type { RawEvent } from "@modelstat/core";
 import { parseClaudeCodeJsonl } from "./claude-code/index.js";
 import { parseCodexRollout } from "./codex/index.js";
+import { parsePiSession } from "./pi/index.js";
 import { PARSER_EVENT_CHUNK } from "./types.js";
 
 const SESSION = "11111111-2222-3333-4444-555555555555";
@@ -58,6 +59,28 @@ function claudeCodeLines(turns: number): string {
   return `${lines.join("\n")}\n`;
 }
 
+function piLines(turns: number): string {
+  const lines: string[] = [
+    JSON.stringify({ type: "session", id: SESSION, cwd: "/Users/someone/proj" }),
+    JSON.stringify({ type: "model_change", provider: "anthropic", modelId: "claude-test-1" }),
+  ];
+  for (let i = 0; i < turns; i++) {
+    const ts = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString();
+    const message =
+      i % 2 === 0
+        ? { role: "user", content: [{ type: "text", text: `please do thing number ${i}` }] }
+        : {
+            role: "assistant",
+            provider: "anthropic",
+            model: "claude-test-1",
+            content: [{ type: "text", text: `did thing number ${i}` }],
+            usage: { input: 10, output: 5 },
+          };
+    lines.push(JSON.stringify({ type: "message", timestamp: ts, message }));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 function codexLines(turns: number): string {
   const lines: string[] = [JSON.stringify({ type: "session_meta", id: SESSION })];
   for (let i = 0; i < turns; i++) {
@@ -93,6 +116,8 @@ for (const [label, fixture, parse, expectedEvents] of [
   ["claude-code", claudeCodeLines(600), parseClaudeCodeJsonl, 600],
   // 600 token_count lines → 600 events; session_meta emits nothing.
   ["codex", codexLines(600), parseCodexRollout, 600],
+  // 600 message lines → 600 events; session/model_change emit nothing.
+  ["pi", piLines(600), parsePiSession, 600],
 ] as const) {
   test(`${label}: streaming parse is chunk-bounded and equivalent to buffered parse`, async () => {
     await withTempFile(`${label}.jsonl`, fixture, async (path) => {

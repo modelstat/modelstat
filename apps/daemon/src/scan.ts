@@ -16,10 +16,14 @@ import { attachSegmentIdsByMap, type ToolCallDraft } from "@modelstat/daemon-cor
 import type { IngestBatch, RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import {
   deriveSessionIdFromFilename,
+  deriveSessionIdFromPiPath,
   deriveSessionIdFromRolloutPath,
   type LocalToolContext,
   parseClaudeCodeJsonl,
   parseCodexRollout,
+  type ParseResult,
+  type ParserContext,
+  parsePiSession,
   quickChecksum,
 } from "@modelstat/parsers";
 import { uploadBatch } from "./api.js";
@@ -174,6 +178,31 @@ export async function discoverJobs(deviceId: string): Promise<ScanJob[]> {
     console.warn("codex scan skipped:", (e as Error).message);
   }
 
+  // pi — ~/.pi/agent/sessions/<encoded-cwd>/<TS>_<uuid>.jsonl
+  try {
+    const base = join(homedir(), ".pi/agent/sessions");
+    const projects = await readdir(base).catch(() => []);
+    for (const p of projects) {
+      const dir = join(base, p);
+      const ds = await stat(dir).catch(() => null);
+      if (!ds?.isDirectory()) continue;
+      const files = await readdir(dir);
+      for (const f of files) {
+        if (!f.endsWith(".jsonl")) continue;
+        const full = join(dir, f);
+        jobs.push({
+          path: full,
+          parse: async (sink) => {
+            const r = await parsePiSession({ deviceId, sourceFile: full, onEvents: sink });
+            return { toolCalls: r.toolCalls ?? [], scriptContexts: r.scriptContexts ?? [] };
+          },
+        });
+      }
+    }
+  } catch (e) {
+    console.warn("pi scan skipped:", (e as Error).message);
+  }
+
   return jobs;
 }
 
@@ -313,20 +342,27 @@ export async function scanSession(
  * `<uuid>.jsonl` or Codex's `rollout-…-<uuid>.jsonl`. Null when neither shape
  * matches (so it's never confused with a real id). */
 function sessionIdForPath(path: string): string | null {
+  if (path.includes("/.pi/agent/sessions/")) return deriveSessionIdFromPiPath(path);
   return deriveSessionIdFromFilename(path) ?? deriveSessionIdFromRolloutPath(path);
 }
 
 /** Build a one-off {@link ScanJob} for an explicit transcript path, picking
  * the parser from the directory shape (Codex rollouts live under
  * `.codex/sessions`; everything else is Claude Code JSONL). */
+function parserForFile(full: string): (ctx: ParserContext) => Promise<ParseResult> {
+  if (full.includes("/.codex/sessions/") && /rollout-.*\.jsonl$/.test(full)) {
+    return parseCodexRollout;
+  }
+  if (full.includes("/.pi/agent/sessions/")) return parsePiSession;
+  return parseClaudeCodeJsonl;
+}
+
 function jobForFile(deviceId: string, full: string): ScanJob {
-  const isCodex = full.includes("/.codex/sessions/") && /rollout-.*\.jsonl$/.test(full);
+  const parse = parserForFile(full);
   return {
     path: full,
     parse: async (sink) => {
-      const r = isCodex
-        ? await parseCodexRollout({ deviceId, sourceFile: full, onEvents: sink })
-        : await parseClaudeCodeJsonl({ deviceId, sourceFile: full, onEvents: sink });
+      const r = await parse({ deviceId, sourceFile: full, onEvents: sink });
       return { toolCalls: r.toolCalls ?? [], scriptContexts: r.scriptContexts ?? [] };
     },
   };

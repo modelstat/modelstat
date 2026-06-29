@@ -11,4 +11,5 @@ export * from "./tool-action/index.js";
 export * from "./claude-code/index.js";
 export * from "./codex/index.js";
 export * from "./cursor/index.js";
+export * from "./pi/index.js";
 export * from "./discovery/index.js";
