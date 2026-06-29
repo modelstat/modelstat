@@ -168,7 +168,7 @@ final class TrayController: NSObject {
     self.cli = locateCli()
     self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     super.init()
-    ensureLoginItem()
+    unregisterLegacyLoginItem()
     configureStatusItem()
     buildMenu()
     ensureDaemon()
@@ -206,23 +206,24 @@ final class TrayController: NSObject {
     watchdogTimer = watchdog
   }
 
-  /// Register ourselves as a macOS Login Item so the menu-bar icon
-  /// returns after every reboot. The headless daemon is launchd-managed
-  /// and comes back on its own, but the tray is a GUI app launchd can't
-  /// bring up — it exits 78/EX_CONFIG there (see writePlist() in
-  /// apps/daemon/src/service.ts) — so a Login Item is the only thing that
-  /// relaunches the tray in the user's GUI session. SMAppService.register()
-  /// is idempotent and shows no permission prompt; the user can still turn
-  /// it off in System Settings → General → Login Items. macOS < 13 lacks
-  /// the API and falls through — those users keep launching it by hand.
-  private func ensureLoginItem() {
+  /// One-time migration for upgraders. Older builds registered the tray as
+  /// a macOS Login Item via SMAppService.register() while running — the
+  /// fragile chicken-and-egg trap: it only registered when alive, so any
+  /// reboot/crash/silent-failure before it ran left it dead with nothing to
+  /// bring it back. Autostart is now owned by a launchd agent the installer
+  /// writes (ai.modelstat.tray — see installTrayAutostart in
+  /// apps/daemon/src/service.ts), which DOES relaunch the GUI tray fine.
+  /// So we UNregister any legacy login item: if we left it, both it and the
+  /// launchd agent would fire at login and race to launch the tray. Fresh
+  /// installs never had a login item, so this is a no-op for them.
+  private func unregisterLegacyLoginItem() {
     if #available(macOS 13.0, *) {
       let svc = SMAppService.mainApp
-      guard svc.status != .enabled else { return }
+      guard svc.status == .enabled else { return }
       do {
-        try svc.register()
+        try svc.unregister()
       } catch {
-        NSLog("modelstat-tray: login-item registration failed: \(error)")
+        NSLog("modelstat-tray: legacy login-item unregister failed: \(error)")
       }
     }
   }
