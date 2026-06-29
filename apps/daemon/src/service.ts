@@ -29,6 +29,11 @@ import { fileURLToPath } from "node:url";
 
 export const SERVICE_LABEL = "ai.modelstat.daemon";
 export const SYSTEMD_UNIT = "modelstat"; // → modelstat.service
+// The tray gets its OWN launchd agent, separate from the daemon's, so the
+// menu-bar icon is brought back on every login by launchd — not by the tray
+// trying to register itself as a Login Item while it happens to be running
+// (the old chicken-and-egg trap that left it dead after any reboot/crash).
+export const TRAY_SERVICE_LABEL = "ai.modelstat.tray";
 
 function home(): string {
   return homedir();
@@ -275,12 +280,11 @@ function locateTrayExecutable(): string | null {
 function writePlist(cliPath: string): string {
   const p = plistPath();
   mkdirSync(dirname(p), { recursive: true });
-  // Run the daemon directly, NOT the menu-bar tray: the tray GUI app exits
-  // 78 (EX_CONFIG) under launchd — AppKit can't come up in that context —
-  // before it ever spawns `modelstat start`, which left the device
-  // permanently disconnected. The daemon needs no GUI and self-heals via
-  // RunAtLoad + KeepAlive. The tray bundle is still staged (installTrayApp)
-  // for anyone who wants to launch it by hand.
+  // This agent runs the headless daemon directly. The menu-bar tray has its
+  // OWN launchd agent (installTrayAutostart) — keeping them separate means
+  // the pipeline stays up even if the GUI tray is quit, and each is
+  // supervised independently. The daemon needs no GUI and self-heals via
+  // RunAtLoad + KeepAlive.
   const programArgs = [
     `    <string>${nodeBinary()}</string>`,
     `    <string>${cliPath}</string>`,
@@ -327,17 +331,11 @@ function macInstall(): void {
   const plist = writePlist(cliPath);
   const uid = userInfo().uid;
   const target = `gui/${uid}/${SERVICE_LABEL}`;
-  // Idempotent: unload the previous instance if there is one.
+  // Idempotent: unload the previous instance, then load + start the fresh one.
   launchctl(["bootout", target]);
   const boot = launchctl(["bootstrap", `gui/${uid}`, plist]);
-  if (!boot.ok && !/already loaded|service already bootstrapped/i.test(boot.err)) {
-    // bootstrap can fail on older macOS; fall back to load.
-    const load = launchctl(["load", "-w", plist]);
-    if (!load.ok) {
-      throw new Error(
-        `launchctl load failed:\n  bootstrap: ${boot.err.trim()}\n  load: ${load.err.trim()}`,
-      );
-    }
+  if (!boot.ok) {
+    throw new Error(`launchctl bootstrap failed: ${boot.err.trim()}`);
   }
   launchctl(["kickstart", "-k", target]);
 }
@@ -477,10 +475,9 @@ export function absoluteBundlePath(): string {
 }
 
 /**
- * Copy a built ModelstatTray.app bundle to ~/Applications. The launchd
- * service runs the headless daemon, not the tray (a GUI app exits
- * 78/EX_CONFIG under launchd — see writePlist); the staged bundle is
- * launched as a GUI Login Item instead (see openTrayApp). Used by
+ * Copy a built ModelstatTray.app bundle to ~/Applications. The daemon's
+ * launchd agent runs the headless daemon; the tray gets its OWN launchd
+ * agent (installTrayAutostart) that execs this bundle's binary. Used by
  * `npx modelstat@latest` on macOS when a source .app is available (the
  * npm package ships one, and the installer build-compiles one if Swift
  * is on $PATH).
@@ -516,30 +513,163 @@ export function installTrayApp(sourceAppPath: string): { installedAt: string } |
   return { installedAt: dest };
 }
 
-/**
- * Launch the staged menu-bar tray (best-effort, never throws).
+/* ─── macOS tray autostart (its own launchd agent) ────────────────────
  *
- * Copying the bundle into ~/Applications is not enough on its own —
- * nothing else opens it, so the icon would only appear once the user
- * launched it by hand, and never at all after a reboot. Opening it here
- * (a) shows the icon immediately at install time, and (b) lets the tray
- * register itself as a Login Item on first launch (ensureLoginItem() in
- * apps/tray-mac), which is what brings the icon back on every subsequent
- * reboot. Opening the tray does NOT start a second daemon: the tray
- * detects the singleton lock (see lock.ts) held by the launchd-managed
- * daemon and backs off.
+ * The tray gets a launchd user agent SEPARATE from the daemon's. Unlike
+ * the daemon agent (which runs a headless `node … start`), this one execs
+ * the tray's GUI binary directly — which works from a user agent in the
+ * gui/<uid> domain: the menu-bar icon comes up and launchd supervises it.
  *
- * `open -g` launches without stealing focus from the installer terminal
- * (the tray is an LSUIElement app with no window to foreground anyway).
- * Returns true if `open` was invoked successfully; false on non-macOS, a
- * missing bundle, or any `open` failure — callers treat it as optional.
+ * KeepAlive={SuccessfulExit:false} is the whole trick for telling a crash
+ * apart from the user quitting, with no marker files:
+ *   · user picks Quit       → NSApp.terminate exits 0 → launchd leaves it
+ *                             dead (no instant-relaunch fight); it returns
+ *                             on the next login via RunAtLoad.
+ *   · crash (non-zero/signal) → launchd relaunches it.
+ *   · login-race duplicate   → the tray's process-table single-instance
+ *                             guard exits 0 → treated as a clean exit, so
+ *                             launchd doesn't fight it either.
+ * This mirrors the daemon agent's KeepAlive (see writePlist).
  */
-export function openTrayApp(): boolean {
-  if (platform() !== "darwin") return false;
+
+export function trayPlistPath(): string {
+  return join(home(), "Library", "LaunchAgents", `${TRAY_SERVICE_LABEL}.plist`);
+}
+
+/**
+ * Render the tray agent's launchd plist XML. Pure (no I/O) and exported so
+ * the load-bearing contract is unit-testable without invoking launchctl:
+ * the agent execs THIS binary, RunAtLoad brings it back at login, and
+ * KeepAlive={SuccessfulExit:false} restarts a crash but not a clean quit.
+ */
+export function trayPlistContents(trayBinary: string): string {
+  // The tray shells out to `/usr/bin/env node …` to run the CLI. launchd
+  // agents start with a bare PATH (/usr/bin:/bin:/usr/sbin:/sbin), so unless
+  // we extend it `node` isn't found and the tray hangs on "Loading…". Put the
+  // EXACT node that ran this installer first (process.execPath's dir) — the
+  // same node the daemon agent is pinned to — so it resolves regardless of
+  // where node lives (nvm, keg-only Homebrew, /usr/local). Keep the common
+  // Homebrew/local bins as fallbacks.
+  const nodeDir = dirname(nodeBinary());
+  const trayPath = `${nodeDir}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${TRAY_SERVICE_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${trayBinary}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>${join(logDir(), "tray-out.log")}</string>
+  <key>StandardErrorPath</key><string>${join(logDir(), "tray-err.log")}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>${trayPath}</string>
+  </dict>
+  <key>WorkingDirectory</key><string>${home()}</string>
+</dict>
+</plist>
+`;
+}
+
+function writeTrayPlist(trayBinary: string): string {
+  const p = trayPlistPath();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, trayPlistContents(trayBinary), { mode: 0o644 });
+  return p;
+}
+
+/** Kill any running tray process so the launchd agent's own instance
+ *  becomes the sole (and supervised) one — e.g. if a copy was launched by
+ *  hand from Finder. Matches the full bundle path to avoid unrelated
+ *  processes. */
+function killStrayTray(): void {
+  spawnSync("pkill", ["-f", "ModelstatTray.app/Contents/MacOS/modelstat-tray"]);
+}
+
+/**
+ * Install the tray's launchd agent so the menu-bar icon starts at login,
+ * comes back after a reboot, and is restarted if it crashes — and start it
+ * immediately. Best-effort: returns the plist path on success, or null on
+ * non-macOS / when no tray binary is installed (callers degrade to the
+ * headless daemon path). Mirrors macInstall().
+ *
+ * We kill any pre-existing tray process first so the agent's own kickstart
+ * instance wins the single-instance race and is the one launchd supervises.
+ */
+export function installTrayAutostart(): { path: string } | null {
+  if (platform() !== "darwin") return null;
+  const trayBinary = locateTrayExecutable();
+  if (!trayBinary) return null;
+  mkdirSync(logDir(), { recursive: true });
+  const plist = writeTrayPlist(trayBinary);
+  const uid = userInfo().uid;
+  const target = `gui/${uid}/${TRAY_SERVICE_LABEL}`;
+  killStrayTray();
+  // Idempotent: drop any previous instance, then load + start.
+  launchctl(["bootout", target]);
+  launchctl(["bootstrap", `gui/${uid}`, plist]);
+  launchctl(["kickstart", "-k", target]);
+  return { path: plist };
+}
+
+/**
+ * Remove the tray's launchd agent and stop the tray. Boots the agent out
+ * (which stops the supervised instance), deletes the plist, and kills any
+ * stray tray process so `npx modelstat remove` actually makes the icon go
+ * away. No-op on non-macOS.
+ */
+export function uninstallTrayAutostart(): void {
+  if (platform() !== "darwin") return;
+  const uid = userInfo().uid;
+  launchctl(["bootout", `gui/${uid}/${TRAY_SERVICE_LABEL}`]);
+  const plist = trayPlistPath();
+  if (existsSync(plist)) {
+    try {
+      unlinkSync(plist);
+    } catch {
+      /* ignore */
+    }
+  }
+  killStrayTray();
+}
+
+/**
+ * Remove the installed tray .app bundle from ~/Applications. Called on
+ * uninstall so nothing is left behind. No-op on non-macOS or if absent.
+ */
+export function removeTrayApp(): void {
+  if (platform() !== "darwin") return;
   const dest = join(home(), "Applications", "ModelstatTray.app");
-  if (!existsSync(dest)) return false;
-  const r = spawnSync("open", ["-g", dest], { encoding: "utf8" });
-  return r.status === 0;
+  if (existsSync(dest)) spawnSync("rm", ["-rf", dest]);
+}
+
+/** True if a tray .app is currently installed in ~/Applications. */
+export function trayInstalled(): boolean {
+  return locateTrayExecutable() !== null;
+}
+
+/**
+ * On upgrade, refresh an ALREADY-installed tray to the bundle shipped with
+ * THIS package and re-arm its autostart agent, so the NEW tray version ends
+ * up running. Called from `_install-service` (the auto-update / npm-update
+ * refresh step). Only touches things if a tray was already installed — it
+ * won't add a tray to a machine that never had one — and only uses a
+ * PREBUILT bundle, so a background upgrade never blocks on a Swift compile.
+ * No-op on non-macOS. Best-effort: returns true if it refreshed + re-armed.
+ */
+export function refreshTrayIfInstalled(): boolean {
+  if (platform() !== "darwin") return false;
+  if (!trayInstalled()) return false;
+  const src = prebuiltTrayAppPath();
+  if (!src) return false;
+  installTrayApp(src);
+  return installTrayAutostart() !== null;
 }
 
 /** Progress sink for an on-device tray build. `onLine` receives each
@@ -566,8 +696,11 @@ export interface TrayBuildProgress {
  * Returns null if we can't produce a bundle — callers degrade to the
  * headless launchd path.
  */
-export async function bundledTrayAppPath(progress?: TrayBuildProgress): Promise<string | null> {
-  if (platform() !== "darwin") return null;
+/** The already-built `.app` candidates (no compile): the CI-bundled
+ *  vendor copy, then the local dev build output. Returns the first that
+ *  exists, or null. Split out so the upgrade refresh can find a prebuilt
+ *  bundle WITHOUT ever triggering a `swift build`. */
+function prebuiltTrayAppPath(): string | null {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     // Pre-built .app — CI with codesigning drops one here.
@@ -578,6 +711,14 @@ export async function bundledTrayAppPath(progress?: TrayBuildProgress): Promise<
   for (const c of candidates) {
     if (existsSync(c)) return c;
   }
+  return null;
+}
+
+export async function bundledTrayAppPath(progress?: TrayBuildProgress): Promise<string | null> {
+  if (platform() !== "darwin") return null;
+  const prebuilt = prebuiltTrayAppPath();
+  if (prebuilt) return prebuilt;
+  const here = dirname(fileURLToPath(import.meta.url));
   // Sources path — build locally if we can.
   const sourceDirs = [join(here, "..", "vendor", "tray-mac"), join(here, "..", "..", "tray-mac")];
   for (const src of sourceDirs) {

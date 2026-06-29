@@ -12,10 +12,10 @@
 //   ./build-app.sh                     (wraps the binary in ModelstatTray.app)
 //
 // Wired into the macOS install path in apps/daemon/src/service.ts: the
-// installer stages this bundle (installTrayApp) and opens it (openTrayApp).
-// The launchd service runs the headless daemon — a GUI app exits
-// 78/EX_CONFIG under launchd — while the tray runs in the GUI session as a
-// Login Item (ensureLoginItem in main.swift) and spawns `modelstat start`
+// installer stages this bundle (installTrayApp) and installs a launchd
+// agent for it (installTrayAutostart) that execs this binary directly,
+// so the menu-bar icon starts at login and is restarted on crash. The
+// daemon has its own separate agent. The tray spawns `modelstat start`
 // as a child, with the singleton lock keeping it to one live daemon.
 import PackageDescription
 

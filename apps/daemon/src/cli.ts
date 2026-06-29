@@ -20,12 +20,15 @@ import {
   bundledTrayAppPath,
   installService,
   installTrayApp,
+  installTrayAutostart,
   logsDir,
-  openTrayApp,
+  refreshTrayIfInstalled,
+  removeTrayApp,
   serviceStatus,
   setupRuntime,
   trayStatus,
   uninstallService,
+  uninstallTrayAutostart,
 } from "./service.js";
 import { daemonHealth } from "./supervise.js";
 import {
@@ -548,14 +551,15 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
             ...(buildMs !== null ? { build_ms: buildMs } : {}),
           });
           ok(`tray at ${out.installedAt}`);
-          // Launch it now so the icon appears immediately AND the tray
-          // registers itself as a Login Item (ensureLoginItem in
-          // apps/tray-mac) so it returns after every reboot. Best-effort:
-          // the daemon is already running headless, so a failed open here
-          // costs only the menu-bar icon, not the pipeline.
-          const opened = openTrayApp();
-          emitEvent(opts, "tray_opened", { ok: opened });
-          if (opened) ok("menu-bar icon launched (and set to open at login)");
+          // Install the tray's own launchd agent and start it now. This
+          // shows the icon immediately AND, via RunAtLoad + KeepAlive,
+          // brings it back on every login and restarts it if it crashes —
+          // without the tray having to register itself as a Login Item.
+          // Best-effort: the daemon is already running headless, so a
+          // failure here costs only the menu-bar icon, not the pipeline.
+          const trayAgent = installTrayAutostart();
+          emitEvent(opts, "tray_autostart_installed", { ok: trayAgent !== null });
+          if (trayAgent) ok("menu-bar icon launched (and set to start at login)");
         }
       } else {
         emitEvent(opts, "tray_not_bundled", {});
@@ -908,6 +912,16 @@ async function cmdStop(): Promise<void> {
   try {
     uninstallService();
     console.log("✓ service stopped and uninstalled");
+    // Remove the menu-bar tray too: its launchd agent, the running tray
+    // process, and the installed .app bundle. Best-effort and macOS-only
+    // (both are no-ops elsewhere) — a tray hiccup must not fail uninstall.
+    try {
+      uninstallTrayAutostart();
+      removeTrayApp();
+      console.log("✓ menu-bar tray removed");
+    } catch (e) {
+      console.log(`  (couldn't fully remove the tray: ${(e as Error).message})`);
+    }
     // Remove our Claude Code statusLine (restoring any one we composed over).
     // Best-effort: a settings hiccup must not fail the uninstall.
     try {
@@ -1216,6 +1230,10 @@ async function main(): Promise<void> {
       // previously hand-spawned daemon gets converted to a managed one.
       const svc = installService();
       console.log(`✓ managed background service installed + started (${svc.path})`);
+      // If a menu-bar tray was already installed, refresh it to this
+      // version and re-arm its autostart agent so an auto-update / upgrade
+      // leaves the NEW tray running. No-op when no tray was installed.
+      if (refreshTrayIfInstalled()) console.log("✓ menu-bar tray refreshed to this version");
       return;
     }
     case "_daemon-health": {
