@@ -280,12 +280,11 @@ function locateTrayExecutable(): string | null {
 function writePlist(cliPath: string): string {
   const p = plistPath();
   mkdirSync(dirname(p), { recursive: true });
-  // Run the daemon directly, NOT the menu-bar tray: the tray GUI app exits
-  // 78 (EX_CONFIG) under launchd — AppKit can't come up in that context —
-  // before it ever spawns `modelstat start`, which left the device
-  // permanently disconnected. The daemon needs no GUI and self-heals via
-  // RunAtLoad + KeepAlive. The tray bundle is still staged (installTrayApp)
-  // for anyone who wants to launch it by hand.
+  // This agent runs the headless daemon directly. The menu-bar tray has its
+  // OWN launchd agent (installTrayAutostart) — keeping them separate means
+  // the pipeline stays up even if the GUI tray is quit, and each is
+  // supervised independently. The daemon needs no GUI and self-heals via
+  // RunAtLoad + KeepAlive.
   const programArgs = [
     `    <string>${nodeBinary()}</string>`,
     `    <string>${cliPath}</string>`,
@@ -332,17 +331,11 @@ function macInstall(): void {
   const plist = writePlist(cliPath);
   const uid = userInfo().uid;
   const target = `gui/${uid}/${SERVICE_LABEL}`;
-  // Idempotent: unload the previous instance if there is one.
+  // Idempotent: unload the previous instance, then load + start the fresh one.
   launchctl(["bootout", target]);
   const boot = launchctl(["bootstrap", `gui/${uid}`, plist]);
-  if (!boot.ok && !/already loaded|service already bootstrapped/i.test(boot.err)) {
-    // bootstrap can fail on older macOS; fall back to load.
-    const load = launchctl(["load", "-w", plist]);
-    if (!load.ok) {
-      throw new Error(
-        `launchctl load failed:\n  bootstrap: ${boot.err.trim()}\n  load: ${load.err.trim()}`,
-      );
-    }
+  if (!boot.ok) {
+    throw new Error(`launchctl bootstrap failed: ${boot.err.trim()}`);
   }
   launchctl(["kickstart", "-k", target]);
 }
@@ -520,35 +513,12 @@ export function installTrayApp(sourceAppPath: string): { installedAt: string } |
   return { installedAt: dest };
 }
 
-/**
- * Launch the staged menu-bar tray once, right now (best-effort, never
- * throws). `open -g` launches without stealing focus from the installer
- * terminal (the tray is an LSUIElement app with no window to foreground
- * anyway). Returns true if `open` was invoked successfully; false on
- * non-macOS, a missing bundle, or any `open` failure.
- *
- * NOTE: this is a one-shot launch only — it does NOT make the icon come
- * back after a reboot. Persistent autostart (and crash-restart) is owned
- * by the launchd agent installTrayAutostart() writes, which is what the
- * install flow uses. Kept as a standalone helper for callers that just
- * want to nudge the tray up without (re)installing the agent.
- */
-export function openTrayApp(): boolean {
-  if (platform() !== "darwin") return false;
-  const dest = join(home(), "Applications", "ModelstatTray.app");
-  if (!existsSync(dest)) return false;
-  const r = spawnSync("open", ["-g", dest], { encoding: "utf8" });
-  return r.status === 0;
-}
-
 /* ─── macOS tray autostart (its own launchd agent) ────────────────────
  *
  * The tray gets a launchd user agent SEPARATE from the daemon's. Unlike
  * the daemon agent (which runs a headless `node … start`), this one execs
- * the tray's GUI binary directly — which DOES work from a user agent in
- * the gui/<uid> domain: the menu-bar icon comes up fine. (The old "GUI app
- * exits 78/EX_CONFIG under launchd" lore was really the missing exec bit,
- * fixed in installTrayApp(); the launchd path was never re-tested after.)
+ * the tray's GUI binary directly — which works from a user agent in the
+ * gui/<uid> domain: the menu-bar icon comes up and launchd supervises it.
  *
  * KeepAlive={SuccessfulExit:false} is the whole trick for telling a crash
  * apart from the user quitting, with no marker files:
@@ -606,9 +576,10 @@ function writeTrayPlist(trayBinary: string): string {
   return p;
 }
 
-/** Best-effort kill of any running tray process so the launchd agent's
- *  own instance becomes the sole (and supervised) one. Matches the full
- *  bundle path to avoid hitting unrelated processes. */
+/** Kill any running tray process so the launchd agent's own instance
+ *  becomes the sole (and supervised) one — e.g. if a copy was launched by
+ *  hand from Finder. Matches the full bundle path to avoid unrelated
+ *  processes. */
 function killStrayTray(): void {
   spawnSync("pkill", ["-f", "ModelstatTray.app/Contents/MacOS/modelstat-tray"]);
 }
@@ -621,8 +592,7 @@ function killStrayTray(): void {
  * headless daemon path). Mirrors macInstall().
  *
  * We kill any pre-existing tray process first so the agent's own kickstart
- * instance wins the single-instance race and is the one launchd supervises
- * (otherwise a previously `open`-launched copy would keep running unmanaged).
+ * instance wins the single-instance race and is the one launchd supervises.
  */
 export function installTrayAutostart(): { path: string } | null {
   if (platform() !== "darwin") return null;
@@ -633,13 +603,9 @@ export function installTrayAutostart(): { path: string } | null {
   const uid = userInfo().uid;
   const target = `gui/${uid}/${TRAY_SERVICE_LABEL}`;
   killStrayTray();
-  // Idempotent: drop any previous instance, then (re)load + start.
+  // Idempotent: drop any previous instance, then load + start.
   launchctl(["bootout", target]);
-  const boot = launchctl(["bootstrap", `gui/${uid}`, plist]);
-  if (!boot.ok && !/already loaded|service already bootstrapped/i.test(boot.err)) {
-    // bootstrap can fail on older macOS; fall back to load.
-    launchctl(["load", "-w", plist]);
-  }
+  launchctl(["bootstrap", `gui/${uid}`, plist]);
   launchctl(["kickstart", "-k", target]);
   return { path: plist };
 }

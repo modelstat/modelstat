@@ -15,7 +15,6 @@
 import AppKit
 import Darwin
 import Foundation
-import ServiceManagement
 
 // ── Resolve the `modelstat` CLI on $PATH, then at the install-path
 //    the agent-dev installer writes into (~/.modelstat/bin/modelstat.mjs)
@@ -168,7 +167,6 @@ final class TrayController: NSObject {
     self.cli = locateCli()
     self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     super.init()
-    unregisterLegacyLoginItem()
     configureStatusItem()
     buildMenu()
     ensureDaemon()
@@ -204,28 +202,6 @@ final class TrayController: NSObject {
     }
     RunLoop.main.add(watchdog, forMode: .common)
     watchdogTimer = watchdog
-  }
-
-  /// One-time migration for upgraders. Older builds registered the tray as
-  /// a macOS Login Item via SMAppService.register() while running — the
-  /// fragile chicken-and-egg trap: it only registered when alive, so any
-  /// reboot/crash/silent-failure before it ran left it dead with nothing to
-  /// bring it back. Autostart is now owned by a launchd agent the installer
-  /// writes (ai.modelstat.tray — see installTrayAutostart in
-  /// apps/daemon/src/service.ts), which DOES relaunch the GUI tray fine.
-  /// So we UNregister any legacy login item: if we left it, both it and the
-  /// launchd agent would fire at login and race to launch the tray. Fresh
-  /// installs never had a login item, so this is a no-op for them.
-  private func unregisterLegacyLoginItem() {
-    if #available(macOS 13.0, *) {
-      let svc = SMAppService.mainApp
-      guard svc.status == .enabled else { return }
-      do {
-        try svc.unregister()
-      } catch {
-        NSLog("modelstat-tray: legacy login-item unregister failed: \(error)")
-      }
-    }
   }
 
   private func configureStatusItem() {
