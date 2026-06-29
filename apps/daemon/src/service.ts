@@ -543,6 +543,15 @@ export function trayPlistPath(): string {
  * KeepAlive={SuccessfulExit:false} restarts a crash but not a clean quit.
  */
 export function trayPlistContents(trayBinary: string): string {
+  // The tray shells out to `/usr/bin/env node …` to run the CLI. launchd
+  // agents start with a bare PATH (/usr/bin:/bin:/usr/sbin:/sbin), so unless
+  // we extend it `node` isn't found and the tray hangs on "Loading…". Put the
+  // EXACT node that ran this installer first (process.execPath's dir) — the
+  // same node the daemon agent is pinned to — so it resolves regardless of
+  // where node lives (nvm, keg-only Homebrew, /usr/local). Keep the common
+  // Homebrew/local bins as fallbacks.
+  const nodeDir = dirname(nodeBinary());
+  const trayPath = `${nodeDir}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -560,8 +569,7 @@ export function trayPlistContents(trayBinary: string): string {
   <key>StandardErrorPath</key><string>${join(logDir(), "tray-err.log")}</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <!-- So the tray can find node/modelstat when it spawns the daemon. -->
-    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>PATH</key><string>${trayPath}</string>
   </dict>
   <key>WorkingDirectory</key><string>${home()}</string>
 </dict>
