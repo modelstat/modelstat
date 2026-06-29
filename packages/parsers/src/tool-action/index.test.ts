@@ -16,12 +16,9 @@ test("shell command → executable + masked param_shape + redacted command", () 
   // Infra names are not secrets → the redacted command keeps them.
   assert.ok(a.command_redacted?.includes("kubectl"));
   assert.ok(a.command_redacted?.includes("prod"));
-  // Semantics are server-derived; the client leaves them empty.
-  assert.equal(a.action, null);
-  assert.equal(a.object, null);
-  assert.deepEqual(a.qualifiers, []);
-  assert.deepEqual(a.keywords, []);
-  assert.equal(a.abstract, null);
+  // SPEC 0004: the wire is structural-only — no semantic fields at all; the
+  // server derives the whole operation frame from command_redacted.
+  assert.ok(!("action" in a), "no semantic fields on the wire");
   assert.equal(a.extractor, "shell.v3");
 });
 

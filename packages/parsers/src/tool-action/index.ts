@@ -1,11 +1,13 @@
 /**
  * On-device, deterministic structural extraction for one tool call.
  *
- * Produces ONLY the cheap, generic facts + the compliance-redacted command —
- * no model, no vocabulary, browser-safe and synchronous. The semantic fields
- * (`action` / `object` / `keywords` / `abstract` / `qualifiers`) are left
- * null/empty on purpose: the backend derives those from `command_redacted`
- * with a better, re-runnable model (so stats stay accurate and future-proof).
+ * Produces ONLY the cheap, generic STRUCTURAL facts + the compliance-redacted
+ * command — no model, no vocabulary, browser-safe and synchronous. SPEC 0004:
+ * the wire carries no semantic fields at all; the backend derives the WHOLE
+ * operation frame (action / object / system / environment / effect /
+ * multiplicity / label / blast_radius) from `command_redacted` with a better,
+ * re-runnable model, cached per distinct command (so stats stay accurate and
+ * future-proof, and re-derive when the model or steering prompt improves).
  *
  * PRIVACY: the only command-derived outputs are `param_shape` (every value
  * masked to `§`) and `command_redacted` (secrets / PII stripped by `redact()`,
@@ -75,15 +77,9 @@ export function extractToolAction(call: ToolActionInput): ToolAction {
   return {
     surface,
     executable,
-    action: null,
-    object: null,
-    qualifiers: [],
     param_shape,
-    keywords: [],
-    abstract: null,
     command_redacted,
     scripts: [],
-    confidence: 0,
     // Per-surface provenance. shell bumped to v3 (normalized executable, see
     // `extractExecutable`); builtin/mcp extraction is unchanged → still v1.
     extractor: `${surface}.${surface === "shell" ? "v3" : "v1"}`,
