@@ -27,10 +27,12 @@
 import type { GitContext, RawEvent, Segment } from "@modelstat/core/schemas";
 import {
   type DetectedRefs,
+  dedupeFiles,
   dedupeSessionMetadata,
   detectBranchTickets,
   detectReferences,
   emptyDetectedRefs,
+  type FileRef,
   isEmptySessionMetadata,
   type SessionMetadata,
 } from "@modelstat/core/session-metadata";
@@ -94,6 +96,13 @@ export interface SessionMetadataOptions {
     cwd: string,
     prNumber: number,
   ) => Promise<{ merged: boolean; merged_at: string | null; reverted: boolean } | null>;
+  /** Aggregate the files a repo changed in [`since`, `until`] (parsers'
+   * `collectFilesChanged`) — the per-file token re-spend signal. Best-effort. */
+  collectFilesChanged?: (
+    cwd: string,
+    since: string,
+    until: string,
+  ) => Promise<Array<{ path: string; lines_added: number; lines_deleted: number }> | null>;
 }
 
 function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {
@@ -105,6 +114,32 @@ function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {
     out.set(key, arr);
   }
   return out;
+}
+
+/** The session's [since, until] as ISO-8601 instants — the span of its segments
+ * and events. Null when nothing is timestamped. ISO-8601 sorts lexically =
+ * chronologically, so a string min/max bounds the git capture window. */
+function sessionWindow(
+  evs: RawEvent[],
+  segs: Segment[],
+): { since: string; until: string } | null {
+  const starts: string[] = [];
+  const ends: string[] = [];
+  for (const s of segs) {
+    if (s.started_at) starts.push(s.started_at);
+    if (s.ended_at) ends.push(s.ended_at);
+  }
+  for (const e of evs) {
+    if (e.ts) {
+      starts.push(e.ts);
+      ends.push(e.ts);
+    }
+  }
+  starts.sort();
+  ends.sort();
+  const since = starts[0];
+  const until = ends[ends.length - 1];
+  return since && until ? { since, until } : null;
 }
 
 /**
@@ -220,6 +255,34 @@ export async function buildSessionMetadata(
           } catch {
             // best-effort — a failed git-check just leaves the PR unenriched.
           }
+        }
+      }
+
+      // 6. enrich with the files each resolved repo changed in the session
+      //    window — the per-file token re-spend signal. One git pass per repo,
+      //    best-effort + isolated; stamped with the repo slug for per-repo rollup.
+      if (opts.collectFilesChanged && slugToCwd.size > 0) {
+        const range = sessionWindow(evs, segs);
+        if (range) {
+          const fileRefs: FileRef[] = [];
+          for (const [slug, cwd] of slugToCwd) {
+            try {
+              const changes = await opts.collectFilesChanged(cwd, range.since, range.until);
+              if (!changes) continue;
+              for (const c of changes) {
+                fileRefs.push({
+                  slug,
+                  path: c.path,
+                  lines_added: c.lines_added,
+                  lines_deleted: c.lines_deleted,
+                  source: "git",
+                });
+              }
+            } catch {
+              // best-effort — a failed git pass just leaves that repo's files out.
+            }
+          }
+          if (fileRefs.length > 0) meta.files = dedupeFiles([...meta.files, ...fileRefs]);
         }
       }
 

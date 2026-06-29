@@ -63,6 +63,7 @@ import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
 import { createPrivacyFilterRedactor } from "@modelstat/daemon-core/redact/privacy-filter";
 import {
   checkPullRequestOutcome,
+  collectFilesChanged,
   type LocalToolContext,
   resolveGitContext,
 } from "@modelstat/parsers";
@@ -430,6 +431,7 @@ export async function buildSessionMetadata(
     resolveGit: resolveGitContext,
     extractLinks: a.extractLinks,
     checkPrOutcome: checkPullRequestOutcome,
+    collectFilesChanged,
   });
 }
 

@@ -95,6 +95,42 @@ test("resolveGit enriches repos + branch tickets from disk", async () => {
   assert.ok(out.s1?.issues.some((i) => i.key === "ENG-9"));
 });
 
+test("collectFilesChanged stamps per-repo files with their line counts", async () => {
+  const ev = mkEvent({ cwd: "/Users/dev/Documents/api" });
+  const seg = mkSegment("s1", "Refactored Forward().");
+  const resolveGit = async (cwd: string | null): Promise<GitContext | null> =>
+    cwd === "/Users/dev/Documents/api"
+      ? mkGit({ remote_host: "github.com", remote_slug: "acme/api", branch: "main" })
+      : null;
+  const collectFilesChanged = async (cwd: string) =>
+    cwd === "/Users/dev/Documents/api"
+      ? [
+          { path: "src/forward.ts", lines_added: 40, lines_deleted: 12 },
+          { path: "src/util.ts", lines_added: 3, lines_deleted: 0 },
+        ]
+      : null;
+  const out = await buildSessionMetadata([seg], [ev], { resolveGit, collectFilesChanged });
+  const files = out.s1?.files ?? [];
+  assert.equal(files.length, 2);
+  const fwd = files.find((f) => f.path === "src/forward.ts");
+  assert.equal(fwd?.slug, "acme/api");
+  assert.equal(fwd?.lines_added, 40);
+  assert.equal(fwd?.source, "git");
+});
+
+test("a failing collectFilesChanged never blocks the rest of the metadata", async () => {
+  const ev = mkEvent({ cwd: "/Users/dev/Documents/api" });
+  const seg = mkSegment("s1", "Landed the fix.");
+  const resolveGit = async (): Promise<GitContext | null> =>
+    mkGit({ remote_host: "github.com", remote_slug: "acme/api", branch: "main" });
+  const collectFilesChanged = async () => {
+    throw new Error("git exploded");
+  };
+  const out = await buildSessionMetadata([seg], [ev], { resolveGit, collectFilesChanged });
+  assert.equal(out.s1?.repos[0]?.slug, "acme/api", "repos survive a files-capture failure");
+  assert.deepEqual(out.s1?.files, []);
+});
+
 test("the model channel surfaces refs for content with no URL (any provider)", async () => {
   const ev = mkEvent({});
   const seg = mkSegment("s1", "Opened a pull request for the retry-logic fix.");
