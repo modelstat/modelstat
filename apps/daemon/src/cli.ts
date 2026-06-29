@@ -950,7 +950,7 @@ async function cmdStop(): Promise<void> {
 // One command for "how's my daemon, and what has it tracked?" — local
 // pairing + service state, then the live usage summary (sessions · tokens ·
 // cost). `--json` returns the whole object; the tray polls `status --json` and
-// decodes claimed / dashboard / analyzed / local from it.
+// decodes claimed / device / claim_url / dashboard / local from it.
 async function cmdStatus(args: readonly string[] = []): Promise<void> {
   const asJson = args.includes("--json");
   const s = serviceStatus();
@@ -958,18 +958,56 @@ async function cmdStatus(args: readonly string[] = []): Promise<void> {
   const local = await readLocalStatus();
   const dashboard = `${state.apiUrl.replace(/\/$/, "")}/dashboard`;
 
-  // Usage is driven entirely off the daemon's LOCAL heartbeat snapshot
+  // Usage NUMBERS are driven entirely off the daemon's LOCAL heartbeat snapshot
   // (~/.modelstat/last-status.json, written by daemon.ts every status change)
   // plus a dashboard pointer for the authoritative numbers. The old
   // claim-code capability endpoint (/v1/device/:claim) was removed server-side —
-  // it now returns the SPA HTML, so there's nothing to fetch here.
+  // it now returns the SPA HTML, so there's nothing to fetch for usage here.
+  // (The tray's claimed/device/claim_url fields ARE refreshed from the authed
+  // /v1/devices/me below, in the --json branch.)
   const stats = (local?.stats as Record<string, number | string> | undefined) ?? {};
 
   if (asJson) {
+    // The tray decodes `claimed` / `device` / `claim_url` / `claim_code` from
+    // this JSON to drive the dropdown: the claimed-vs-unclaimed UI, the device
+    // hostname line ("unknown" when this is missing — the bug this restores),
+    // and the "Copy claim URL" item. These USED to come from the public
+    // claim-code device-view (removed server-side — it now returns SPA HTML);
+    // the authed `GET /v1/devices/me` is its replacement. Best-effort: on any
+    // failure (offline / transient / revoked secret) we fall back to the
+    // locally-cached identity so the menu still shows the real hostname + claim
+    // link. We do NOT recover the identity here — a status poll must stay
+    // side-effect-free; the heartbeat loop owns 401 recovery.
+    const fp = buildFingerprint();
+    const device = {
+      hostname: typeof fp.hostname === "string" ? fp.hostname : null,
+      os_family: typeof fp.os_family === "string" ? fp.os_family : null,
+      daemon_status: (local?.status as string | undefined) ?? null,
+    };
+    // `userEmail` is set only once /devices/me has reported the device claimed,
+    // so it's a safe offline proxy for claimed-ness when the fetch below fails.
+    let claimed = !!state.userEmail;
+    let claimUrl = state.claimUrl;
+    let claimCode = state.claimCode;
+    if (paired) {
+      try {
+        const me = await fetchDeviceMe(state.bearer ?? "");
+        claimed = me.status === "claimed";
+        claimUrl = me.claim_url ?? claimUrl;
+        claimCode = me.claim_code ?? claimCode;
+        if (me.daemon_status) device.daemon_status = me.daemon_status;
+      } catch {
+        // offline / transient / revoked — keep the cached fallbacks above.
+      }
+    }
     process.stdout.write(
       `${JSON.stringify({
         paired,
+        claimed,
         dashboard,
+        device,
+        claim_url: claimUrl,
+        claim_code: claimCode,
         local,
         service: { running: s.running, hint: s.hint },
         pairing: paired
