@@ -157,9 +157,21 @@ function numericFlag(args: readonly string[], flag: string): number | undefined 
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** No human at the keyboard: a CI runner, or stdin isn't a TTY. */
+/** No human present: an explicit CI runner, or NO terminal on any std stream.
+ *
+ * We check stdin/stdout/stderr — a human is present if *any* is a TTY — and
+ * deliberately do NOT key on stdin alone. The official `curl … | sh` installer
+ * (and any piped-stdin run) leaves stdin a pipe while stdout/stderr stay the
+ * user's terminal; a stdin-only check wrongly flagged that human as CI and
+ * refused to register them. Truly headless CI has no TTY on any stream (and
+ * usually sets `CI`), so it's still blocked. */
 function isNonInteractive(): boolean {
-  return Boolean(process.env.CI) || process.stdin.isTTY !== true;
+  if (Boolean(process.env.CI)) return true;
+  return !(
+    process.stdin.isTTY === true ||
+    process.stdout.isTTY === true ||
+    process.stderr.isTTY === true
+  );
 }
 
 /** True when an env var is set to a truthy value (`1`/`true`/`yes`). */
