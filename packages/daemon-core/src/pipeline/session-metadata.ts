@@ -116,9 +116,17 @@ function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {
   return out;
 }
 
+/** Commits usually land when a session wraps up — a little AFTER its active
+ * window closes — so the per-file capture extends `until` by this grace period
+ * (capped at the next session's start; see step 6). 4h covers "commit when
+ * you're done" without claiming unrelated later work when there's no next
+ * session. The active window itself (`sessionWindow`) stays the lower bound. */
+const COMMIT_GRACE_MS = 4 * 60 * 60 * 1000;
+
 /** The session's [since, until] as ISO-8601 instants — the span of its segments
  * and events. Null when nothing is timestamped. ISO-8601 sorts lexically =
- * chronologically, so a string min/max bounds the git capture window. */
+ * chronologically, so a string min/max bounds the active window (step 6 extends
+ * `until` past it by {@link COMMIT_GRACE_MS} to catch the commit-on-wrap). */
 function sessionWindow(
   evs: RawEvent[],
   segs: Segment[],
@@ -159,6 +167,16 @@ export async function buildSessionMetadata(
   const sessionIds = new Set<string>([...eventsBySession.keys(), ...segsBySession.keys()]);
 
   const out: Record<string, SessionMetadata> = {};
+  // All sessions' start instants (ms), sorted — used to cap each session's
+  // commit-capture grace window (step 6) at the NEXT session's start, so a later
+  // session never double-claims a commit made after this one wrapped up.
+  const allStartsMs = [...sessionIds]
+    .map((sid) => {
+      const w = sessionWindow(eventsBySession.get(sid) ?? [], segsBySession.get(sid) ?? []);
+      return w ? Date.parse(w.since) : Number.NaN;
+    })
+    .filter((m) => !Number.isNaN(m))
+    .sort((a, b) => a - b);
   for (const sessionId of sessionIds) {
     try {
       const evs = eventsBySession.get(sessionId) ?? [];
@@ -258,16 +276,25 @@ export async function buildSessionMetadata(
         }
       }
 
-      // 6. enrich with the files each resolved repo changed in the session
-      //    window — the per-file token re-spend signal. One git pass per repo,
-      //    best-effort + isolated; stamped with the repo slug for per-repo rollup.
+      // 6. enrich with the files each resolved repo changed in the session — the
+      //    per-file token re-spend signal. Commits usually land when wrapping up,
+      //    just AFTER the active window, so extend `until` by a grace period
+      //    (capped at the next session's start so a later session can't claim it).
+      //    One git pass per repo, best-effort + isolated; slug-stamped for rollup.
       if (opts.collectFilesChanged && slugToCwd.size > 0) {
         const range = sessionWindow(evs, segs);
         if (range) {
+          const endMs = Date.parse(range.until);
+          const nextStartMs = allStartsMs.find((m) => m > endMs);
+          const untilMs =
+            nextStartMs !== undefined
+              ? Math.min(endMs + COMMIT_GRACE_MS, nextStartMs)
+              : endMs + COMMIT_GRACE_MS;
+          const until = new Date(untilMs).toISOString();
           const fileRefs: FileRef[] = [];
           for (const [slug, cwd] of slugToCwd) {
             try {
-              const changes = await opts.collectFilesChanged(cwd, range.since, range.until);
+              const changes = await opts.collectFilesChanged(cwd, range.since, until);
               if (!changes) continue;
               for (const c of changes) {
                 fileRefs.push({

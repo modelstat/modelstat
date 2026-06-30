@@ -131,6 +131,64 @@ test("a failing collectFilesChanged never blocks the rest of the metadata", asyn
   assert.deepEqual(out.s1?.files, []);
 });
 
+test("the per-file capture window extends past the session (grace) and caps at the next session", async () => {
+  // Commits usually land when wrapping up, AFTER the active window — so `until`
+  // is extended by the grace period, but capped at the next session's start so a
+  // later session never double-claims a commit.
+  const captured = new Map<string, { since: string; until: string }>();
+  const collectFilesChanged = async (cwd: string, since: string, until: string) => {
+    captured.set(cwd, { since, until });
+    return [];
+  };
+  const resolveGit = async (): Promise<GitContext | null> =>
+    mkGit({ remote_host: "github.com", remote_slug: "acme/api" });
+  const evAt = (sid: string, cwd: string, ts: string): RawEvent =>
+    RawEvent.parse({
+      source_event_id: `e_${sid}`,
+      ts,
+      kind: "assistant_message",
+      agent: "claude_code",
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      session_id: sid,
+      turn_index: null,
+      parent_event_id: null,
+      cwd,
+      git: null,
+      tokens: { input: 1, output: 1, cache_creation: 0, cache_read: 0, reasoning: 0 },
+      duration_ms: null,
+      source_file: "f.jsonl",
+      source_byte_offset: 0,
+    });
+  const segAt = (sid: string, startIso: string, endIso: string): Segment =>
+    Segment.parse({
+      segment_id: `seg_${sid}`,
+      session_id: sid,
+      agent: "claude_code",
+      started_at: startIso,
+      ended_at: endIso,
+      abstract: "work",
+      tokens: { input: 1, output: 1, cache_creation: 0, cache_read: 0, reasoning: 0 },
+      redaction: {},
+      source_event_ids: [`e_${sid}`],
+    });
+  // s1 active 10:00–10:30 (cwd /r1); s2 active 11:00–11:10 (cwd /r2).
+  const segs = [
+    segAt("s1", "2026-06-15T10:00:00.000Z", "2026-06-15T10:30:00.000Z"),
+    segAt("s2", "2026-06-15T11:00:00.000Z", "2026-06-15T11:10:00.000Z"),
+  ];
+  const evs = [
+    evAt("s1", "/r1", "2026-06-15T10:15:00.000Z"),
+    evAt("s2", "/r2", "2026-06-15T11:05:00.000Z"),
+  ];
+  await buildSessionMetadata(segs, evs, { resolveGit, collectFilesChanged });
+  // s1 ends 10:30; +4h grace would be 14:30, but capped at s2's start 11:00.
+  assert.equal(captured.get("/r1")?.since, "2026-06-15T10:00:00.000Z");
+  assert.equal(captured.get("/r1")?.until, "2026-06-15T11:00:00.000Z");
+  // s2 ends 11:10; no next session → +4h grace = 15:10.
+  assert.equal(captured.get("/r2")?.until, "2026-06-15T15:10:00.000Z");
+});
+
 test("the model channel surfaces refs for content with no URL (any provider)", async () => {
   const ev = mkEvent({});
   const seg = mkSegment("s1", "Opened a pull request for the retry-logic fix.");
