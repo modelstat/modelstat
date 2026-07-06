@@ -41,26 +41,39 @@ Things to know:
   for local error/notice messages is passed through as-is (the server
   decides what to hide; the daemon never drops data). The one exception:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
-- The summariser default is the bundled npm path — a Qwen GGUF run via
-  `node-llama-cpp`, staged via `installNativeRuntime`/`_setup-runtime`. It is
-  **not** the only path: if the native runtime can't load, the pipeline degrades
-  to the dependency-free extractive fallback (`resilientSummarize` in
-  `apps/daemon/src/pipeline.ts`) so ingest never blocks — the same fallback
-  catches a **misconfigured** remote provider (bad/incomplete `MODELSTAT_LLM_*`),
-  loudly, instead of crashing a scan. For constrained machines (sandbox, CI, thin
-  laptops) an **opt-in remote** OpenAI-compatible provider is selectable via
-  `MODELSTAT_LLM_PROVIDER=openai` (+ `MODELSTAT_LLM_BASE_URL` / `_MODEL` /
-  `_API_KEY`) — see `packages/daemon-core/src/node/openai-compat.ts`. The remote
-  path is an explicit egress: excerpts + script bodies leave the box, but only
-  after the on-device pre-send scrub (regex floor + NER/PII, `makeRemotePreSend`)
-  runs over them first; embeddings and the output PII redactor stay local. The
-  remote path is **fail-closed** on that guard — if the on-device NER redactor
+- **Summariser mode** is chosen at install (`modelstat connect`, Cloud
+  pre-selected) and persisted to `state.json` (`summarizerMode`; env override
+  `MODELSTAT_SUMMARIZER_MODE`; changeable later via `modelstat mode`). Redaction
+  (regex floor + on-device NER/PII) runs client-side in EVERY mode; only the
+  summarisation LOCATION differs — see `resolveProvider` in
+  `apps/daemon/src/pipeline.ts`:
+  - `local` — the bundled Qwen GGUF via `node-llama-cpp`, staged by
+    `installNativeRuntime`/`_setup-runtime`. The **only** mode that
+    downloads/stages the ~2.7 GB model (`installNativeRuntime` stages
+    `node-llama-cpp` only in local mode; `connect`/postinstall gate the model
+    pull on it too). Ships abstracts to `/v1/ingest`.
+  - `self-hosted` — an org-run OpenAI-compatible endpoint (URL + model chosen at
+    install, or `MODELSTAT_LLM_BASE_URL`/`_MODEL`/`_API_KEY`); see
+    `openai-compat.ts` (`makeOpenAICompatConfig`). Explicit egress: excerpts +
+    script bodies leave the box, but only after the on-device pre-send scrub
+    (regex floor + NER/PII, `makeRemotePreSend`); embeddings + output PII
+    redactor stay local. Ships abstracts to `/v1/ingest`.
+  - `cloud` (default) — no local model; the daemon runs the full redaction over
+    the turns (`prepareCloudRawEvents`: floor + NER) and ships them to
+    `/v1/ingest/raw` for server-side summarisation (see `scan.ts`).
+
+  If the selected runtime can't run (native binary won't load, self-hosted
+  endpoint misconfigured, NER redactor unavailable), the pipeline degrades
+  LOUDLY to the dependency-free extractive fallback (`resilientSummarize` /
+  `heuristicSummarize`) so ingest never blocks. The self-hosted and cloud paths
+  are **fail-closed** on the NER guard — if the on-device NER redactor
   (`@huggingface/transformers`) is a silent pass-through, the daemon REFUSES the
-  remote egress and degrades to the extractive fallback rather than ship raw
-  content with regex-floor-only redaction. Remote
-  requests retry with bounded backoff (honouring `Retry-After`) and send
-  `max_completion_tokens` (no `temperature`) to o-series/gpt-5 reasoning models.
-  The legacy `ollama.ts` adapter remains exported but is unwired in the daemon.
+  egress (self-hosted → extractive fallback; cloud → local extractive abstracts
+  to `/v1/ingest`, no raw egress) rather than ship content with
+  regex-floor-only redaction. Remote requests retry with bounded backoff
+  (honouring `Retry-After`) and send `max_completion_tokens` (no `temperature`)
+  to o-series/gpt-5 reasoning models. The legacy `ollama.ts` adapter remains
+  exported but is unwired in the daemon.
 - Redaction has **one floor**. The secret-pattern catalogue lives in
   `@modelstat/core/redact-floor` (dependency-free) and is the single source of
   truth for the wire redactor (`@modelstat/core/redact`) and the daemon — add a

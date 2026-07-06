@@ -3,15 +3,22 @@
  * Post-install hook for the @modelstat/daemon CLI.
  *
  * Runs after `npm install -g modelstat` (or `npx modelstat` cache
- * population) and downloads the bundled summariser GGUF (~2.7 GB)
- * with visible progress, so the user sees the heavy download
- * attached to the install they just kicked off — not as a surprise
+ * population). It ALWAYS refreshes an installed background service, and — ONLY
+ * in `local` summariser mode — pre-downloads the bundled summariser GGUF
+ * (~2.7 GB) with visible progress, so a local-mode user sees the heavy download
+ * attached to the install they just kicked off rather than as a surprise
  * 7-minute hang the first time they run `modelstat scan`.
  *
- * Skipped when:
+ * The model pre-download is skipped when:
+ *   - The summariser mode is NOT `local`. Cloud (the default) and self-hosted
+ *     never run the local model, so there is nothing to download — this is
+ *     what keeps a Cloud/self-hosted install off the ~2.7 GB (~4 GB with the
+ *     native runtime) footprint. The mode is read from the persisted install
+ *     choice (~/.modelstat/state.json) or `MODELSTAT_SUMMARIZER_MODE`; a fresh
+ *     install has no choice yet and defaults to cloud, so the model downloads
+ *     later at `modelstat connect` / `modelstat mode local` if local is picked.
  *   - Running inside this repo's pnpm workspace (we don't want every
- *     dev `pnpm install` to pull 2.7 GB; the developer can opt in by
- *     running `modelstat connect` once or pre-pulling the model).
+ *     dev `pnpm install` to pull 2.7 GB).
  *   - `MODELSTAT_SKIP_POSTINSTALL=1` is set (CI escape hatch, or for
  *     packagers who handle the model out-of-band).
  *   - `CI=true` is set (most CI providers; avoids blocking automated
@@ -19,10 +26,9 @@
  *   - stdout isn't a TTY AND CI isn't set (likely a scripted
  *     install that doesn't want long-running side-effects).
  *
- * In all skip cases the model still downloads lazily on first
- * `modelstat scan` — the daemon always preflights the summariser
- * before producing any segments (see src/pipeline.ts), so users in
- * skip-mode just see the download then, instead of now.
+ * In every skip case a local-mode daemon still downloads the model lazily on
+ * first `modelstat scan` — the daemon preflights the summariser before
+ * producing any segments (see src/pipeline.ts).
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -39,6 +45,26 @@ import { fileURLToPath } from "node:url";
 // leaves headroom over a cold model load. SIGKILL is a true last resort.
 const DAEMON_TERM_GRACE_MS = 45_000;
 const DAEMON_POLL_INTERVAL_MS = 250;
+
+/**
+ * The persisted summariser mode, so the pre-download only fires for `local`.
+ * `MODELSTAT_SUMMARIZER_MODE` wins (scripted installs); otherwise read the
+ * install choice from `<MODELSTAT_HOME|~/.modelstat>/state.json`. A fresh
+ * install (no state) defaults to `cloud` — no local model. Plain .mjs, so this
+ * reads the JSON directly rather than importing the TS config module.
+ */
+function persistedSummarizerMode() {
+  const valid = (v) => (v === "local" || v === "cloud" || v === "self-hosted" ? v : null);
+  const env = valid((process.env.MODELSTAT_SUMMARIZER_MODE ?? "").trim().toLowerCase());
+  if (env) return env;
+  try {
+    const home = process.env.MODELSTAT_HOME?.trim() || join(homedir(), ".modelstat");
+    const state = JSON.parse(readFileSync(join(home, "state.json"), "utf8"));
+    return valid(String(state?.summarizerMode ?? "").trim().toLowerCase()) ?? "cloud";
+  } catch {
+    return "cloud"; // no persisted state yet — default is cloud (no local model)
+  }
+}
 
 function inThisMonorepo() {
   // Walk up from this script looking for the repo's pnpm-workspace.yaml.
@@ -77,7 +103,19 @@ async function main() {
   // install with a half-installed bundle the daemon couldn't load.
   await rebootServiceIfInstalled();
 
-  // ── TTY-only path: pre-download the heavy summariser model ───────
+  // ── local-mode + TTY-only path: pre-download the heavy summariser model ──
+  // Only `local` mode runs the bundled model, so only `local` needs it on
+  // disk. Cloud/self-hosted installs skip the ~2.7 GB pull entirely (the whole
+  // point of choosing them). The mode isn't chosen until `modelstat connect`,
+  // so a fresh install reads as the default (cloud) and downloads nothing here;
+  // a reinstall on a local-mode machine still gets the instant-first-scan pull.
+  const mode = persistedSummarizerMode();
+  if (mode !== "local") {
+    console.log(
+      `[modelstat] ${mode} summariser mode — no local model to download (server-side / self-hosted summarisation)`,
+    );
+    return;
+  }
   // The 2.7 GB GGUF is the only thing we want to skip in non-TTY
   // installs (CI, npm cache, packagers). The daemon always preflights
   // the summariser before producing segments (see src/pipeline.ts),

@@ -11,11 +11,8 @@ import { createInterface } from "node:readline";
 import { DeviceMeUnauthorized, fetchDeviceMe, recoverIdentity, selfRegister } from "./api.js";
 import { state } from "./config.js";
 import { backupIdentity, hasIdentityFile, identityPath } from "./identity.js";
-import {
-  buildFingerprint,
-  intendedDeviceUuid,
-  machineKeySource,
-} from "./machine-key.js";
+import { buildFingerprint, intendedDeviceUuid, machineKeySource } from "./machine-key.js";
+import { parseSummarizerMode, type SummarizerMode } from "./runtime-state.js";
 import {
   bundledTrayAppPath,
   installService,
@@ -55,6 +52,108 @@ async function confirmPrompt(question: string, defaultYes: boolean): Promise<boo
   } finally {
     rl.close();
   }
+}
+
+/** Free-text prompt over stdin. Returns `def` if stdin isn't a TTY or the user
+ * just hits Enter. */
+async function textPrompt(question: string, def = ""): Promise<string> {
+  if (process.stdin.isTTY !== true) return def;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const raw: string = await new Promise((resolve) => rl.question(question, resolve));
+    const ans = raw.trim();
+    return ans === "" ? def : ans;
+  } finally {
+    rl.close();
+  }
+}
+
+/** Human labels for the summariser modes, for menus + confirmations. */
+const MODE_BLURB: Record<SummarizerMode, string> = {
+  cloud: "Cloud — modelstat's servers summarise (no local model). Cleaned turns are uploaded.",
+  local: "Local — a ~2.7 GB model summarises on THIS machine. Only abstracts are uploaded.",
+  "self-hosted": "Self-hosted — your org's own AI endpoint summarises the cleaned turns.",
+};
+
+/** Interactive menu (Cloud pre-selected) → a {@link SummarizerMode}. Only
+ * called when stdin is a TTY; returns the default on empty input. */
+async function promptForMode(current: SummarizerMode): Promise<SummarizerMode> {
+  const def = current;
+  process.stdout.write(
+    "\nHow should modelstat summarise your sessions?\n" +
+      "Redaction (secrets + names/PII) ALWAYS runs on your machine first — only the\n" +
+      "summarisation location changes.\n" +
+      `  1) ${MODE_BLURB.cloud}\n` +
+      `  2) ${MODE_BLURB.local}\n` +
+      `  3) ${MODE_BLURB["self-hosted"]}\n`,
+  );
+  const raw = await textPrompt(`Choose 1-3 or a name [${def}]: `, def);
+  const byNumber: Record<string, SummarizerMode> = {
+    "1": "cloud",
+    "2": "local",
+    "3": "self-hosted",
+  };
+  return byNumber[raw.trim()] ?? parseSummarizerMode(raw) ?? def;
+}
+
+/**
+ * Resolve the summariser mode for an install / `modelstat mode` run and persist
+ * it (plus the self-hosted endpoint when applicable). Precedence:
+ *   1. explicit `requested` (a --mode flag / positional arg),
+ *   2. an interactive menu (TTY only, Cloud pre-selected),
+ *   3. the current persisted mode, unchanged.
+ * For self-hosted it resolves the endpoint from --url/--model, else the
+ * MODELSTAT_LLM_* env, else an interactive prompt, and validates the URL —
+ * throwing (so the caller can surface it) when it can't get a valid endpoint.
+ * Returns the chosen mode.
+ */
+async function resolveAndPersistMode(input: {
+  requested?: string;
+  url?: string;
+  model?: string;
+  interactive: boolean;
+}): Promise<SummarizerMode> {
+  let mode: SummarizerMode;
+  if (input.requested !== undefined && input.requested !== "") {
+    const parsed = parseSummarizerMode(input.requested);
+    if (!parsed) {
+      throw new Error(`unknown mode "${input.requested}" — expected cloud, local, or self-hosted`);
+    }
+    mode = parsed;
+  } else if (input.interactive) {
+    mode = await promptForMode(state.summarizerMode);
+  } else {
+    // Non-interactive with nothing requested: fresh installs default to cloud;
+    // an existing choice is left as-is.
+    mode = state.summarizerMode;
+  }
+
+  if (mode === "self-hosted") {
+    // URL + model: flags → env → interactive prompt.
+    let url = input.url ?? process.env.MODELSTAT_LLM_BASE_URL?.trim() ?? "";
+    let model = input.model ?? process.env.MODELSTAT_LLM_MODEL?.trim() ?? "";
+    if (!url && input.interactive) {
+      url = await textPrompt(
+        "  Self-hosted summariser URL (OpenAI-compatible, e.g. https://llm.acme.internal/v1): ",
+      );
+    }
+    if (!model && input.interactive) {
+      model = await textPrompt("  Model id (e.g. qwen2.5-7b-instruct): ");
+    }
+    if (!url) throw new Error("self-hosted mode needs a summariser URL (--url <URL>)");
+    if (!model) throw new Error("self-hosted mode needs a model id (--model <ID>)");
+    // Reuse the daemon-core validator so `modelstat mode` rejects a bad URL the
+    // same way the pipeline would (http/https only).
+    const { validateSummarizerUrl } = await import("@modelstat/daemon-core/node");
+    validateSummarizerUrl(url, "summariser URL"); // throws on invalid
+    state.setSelfHosted(url, model);
+  } else {
+    // Leaving self-hosted — clear the stored endpoint so a stale URL can't
+    // linger and resurface if the user flips back without re-entering it.
+    state.setSelfHosted("", "");
+  }
+  state.setSummarizerMode(mode);
+  return mode;
 }
 
 /** Best-effort open a URL in the user's default browser. Returns true
@@ -166,7 +265,7 @@ function numericFlag(args: readonly string[], flag: string): number | undefined 
  * refused to register them. Truly headless CI has no TTY on any stream (and
  * usually sets `CI`), so it's still blocked. */
 function isNonInteractive(): boolean {
-  if (Boolean(process.env.CI)) return true;
+  if (process.env.CI) return true;
   return !(
     process.stdin.isTTY === true ||
     process.stdout.isTTY === true ||
@@ -333,6 +432,12 @@ interface ConnectOpts {
    * (e.g. tray-launched daemon). With `--yes` the behavior is:
    * reuse identity if present, else self-register. */
   yes: boolean;
+  /** Summariser mode from `--mode <cloud|local|self-hosted>`. When set, skips
+   * the interactive chooser. */
+  mode?: string;
+  /** Self-hosted endpoint from `--url` / `--model` (used with `--mode self-hosted`). */
+  selfHostedUrl?: string;
+  selfHostedModel?: string;
 }
 
 /** Emit one NDJSON event to stdout. Only active when --json is set.
@@ -530,9 +635,7 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
   const apiBase = state.apiUrl.replace(/\/$/, "");
   const dashboardUrl = `${apiBase}/dashboard`;
   const claimCode = state.claimCode ?? "(unknown)";
-  const claimUrl = claimed
-    ? dashboardUrl
-    : (state.claimUrl ?? `${apiBase}/device/${claimCode}`);
+  const claimUrl = claimed ? dashboardUrl : (state.claimUrl ?? `${apiBase}/device/${claimCode}`);
   const agentUrl = `${apiBase}/device/${claimCode}/agent`;
   emitEvent(opts, "registered", {
     device_uuid: state.deviceUuid,
@@ -584,27 +687,71 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     }
   }
 
-  // ── 3. Local summariser model ──────────────────────────────────
-  // The bundled summariser produces every segment's abstract on
-  // your machine. The model is ~2.7 GB and downloads to
-  // ~/.modelstat/models/ on first use. Pull it BEFORE installing
-  // the background service so the daemon's first preflight succeeds
-  // and real abstracts begin streaming immediately on boot. If the
-  // npm postinstall already pulled it, this returns instantly.
-  step("Preparing local summariser (downloads on first run)");
-  let modelReady = false;
+  // ── 2.5 Summariser mode (Cloud pre-selected) ───────────────────
+  // Where each session gets summarised. Redaction ALWAYS runs on this machine
+  // first; only the summarisation LOCATION differs. Chosen interactively on a
+  // TTY (Cloud pre-selected), or via --mode / MODELSTAT_SUMMARIZER_MODE for
+  // scripted installs; a non-interactive install with no choice defaults to
+  // cloud — so it never downloads the local model. Changeable later with
+  // `modelstat mode`.
+  step("Choosing where sessions get summarised (redaction stays on your machine)");
   try {
-    const { ensureLlamaModel, defaultLlamaConfig } = await import("@modelstat/daemon-core/node");
-    await ensureLlamaModel(defaultLlamaConfig());
-    modelReady = true;
-    emitEvent(opts, "summariser_model_ready", {});
-    ok("summariser model on disk");
-  } catch (e) {
-    emitEvent(opts, "summariser_model_failed", {
-      error: (e as Error).message,
+    await resolveAndPersistMode({
+      requested: opts.mode,
+      url: opts.selfHostedUrl,
+      model: opts.selfHostedModel,
+      interactive: !opts.yes && !opts.json && process.stdin.isTTY === true,
     });
-    warn(`couldn't prepare summariser model: ${(e as Error).message}`);
-    warn("the background service will retry the download on its first scan");
+  } catch (e) {
+    warn(`mode selection failed: ${(e as Error).message}`);
+    warn("falling back to cloud summarisation (change later with `modelstat mode`)");
+    state.setSummarizerMode("cloud");
+    state.setSelfHosted("", "");
+  }
+  // The EFFECTIVE mode the daemon will run (honours MODELSTAT_SUMMARIZER_MODE).
+  const mode = state.summarizerMode;
+  if (state.summarizerModeIsEnvOverridden) {
+    warn(`MODELSTAT_SUMMARIZER_MODE is set — running "${mode}" regardless of the stored choice`);
+  }
+  ok(
+    mode === "self-hosted"
+      ? `summariser mode: self-hosted (${state.selfHosted.url})`
+      : `summariser mode: ${mode}`,
+  );
+  emitEvent(opts, "summarizer_mode", {
+    mode,
+    ...(mode === "self-hosted" ? { url: state.selfHosted.url, model: state.selfHosted.model } : {}),
+  });
+
+  // ── 3. Local summariser model (local mode only) ────────────────
+  // Only local mode runs the bundled model, so only local downloads it —
+  // cloud/self-hosted skip the ~2.7 GB pull entirely. In local mode we pull it
+  // BEFORE installing the service so the daemon's first preflight succeeds and
+  // real abstracts stream immediately on boot; if the npm postinstall already
+  // pulled it, this returns instantly.
+  let modelReady = false;
+  if (mode === "local") {
+    step("Preparing local summariser (downloads on first run)");
+    try {
+      const { ensureLlamaModel, defaultLlamaConfig } = await import("@modelstat/daemon-core/node");
+      await ensureLlamaModel(defaultLlamaConfig());
+      modelReady = true;
+      emitEvent(opts, "summariser_model_ready", {});
+      ok("summariser model on disk");
+    } catch (e) {
+      emitEvent(opts, "summariser_model_failed", {
+        error: (e as Error).message,
+      });
+      warn(`couldn't prepare summariser model: ${(e as Error).message}`);
+      warn("the background service will retry the download on its first scan");
+    }
+  } else {
+    emitEvent(opts, "summariser_model_skipped", { mode });
+    ok(
+      mode === "cloud"
+        ? "cloud mode — modelstat summarises server-side (no local model to download)"
+        : "self-hosted mode — your endpoint summarises (no local model to download)",
+    );
   }
 
   // ── 4. Background service (install OR refresh-and-restart) ────
@@ -731,13 +878,13 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
       );
     }
     console.log();
-    console.log(
-      claimed ? `  Open your dashboard:` : `  Open your dashboard (no sign-up needed):`,
-    );
+    console.log(claimed ? `  Open your dashboard:` : `  Open your dashboard (no sign-up needed):`);
     console.log(`    \x1b[1;36m${claimUrl}\x1b[0m`);
     console.log();
     console.log(`  Live numbers from this terminal:`);
-    console.log(`    \x1b[2mmodelstat status\x1b[0m  # pairing, service + sessions · tokens · cost`);
+    console.log(
+      `    \x1b[2mmodelstat status\x1b[0m  # pairing, service + sessions · tokens · cost`,
+    );
     console.log(`    \x1b[2mmodelstat jobs\x1b[0m    # pipeline queue + recent activity`);
     console.log();
     console.log(`  Agent-friendly (for LLMs / MCPs):`);
@@ -1216,12 +1363,105 @@ function cmdToken(args: readonly string[]): void {
   }
 }
 
+/**
+ * `modelstat mode [cloud|local|self-hosted]` — show or change where sessions
+ * get summarised (redaction always stays on-device). With no argument it prints
+ * the current mode; with one it persists the new mode (prompting for /
+ * validating a self-hosted endpoint), pulls the local model when switching TO
+ * local, and refreshes the background service so the running daemon reloads.
+ */
+async function cmdMode(argv: readonly string[]): Promise<void> {
+  const json = argv.includes("--json");
+  // A bare positional (not a --flag) is the mode; --mode is also accepted.
+  const positional = argv.find((a) => !a.startsWith("-"));
+  const requested = flagValue(argv, "--mode") ?? positional;
+
+  // No argument → report the current mode + endpoint.
+  if (!requested) {
+    const mode = state.summarizerMode;
+    if (json) {
+      process.stdout.write(
+        `${JSON.stringify({
+          mode,
+          ...(mode === "self-hosted" ? state.selfHosted : {}),
+          env_override: state.summarizerModeIsEnvOverridden,
+        })}\n`,
+      );
+      return;
+    }
+    console.log(`summariser mode: ${mode}`);
+    console.log(`  ${MODE_BLURB[mode]}`);
+    if (mode === "self-hosted") {
+      const sh = state.selfHosted;
+      console.log(`  endpoint: ${sh.url || "(unset)"}   model: ${sh.model || "(unset)"}`);
+    }
+    if (state.summarizerModeIsEnvOverridden) {
+      console.log("  note: MODELSTAT_SUMMARIZER_MODE is set and overrides the stored value.");
+    }
+    console.log("change it: modelstat mode <cloud|local|self-hosted> [--url <URL> --model <ID>]");
+    return;
+  }
+
+  let mode: SummarizerMode;
+  try {
+    mode = await resolveAndPersistMode({
+      requested,
+      url: flagValue(argv, "--url"),
+      model: flagValue(argv, "--model"),
+      interactive: !json && process.stdin.isTTY === true,
+    });
+  } catch (e) {
+    console.error(`couldn't set mode: ${(e as Error).message}`);
+    process.exit(1);
+    return;
+  }
+  console.log(`✓ summariser mode set to ${mode}`);
+  if (state.summarizerModeIsEnvOverridden) {
+    console.warn(
+      `⚠ MODELSTAT_SUMMARIZER_MODE is set — the daemon will use "${state.summarizerMode}" until you unset it`,
+    );
+  }
+
+  // Switching TO local needs the model — pull it now so the next scan is
+  // instant (best-effort; otherwise the daemon downloads it lazily on first scan).
+  if (mode === "local") {
+    try {
+      const { ensureLlamaModel, defaultLlamaConfig } = await import("@modelstat/daemon-core/node");
+      console.log("preparing local summariser model (downloads on first use)…");
+      await ensureLlamaModel(defaultLlamaConfig());
+      console.log("✓ summariser model on disk");
+    } catch (e) {
+      console.warn(
+        `couldn't pre-download the model (${(e as Error).message}); it downloads on first scan`,
+      );
+    }
+  }
+
+  // Re-stage the native runtime for the new mode + bounce the service so the
+  // running daemon reloads. Only when there's an installed daemon to refresh.
+  if (state.bearer) {
+    try {
+      const svc = installService();
+      console.log(`✓ background service refreshed (${svc.path})`);
+    } catch (e) {
+      console.warn(
+        `couldn't refresh the service (${(e as Error).message}) — restart it by re-running \`modelstat\``,
+      );
+    }
+  } else {
+    console.log("run `modelstat` to install the background service with this mode.");
+  }
+}
+
 function parseConnectOpts(argv: readonly string[]): ConnectOpts {
   return {
     json: argv.includes("--json"),
     noBrowser: argv.includes("--no-browser"),
     fresh: argv.includes("--fresh"),
     yes: argv.includes("--yes") || argv.includes("-y"),
+    mode: flagValue(argv, "--mode"),
+    selfHostedUrl: flagValue(argv, "--url"),
+    selfHostedModel: flagValue(argv, "--model"),
   };
 }
 
@@ -1311,6 +1551,10 @@ async function main(): Promise<void> {
     case "token":
       cmdToken(rest);
       return;
+    case "mode":
+      // Show or change where sessions get summarised: cloud | local |
+      // self-hosted (redaction always stays on-device). See cmdMode.
+      return cmdMode(rest);
     case "discover":
       return cmdDiscover();
     case "sync":
@@ -1346,7 +1590,7 @@ async function main(): Promise<void> {
         "  npx modelstat@latest                — install or upgrade. Registers the device, installs the background service, wires the MCP into your AI tools, exits.",
       );
       console.log(
-        "                                        flags: --json (NDJSON events on stdout), --no-browser, --fresh, -y",
+        "                                        flags: --json, --no-browser, --fresh, -y, --mode <cloud|local|self-hosted> [--url --model]",
       );
       console.log(
         "  npx modelstat@latest remove         — stop and uninstall the background service. Keeps your identity.",
@@ -1360,9 +1604,7 @@ async function main(): Promise<void> {
         "  npx modelstat@latest status         — pairing, service + live usage: sessions · tokens · cost (--json)",
       );
       console.log("  npx modelstat@latest upgrade        — update to the latest version now");
-      console.log(
-        "  npx modelstat@latest autoupdate     — show/set auto-update: on|off|toggle",
-      );
+      console.log("  npx modelstat@latest autoupdate     — show/set auto-update: on|off|toggle");
       console.log(
         "  npx modelstat@latest jobs           — pipeline queue + recent processing ledger (--json)",
       );
@@ -1371,6 +1613,9 @@ async function main(): Promise<void> {
       );
       console.log(
         "  npx modelstat@latest token          — print the device token for hosted MCP / API access (--json)",
+      );
+      console.log(
+        "  npx modelstat@latest mode           — show/set where sessions summarise: cloud|local|self-hosted",
       );
       console.log(
         "  modelstat statusline                — Claude Code status line (reads stdin JSON; auto-enabled on install)",

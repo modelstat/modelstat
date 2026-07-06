@@ -26,6 +26,7 @@ import { createRequire } from "node:module";
 import { homedir, platform, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { state } from "./config.js";
 
 export const SERVICE_LABEL = "ai.modelstat.daemon";
 export const SYSTEMD_UNIT = "modelstat"; // → modelstat.service
@@ -203,46 +204,61 @@ function stageNativePkgs(specs: string[]): boolean {
 }
 
 /**
- * Stage every native runtime the bundle imports — node-llama-cpp (the summariser,
- * load-bearing) and @huggingface/transformers (the embedder + on-device PII/NER
- * redactor, best-effort) — into `~/.modelstat/bin`. Runs from inside
- * `installBundle()` on every `connect` / service refresh, straight out of the
- * freshly-unpacked npm tree where npm is on PATH.
+ * Stage the native runtimes the bundle imports into `~/.modelstat/bin`. Runs
+ * from inside `installBundle()` on every `connect` / service refresh, straight
+ * out of the freshly-unpacked npm tree where npm is on PATH.
  *
- * Both go in ONE install (see stageNativePkgs — separate `--no-save` installs
- * prune each other). If the combined install fails (e.g. transformers'
- * onnxruntime binary), retry with just node-llama-cpp so a transformers hiccup
- * can never cost us the summariser. Best-effort: never throws; skips the
- * (network) install when every package is already staged at the right version.
+ * @huggingface/transformers (the embedder + on-device PII/NER redactor) is
+ * staged in EVERY mode — redaction/embeddings stay on-device regardless of
+ * where summarisation happens. node-llama-cpp (the local summariser, ~big
+ * native binary + the ~2.7 GB model it then pulls) is staged ONLY in `local`
+ * mode: cloud and self-hosted summarise elsewhere, so skipping it is what keeps
+ * them off the native-runtime footprint.
+ *
+ * When both are needed they go in ONE install (see stageNativePkgs — separate
+ * `--no-save` installs prune each other). If a combined local-mode install
+ * fails (e.g. transformers' onnxruntime binary), retry with just node-llama-cpp
+ * so a transformers hiccup can never cost us the summariser. Best-effort: never
+ * throws; skips the (network) install when every package is already staged.
  */
 function installNativeRuntime(sourceCli: string): string[] {
-  const pkgs = [
-    {
-      name: "node-llama-cpp",
-      version: sourcePkgVersion(sourceCli, "node-llama-cpp") ?? NODE_LLAMA_CPP_FALLBACK_VERSION,
-    },
-    {
-      name: "@huggingface/transformers",
-      version:
-        sourcePkgVersion(sourceCli, "@huggingface/transformers") ?? HF_TRANSFORMERS_FALLBACK_VERSION,
-    },
-  ];
+  const local = state.summarizerMode === "local";
+  const transformers = {
+    name: "@huggingface/transformers",
+    version:
+      sourcePkgVersion(sourceCli, "@huggingface/transformers") ?? HF_TRANSFORMERS_FALLBACK_VERSION,
+  };
+  const llama = {
+    name: "node-llama-cpp",
+    version: sourcePkgVersion(sourceCli, "node-llama-cpp") ?? NODE_LLAMA_CPP_FALLBACK_VERSION,
+  };
+  // node-llama-cpp only in local mode; transformers always.
+  const pkgs = local ? [llama, transformers] : [transformers];
   // Every package already staged at the right version → nothing to do.
   if (pkgs.every((p) => stagedVersion(p.name) === p.version)) {
     return pkgs.map((p) => `${p.name}@${p.version} (cached)`);
   }
   const specs = pkgs.map((p) => `${p.name}@${p.version}`);
   if (stageNativePkgs(specs)) return specs;
-  // Combined install failed — ensure at least the CRITICAL summariser runtime is
-  // staged (the embedder/redactor degrades to server-side embed + regex/LLM).
-  process.stderr.write(
-    "[modelstat] retrying with just the summariser runtime; the embedder/redactor will fall back…\n",
-  );
-  const llamaSpec = `node-llama-cpp@${pkgs[0]!.version}`;
-  if (stageNativePkgs([llamaSpec])) return [llamaSpec];
-  process.stderr.write(
-    `[modelstat] couldn't stage the summariser runtime (${llamaSpec}); the daemon uses the extractive fallback until this is resolved.\n`,
-  );
+  if (local) {
+    // Combined install failed — ensure at least the CRITICAL summariser runtime
+    // is staged (the embedder/redactor degrades to server-side embed + regex/LLM).
+    process.stderr.write(
+      "[modelstat] retrying with just the summariser runtime; the embedder/redactor will fall back…\n",
+    );
+    const llamaSpec = `node-llama-cpp@${llama.version}`;
+    if (stageNativePkgs([llamaSpec])) return [llamaSpec];
+    process.stderr.write(
+      `[modelstat] couldn't stage the summariser runtime (${llamaSpec}); the daemon uses the extractive fallback until this is resolved.\n`,
+    );
+  } else {
+    // Cloud/self-hosted: no local summariser to fall back on. A transformers
+    // miss just degrades on-device NER/embeddings (cloud fail-closes to local
+    // extractive; self-hosted keeps its remote model).
+    process.stderr.write(
+      "[modelstat] couldn't stage @huggingface/transformers; on-device NER/embeddings degrade until this is resolved.\n",
+    );
+  }
   return [];
 }
 

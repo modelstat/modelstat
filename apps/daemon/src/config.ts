@@ -1,15 +1,16 @@
-import { config as loadDotenv } from "dotenv";
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { config as loadDotenv } from "dotenv";
+import { type DeviceIdentity, loadIdentity, saveIdentity, updateIdentity } from "./identity.js";
 import {
-  loadIdentity,
-  saveIdentity,
-  updateIdentity,
-  type DeviceIdentity,
-} from "./identity.js";
-import { type FileCursor, runtimeState, statePath } from "./runtime-state.js";
+  type FileCursor,
+  parseSummarizerMode,
+  runtimeState,
+  type SummarizerMode,
+  statePath,
+} from "./runtime-state.js";
 
 // Walk up from this file to find .env (same pattern as api/worker).
 const here = dirname(fileURLToPath(import.meta.url));
@@ -45,9 +46,7 @@ function writeThrough(patch: Partial<DeviceIdentity>): void {
     // Can't update before the identity exists — setBearer/setDeviceId
     // etc. are called in sequence right after selfRegister(). Don't
     // allow partial writes; require saveFreshIdentity() to seed.
-    throw new Error(
-      "config: no identity yet — call state.saveFreshIdentity() first",
-    );
+    throw new Error("config: no identity yet — call state.saveFreshIdentity() first");
   }
   cachedIdentity = { ...cachedIdentity, ...patch };
   updateIdentity(patch);
@@ -184,6 +183,43 @@ export const state = {
   },
   setProcessingVersion(v: number): void {
     runtimeState.setProcessingVersion(v);
+  },
+
+  // ── Summariser mode: where each session gets summarised ────────
+  // Resolution mirrors `apiUrl`: an explicit env override wins (handy for
+  // CI / scripted installs), else the value chosen at install and persisted
+  // to state.json, else the baked-in default (cloud). Redaction stays
+  // client-side in every mode — only the summarisation LOCATION changes.
+
+  /** The effective summariser mode. `MODELSTAT_SUMMARIZER_MODE` overrides the
+   * persisted choice; an unset/garbage env value falls through to it. */
+  get summarizerMode(): SummarizerMode {
+    const override = parseSummarizerMode(process.env.MODELSTAT_SUMMARIZER_MODE);
+    if (override) return override;
+    return runtimeState.getSummarizerMode();
+  },
+  setSummarizerMode(v: SummarizerMode): void {
+    runtimeState.setSummarizerMode(v);
+  },
+
+  /** The self-hosted endpoint (base URL + model). `MODELSTAT_LLM_BASE_URL` /
+   * `MODELSTAT_LLM_MODEL` override the persisted values when both are present
+   * (so a self-hosted install can be driven entirely from the environment). */
+  get selfHosted(): { url: string; model: string } {
+    const envUrl = process.env.MODELSTAT_LLM_BASE_URL?.trim();
+    const envModel = process.env.MODELSTAT_LLM_MODEL?.trim();
+    if (envUrl && envModel) return { url: envUrl, model: envModel };
+    return runtimeState.getSelfHosted();
+  },
+  setSelfHosted(url: string, model: string): void {
+    runtimeState.setSelfHosted(url, model);
+  },
+
+  /** True when the persisted (or default) mode isn't overridden by
+   * `MODELSTAT_SUMMARIZER_MODE`. Lets `modelstat mode` warn that an env var is
+   * masking the stored choice. */
+  get summarizerModeIsEnvOverridden(): boolean {
+    return parseSummarizerMode(process.env.MODELSTAT_SUMMARIZER_MODE) !== null;
   },
 
   get storePath(): string {
