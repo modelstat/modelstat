@@ -3,7 +3,7 @@
  *
  * macOS shows a process's name from the FILENAME of the running binary, not
  * from Node's process.title — so the daemon launches through a link named
- * "ModelStat Agent" to make Activity Monitor read that instead of "node".
+ * "modelstat agent" to make Activity Monitor read that instead of "node".
  * What MUST stay correct: the name (≤16 chars so p_comm doesn't truncate),
  * that the launchd plist execs the launcher rather than bare node, and that
  * the link is a zero-cost hardlink to the same inode. $HOME is redirected so
@@ -21,14 +21,14 @@ import { DAEMON_LAUNCHER_NAME, daemonPlistContents, ensureDaemonLauncher } from 
 const macOnly = { skip: platform() !== "darwin" };
 
 test("DAEMON_LAUNCHER_NAME is the agreed name and fits p_comm's 16-char cap", () => {
-  // A longer name would be truncated by the kernel (e.g. "ModelStat Watcher"
-  // → "ModelStat Watche"); "ModelStat Agent" is 15 chars and shows in full.
-  assert.equal(DAEMON_LAUNCHER_NAME, "ModelStat Agent");
+  // A longer name would be truncated by the kernel (e.g. "modelstat watcher"
+  // → "modelstat watche"); "modelstat agent" is 15 chars and shows in full.
+  assert.equal(DAEMON_LAUNCHER_NAME, "modelstat agent");
   assert.ok(DAEMON_LAUNCHER_NAME.length <= 16, "must fit the 16-char p_comm cap");
 });
 
 test("daemonPlistContents: execs the launcher directly, then the CLI's `start`", () => {
-  const launcher = "/Users/somebody/.modelstat/bin/ModelStat Agent";
+  const launcher = "/Users/somebody/.modelstat/bin/modelstat agent";
   const cli = "/Users/somebody/.modelstat/bin/modelstat.mjs";
   const plist = daemonPlistContents(launcher, cli);
   // The launcher (not bare node) must be argv[0] — that's what renames the
@@ -40,7 +40,7 @@ test("daemonPlistContents: execs the launcher directly, then the CLI's `start`",
 });
 
 test(
-  "ensureDaemonLauncher: hardlinks a 'ModelStat Agent' launcher at zero disk cost",
+  "ensureDaemonLauncher: hardlinks a 'modelstat agent' launcher at zero disk cost",
   macOnly,
   () => {
     const prevHome = process.env.HOME;
@@ -54,7 +54,7 @@ test(
 
       const launcher = ensureDaemonLauncher(fakeNode);
 
-      assert.equal(basename(launcher), "ModelStat Agent");
+      assert.equal(basename(launcher), "modelstat agent");
       assert.ok(existsSync(launcher), "launcher must exist");
       // Hardlink → same inode as the source → zero extra bytes on disk.
       assert.equal(

@@ -254,7 +254,7 @@ function nodeBinary(): string {
 
 /**
  * The daemon launches through a link named exactly this so macOS Activity
- * Monitor labels the process "ModelStat Agent" instead of a bare "node".
+ * Monitor labels the process "modelstat agent" instead of a bare "node".
  * macOS derives a process's display name from the FILENAME of the running
  * binary (the kernel's p_comm), NOT from Node's process.title — so the only
  * way to rename it in the GUI is to run it from a nicely-named file. Kept at
@@ -262,14 +262,14 @@ function nodeBinary(): string {
  * (set in cli.ts cmdStart) covers `ps`/`top`; this covers the GUI. Must stay
  * in sync with the tray's spawnDaemon() in apps/tray-mac (main.swift).
  */
-export const DAEMON_LAUNCHER_NAME = "ModelStat Agent";
+export const DAEMON_LAUNCHER_NAME = "modelstat agent";
 
 function daemonLauncherPath(): string {
   return join(binDir(), DAEMON_LAUNCHER_NAME);
 }
 
 /**
- * Ensure ~/.modelstat/bin/"ModelStat Agent" links to the node binary we
+ * Ensure ~/.modelstat/bin/"modelstat agent" links to the node binary we
  * launch the daemon with, and return the path to launch through.
  *
  * A hardlink costs zero extra disk and keeps node's code signature intact
@@ -281,7 +281,7 @@ function daemonLauncherPath(): string {
  *
  * macOS only — it's the one platform where process.title can't rename the
  * process for the GUI. On Linux, process.title updates /proc/<pid>/comm, so
- * top/htop/System Monitor already read "ModelStat Agent" with no link.
+ * top/htop/System Monitor already read "modelstat agent" with no link.
  *
  * Falls back to a full copy when the link can't be made (node on another
  * volume → EXDEV), then to the bare node path if even that fails: a cosmetic
@@ -385,7 +385,7 @@ function writePlist(cliPath: string): string {
   // the pipeline stays up even if the GUI tray is quit, and each is
   // supervised independently. The daemon needs no GUI and self-heals via
   // RunAtLoad + KeepAlive. It launches through ensureDaemonLauncher() so the
-  // process shows as "ModelStat Agent" in Activity Monitor, not "node".
+  // process shows as "modelstat agent" in Activity Monitor, not "node".
   const plist = daemonPlistContents(ensureDaemonLauncher(), cliPath);
   writeFileSync(p, plist, { mode: 0o644 });
   return p;
