@@ -28,6 +28,7 @@ import {
 } from "@modelstat/parsers";
 import { uploadBatch } from "./api.js";
 import { state } from "./config.js";
+import { resolveAuthoritativeGit } from "./git-enrich.js";
 import {
   buildSegments,
   buildSessionMetadata,
@@ -428,9 +429,12 @@ async function runScanOverJobs(
 
   async function flushBatch(): Promise<void> {
     if (!buffer.length && !toolCallBuffer.length) return;
-    // Normalise token-less events to zeroed TokenUsage before they hit
-    // the wire — the ingest server rejects null tokens (see ZERO_TOKENS).
-    const events = buffer.map(withNonNullTokens);
+    // Correct each event's repo identity to the AUTHORITATIVE git remote on
+    // disk BEFORE segmentation, so the `projects` hint (→ "Spend by Repo")
+    // keys on the real owner/repo instead of a path-guessed subdirectory such
+    // as `accounting/controllers`. Also normalise token-less events to zeroed
+    // TokenUsage — the ingest server rejects null tokens (see ZERO_TOKENS).
+    const events = await resolveAuthoritativeGit(buffer.map(withNonNullTokens));
     // Shared pipeline produces one-or-more Segments per session:
     // redact → segment (time + embedding boundaries) → summarise → tag.
     // Adapter config is set once at process boot in cli.ts. Build first
