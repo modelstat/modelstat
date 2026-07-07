@@ -47,6 +47,15 @@ export function mainRepoPath(cwd: string): string {
   return i === -1 ? cwd : cwd.slice(0, i);
 }
 
+/** The repo-root directory for a cwd — the nearest `.git` (worktrees collapsed
+ * to the main repo via {@link mainRepoPath}), or null when none is reachable.
+ * Deterministic + sync (an `existsSync` walk). Lets a caller derive a project
+ * identity from where the repo actually IS, never a path-substring guess. */
+export function resolveRepoRoot(cwd: string | null): string | null {
+  if (!cwd) return null;
+  return findRepoRoot(mainRepoPath(cwd));
+}
+
 export async function resolveGitContext(cwd: string | null): Promise<GitContext | null> {
   if (!cwd) return null;
   // Ephemeral worktrees live under `<repo>/.claude/worktrees/<id>` and are often
