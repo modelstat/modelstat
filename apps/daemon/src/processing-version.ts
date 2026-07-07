@@ -120,8 +120,15 @@
  *      as a structured `mind` hint, feeding the server's Mind taxonomy dimension
  *      (the cognitive-mode counterpart to Mood + Posture). Re-scan so historical
  *      segments gain it.
+ * v15 — authoritative project slugs. The `projects` hint (→ the Workstreams /
+ *      "Spend by Repo" dimension) now keys on the git remote read from `.git`
+ *      on disk (`resolveAuthoritativeGit`, run before segmentation) instead of
+ *      the parser's path guess, which mistook an in-repo `…/src/<a>/<b>` subtree
+ *      for a repository (e.g. the subdirectory `accounting/controllers`).
+ *      Re-scan so historical segments re-tag to their real owner/repo — only
+ *      the daemon can, from the repos on disk.
  */
-export const PROCESSING_VERSION = 14;
+export const PROCESSING_VERSION = 15;
 
 export interface ProcessingState {
   processingVersion: number | null;
