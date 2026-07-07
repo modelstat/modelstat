@@ -911,6 +911,11 @@ async function cmdWatch(): Promise<void> {
 }
 
 async function cmdStart(rest: string[]): Promise<void> {
+  // Name the long-running daemon "ModelStat Agent" so `ps`/`top` (and Linux
+  // GUI monitors, via /proc/<pid>/comm) show it instead of a bare "node".
+  // On macOS the Activity Monitor name instead comes from the launcher
+  // binary's filename — see ensureDaemonLauncher() in service.ts.
+  process.title = "ModelStat Agent";
   if (!state.bearer || !state.deviceId) {
     console.error("not paired yet. Run `modelstat` first.");
     process.exit(1);

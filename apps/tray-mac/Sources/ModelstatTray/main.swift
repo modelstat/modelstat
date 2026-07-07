@@ -353,9 +353,20 @@ final class TrayController: NSObject {
     let p = Process()
     var args = ["start"]
     if force { args.append("--force") }
+    // Prefer the "ModelStat Agent" launcher the installer links next to the
+    // bundle (a rename of node) so a tray-spawned daemon shows as "ModelStat
+    // Agent" in Activity Monitor too, matching the launchd-managed one. Falls
+    // back to `env node` when it isn't there yet (older install / mid-upgrade).
+    // Keep this name in sync with DAEMON_LAUNCHER_NAME in service.ts.
+    let launcher = ("~/.modelstat/bin/ModelStat Agent" as NSString).expandingTildeInPath
     if cli.pathExtension == "mjs" {
-      p.launchPath = "/usr/bin/env"
-      p.arguments = ["node", cli.path] + args
+      if FileManager.default.isExecutableFile(atPath: launcher) {
+        p.launchPath = launcher
+        p.arguments = [cli.path] + args
+      } else {
+        p.launchPath = "/usr/bin/env"
+        p.arguments = ["node", cli.path] + args
+      }
     } else {
       p.launchPath = cli.path
       p.arguments = args
