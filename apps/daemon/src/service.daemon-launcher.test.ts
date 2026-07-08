@@ -14,7 +14,12 @@ import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:f
 import { platform, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { DAEMON_LAUNCHER_NAME, daemonPlistContents, ensureDaemonLauncher } from "./service.js";
+import {
+  DAEMON_LAUNCHER_NAME,
+  daemonPlistContents,
+  ensureDaemonLauncher,
+  parseRpathDylibs,
+} from "./service.js";
 
 // The link trick is macOS-specific; elsewhere process.title already renames the
 // process, so ensureDaemonLauncher is a no-op that returns node unchanged.
@@ -75,16 +80,18 @@ test("ensureDaemonLauncher: re-points an existing launcher to the current node",
   const home = mkdtempSync(join(tmpdir(), "ms-launcher-"));
   process.env.HOME = home;
   try {
-    // First install links to the old node...
+    // First install links to the old node... Runnable stand-in nodes (exit 0)
+    // so the new runnability preflight passes and we exercise the re-point path,
+    // not the bare-node fallback.
     const oldNode = join(home, "node-old");
-    writeFileSync(oldNode, "old\n", { mode: 0o755 });
+    writeFileSync(oldNode, "#!/bin/sh\ntrue\n", { mode: 0o755 });
     const first = ensureDaemonLauncher(oldNode);
     assert.equal(statSync(first).ino, statSync(oldNode).ino);
 
     // ...a node upgrade gives node a NEW inode; the launcher must follow it,
     // not keep executing the old one forever.
     const newNode = join(home, "node-new");
-    writeFileSync(newNode, "new\n", { mode: 0o755 });
+    writeFileSync(newNode, "#!/bin/sh\ntrue\n", { mode: 0o755 });
     const second = ensureDaemonLauncher(newNode);
     assert.equal(
       statSync(second).ino,
@@ -96,4 +103,51 @@ test("ensureDaemonLauncher: re-points an existing launcher to the current node",
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
   }
+});
+
+test(
+  "ensureDaemonLauncher: falls back to bare node when the launcher can't run",
+  macOnly,
+  () => {
+    const prevHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), "ms-launcher-"));
+    process.env.HOME = home;
+    try {
+      // Stand-in for a dyld-broken launcher: a "node" that exits non-zero, so
+      // the runnability preflight fails. We must NOT hand launchd a binary it
+      // would abort-loop on — fall back to the real node path instead.
+      const brokenNode = join(home, "node-broken");
+      writeFileSync(brokenNode, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+      const result = ensureDaemonLauncher(brokenNode);
+
+      assert.equal(result, brokenNode, "must fall back to bare node when the launcher can't run");
+      const launcher = join(home, ".modelstat", "bin", DAEMON_LAUNCHER_NAME);
+      assert.ok(
+        !existsSync(launcher),
+        "a non-runnable launcher must be removed, not left for launchd to abort-loop on",
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
+  },
+);
+
+test("parseRpathDylibs: keeps @rpath dylibs, drops absolute kegs, dedupes", () => {
+  const otool = [
+    "/Users/x/.modelstat/bin/modelstat agent:",
+    "\t@rpath/libnode.127.dylib (compatibility version 0.0.0, current version 0.0.0)",
+    "\t/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.12)",
+    "\t/opt/homebrew/opt/libuv/lib/libuv.1.dylib (compatibility version 1.0.0, current version 1.0.0)",
+    "\t@rpath/libnode.127.dylib (compatibility version 0.0.0, current version 0.0.0)",
+  ].join("\n");
+  // Only the relative @rpath dep needs to travel with a relocated launcher; the
+  // absolute /usr/lib + /opt/homebrew kegs resolve wherever the launcher lives.
+  assert.deepEqual(parseRpathDylibs(otool), ["libnode.127.dylib"]);
+});
+
+test("parseRpathDylibs: empty for a node with no @rpath deps (statically linked)", () => {
+  assert.deepEqual(parseRpathDylibs("some-node:\n\t/usr/lib/libSystem.B.dylib (…)\n"), []);
 });

@@ -42,32 +42,59 @@ function upgradeMarkerPath(): string {
  * and allow a fresh attempt rather than wedging on a stale marker. */
 const UPGRADE_MARKER_TTL_MS = 5 * 60_000;
 
+/** Is `pid` a live process? `kill(pid, 0)` sends no signal — it only probes
+ * existence. EPERM ⇒ alive but owned by another user (still counts as live);
+ * ESRCH (or anything else) ⇒ treat as gone. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /** True when a recent upgrade marker exists — i.e. THIS process is very likely a
  * supervisor respawn during an in-flight `npm i -g`. The caller should skip
  * spawning another install and let the postinstall finish swapping the binary.
- * A marker older than the TTL is treated as stale (cleared) so a genuinely stuck
- * upgrade can be retried. */
+ *
+ * Cleared (⇒ false, retry allowed) in two cases:
+ *   · the marker is older than the TTL — a genuinely stuck upgrade; or
+ *   · the `npm i -g` WORKER we spawned is already gone — the install it
+ *     represents has finished or died, so there's nothing left to wait on.
+ * We check the WORKER pid, NOT the daemon's: the daemon is deliberately
+ * SIGTERM'd mid-upgrade by the postinstall, so its liveness says nothing — and
+ * clearing on a dead daemon pid would let a respawn stack a second install
+ * (exactly what this marker exists to prevent). */
 export function upgradeInProgress(): boolean {
   try {
     const raw = readFileSync(upgradeMarkerPath(), "utf8");
-    const o = JSON.parse(raw) as { at?: number };
+    const o = JSON.parse(raw) as { at?: number; workerPid?: number };
     const at = Number(o?.at ?? 0);
-    if (at > 0 && Date.now() - at < UPGRADE_MARKER_TTL_MS) return true;
-    // Stale — clear it so it can't wedge future upgrades.
-    clearUpgradeMarker();
-    return false;
+    if (!(at > 0 && Date.now() - at < UPGRADE_MARKER_TTL_MS)) {
+      clearUpgradeMarker(); // stale by the clock — don't let it wedge a retry
+      return false;
+    }
+    const worker = Number(o?.workerPid ?? 0);
+    if (worker > 0 && !pidAlive(worker)) {
+      clearUpgradeMarker(); // the install worker is gone — finished or died
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
 }
 
-function writeUpgradeMarker(target: string | null): void {
+/** Write the marker. `workerPid` is the `npm i -g` child once it's spawned
+ * (null in the tiny window before, when the TTL is the only guard). */
+function writeUpgradeMarker(target: string | null, workerPid: number | null = null): void {
   try {
     mkdirSync(modelstatHome(), { recursive: true, mode: 0o700 });
     const tmp = `${upgradeMarkerPath()}.${process.pid}.tmp`;
     writeFileSync(
       tmp,
-      JSON.stringify({ pid: process.pid, at: Date.now(), target: target ?? null }),
+      JSON.stringify({ pid: process.pid, workerPid, at: Date.now(), target: target ?? null }),
       { mode: 0o600 },
     );
     renameSync(tmp, upgradeMarkerPath());
@@ -166,6 +193,10 @@ export function runUpgrade(target: string | null = null): UpgradeResult {
       env,
     });
     child.unref();
+    // Record the WORKER pid so a supervisor respawn can tell "install still
+    // running" (worker alive) from "install finished/died" (worker gone) —
+    // see upgradeInProgress().
+    if (typeof child.pid === "number") writeUpgradeMarker(target, child.pid);
     return { started: true };
   } catch (e) {
     // The install never launched — clear the marker so the next verdict can
