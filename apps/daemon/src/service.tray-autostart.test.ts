@@ -12,9 +12,11 @@
  * stay dead on user-quit". $HOME is redirected so no real file is touched.
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
+  nodeBinary,
   SERVICE_LABEL,
   TRAY_SERVICE_LABEL,
   trayPlistContents,
@@ -52,16 +54,20 @@ test("trayPlistContents: KeepAlive restarts a crash but NOT a clean user-quit", 
   assert.ok(!/<key>KeepAlive<\/key><true\/>/.test(plist), "KeepAlive must not be unconditional");
 });
 
-test("trayPlistContents: PATH leads with this node's dir so `env node` resolves", () => {
+test("trayPlistContents: PATH leads with the resolved node's dir so `env node` resolves", () => {
   // launchd agents start with a bare PATH; the tray runs `env node …`, so the
-  // install-time node's directory must be on PATH or the tray hangs on
-  // "Loading…". It must come FIRST so we use the same node the daemon is
-  // pinned to, not whatever else happens to be on PATH.
+  // resolved node's directory must be on PATH or the tray hangs on "Loading…".
+  // It must come FIRST so we use the same node the daemon uses, not whatever
+  // else is on PATH — and that dir must actually contain a runnable node.
   const plist = trayPlistContents(BIN);
-  const nodeDir = dirname(process.execPath);
   const m = plist.match(/<key>PATH<\/key><string>([^<]+)<\/string>/);
   assert.ok(m, "plist must set a PATH env var");
-  assert.equal(m[1]?.split(":")[0], nodeDir, "node dir must be first on PATH");
+  const first = m[1]?.split(":")[0] ?? "";
+  assert.equal(first, dirname(nodeBinary()), "resolved node dir must be first on PATH");
+  assert.ok(
+    existsSync(join(first, process.platform === "win32" ? "node.exe" : "node")),
+    "the first PATH entry must contain a real node binary",
+  );
 });
 
 test("trayPlistContents: logs go to ~/.modelstat/logs/tray-*.log", () => {

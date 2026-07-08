@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, platform, userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { state } from "./config.js";
 
@@ -262,9 +262,34 @@ function installNativeRuntime(sourceCli: string): string[] {
   return [];
 }
 
-/** Best-effort: absolute path to the node binary we'd invoke. */
-function nodeBinary(): string {
-  return process.execPath;
+/**
+ * A STABLE, real `node` to run the daemon bundle. We deliberately do NOT bake
+ * `process.execPath` into the service files, for two reasons that both caused
+ * dead daemons in the field:
+ *
+ *   1. On Homebrew's keg-only `node@22`, `process.execPath` is a version-pinned
+ *      Cellar path (`…/Cellar/node@22/22.21.1_4/bin/node`) that DISAPPEARS on
+ *      the next `brew upgrade node` — the baked path then points at nothing and
+ *      launchd can't start the daemon.
+ *   2. If the daemon was ever spawned under a wrapper or the retired
+ *      `modelstat agent` single-file binary, `process.execPath` isn't `node` at
+ *      all — baking it makes launchd exec that (broken) interpreter forever.
+ *
+ * So resolve a stable one: prefer `node` on PATH (e.g. Homebrew's
+ * `…/opt/node@22/bin/node` symlink, which survives version bumps), then a
+ * `process.execPath` that actually IS node, then a bare `node` resolved from
+ * PATH at launch. The plist/unit run `/usr/bin/env node` and seed PATH with
+ * `dirname(nodeBinary())`, so a stale first entry still falls through to a
+ * real node instead of wedging the service.
+ */
+export function nodeBinary(): string {
+  const probe = spawnSync(process.platform === "win32" ? "where" : "which", ["node"], {
+    encoding: "utf8",
+  });
+  const resolved = probe.status === 0 ? (probe.stdout.split(/\r?\n/)[0] ?? "").trim() : "";
+  if (resolved && existsSync(resolved)) return resolved;
+  if (/^node(\.exe)?$/i.test(basename(process.execPath))) return process.execPath;
+  return "node";
 }
 
 /* ─── macOS ────────────────────────────────────────────────────────── */
@@ -301,8 +326,16 @@ function writePlist(cliPath: string): string {
   // the pipeline stays up even if the GUI tray is quit, and each is
   // supervised independently. The daemon needs no GUI and self-heals via
   // RunAtLoad + KeepAlive.
+  // Resolve `node` at LAUNCH via `/usr/bin/env node` rather than baking an
+  // absolute path — a baked Cellar path or a wrapper interpreter is exactly
+  // what crash-looped the daemon (see nodeBinary). launchd agents start with a
+  // bare PATH, so seed it with the installer's (stable) node dir first, then the
+  // common Homebrew/local bins as fallbacks.
+  const nodeDir = dirname(nodeBinary());
+  const daemonPath = `${nodeDir}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin`;
   const programArgs = [
-    `    <string>${nodeBinary()}</string>`,
+    `    <string>/usr/bin/env</string>`,
+    `    <string>node</string>`,
     `    <string>${cliPath}</string>`,
     `    <string>start</string>`,
   ].join("\n");
@@ -323,7 +356,7 @@ ${programArgs}
   <key>StandardErrorPath</key><string>${join(logDir(), "err.log")}</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>PATH</key><string>${daemonPath}</string>
     <!-- Heap headroom for the startup scan of a large transcript backlog.
          Node's default old-space ceiling (~4 GB) OOM-crashed the daemon on
          big histories; raise it well below typical RAM. -->
@@ -398,7 +431,10 @@ Type=simple
 # Node's default ~4 GB old-space ceiling OOM-crashed the daemon on big
 # histories.
 Environment=NODE_OPTIONS=--max-old-space-size=8192
-ExecStart=${nodeBinary()} ${cliPath} start
+# Resolve node at launch (env node) with the installer's node dir seeded on
+# PATH, rather than baking an absolute path that a node upgrade can invalidate.
+Environment=PATH=${dirname(nodeBinary())}:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node ${cliPath} start
 Restart=always
 RestartSec=10
 # Don't restart-storm if the service is persistently unreachable.
