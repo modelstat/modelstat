@@ -26,17 +26,28 @@ export type UploadDecision =
  */
 export function classifyStatus(status: number, attempt: number): UploadDecision {
   if (status >= 200 && status < 300) return { type: "commit" };
-  if (status === 400 || status === 422) return { type: "drop", reason: `http_${status}` };
-  if (status === 401 || status === 403) return { type: "reauth" };
-  // 426 = daemon too old (the server's min-version gate). Transient by nature:
-  // the daemon auto-updates via its heartbeat, after which the retry succeeds —
-  // so back off and HOLD the batch, never drop it. (Dropping logged an error and
-  // re-spun the same data every scan cycle until the update landed.)
-  if (status === 408 || status === 426 || status === 429 || status >= 500) {
-    return { type: "backoff", delayMs: expBackoff(attempt) };
+  // PERMANENT — the server will never accept THIS batch however many times we
+  // resend it, because the fault is the payload itself: malformed/unparseable
+  // (400), failed validation (422), too large (413), or wrong media type (415).
+  // ONLY these drop; the caller quarantines the poison batch and moves on. Every
+  // other status HOLDS, so we never discard good data over a transient blip or an
+  // environmental (server/proxy/deploy) problem that gets fixed operationally.
+  if (status === 400 || status === 413 || status === 415 || status === 422) {
+    return { type: "drop", reason: `http_${status}` };
   }
-  // Any other 4xx is treated as permanent — drop so we don't spin.
-  return { type: "drop", reason: `http_${status}` };
+  if (status === 401 || status === 403) return { type: "reauth" };
+  // Everything else BACKS OFF + HOLDS (retry until healthy). Notably this covers:
+  //   · 404 / 405 — the endpoint isn't routable RIGHT NOW: a route not deployed
+  //     yet, a reverse proxy that doesn't forward the path, or a route renamed
+  //     mid-rollout. This is environmental, NOT a bad batch — so hold + retry and
+  //     the data lands once ops fixes it; dropping would silently lose real usage
+  //     data. (Observed live 2026-07-08: a Caddy exact-path matcher 405'd every
+  //     cloud-mode POST /v1/ingest/raw, and the old default dropped ~1000 events
+  //     per batch instead of waiting the misconfig out.)
+  //   · 408 / 426 / 429 — timeout; version-gate (the daemon self-updates via its
+  //     heartbeat, after which the retry succeeds); rate-limit.
+  //   · 5xx — server down / restarting / behind a bad gateway.
+  return { type: "backoff", delayMs: expBackoff(attempt) };
 }
 
 /** What a daemon provides so the ingest client can mint + refresh
@@ -150,8 +161,9 @@ export class IngestClient {
           reason: decision.reason,
           body: text.slice(0, 500),
         });
-        // A 400/422 (or other permanent 4xx) — the server will never accept this
-        // payload. Permanent so the caller quarantines it, not holds it.
+        // A payload-level reject (400/413/415/422) — the server will never accept
+        // this exact batch. Permanent so the caller quarantines it, not holds it.
+        // (404/405/5xx are environmental → they back off above, never land here.)
         return { kind: "drop", reason: decision.reason, permanent: true };
       }
       if (decision.type === "reauth") {
@@ -187,11 +199,12 @@ export class IngestClient {
 
 export type UploadResult =
   | { kind: "commit"; response: IngestResponse }
-  // `permanent`: the server will NEVER accept this exact batch (400/422 — a
-  // malformed/un-encodable payload), so the caller must QUARANTINE it (skip past
-  // it + alert) rather than block the newest-first scan behind it forever.
-  // `!permanent` = transient (no token / reauth failed / 5xx-exhausted / network)
-  // → HOLD the batch and retry next cycle; never drop good data on a blip.
+  // `permanent`: the server will NEVER accept this exact batch (400/413/415/422 —
+  // a malformed/oversize/un-encodable payload), so the caller must QUARANTINE it
+  // (skip past it + alert) rather than block the newest-first scan behind it
+  // forever. `!permanent` = transient/environmental (no token / reauth failed /
+  // 404-405-endpoint-not-routable / 5xx-exhausted / network) → HOLD the batch and
+  // retry next cycle; never drop good data on a blip or a server/proxy misconfig.
   | { kind: "drop"; reason: string; permanent: boolean };
 
 function sleep(ms: number): Promise<void> {
