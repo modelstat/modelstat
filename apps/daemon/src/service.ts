@@ -16,6 +16,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -251,6 +252,65 @@ function nodeBinary(): string {
   return process.execPath;
 }
 
+/**
+ * The daemon launches through a link named exactly this so macOS Activity
+ * Monitor labels the process "modelstat agent" instead of a bare "node".
+ * macOS derives a process's display name from the FILENAME of the running
+ * binary (the kernel's p_comm), NOT from Node's process.title — so the only
+ * way to rename it in the GUI is to run it from a nicely-named file. Kept at
+ * 15 chars (≤ the 16-char p_comm cap) so it never truncates. process.title
+ * (set in cli.ts cmdStart) covers `ps`/`top`; this covers the GUI. Must stay
+ * in sync with the tray's spawnDaemon() in apps/tray-mac (main.swift).
+ */
+export const DAEMON_LAUNCHER_NAME = "modelstat agent";
+
+function daemonLauncherPath(): string {
+  return join(binDir(), DAEMON_LAUNCHER_NAME);
+}
+
+/**
+ * Ensure ~/.modelstat/bin/"modelstat agent" links to the node binary we
+ * launch the daemon with, and return the path to launch through.
+ *
+ * A hardlink costs zero extra disk and keeps node's code signature intact
+ * (identical bytes). We re-point it on every install so a node upgrade
+ * (which gives node a new inode) is picked up — otherwise the link would
+ * keep executing the OLD node forever. Unlinking a file that a running
+ * daemon is still executing is safe on Unix: the inode survives until that
+ * process exits.
+ *
+ * macOS only — it's the one platform where process.title can't rename the
+ * process for the GUI. On Linux, process.title updates /proc/<pid>/comm, so
+ * top/htop/System Monitor already read "modelstat agent" with no link.
+ *
+ * Falls back to a full copy when the link can't be made (node on another
+ * volume → EXDEV), then to the bare node path if even that fails: a cosmetic
+ * name is never worth a daemon that won't start.
+ *
+ * @param node binary to link to; injectable for tests.
+ */
+export function ensureDaemonLauncher(node: string = nodeBinary()): string {
+  if (platform() !== "darwin") return node;
+  const launcher = daemonLauncherPath();
+  // Already launching through the named link — relinking would unlink our
+  // own running binary and then fail to find a source. Nothing to do.
+  if (node === launcher) return launcher;
+  try {
+    mkdirSync(binDir(), { recursive: true });
+    if (existsSync(launcher)) unlinkSync(launcher);
+    linkSync(node, launcher);
+    return launcher;
+  } catch {
+    try {
+      copyFileSync(node, launcher);
+      chmodSync(launcher, 0o755);
+      return launcher;
+    } catch {
+      return node;
+    }
+  }
+}
+
 /* ─── macOS ────────────────────────────────────────────────────────── */
 
 function plistPath(): string {
@@ -277,20 +337,18 @@ function locateTrayExecutable(): string | null {
   return null;
 }
 
-function writePlist(cliPath: string): string {
-  const p = plistPath();
-  mkdirSync(dirname(p), { recursive: true });
-  // This agent runs the headless daemon directly. The menu-bar tray has its
-  // OWN launchd agent (installTrayAutostart) — keeping them separate means
-  // the pipeline stays up even if the GUI tray is quit, and each is
-  // supervised independently. The daemon needs no GUI and self-heals via
-  // RunAtLoad + KeepAlive.
+/**
+ * Pure launchd plist body for the daemon agent: `launcher` runs the bundled
+ * CLI's `start`. Split out from writePlist (which does the filesystem + link
+ * side effects) so the launch contract is unit-testable.
+ */
+export function daemonPlistContents(launcher: string, cliPath: string): string {
   const programArgs = [
-    `    <string>${nodeBinary()}</string>`,
+    `    <string>${launcher}</string>`,
     `    <string>${cliPath}</string>`,
     `    <string>start</string>`,
   ].join("\n");
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -317,6 +375,18 @@ ${programArgs}
 </dict>
 </plist>
 `;
+}
+
+function writePlist(cliPath: string): string {
+  const p = plistPath();
+  mkdirSync(dirname(p), { recursive: true });
+  // This agent runs the headless daemon directly. The menu-bar tray has its
+  // OWN launchd agent (installTrayAutostart) — keeping them separate means
+  // the pipeline stays up even if the GUI tray is quit, and each is
+  // supervised independently. The daemon needs no GUI and self-heals via
+  // RunAtLoad + KeepAlive. It launches through ensureDaemonLauncher() so the
+  // process shows as "modelstat agent" in Activity Monitor, not "node".
+  const plist = daemonPlistContents(ensureDaemonLauncher(), cliPath);
   writeFileSync(p, plist, { mode: 0o644 });
   return p;
 }
