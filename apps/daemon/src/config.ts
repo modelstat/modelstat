@@ -5,12 +5,13 @@ import { fileURLToPath } from "node:url";
 import { config as loadDotenv } from "dotenv";
 import { type DeviceIdentity, loadIdentity, saveIdentity, updateIdentity } from "./identity.js";
 import {
-  type FileCursor,
   parseSummarizerMode,
-  runtimeState,
+  readModeSettings,
   type SummarizerMode,
-  statePath,
-} from "./runtime-state.js";
+  writeMode,
+  writeSelfHosted,
+} from "./mode-settings.js";
+import { type FileCursor, runtimeState, statePath } from "./runtime-state.js";
 
 // Walk up from this file to find .env (same pattern as api/worker).
 const here = dirname(fileURLToPath(import.meta.url));
@@ -196,10 +197,10 @@ export const state = {
   get summarizerMode(): SummarizerMode {
     const override = parseSummarizerMode(process.env.MODELSTAT_SUMMARIZER_MODE);
     if (override) return override;
-    return runtimeState.getSummarizerMode();
+    return readModeSettings().mode;
   },
   setSummarizerMode(v: SummarizerMode): void {
-    runtimeState.setSummarizerMode(v);
+    writeMode(v);
   },
 
   /** The self-hosted endpoint (base URL + model). `MODELSTAT_LLM_BASE_URL` /
@@ -209,10 +210,11 @@ export const state = {
     const envUrl = process.env.MODELSTAT_LLM_BASE_URL?.trim();
     const envModel = process.env.MODELSTAT_LLM_MODEL?.trim();
     if (envUrl && envModel) return { url: envUrl, model: envModel };
-    return runtimeState.getSelfHosted();
+    const s = readModeSettings();
+    return { url: s.selfHostedUrl, model: s.selfHostedModel };
   },
   setSelfHosted(url: string, model: string): void {
-    runtimeState.setSelfHosted(url, model);
+    writeSelfHosted(url, model);
   },
 
   /** True when the persisted (or default) mode isn't overridden by

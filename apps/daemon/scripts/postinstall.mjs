@@ -49,9 +49,9 @@ const DAEMON_POLL_INTERVAL_MS = 250;
 /**
  * The persisted summariser mode, so the pre-download only fires for `local`.
  * `MODELSTAT_SUMMARIZER_MODE` wins (scripted installs); otherwise read the
- * install choice from `<MODELSTAT_HOME|~/.modelstat>/state.json`. A fresh
- * install (no state) defaults to `cloud` — no local model. Plain .mjs, so this
- * reads the JSON directly rather than importing the TS config module.
+ * install choice from `<MODELSTAT_HOME|~/.modelstat>/mode.json`. A fresh install
+ * (no file) defaults to `cloud` — no local model. Plain .mjs, so this reads the
+ * JSON directly rather than importing the TS mode-settings module.
  */
 function persistedSummarizerMode() {
   const valid = (v) => (v === "local" || v === "cloud" || v === "self-hosted" ? v : null);
@@ -59,10 +59,10 @@ function persistedSummarizerMode() {
   if (env) return env;
   try {
     const home = process.env.MODELSTAT_HOME?.trim() || join(homedir(), ".modelstat");
-    const state = JSON.parse(readFileSync(join(home, "state.json"), "utf8"));
-    return valid(String(state?.summarizerMode ?? "").trim().toLowerCase()) ?? "cloud";
+    const settings = JSON.parse(readFileSync(join(home, "mode.json"), "utf8"));
+    return valid(String(settings?.mode ?? "").trim().toLowerCase()) ?? "cloud";
   } catch {
-    return "cloud"; // no persisted state yet — default is cloud (no local model)
+    return "cloud"; // no persisted mode yet — default is cloud (no local model)
   }
 }
 

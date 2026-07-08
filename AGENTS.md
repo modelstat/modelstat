@@ -42,8 +42,11 @@ Things to know:
   decides what to hide; the daemon never drops data). The one exception:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
 - **Summariser mode** is chosen at install (`modelstat connect`, Cloud
-  pre-selected) and persisted to `state.json` (`summarizerMode`; env override
-  `MODELSTAT_SUMMARIZER_MODE`; changeable later via `modelstat mode`). Redaction
+  pre-selected) and persisted to its OWN `mode.json` (NOT `state.json` — the
+  daemon rewrites state.json on every scan and would clobber a CLI-set value;
+  see `mode-settings.ts`, mirroring `auto-update.json`). Env override
+  `MODELSTAT_SUMMARIZER_MODE`; changeable later via `modelstat mode` (which
+  restarts the daemon so it re-reads the mode). Redaction
   (regex floor + on-device NER/PII) runs client-side in EVERY mode; only the
   summarisation LOCATION differs — see `resolveProvider` in
   `apps/daemon/src/pipeline.ts`:

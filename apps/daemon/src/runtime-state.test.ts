@@ -1,9 +1,9 @@
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parseSummarizerMode, runtimeState, statePath } from "./runtime-state.js";
+import { runtimeState, statePath } from "./runtime-state.js";
 
 /** Run `fn` with MODELSTAT_HOME pointed at a throwaway dir + a clean cache. */
 function withTempHome(fn: () => void): void {
@@ -67,49 +67,6 @@ test("reshipState (self-heal backoff bookkeeping) round-trips through disk", () 
     const onDisk = JSON.parse(readFileSync(statePath(), "utf8"));
     assert.equal(onDisk.reshipState["2026-06-01\0sess-1"].attempts, 2);
   });
-});
-
-test("summariserMode defaults to cloud on a fresh install", () => {
-  withTempHome(() => {
-    assert.equal(runtimeState.getSummarizerMode(), "cloud");
-    assert.deepEqual(runtimeState.getSelfHosted(), { url: "", model: "" });
-  });
-});
-
-test("summariserMode + self-hosted endpoint round-trip through disk", () => {
-  withTempHome(() => {
-    runtimeState.setSummarizerMode("self-hosted");
-    runtimeState.setSelfHosted("https://llm.acme.internal/v1", "qwen2.5-7b-instruct");
-    runtimeState._resetCacheForTests(); // force a fresh disk read
-    assert.equal(runtimeState.getSummarizerMode(), "self-hosted");
-    assert.deepEqual(runtimeState.getSelfHosted(), {
-      url: "https://llm.acme.internal/v1",
-      model: "qwen2.5-7b-instruct",
-    });
-    const onDisk = JSON.parse(readFileSync(statePath(), "utf8"));
-    assert.equal(onDisk.summarizerMode, "self-hosted");
-  });
-});
-
-test("a garbage persisted mode falls back to the cloud default", () => {
-  withTempHome(() => {
-    runtimeState.setApiUrl("x"); // seed the file so it exists
-    // Hand-corrupt the on-disk mode, then force a fresh read.
-    const raw = JSON.parse(readFileSync(statePath(), "utf8"));
-    raw.summarizerMode = "banana";
-    writeFileSync(statePath(), JSON.stringify(raw));
-    runtimeState._resetCacheForTests();
-    assert.equal(runtimeState.getSummarizerMode(), "cloud");
-  });
-});
-
-test("parseSummarizerMode normalises + rejects", () => {
-  assert.equal(parseSummarizerMode("cloud"), "cloud");
-  assert.equal(parseSummarizerMode("  LOCAL "), "local");
-  assert.equal(parseSummarizerMode("Self-Hosted"), "self-hosted");
-  assert.equal(parseSummarizerMode("banana"), null);
-  assert.equal(parseSummarizerMode(""), null);
-  assert.equal(parseSummarizerMode(undefined), null);
 });
 
 test("wipeCursors clears every cursor (rescan / version bump)", () => {

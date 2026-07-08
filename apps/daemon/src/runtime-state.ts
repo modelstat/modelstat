@@ -22,32 +22,6 @@ export interface FileCursor {
   tailHash: string;
 }
 
-/**
- * Where each session gets summarised — chosen at install, changeable later via
- * `modelstat mode`. Redaction (secrets + on-device NER/PII + emails + paths)
- * runs client-side in EVERY mode; only the summarisation LOCATION differs.
- *
- * - `local`       — the bundled Qwen model summarises on THIS machine (the only
- *   mode that downloads/loads the ~2.7 GB model). Ships abstracts to /v1/ingest.
- * - `self-hosted` — an org-run OpenAI-compatible endpoint summarises the cleaned
- *   excerpts (see selfHostedUrl/selfHostedModel). Ships abstracts to /v1/ingest.
- * - `cloud`       — no local summariser; cleaned turns ship to /v1/ingest/raw
- *   and modelstat's cloud summarises server-side. The install default.
- */
-export type SummarizerMode = "local" | "self-hosted" | "cloud";
-
-/** All valid modes, in menu order (Cloud first — it's the default). */
-export const SUMMARIZER_MODES: readonly SummarizerMode[] = ["cloud", "local", "self-hosted"];
-
-/** The install default: cloud (no local model, server-side summarisation). */
-export const DEFAULT_SUMMARIZER_MODE: SummarizerMode = "cloud";
-
-/** Narrow an arbitrary string to a {@link SummarizerMode}, else `null`. */
-export function parseSummarizerMode(v: string | null | undefined): SummarizerMode | null {
-  const s = (v ?? "").trim().toLowerCase();
-  return (SUMMARIZER_MODES as readonly string[]).includes(s) ? (s as SummarizerMode) : null;
-}
-
 export interface RuntimeState {
   /** Operator-set API URL override (empty ⇒ env / production default). */
   apiUrl: string;
@@ -80,15 +54,6 @@ export interface RuntimeState {
    * never reduces the reported deficit) stops re-shipping every pass instead of
    * looping forever. GC'd to the current (day,session) set each pass. */
   reshipState: Record<string, { attempts: number; lastAt: number }>;
-  /** Where sessions get summarised (chosen at install; see {@link SummarizerMode}).
-   * Defaults to `cloud`. */
-  summarizerMode: SummarizerMode;
-  /** Self-hosted only: the org's OpenAI-compatible summariser base URL (e.g.
-   * `https://llm.acme.internal/v1`). Empty in local/cloud mode. */
-  selfHostedUrl: string;
-  /** Self-hosted only: the model id to request from {@link selfHostedUrl}
-   * (e.g. `qwen2.5-7b-instruct`). Empty in local/cloud mode. */
-  selfHostedModel: string;
 }
 
 const DEFAULTS: RuntimeState = {
@@ -100,9 +65,6 @@ const DEFAULTS: RuntimeState = {
   summariserDegraded: false,
   summariserRecoveryAt: 0,
   reshipState: {},
-  summarizerMode: DEFAULT_SUMMARIZER_MODE,
-  selfHostedUrl: "",
-  selfHostedModel: "",
 };
 
 export function statePath(): string {
@@ -126,11 +88,6 @@ function load(): RuntimeState {
       summariserDegraded: obj.summariserDegraded ?? false,
       summariserRecoveryAt: obj.summariserRecoveryAt ?? 0,
       reshipState: obj.reshipState ?? {},
-      // Validate the persisted mode — a hand-edited/garbage value falls back to
-      // the default rather than driving the pipeline off a bogus branch.
-      summarizerMode: parseSummarizerMode(obj.summarizerMode) ?? DEFAULT_SUMMARIZER_MODE,
-      selfHostedUrl: obj.selfHostedUrl ?? "",
-      selfHostedModel: obj.selfHostedModel ?? "",
     };
   } catch {
     // Missing/corrupt ⇒ fresh defaults (a new install, or post-`MODELSTAT_HOME`
@@ -254,28 +211,6 @@ export const runtimeState = {
   setReshipState(r: RuntimeState["reshipState"]): void {
     const s = load();
     s.reshipState = r;
-    persist(s);
-  },
-
-  /** The persisted summariser mode (see {@link SummarizerMode}). */
-  getSummarizerMode(): SummarizerMode {
-    return load().summarizerMode;
-  },
-  setSummarizerMode(v: SummarizerMode): void {
-    const s = load();
-    s.summarizerMode = v;
-    persist(s);
-  },
-  /** Self-hosted endpoint config (base URL + model id). Both empty unless the
-   * mode is `self-hosted`. */
-  getSelfHosted(): { url: string; model: string } {
-    const s = load();
-    return { url: s.selfHostedUrl, model: s.selfHostedModel };
-  },
-  setSelfHosted(url: string, model: string): void {
-    const s = load();
-    s.selfHostedUrl = url;
-    s.selfHostedModel = model;
     persist(s);
   },
 

@@ -11,8 +11,9 @@ import { createInterface } from "node:readline";
 import { DeviceMeUnauthorized, fetchDeviceMe, recoverIdentity, selfRegister } from "./api.js";
 import { state } from "./config.js";
 import { backupIdentity, hasIdentityFile, identityPath } from "./identity.js";
+import { isProcessAlive, readDaemonLock } from "./lock.js";
 import { buildFingerprint, intendedDeviceUuid, machineKeySource } from "./machine-key.js";
-import { parseSummarizerMode, type SummarizerMode } from "./runtime-state.js";
+import { parseSummarizerMode, type SummarizerMode } from "./mode-settings.js";
 import {
   bundledTrayAppPath,
   installService,
@@ -1437,15 +1438,31 @@ async function cmdMode(argv: readonly string[]): Promise<void> {
     }
   }
 
-  // Re-stage the native runtime for the new mode + bounce the service so the
-  // running daemon reloads. Only when there's an installed daemon to refresh.
+  // Re-stage the native runtime for the new mode + RESTART the daemon so it
+  // re-reads the mode (the provider is resolved once per process). A plain
+  // service bounce isn't enough: the menu-bar tray may own the live daemon via
+  // the singleton lock, so we evict the current lock holder first, wait for it
+  // to release, then reinstall — the fresh daemon comes up on the new mode.
   if (state.bearer) {
+    const lock = readDaemonLock();
+    if (lock && isProcessAlive(lock.pid)) {
+      try {
+        process.kill(lock.pid, "SIGTERM");
+      } catch {
+        /* already gone / not ours */
+      }
+      // Bounded wait (≤10s) for a clean release so the restart doesn't bounce
+      // off a still-shutting-down owner.
+      for (let i = 0; i < 40 && isProcessAlive(lock.pid); i++) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
     try {
       const svc = installService();
-      console.log(`✓ background service refreshed (${svc.path})`);
+      console.log(`✓ background service restarted on ${mode} mode (${svc.path})`);
     } catch (e) {
       console.warn(
-        `couldn't refresh the service (${(e as Error).message}) — restart it by re-running \`modelstat\``,
+        `couldn't restart the service (${(e as Error).message}) — restart it by re-running \`modelstat\``,
       );
     }
   } else {
