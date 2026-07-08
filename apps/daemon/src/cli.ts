@@ -68,24 +68,51 @@ async function textPrompt(question: string, def = ""): Promise<string> {
   }
 }
 
-/** Human labels for the summariser modes, for menus + confirmations. */
-const MODE_BLURB: Record<SummarizerMode, string> = {
-  cloud: "Cloud — modelstat's servers summarise (no local model). Cleaned turns are uploaded.",
-  local: "Local — a ~2.7 GB model summarises on THIS machine. Only abstracts are uploaded.",
-  "self-hosted": "Self-hosted — your org's own AI endpoint summarises the cleaned turns.",
+/**
+ * Per-mode copy for the install chooser + `modelstat mode`. Each mode states
+ * its RESOURCE profile (what it costs THIS machine) and its PRIVACY profile
+ * (what leaves, and to where). Redaction runs on-device in EVERY mode — only
+ * the summarisation LOCATION differs — so the privacy lines describe the
+ * already-cleaned payload. The `local` resource line is the explicit
+ * RAM/battery warning a tester asked us to surface up front.
+ */
+const MODE_INFO: Record<SummarizerMode, { label: string; resource: string; privacy: string }> = {
+  cloud: {
+    label: "Cloud (default) — modelstat's servers summarise",
+    resource: "no local model; negligible RAM, CPU and battery on this machine",
+    privacy: "your cleaned, redacted turns are uploaded and summarised server-side",
+  },
+  local: {
+    label: "Local — a bundled model summarises on THIS machine",
+    resource:
+      "⚠ downloads a ~2.7 GB model (Qwen3-4B) and uses ~4 GB RAM plus extra battery/CPU while summarising",
+    privacy: "only a ≤240-char abstract is uploaded; the raw turns never leave this machine",
+  },
+  "self-hosted": {
+    label: "Self-hosted — your org's own AI endpoint summarises",
+    resource: "no local model here; summarisation runs on the endpoint you configure",
+    privacy:
+      "only the abstract reaches modelstat; the cleaned excerpts go to your own endpoint (URL + model)",
+  },
 };
 
 /** Interactive menu (Cloud pre-selected) → a {@link SummarizerMode}. Only
- * called when stdin is a TTY; returns the default on empty input. */
+ * called when stdin is a TTY; returns the default on empty input. Each option
+ * lists its resource cost and privacy profile so the choice is informed. */
 async function promptForMode(current: SummarizerMode): Promise<SummarizerMode> {
   const def = current;
+  const opt = (n: string, m: SummarizerMode): string =>
+    `  ${n}) ${MODE_INFO[m].label}\n` +
+    `       resource: ${MODE_INFO[m].resource}\n` +
+    `       privacy:  ${MODE_INFO[m].privacy}\n`;
   process.stdout.write(
     "\nHow should modelstat summarise your sessions?\n" +
       "Redaction (secrets + names/PII) ALWAYS runs on your machine first — only the\n" +
-      "summarisation location changes.\n" +
-      `  1) ${MODE_BLURB.cloud}\n` +
-      `  2) ${MODE_BLURB.local}\n` +
-      `  3) ${MODE_BLURB["self-hosted"]}\n`,
+      "summarisation LOCATION below changes.\n\n" +
+      opt("1", "cloud") +
+      opt("2", "local") +
+      opt("3", "self-hosted") +
+      "\n",
   );
   const raw = await textPrompt(`Choose 1-3 or a name [${def}]: `, def);
   const byNumber: Record<string, SummarizerMode> = {
@@ -886,6 +913,9 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
       `    \x1b[2mmodelstat status\x1b[0m  # pairing, service + sessions · tokens · cost`,
     );
     console.log(`    \x1b[2mmodelstat jobs\x1b[0m    # pipeline queue + recent activity`);
+    console.log(
+      `    \x1b[2mmodelstat mode\x1b[0m    # where sessions summarise (cloud/local/self-hosted)`,
+    );
     console.log();
     console.log(`  Agent-friendly (for LLMs / MCPs):`);
     console.log(`    \x1b[2m${agentUrl}\x1b[0m`);
@@ -1183,6 +1213,13 @@ async function cmdStatus(args: readonly string[] = []): Promise<void> {
             }
           : { paired: false },
         auto_update: { enabled: autoUpdateEnabled(), pinned_by_env: autoUpdatePinnedByEnv() },
+        // Active summariser mode (the tray reads this to show + switch it).
+        // Mirrors `modelstat mode --json`: endpoint fields only for self-hosted.
+        summarizer: {
+          mode: state.summarizerMode,
+          ...(state.summarizerMode === "self-hosted" ? state.selfHosted : {}),
+          env_override: state.summarizerModeIsEnvOverridden,
+        },
         api: state.apiUrl,
         logs: logsDir(),
         state: state.storePath,
@@ -1202,6 +1239,11 @@ async function cmdStatus(args: readonly string[] = []): Promise<void> {
   console.log(`logs:    ${logsDir()}`);
   console.log(`state:   ${state.storePath}`);
   console.log(`api:     ${state.apiUrl}`);
+  const sm = state.summarizerMode;
+  const smEndpoint =
+    sm === "self-hosted" && state.selfHosted.url ? ` (${state.selfHosted.url})` : "";
+  const smEnv = state.summarizerModeIsEnvOverridden ? " (env override)" : "";
+  console.log(`summariser: ${sm}${smEndpoint}${smEnv} — change with \`modelstat mode\``);
   console.log(
     `auto-update: ${autoUpdateEnabled() ? "on" : "off"}${autoUpdatePinnedByEnv() ? " (pinned by env)" : ""}`,
   );
@@ -1395,7 +1437,9 @@ async function cmdMode(argv: readonly string[]): Promise<void> {
       return;
     }
     console.log(`summariser mode: ${mode}`);
-    console.log(`  ${MODE_BLURB[mode]}`);
+    console.log(`  ${MODE_INFO[mode].label}`);
+    console.log(`  resource: ${MODE_INFO[mode].resource}`);
+    console.log(`  privacy:  ${MODE_INFO[mode].privacy}`);
     if (mode === "self-hosted") {
       const sh = state.selfHosted;
       console.log(`  endpoint: ${sh.url || "(unset)"}   model: ${sh.model || "(unset)"}`);
