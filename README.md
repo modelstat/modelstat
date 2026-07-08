@@ -71,18 +71,23 @@ This is the **public source** for everything that runs on your machine:
 │   Claude Code · Codex    │           │    modelstat daemon     │           │ analytics dashboard  │
 │ Cursor · Cline · Aider   │  session  │ • parse + price turns   │ redacted  │ spend & ROI grouped  │
 │ Windsurf · Zed · Copilot │ ───────▶  │ • redact (PII / keys)   │ ───────▶  │ by activity · repo · │
-│ Claude Desktop · …       │   logs    │ • summarize (local LLM) │   HTTPS   │ model · person —     │
+│ Claude Desktop · …       │   logs    │ • summarise (see modes) │   HTTPS   │ model · person —     │
 │ (logs already on disk)   │           │ → tokens + abstract     │           │ the charts above     │
 └──────────────────────────┘           └─────────────────────────┘           └──────────────────────┘
 
-                      ↑ raw prompts, code & secrets never leave your machine ↑
+                      ↑ secrets & PII are stripped on your machine before anything leaves ↑
 ```
 
 1. **Detects installed tools** — scans `~/.claude`, `~/.codex`, `~/.cursor`, `~/.aider`, `~/.config/continue`, and other tool-specific locations.
 2. **Parses local log files** — Claude Code's JSONL logs, Cursor's SQLite DB, Codex's conversation files, and so on. The [per-tool parsers](packages/parsers/src/) are the only code that opens these files.
-3. **Redacts on-device** — every excerpt goes through a regex pass for secrets/PII *and* (optionally) a local NER model **before** the uploader ever sees it.
-4. **Summarises on-device** — a small local LLM compresses each work-segment into a single ≤240-char abstract. The raw turns stay on disk; only the abstract goes up.
-5. **Uploads metadata only** — per-session totals (tokens, model, cost, duration) + the redacted abstract + provenance describing what was redacted.
+3. **Redacts on-device — in every mode** — every excerpt goes through a regex pass for secrets/PII *and* an on-device NER model **before** the uploader ever sees it. This never moves off your machine, regardless of the mode below.
+4. **Summarises — you choose where (at install)** — the redaction in step 3 always runs locally; only *where the summary is written* differs:
+   - **Local** — a small ~2.7 GB LLM summarises each work-segment on **this machine** into a ≤240-char abstract. Raw turns stay on disk; only the abstract goes up. (The only mode that downloads the model.)
+   - **Self-hosted** — your org's own OpenAI-compatible endpoint summarises the cleaned excerpts (URL + model set at install). Only the abstract goes up; no local model.
+   - **Cloud** *(default)* — no local model at all; the cleaned, redacted turns are uploaded and modelstat's servers summarise them.
+
+   Change it any time with `modelstat mode <local|self-hosted|cloud>`.
+5. **Uploads what the mode implies** — per-session totals (tokens, model, cost, duration) + provenance always. In **Local**/**Self-hosted**, the redacted ≤240-char abstract. In **Cloud**, the redacted turns (so the server can summarise them). Never raw prompts, code, or secrets — redaction runs on-device first in every mode.
 
 ---
 
@@ -133,13 +138,13 @@ No in-band auth — the server reuses the token `npx modelstat@latest` already w
 
 You can verify, from this repository alone, exactly what does and doesn't leave your machine.
 
-**The boundary.** Exactly one function talks to our server: **[`IngestClient.upload()`](packages/daemon-core/src/http/index.ts) → POST `/v1/ingest`**. There is no other outbound channel. The wire-format types live in **[`packages/core/src/schemas.ts`](packages/core/src/schemas.ts)** as Zod schemas — if a field isn't there, the uploader literally cannot send it.
+**The boundary.** Exactly one module talks to our server: **[`IngestClient.upload()`](packages/daemon-core/src/http/index.ts)**. It POSTs to **`/v1/ingest`** in **Local** and **Self-hosted** modes (pre-summarised abstracts) or **`/v1/ingest/raw`** in **Cloud** mode (the redacted turns the server summarises). There is no other outbound channel. The wire-format types live in **[`packages/core/src/schemas.ts`](packages/core/src/schemas.ts)** as Zod schemas — if a field isn't there, the uploader literally cannot send it.
 
-**What we receive:** model/provider/tool, per-class token counts, the cost we computed, scrubbed `cwd`/git metadata, filenames (paths scrubbed), an optional ≤320-char pre-redacted excerpt, a ≤240-char on-device abstract, redaction *counts* (never the matched text), and a provenance stamp.
+**What we receive — always:** model/provider/tool, per-class token counts, the cost we computed, scrubbed `cwd`/git metadata, filenames (paths scrubbed), redaction *counts* (never the matched text), and a provenance stamp. **Plus, depending on your mode:** a ≤240-char on-device abstract (**Local** / **Self-hosted**), or the redacted conversation turns themselves (**Cloud** — that is exactly what our servers summarise for you).
 
-**What we never receive:** your raw prompts, your code, or any API key / token / password. Text fields are size-capped by Zod and pass through redaction first; the `paranoid` policy drops entire `stdout`/`stderr`/`tool_output`/`raw_text` blobs before upload.
+**What we never receive:** your raw prompts, your code, or any API key / token / password. Redaction runs **on your machine in every mode** before anything leaves it — Cloud mode's uploaded turns are redacted turns, not raw ones, and Self-hosted mode runs the same on-device scrub before excerpts reach your org's endpoint. Text fields are size-capped by Zod; the `paranoid` policy drops entire `stdout`/`stderr`/`tool_output`/`raw_text` blobs before upload.
 
-**Defence-in-depth**, every byte crossing the boundary passes through: parser scoping → secrets regex (Anthropic/OpenAI/Google/AWS/GitHub/Slack/Stripe keys, JWTs, PEM blocks, bearer headers, DB passwords) → PII regex (emails, public IPs, URL creds, home paths) → a Shannon-entropy catcher for unknown key shapes → optional on-device NER → Zod length caps → policy gate → provenance stamp. All in [`packages/core/src/redact.ts`](packages/core/src/redact.ts).
+**Defence-in-depth**, every byte crossing the boundary passes through: parser scoping → secrets regex (Anthropic/OpenAI/Google/AWS/GitHub/Slack/Stripe keys, JWTs, PEM blocks, bearer headers, DB passwords) → PII regex (emails, public IPs, URL creds, home paths) → a Shannon-entropy catcher for unknown key shapes → on-device NER → Zod length caps → policy gate → provenance stamp. All in [`packages/core/src/redact.ts`](packages/core/src/redact.ts). In **Cloud** mode the daemon is **fail-closed** on the NER pass: if that on-device model can't load, it will NOT ship raw turns with regex-only redaction — it falls back to local extractive abstracts instead (no raw egress).
 
 **Audit it yourself** — three files tell the whole story:
 

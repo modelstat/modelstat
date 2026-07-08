@@ -9,20 +9,20 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { IngestBatch, RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import { batchId } from "@modelstat/daemon-core";
 import { INGEST_BATCH_MAX_EVENTS } from "@modelstat/daemon-core/config";
 import type { SegmentProgressFn } from "@modelstat/daemon-core/pipeline";
 import { attachSegmentIdsByMap, type ToolCallDraft } from "@modelstat/daemon-core/queue";
-import type { IngestBatch, RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import {
   deriveSessionIdFromFilename,
   deriveSessionIdFromPiPath,
   deriveSessionIdFromRolloutPath,
   type LocalToolContext,
-  parseClaudeCodeJsonl,
-  parseCodexRollout,
   type ParseResult,
   type ParserContext,
+  parseClaudeCodeJsonl,
+  parseCodexRollout,
   parsePiSession,
   quickChecksum,
 } from "@modelstat/parsers";
@@ -34,6 +34,7 @@ import {
   buildSessionMetadata,
   buildSessionTitles,
   enrichScripts,
+  prepareCloudRawEvents,
 } from "./pipeline.js";
 
 /** Substituted by tsup's `define` (see tsup.config.ts) — a string
@@ -427,6 +428,51 @@ async function runScanOverJobs(
   // server-side (titles are last-write-wins per session).
   const runSegmentsBySession = new Map<string, Segment[]>();
 
+  /** Ship one assembled batch and, on success, advance the buffered files'
+   * cursors. Shared by the normal (abstracts → /v1/ingest) and cloud (raw turns
+   * → /v1/ingest/raw) paths — `raw` picks the endpoint, `segmentCount` is 0 for
+   * the cloud path (the server builds the segments). */
+  async function commitBatch(
+    batch: IngestBatch,
+    o: { raw: boolean; segmentCount: number },
+  ): Promise<void> {
+    const eventCount = batch.events.length;
+    // These records are now in-flight.
+    cb.onUpload?.({ events: eventCount, segments: o.segmentCount });
+    const res = await uploadBatch(batch, { raw: o.raw });
+    if (!res.committed) {
+      // PERMANENT server reject (400/422 — an un-encodable batch the server will
+      // never accept). QUARANTINE it: advance these files' cursors PAST the poison
+      // batch so the newest-first scan isn't wedged behind it forever (one bad
+      // batch was blocking every newer file's events). A TRANSIENT failure would
+      // have thrown above instead — held + retried — so good data is never lost on
+      // a blip; only a genuinely-rejected batch is skipped, and loudly.
+      batchesDropped += 1;
+      console.error(
+        `dropped ${eventCount} event(s) / ${o.segmentCount} segment(s) — server rejected the batch (${res.reason}); skipping so newer data keeps flowing`,
+      );
+      cb.onDropped?.({ events: eventCount, segments: o.segmentCount, reason: res.reason });
+      for (const pc of pendingCursors) state.setCursor(pc.path, pc.cs);
+      pendingCursors = [];
+      buffer = [];
+      toolCallBuffer = [];
+      return;
+    }
+    batchesUploaded += 1;
+    eventsUploaded += res.accepted;
+    segmentsUploaded += o.segmentCount;
+    // Upload confirmed — persist cursors for the files whose events
+    // just landed. Batch upserts are server-side idempotent (segments
+    // keyed by segment_id, sessions keyed by device+tool+source_session_id)
+    // so even if we crash between here and the next scan, re-sending
+    // the same events is safe.
+    for (const pc of pendingCursors) state.setCursor(pc.path, pc.cs);
+    pendingCursors = [];
+    buffer = [];
+    toolCallBuffer = [];
+    cb.onUploaded?.({ events: res.accepted, segments: o.segmentCount });
+  }
+
   async function flushBatch(): Promise<void> {
     if (!buffer.length && !toolCallBuffer.length) return;
     // Correct each event's repo identity to the AUTHORITATIVE git remote on
@@ -434,7 +480,44 @@ async function runScanOverJobs(
     // keys on the real owner/repo instead of a path-guessed subdirectory such
     // as `accounting/controllers`. Also normalise token-less events to zeroed
     // TokenUsage — the ingest server rejects null tokens (see ZERO_TOKENS).
+    // This runs in EVERY mode: cloud ships these events (with corrected git) to
+    // /v1/ingest/raw, so the authoritative repo identity must be applied first.
     const events = await resolveAuthoritativeGit(buffer.map(withNonNullTokens));
+
+    // ── Cloud mode: summarise server-side ────────────────────────────────
+    // No local model runs. Redact the turns fully on-device (the parser's
+    // regex floor + the on-device NER/PII pass; see prepareCloudRawEvents),
+    // then ship them to /v1/ingest/raw with NO local segments — modelstat's
+    // cloud summarises them. FAIL-CLOSED: if the NER redactor is unavailable
+    // we must not ship raw content with floor-only redaction, so we fall
+    // through to the normal path and ship LOCAL extractive abstracts (no raw
+    // egress) instead.
+    if (state.summarizerMode === "cloud") {
+      const cloudEvents = await prepareCloudRawEvents(events, toolCallBuffer);
+      if (cloudEvents) {
+        await commitBatch(
+          {
+            batch_id: batchId(),
+            device_id: deviceId,
+            daemon_version: DAEMON_VERSION,
+            events: cloudEvents,
+            segments: [],
+            // No local segments to attribute calls to — a null segment_id is
+            // valid wire; the server attaches them when it segments the turns.
+            tool_calls: attachSegmentIdsByMap(toolCallBuffer, new Map<string, string>()),
+          },
+          { raw: true, segmentCount: 0 },
+        );
+        return;
+      }
+      console.warn(
+        "[modelstat] ⚠ cloud summariser HELD — the on-device NER/PII redactor " +
+          "(@huggingface/transformers) isn't available, so turns can't be scrubbed before " +
+          "leaving the machine. Shipping LOCAL extractive abstracts (no raw egress) instead. " +
+          "Install @huggingface/transformers to enable cloud mode.",
+      );
+      // fall through to the normal (local extractive) path
+    }
     // Shared pipeline produces one-or-more Segments per session:
     // redact → segment (time + embedding boundaries) → summarise → tag.
     // Adapter config is set once at process boot in cli.ts. Build first
@@ -454,7 +537,9 @@ async function runScanOverJobs(
       // history, retaining an embedding per segment grew the heap unbounded —
       // the 8GB-OOM crash-loop. The wire `segments` array (shipped this batch)
       // still carries the embedding; only this auxiliary copy sheds it.
-      arr.push(seg.abstract_embedding === undefined ? seg : { ...seg, abstract_embedding: undefined });
+      arr.push(
+        seg.abstract_embedding === undefined ? seg : { ...seg, abstract_embedding: undefined },
+      );
       runSegmentsBySession.set(seg.session_id, arr);
     }
     const titleInput: Segment[] = [];
@@ -509,40 +594,7 @@ async function runScanOverJobs(
       ...(Object.keys(sessionTitles).length ? { session_titles: sessionTitles } : {}),
       ...(Object.keys(sessionMetadata).length ? { session_metadata: sessionMetadata } : {}),
     };
-    // These segments are now in-flight.
-    cb.onUpload?.({ events: events.length, segments: segments.length });
-    const res = await uploadBatch(batch);
-    if (!res.committed) {
-      // PERMANENT server reject (400/422 — an un-encodable batch the server will
-      // never accept). QUARANTINE it: advance these files' cursors PAST the poison
-      // batch so the newest-first scan isn't wedged behind it forever (one bad
-      // batch was blocking every newer file's events). A TRANSIENT failure would
-      // have thrown above instead — held + retried — so good data is never lost on
-      // a blip; only a genuinely-rejected batch is skipped, and loudly.
-      batchesDropped += 1;
-      console.error(
-        `dropped ${events.length} event(s) / ${segments.length} segment(s) — server rejected the batch (${res.reason}); skipping so newer data keeps flowing`,
-      );
-      cb.onDropped?.({ events: events.length, segments: segments.length, reason: res.reason });
-      for (const pc of pendingCursors) state.setCursor(pc.path, pc.cs);
-      pendingCursors = [];
-      buffer = [];
-      toolCallBuffer = [];
-      return;
-    }
-    batchesUploaded += 1;
-    eventsUploaded += res.accepted;
-    segmentsUploaded += segments.length;
-    // Upload confirmed — persist cursors for the files whose events
-    // just landed. Batch upserts are server-side idempotent (segments
-    // keyed by segment_id, sessions keyed by device+tool+source_session_id)
-    // so even if we crash between here and the next scan, re-sending
-    // the same events is safe.
-    for (const pc of pendingCursors) state.setCursor(pc.path, pc.cs);
-    pendingCursors = [];
-    buffer = [];
-    toolCallBuffer = [];
-    cb.onUploaded?.({ events: res.accepted, segments: segments.length });
+    await commitBatch(batch, { raw: false, segmentCount: segments.length });
   }
 
   // Streaming sink shared by every job: parsers call this with small

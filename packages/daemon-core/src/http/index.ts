@@ -94,8 +94,15 @@ export class IngestClient {
     this.maxAttempts = opts.maxAttempts ?? 3;
   }
 
-  async upload(batch: IngestBatch): Promise<UploadResult> {
-    const url = `${this.opts.apiUrl.replace(/\/+$/, "")}/v1/ingest`;
+  /**
+   * Upload a batch. `opts.raw` targets `/v1/ingest/raw` — the endpoint for
+   * cleaned FULL turns the server summarises itself (cloud mode), as opposed to
+   * `/v1/ingest` for pre-summarised abstracts. Same auth, retry, and reauth
+   * matrix either way.
+   */
+  async upload(batch: IngestBatch, opts: { raw?: boolean } = {}): Promise<UploadResult> {
+    const path = opts.raw ? "/v1/ingest/raw" : "/v1/ingest";
+    const url = `${this.opts.apiUrl.replace(/\/+$/, "")}${path}`;
     // Track the last network-level failure so we can surface its real
     // cause chain (ENOTFOUND, ECONNREFUSED, CERT_HAS_EXPIRED, etc)
     // instead of the useless "fetch failed" message undici wraps.

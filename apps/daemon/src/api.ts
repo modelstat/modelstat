@@ -1,8 +1,8 @@
-import { request } from "undici";
 import type { IngestBatch } from "@modelstat/core";
 import { expBackoff } from "@modelstat/daemon-core/config";
 import { IngestClient } from "@modelstat/daemon-core/http";
 import { createLogger } from "@modelstat/daemon-core/logger";
+import { request } from "undici";
 import { state } from "./config.js";
 import { buildFingerprint, intendedDeviceUuid } from "./machine-key.js";
 
@@ -375,8 +375,11 @@ export type UploadOutcome =
   // must QUARANTINE it (skip past + alert), not retry — see scan.ts.
   | { committed: false; reason: string };
 
-export async function uploadBatch(batch: IngestBatch): Promise<UploadOutcome> {
-  const result = await ingestClient().upload(batch);
+export async function uploadBatch(
+  batch: IngestBatch,
+  opts: { raw?: boolean } = {},
+): Promise<UploadOutcome> {
+  const result = await ingestClient().upload(batch, opts);
   if (result.kind === "commit") {
     return {
       committed: true,

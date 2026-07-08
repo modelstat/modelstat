@@ -46,3 +46,17 @@ test("2xx → commit", async () => {
   ).upload({} as never);
   assert.equal(res.kind, "commit");
 });
+
+test("upload() targets /v1/ingest by default and /v1/ingest/raw when raw", async () => {
+  const seen: string[] = [];
+  const ok = async (url: string | URL | Request) => {
+    seen.push(String(url));
+    return new Response(JSON.stringify({ accepted: 0 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  await client(ok as never).upload({} as never);
+  await client(ok as never).upload({} as never, { raw: true });
+  assert.deepEqual(seen, ["http://x/v1/ingest", "http://x/v1/ingest/raw"]);
+});

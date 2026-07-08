@@ -2,27 +2,29 @@
  * CLI-side pipeline binding — wires the summariser/embedder pair the
  * daemon runs and hands them to daemon-core.
  *
- * DEFAULT summariser path: the bundled `node-llama-cpp` runtime. The
- * daemon ships `node-llama-cpp` as a real dependency and stages it (plus
- * this platform's prebuilt binary) beside the installed bundle at install
- * time — see apps/daemon/src/service.ts `installNativeRuntime`. A ~2.7 GB
- * Qwen3.5-4B GGUF is lazy-downloaded to `~/.modelstat/models/` on first
- * scan. This runs on every supported machine (macOS arm64/x64, Linux)
- * with no external runtime to install, configure, or keep alive.
+ * The summariser runtime follows the install-time MODE (state.summarizerMode;
+ * see runtime-state.ts). Redaction — the regex floor plus the on-device NER/PII
+ * pass — runs client-side in EVERY mode; only the summarisation LOCATION moves:
  *
- * Two opt-outs from that default, both selected here:
- *   - `MODELSTAT_LLM_PROVIDER=openai` — summarise via a remote
- *     OpenAI-compatible endpoint for machines where a 2.7 GB local model
- *     isn't viable (see `remoteAdapters`). EXPLICIT egress: prompt
- *     content is NER/PII-scrubbed on-device before it leaves the box.
- *   - degraded extractive fallback — when the bundled runtime can't load,
- *     or the remote provider is misconfigured, ingest stays alive on the
- *     dependency-free heuristic summariser rather than blocking. Abstracts
- *     re-summarise at model quality once the LLM is healthy again.
+ *   - `local`       — the bundled `node-llama-cpp` runtime. The daemon ships
+ *     `node-llama-cpp` and stages this platform's prebuilt binary beside the
+ *     bundle at install time (service.ts `installNativeRuntime`); a ~2.7 GB
+ *     Qwen3.5-4B GGUF lazy-downloads to `~/.modelstat/models/`. This is the
+ *     ONLY mode that touches the local model.
+ *   - `self-hosted` — summarise via an org-run OpenAI-compatible endpoint (its
+ *     URL + model chosen at install; see `remoteAdapters`). EXPLICIT egress:
+ *     prompt content is NER/PII-scrubbed on-device before it leaves the box.
+ *   - `cloud`       — no local summariser at all. The scan loop ships redacted
+ *     turns to /v1/ingest/raw and modelstat's cloud summarises server-side
+ *     (see scan.ts). `getAdapters()` is only reached here as the NER-down
+ *     fallback, which degrades to local extractive abstracts (no egress).
  *
- * Summarisation is core product output, so the degradation is LOUD (a
- * one-time startup warning), never a silent no-op that uploads thousands
- * of useless "100 turns on claude_code" abstracts without a trace.
+ * A degraded extractive fallback keeps ingest alive whenever the selected
+ * runtime can't run (bundled binary won't load, self-hosted endpoint
+ * misconfigured, NER redactor unavailable): the dependency-free heuristic
+ * summariser ships real, if plainer, abstracts rather than blocking. Because
+ * summarisation is core product output the degradation is LOUD (a one-time
+ * startup warning), never a silent no-op.
  *
  * The adapters are built once and cached for the life of the process.
  */
@@ -33,13 +35,13 @@ import { redact as redactFloor } from "@modelstat/core/redact";
 import {
   createTransformersJsEmbedder,
   defaultLlamaConfig,
-  defaultOpenAICompatConfig,
   llamaCognize,
   llamaEntitle,
   llamaExtractLinks,
   llamaRedact,
   llamaScriptSummarize,
   llamaSummarize,
+  makeOpenAICompatConfig,
   type OpenAICompatConfig,
   openaiCognize,
   openaiEntitle,
@@ -67,6 +69,7 @@ import {
   type LocalToolContext,
   resolveGitContext,
 } from "@modelstat/parsers";
+import { state } from "./config.js";
 import { enrichToolCallRedaction, enrichToolCallScripts } from "./enrich-scripts.js";
 import { runtimeState } from "./runtime-state.js";
 
@@ -203,43 +206,50 @@ async function bundledAdapters(): Promise<PipelineAdapters> {
   };
 }
 
-/** Which summariser runtime to use. `local` (default) runs the bundled
- * Qwen GGUF on-device; `openai` POSTs to a remote OpenAI-compatible
- * endpoint (MODELSTAT_LLM_* env) for constrained machines. */
-const REMOTE_PROVIDER_ALIASES = new Set(["openai", "openai-compatible", "remote"]);
-
 type ResolvedProvider =
   | { readonly kind: "local" }
   | { readonly kind: "openai"; readonly cfg: OpenAICompatConfig }
+  | { readonly kind: "cloud" }
   | { readonly kind: "misconfigured"; readonly reason: string };
 
 let resolvedProvider: ResolvedProvider | null = null;
 
-/** Resolve, ONCE, which summariser runtime the environment selects —
- * never throwing. A bad `MODELSTAT_LLM_PROVIDER` value or incomplete
- * remote config resolves to `misconfigured` (carrying the operator-facing
- * reason) so the daemon can degrade to the extractive fallback with a
- * loud notice instead of crashing mid-scan. The result is cached: env is
- * immutable after start, and every call site shares one config snapshot
- * (so e.g. the script summariser can't drift to a different key). */
+/** Resolve, ONCE, which summariser runtime the install-time mode selects —
+ * never throwing. Self-hosted with an incomplete endpoint config resolves to
+ * `misconfigured` (carrying the operator-facing reason) so the daemon degrades
+ * to the extractive fallback with a loud notice instead of crashing mid-scan.
+ * The result is cached: the mode is immutable for the process lifetime (a
+ * `modelstat mode` change bounces the service), and every call site shares one
+ * snapshot so e.g. the script summariser can't drift to a different endpoint. */
 function resolveProvider(): ResolvedProvider {
   if (resolvedProvider) return resolvedProvider;
-  const raw = (process.env.MODELSTAT_LLM_PROVIDER ?? "local").trim().toLowerCase();
-  if (raw === "" || raw === "local") {
+  const mode = state.summarizerMode;
+  if (mode === "local") {
     resolvedProvider = { kind: "local" };
-  } else if (!REMOTE_PROVIDER_ALIASES.has(raw)) {
-    resolvedProvider = {
-      kind: "misconfigured",
-      reason: `unknown MODELSTAT_LLM_PROVIDER="${raw}" — expected "local" or "openai".`,
-    };
+  } else if (mode === "cloud") {
+    resolvedProvider = { kind: "cloud" };
   } else {
+    // self-hosted — summarise via the org's OpenAI-compatible endpoint
+    // (URL + model chosen at install, or overridden by MODELSTAT_LLM_* env).
     try {
-      resolvedProvider = { kind: "openai", cfg: defaultOpenAICompatConfig() };
+      const { url, model } = state.selfHosted;
+      resolvedProvider = {
+        kind: "openai",
+        cfg: makeOpenAICompatConfig(url, model, "self-hosted summariser URL"),
+      };
     } catch (err) {
       resolvedProvider = { kind: "misconfigured", reason: (err as Error).message };
     }
   }
   return resolvedProvider;
+}
+
+/** Test-only: drop the cached provider so the next resolveProvider() re-reads
+ * the mode. The daemon never needs this (a mode change bounces the process). */
+export function _resetProviderForTests(): void {
+  resolvedProvider = null;
+  adapters = null;
+  cloudRedactor = null;
 }
 
 /** Build the remote-egress scrubber: the deterministic regex floor
@@ -271,8 +281,8 @@ function makeRemotePreSend(nerRedact: Redactor): (text: string) => Promise<strin
 function warnRemoteEgress(cfg: OpenAICompatConfig): void {
   // biome-ignore lint/suspicious/noConsole: one-time egress notice
   console.warn(
-    `[modelstat] ⚠ remote summariser ENABLED — session excerpts + script bodies are sent to ${cfg.baseUrl} (model ${cfg.model}). ` +
-      "Embeddings + on-device PII redaction stay local. Unset MODELSTAT_LLM_PROVIDER for the bundled on-device model.",
+    `[modelstat] ⚠ self-hosted summariser ENABLED — session excerpts + script bodies are sent to ${cfg.baseUrl} (model ${cfg.model}). ` +
+      "Embeddings + on-device PII redaction stay local. Run `modelstat mode local` for the bundled on-device model.",
   );
 }
 
@@ -340,16 +350,25 @@ async function getAdapters(): Promise<PipelineAdapters> {
   if (provider.kind === "misconfigured") {
     markDegraded(
       provider.reason,
-      `[modelstat] ⚠ summariser provider MISCONFIGURED (${provider.reason}) — shipping ` +
-        "extractive fallback abstracts so ingest continues. Fix the MODELSTAT_LLM_* env and " +
-        "restart to enable the remote model.",
+      `[modelstat] ⚠ self-hosted summariser MISCONFIGURED (${provider.reason}) — shipping ` +
+        "extractive fallback abstracts so ingest continues. Fix the endpoint with " +
+        "`modelstat mode self-hosted --url <URL> --model <ID>` and restart.",
     );
     adapters = await degradedAdapters();
     return adapters;
   }
-  // Remote provider (opt-in): summarise via an OpenAI-compatible endpoint for
-  // machines where a 2.7 GB local model isn't viable. Explicit egress — warn
-  // loudly, then build the remote set (embeddings + PII redaction stay local).
+  // Cloud mode: modelstat's cloud summarises server-side from the redacted
+  // turns the scan loop ships to /v1/ingest/raw, so there is NO local summariser
+  // to build. We only reach here as scan.ts's NER-down fallback — degrade to the
+  // extractive set (local, no egress, no model) so ingest still ships abstracts.
+  if (provider.kind === "cloud") {
+    adapters = await degradedAdapters();
+    return adapters;
+  }
+  // Self-hosted: summarise via an org-run OpenAI-compatible endpoint (for orgs
+  // that want the model off modelstat's cloud but off the user's machine too).
+  // Explicit egress — warn loudly, then build the remote set (embeddings + PII
+  // redaction stay local).
   if (provider.kind === "openai") {
     // FAIL-CLOSED on the egress guard. The remote path's privacy promise is
     // that raw excerpts/script bodies are NER/PII-scrubbed on-device before
@@ -394,6 +413,59 @@ async function getAdapters(): Promise<PipelineAdapters> {
   );
   adapters = await bundledAdapters();
   return adapters;
+}
+
+// ── Cloud mode: redact turns on-device, summarise server-side ────────────────
+// Cloud mode ships cleaned turns (not a local abstract) to /v1/ingest/raw, so
+// the on-device NER/PII pass has to run over the EXCERPTS themselves — the
+// parser already floor-redacted them, but the NER pass is what the normal path
+// applies only to the derived abstract. Built + probed once; the sentinel proof
+// (nerRedactorActive) makes the fail-closed decision below honest.
+let cloudRedactor: { redact: Redactor; nerActive: boolean } | null = null;
+
+async function cloudRawRedactor(): Promise<{ redact: Redactor; nerActive: boolean }> {
+  if (cloudRedactor) return cloudRedactor;
+  const redact = await createPrivacyFilterRedactor();
+  cloudRedactor = { redact, nerActive: await nerRedactorActive(redact) };
+  return cloudRedactor;
+}
+
+/**
+ * Prepare a Cloud-mode raw batch: run the FULL redaction pipeline over every
+ * event excerpt and tool-call command before they leave the machine. The regex
+ * floor already ran in the parser; this adds the on-device NER/PII pass, so the
+ * turns modelstat's cloud summarises are secrets- AND names/orgs-scrubbed.
+ *
+ * FAIL-CLOSED: returns `null` when the on-device NER redactor is unavailable
+ * (its `@huggingface/transformers` peer dep is missing / a silent pass-through).
+ * The caller then degrades to LOCAL extractive abstracts — NO raw egress —
+ * rather than shipping floor-only-redacted turns off the box. Mutates `drafts`
+ * in place (their `command_redacted` gets the NER pass) and returns the redacted
+ * events; the tool-call floor already ran in the parser too.
+ *
+ * NOTE: the daemon's parsers cap `content_excerpt` at 320 chars, so Cloud ships
+ * the same per-turn excerpts the local model would summarise — not literally
+ * untruncated turns like the raw SDK. Widening that is a parser change (a
+ * follow-up), not part of this client wiring.
+ */
+export async function prepareCloudRawEvents(
+  events: RawEvent[],
+  drafts: readonly ToolCallDraft[],
+): Promise<RawEvent[] | null> {
+  const { redact, nerActive } = await cloudRawRedactor();
+  if (!nerActive) return null; // fail-closed — caller keeps data local
+  const redacted = await Promise.all(
+    events.map(async (e) => {
+      if (!e.content_excerpt) return e;
+      const floored = redactFloor(e.content_excerpt).text;
+      const scrubbed = (await redact(floored)).text;
+      return scrubbed === e.content_excerpt ? e : { ...e, content_excerpt: scrubbed };
+    }),
+  );
+  // Tool-call commands leave the box too — give command_redacted the same NER
+  // pass (its floor already ran in the parser). No LLM script summaries here.
+  if (drafts.length) await enrichToolCallRedaction(drafts, redact);
+  return redacted;
 }
 
 export async function buildSegments(
@@ -449,7 +521,9 @@ let scriptSummarizer: ScriptSummarizer | null = null;
  * we neither call out nor spin up the opted-out local model. */
 function buildScriptSummarizer(modelRedact: Redactor | undefined): ScriptSummarizer {
   const provider = resolveProvider();
-  if (provider.kind === "misconfigured") return async () => null;
+  // Cloud summarises server-side and misconfigured has no runtime — neither
+  // should spin up the opted-out local model, so both no-op.
+  if (provider.kind === "misconfigured" || provider.kind === "cloud") return async () => null;
   if (provider.kind === "openai") {
     const preSend = modelRedact ? makeRemotePreSend(modelRedact) : undefined;
     return openaiScriptSummarize(provider.cfg, preSend);
@@ -506,6 +580,14 @@ export async function enrichScripts(
  * Called from `modelstat start` / `scan` boot.
  */
 export async function preflightSummariser(): Promise<{ label: string; degraded: boolean }> {
+  // Cloud mode has no local summariser to exercise — modelstat's cloud
+  // summarises the redacted turns server-side. Report it plainly; a missing
+  // local model can't "degrade" ingest here. (If the on-device NER redactor is
+  // unavailable at scan time, scan.ts falls back to local extractive abstracts
+  // and marks degraded there — the honest place to detect it.)
+  if (resolveProvider().kind === "cloud") {
+    return { label: "cloud — modelstat summarises server-side (no local model)", degraded: false };
+  }
   const a = await getAdapters();
   const out = await a.summarize({
     prompt:

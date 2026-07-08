@@ -104,10 +104,61 @@ const MIN_RETRY_WAIT_MS = 250;
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Validate that `baseUrl` is a well-formed http(s) URL, throwing
+ * {@link OpenAICompatConfigError} otherwise. Shared by the env-driven and the
+ * install-driven config builders (and reusable by the install/`modelstat mode`
+ * prompt so a bad URL is rejected before it is persisted). `label` names the
+ * source in the error (`"MODELSTAT_LLM_BASE_URL"`, `"summariser URL"`, …).
+ */
+export function validateSummarizerUrl(baseUrl: string, label = "summariser URL"): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new OpenAICompatConfigError(`${label} is not a valid URL: "${baseUrl}".`);
+  }
+  // Reject non-http(s) so an operator can't point the egress at a file:// (or
+  // any other) scheme — a typo here would otherwise surface mid-scan.
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new OpenAICompatConfigError(
+      `${label} must use http(s): "${baseUrl}" (got "${parsed.protocol}").`,
+    );
+  }
+}
+
+/**
+ * Build an OpenAI-compatible config from an explicit base URL + model (e.g. the
+ * self-hosted summariser endpoint chosen at install), validating the URL and
+ * filling the API key + timeout from the environment. Throws
+ * {@link OpenAICompatConfigError} on an empty/invalid URL or empty model.
+ */
+export function makeOpenAICompatConfig(
+  baseUrl: string,
+  model: string,
+  label = "summariser URL",
+): OpenAICompatConfig {
+  const url = baseUrl.trim();
+  const mdl = model.trim();
+  if (!url) throw new OpenAICompatConfigError(`${label} is required.`);
+  if (!mdl) throw new OpenAICompatConfigError("summariser model id is required.");
+  validateSummarizerUrl(url, label);
+  const env = process.env;
+  const timeoutRaw = Number(env.MODELSTAT_LLM_TIMEOUT_MS ?? DEFAULT_LLM_TIMEOUT_MS);
+  return {
+    baseUrl: url,
+    apiKey: env.MODELSTAT_LLM_API_KEY?.trim() || null,
+    model: mdl,
+    timeoutMs: Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : DEFAULT_LLM_TIMEOUT_MS,
+  };
+}
+
+/**
  * Resolve the remote-LLM config from the environment. Throws
  * {@link OpenAICompatConfigError} when `MODELSTAT_LLM_BASE_URL` or
  * `MODELSTAT_LLM_MODEL` is absent — fail-fast at the boundary rather
- * than ship empty abstracts.
+ * than ship empty abstracts. Used when the self-hosted endpoint is supplied
+ * entirely via env (CI / scripted installs); the interactive install path
+ * calls {@link makeOpenAICompatConfig} with the persisted URL + model instead.
  */
 export function defaultOpenAICompatConfig(): OpenAICompatConfig {
   const env = process.env;
@@ -115,36 +166,15 @@ export function defaultOpenAICompatConfig(): OpenAICompatConfig {
   const model = env.MODELSTAT_LLM_MODEL?.trim();
   if (!baseUrl) {
     throw new OpenAICompatConfigError(
-      'MODELSTAT_LLM_BASE_URL is required when MODELSTAT_LLM_PROVIDER=openai (e.g. "https://api.openai.com/v1").',
+      'MODELSTAT_LLM_BASE_URL is required for self-hosted mode (e.g. "https://api.openai.com/v1").',
     );
   }
   if (!model) {
     throw new OpenAICompatConfigError(
-      'MODELSTAT_LLM_MODEL is required when MODELSTAT_LLM_PROVIDER=openai (e.g. "gpt-4o-mini").',
+      'MODELSTAT_LLM_MODEL is required for self-hosted mode (e.g. "gpt-4o-mini").',
     );
   }
-  // Validate the URL up front: a typo or a non-http(s) scheme should surface
-  // as a clear config error (which the daemon degrades on) rather than a
-  // mid-scan transport failure — and rejecting non-http(s) keeps the operator
-  // from accidentally pointing the egress at a file:// or other scheme.
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(baseUrl);
-  } catch {
-    throw new OpenAICompatConfigError(`MODELSTAT_LLM_BASE_URL is not a valid URL: "${baseUrl}".`);
-  }
-  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-    throw new OpenAICompatConfigError(
-      `MODELSTAT_LLM_BASE_URL must use http(s): "${baseUrl}" (got "${parsedUrl.protocol}").`,
-    );
-  }
-  const timeoutRaw = Number(env.MODELSTAT_LLM_TIMEOUT_MS ?? DEFAULT_LLM_TIMEOUT_MS);
-  return {
-    baseUrl,
-    apiKey: env.MODELSTAT_LLM_API_KEY?.trim() || null,
-    model,
-    timeoutMs: Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : DEFAULT_LLM_TIMEOUT_MS,
-  };
+  return makeOpenAICompatConfig(baseUrl, model, "MODELSTAT_LLM_BASE_URL");
 }
 
 /** Minimal shape of the OpenAI chat-completions response we depend on.
