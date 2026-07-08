@@ -3,6 +3,15 @@
 Guidance for developers and coding agents in this repo. Keep it current:
 when you change how something here works, update this file in the same PR.
 
+## CRITICAL — read first (repeated at the end)
+
+Nobody uses this service yet — there's no data or behaviour to preserve. Every change lands as the **final, canonical version**, as if the code had always been written that way:
+
+- **Fix the root cause, in the right place** — no hacks, workarounds, or symptom patches.
+- **Delete legacy/outdated code in the same change** — migrate every caller and remove the old path; prefer the clean breaking change over the cautious additive one.
+- **Leave zero cruft** — no back-compat shims, aliases, deprecated paths, dead flags, `_v1`/`_v2` forks, or commented-out code.
+- **Only ordering to mind** — the daemon (npm, auto-updates) and server can't cut over atomically, so change both sides and bump; that's an ordering note, not a license for a permanent shim.
+
 ## What this repo is
 
 The modelstat **daemon** — everything that runs on a user's machine and
@@ -199,3 +208,12 @@ re-run the job) converges:
   main untouched.
 - The Homebrew tap bump no-ops when `HOMEBREW_TAP_DISPATCH_TOKEN` is
   absent — a missing tap update with a green run usually means that.
+
+## CRITICAL — read last (repeated from the top)
+
+Nobody uses this service yet — there's no data or behaviour to preserve. Every change lands as the **final, canonical version**, as if the code had always been written that way:
+
+- **Fix the root cause, in the right place** — no hacks, workarounds, or symptom patches.
+- **Delete legacy/outdated code in the same change** — migrate every caller and remove the old path; prefer the clean breaking change over the cautious additive one.
+- **Leave zero cruft** — no back-compat shims, aliases, deprecated paths, dead flags, `_v1`/`_v2` forks, or commented-out code.
+- **Only ordering to mind** — the daemon (npm, auto-updates) and server can't cut over atomically, so change both sides and bump; that's an ordering note, not a license for a permanent shim.
