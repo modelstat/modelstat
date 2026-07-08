@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GitContext, RawEvent } from "@modelstat/core";
-import { type GitResolver, resolveAuthoritativeGit } from "./git-enrich.js";
+import { type GitResolver, type RootResolver, resolveAuthoritativeGit } from "./git-enrich.js";
 
 function mkGit(over: Partial<GitContext> = {}): GitContext {
   return { remote_url: null, remote_host: null, remote_slug: null, branch: null, ...over };
@@ -30,10 +30,17 @@ function mkEvent(over: Partial<RawEvent> = {}): RawEvent {
   };
 }
 
-/** A resolver backed by a fixed cwd→GitContext table. */
+/** A remote resolver backed by a fixed cwd→GitContext table. */
 function resolverFor(table: Record<string, GitContext>): GitResolver {
   return async (cwd) => (cwd ? (table[cwd] ?? null) : null);
 }
+
+/** A repo-root resolver backed by a fixed cwd→root-dir table. Default: no root. */
+function rootResolverFor(table: Record<string, string> = {}): RootResolver {
+  return (cwd) => (cwd ? (table[cwd] ?? null) : null);
+}
+
+const NO_ROOT: RootResolver = () => null;
 
 test("overwrites a path-guessed slug with the authoritative remote, keeping the historical branch", async () => {
   // The parser guessed a SUBDIRECTORY (`accounting/controllers`) off an in-repo
@@ -51,7 +58,7 @@ test("overwrites a path-guessed slug with the authoritative remote, keeping the 
     }),
   });
 
-  const [out] = await resolveAuthoritativeGit([ev], resolveGit);
+  const [out] = await resolveAuthoritativeGit([ev], resolveGit, NO_ROOT);
 
   assert.equal(out?.git?.remote_slug, "acme/backend");
   assert.equal(out?.git?.remote_host, "github.com");
@@ -59,18 +66,51 @@ test("overwrites a path-guessed slug with the authoritative remote, keeping the 
   assert.equal(out?.git?.branch, "feature/x", "keeps the branch the parser recorded for the turn");
 });
 
-test("keeps the parser's guess when disk resolves no remote (last resort)", async () => {
+test("no remote → uses the repo-ROOT dir name (bare, never a subpath)", async () => {
+  // A local-only repo (no origin) inside its own `src/` tree: the parser guessed
+  // the subdirectory, but the repo is the `.git` root's folder, `backend`.
   const ev = mkEvent({
-    cwd: "/tmp/local-only-repo",
-    git: mkGit({ remote_slug: "guessed/slug", branch: "main" }),
+    cwd: "/Users/dev/work/backend/src/app/case-studies",
+    git: mkGit({ remote_slug: "app/case-studies", branch: "feature/x" }),
   });
-  // Repo on disk but no origin → resolver yields a slug-less context.
-  const resolveGit = resolverFor({ "/tmp/local-only-repo": mkGit({ branch: "main" }) });
+  const resolveGit = resolverFor({
+    "/Users/dev/work/backend/src/app/case-studies": mkGit({ branch: "main" }), // root found, no origin
+  });
+  const resolveRoot = rootResolverFor({
+    "/Users/dev/work/backend/src/app/case-studies": "/Users/dev/work/backend",
+  });
 
-  const [out] = await resolveAuthoritativeGit([ev], resolveGit);
+  const [out] = await resolveAuthoritativeGit([ev], resolveGit, resolveRoot);
+
+  assert.equal(out?.git?.remote_slug, "backend", "bare repo-root name, not app/case-studies");
+  assert.equal(out?.git?.remote_host, null);
+  assert.equal(out?.git?.branch, "feature/x", "historical branch preserved");
+});
+
+test("repo-root fallback overrides a subpath guess even when the event had no branch", async () => {
+  const ev = mkEvent({ cwd: "/home/x/src/erpc-site/src/public/images", git: null });
+  const resolveGit = resolverFor({}); // nothing resolves a remote
+  const resolveRoot = rootResolverFor({
+    "/home/x/src/erpc-site/src/public/images": "/home/x/src/erpc-site",
+  });
+
+  const [out] = await resolveAuthoritativeGit([ev], resolveGit, resolveRoot);
+
+  assert.equal(out?.git?.remote_slug, "erpc-site");
+  assert.equal(out?.git?.branch, null);
+});
+
+test("no remote AND no reachable .git → keeps the parser's guess (last resort)", async () => {
+  const ev = mkEvent({
+    cwd: "/tmp/gone-repo/src/app/thing",
+    git: mkGit({ remote_slug: "app/thing", branch: "main" }),
+  });
+  const resolveGit = resolverFor({}); // no remote
+
+  const [out] = await resolveAuthoritativeGit([ev], resolveGit, NO_ROOT);
 
   assert.equal(out, ev, "unchanged event reference — nothing to override");
-  assert.equal(out?.git?.remote_slug, "guessed/slug");
+  assert.equal(out?.git?.remote_slug, "app/thing");
 });
 
 test("adds git identity when the event had none but disk resolves a remote", async () => {
@@ -83,13 +123,13 @@ test("adds git identity when the event had none but disk resolves a remote", asy
     }),
   });
 
-  const [out] = await resolveAuthoritativeGit([ev], resolveGit);
+  const [out] = await resolveAuthoritativeGit([ev], resolveGit, NO_ROOT);
 
   assert.equal(out?.git?.remote_slug, "acme/api");
   assert.equal(out?.git?.branch, "main", "no parsed branch → falls back to the on-disk branch");
 });
 
-test("a throwing resolver leaves the event untouched (best-effort)", async () => {
+test("a throwing git resolver with no reachable root leaves the event untouched", async () => {
   const ev = mkEvent({
     cwd: "/Users/dev/work/backend",
     git: mkGit({ remote_slug: "accounting/controllers" }),
@@ -98,7 +138,7 @@ test("a throwing resolver leaves the event untouched (best-effort)", async () =>
     throw new Error("git exploded");
   };
 
-  const [out] = await resolveAuthoritativeGit([ev], resolveGit);
+  const [out] = await resolveAuthoritativeGit([ev], resolveGit, NO_ROOT);
 
   assert.equal(out?.git?.remote_slug, "accounting/controllers");
 });
@@ -111,7 +151,7 @@ test("resolves each distinct cwd independently", async () => {
     "/w/b": mkGit({ remote_slug: "acme/b", remote_host: "github.com" }),
   });
 
-  const out = await resolveAuthoritativeGit([a, b], resolveGit);
+  const out = await resolveAuthoritativeGit([a, b], resolveGit, NO_ROOT);
 
   assert.equal(out[0]?.git?.remote_slug, "acme/a");
   assert.equal(out[1]?.git?.remote_slug, "acme/b");
@@ -119,14 +159,20 @@ test("resolves each distinct cwd independently", async () => {
 
 test("short-circuits (same array, no resolver calls) when no event has a cwd", async () => {
   const evs = [mkEvent({ cwd: null }), mkEvent({ source_event_id: "e2", cwd: null })];
-  let calls = 0;
+  let gitCalls = 0;
+  let rootCalls = 0;
   const resolveGit: GitResolver = async () => {
-    calls += 1;
+    gitCalls += 1;
+    return null;
+  };
+  const resolveRoot: RootResolver = () => {
+    rootCalls += 1;
     return null;
   };
 
-  const out = await resolveAuthoritativeGit(evs, resolveGit);
+  const out = await resolveAuthoritativeGit(evs, resolveGit, resolveRoot);
 
   assert.equal(out, evs, "returns the input array unchanged");
-  assert.equal(calls, 0, "no cwds → resolver never invoked");
+  assert.equal(gitCalls, 0, "no cwds → git resolver never invoked");
+  assert.equal(rootCalls, 0, "no cwds → root resolver never invoked");
 });
