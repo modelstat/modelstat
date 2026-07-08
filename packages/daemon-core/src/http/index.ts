@@ -16,7 +16,6 @@ import { describeErrorWithCause } from "../logger.js";
 
 export type UploadDecision =
   | { type: "commit" }
-  | { type: "drop"; reason: string }
   | { type: "reauth" }
   | { type: "backoff"; delayMs: number };
 
@@ -26,17 +25,23 @@ export type UploadDecision =
  */
 export function classifyStatus(status: number, attempt: number): UploadDecision {
   if (status >= 200 && status < 300) return { type: "commit" };
-  if (status === 400 || status === 422) return { type: "drop", reason: `http_${status}` };
   if (status === 401 || status === 403) return { type: "reauth" };
-  // 426 = daemon too old (the server's min-version gate). Transient by nature:
-  // the daemon auto-updates via its heartbeat, after which the retry succeeds —
-  // so back off and HOLD the batch, never drop it. (Dropping logged an error and
-  // re-spun the same data every scan cycle until the update landed.)
-  if (status === 408 || status === 426 || status === 429 || status >= 500) {
-    return { type: "backoff", delayMs: expBackoff(attempt) };
-  }
-  // Any other 4xx is treated as permanent — drop so we don't spin.
-  return { type: "drop", reason: `http_${status}` };
+  // EVERYTHING else HOLDS + retries until it succeeds — the daemon never discards a
+  // batch, so an outage or misconfig is a pause, never a gap in the data.
+  //
+  // We used to quarantine "permanent" 4xx (400/422) as un-acceptable payloads, but
+  // in practice even those are usually transient or environmental — and the cost of
+  // guessing wrong is unrecoverable data loss:
+  //   · 400 / 403 / 429 can come from a Cloudflare/WAF edge, not our origin.
+  //   · 404 / 405 — the route isn't reachable RIGHT NOW: undeployed, mis-proxied
+  //     (observed live 2026-07-08: a Caddy exact-path matcher 405'd every cloud-mode
+  //     POST /v1/ingest/raw), or renamed mid-rollout.
+  //   · 413 / 415 / 422 usually clear once a server-side clamp/parse fix lands.
+  //   · 408 / 426 / 429 — timeout; version-gate (daemon self-updates via heartbeat);
+  //     rate-limit. 5xx — server down / restarting / bad gateway.
+  // A held batch stalls only its own file's cursor — visible in the logs and it
+  // drains once the server is healthy; a dropped batch is gone for good. So we hold.
+  return { type: "backoff", delayMs: expBackoff(attempt) };
 }
 
 /** What a daemon provides so the ingest client can mint + refresh
@@ -143,17 +148,6 @@ export class IngestClient {
         const body = (await res.json().catch(() => ({}))) as IngestResponse;
         return { kind: "commit", response: body };
       }
-      if (decision.type === "drop") {
-        const text = await res.text().catch(() => "");
-        this.opts.logger.error("ingest dropped", {
-          status: res.status,
-          reason: decision.reason,
-          body: text.slice(0, 500),
-        });
-        // A 400/422 (or other permanent 4xx) — the server will never accept this
-        // payload. Permanent so the caller quarantines it, not holds it.
-        return { kind: "drop", reason: decision.reason, permanent: true };
-      }
       if (decision.type === "reauth") {
         // Release the unread body before retrying — with global fetch
         // (undici) an unconsumed body keeps the connection + its
@@ -164,14 +158,23 @@ export class IngestClient {
         if (!ok) return { kind: "drop", reason: "reauth_failed", permanent: false };
         continue; // retry with new token
       }
-      // backoff — drain the unread body first (see reauth note). A
-      // backfill that hits sustained 429s loops here repeatedly, so an
-      // un-cancelled body per attempt accumulates on the heap.
-      await res.body?.cancel().catch(() => {});
+      // backoff + HOLD (we never drop). For a 4xx the body usually says WHY the
+      // batch was rejected (a WAF/edge notice, a validation message) — surface it so
+      // a batch that's genuinely stuck is diagnosable, not an opaque repeating
+      // "backoff 400". For 5xx/429 the body is noise, and a backfill looping here on
+      // sustained 429s would pile un-cancelled bodies on the heap, so drain it unread
+      // (see reauth note).
+      let body: string | undefined;
+      if (res.status >= 400 && res.status < 500) {
+        body = (await res.text().catch(() => "")).slice(0, 500) || undefined;
+      } else {
+        await res.body?.cancel().catch(() => {});
+      }
       this.opts.logger.warn("ingest backoff", {
         status: res.status,
         delay_ms: decision.delayMs,
         attempt,
+        ...(body ? { body } : {}),
       });
       await sleep(decision.delayMs);
     }
@@ -187,11 +190,12 @@ export class IngestClient {
 
 export type UploadResult =
   | { kind: "commit"; response: IngestResponse }
-  // `permanent`: the server will NEVER accept this exact batch (400/422 — a
-  // malformed/un-encodable payload), so the caller must QUARANTINE it (skip past
-  // it + alert) rather than block the newest-first scan behind it forever.
-  // `!permanent` = transient (no token / reauth failed / 5xx-exhausted / network)
-  // → HOLD the batch and retry next cycle; never drop good data on a blip.
+  // A non-commit is always a HOLD: the batch wasn't accepted (no token / reauth
+  // failed / retries exhausted on any 4xx/5xx / network), so the caller retries it
+  // next cycle — good data is NEVER discarded. `permanent` is retained for wire
+  // compatibility but is now ALWAYS `false`: classifyStatus no longer marks any
+  // response as un-retryable (see its comment), so the scan loop's quarantine branch
+  // is dormant. Deleting that path (and this field) end-to-end is a follow-up.
   | { kind: "drop"; reason: string; permanent: boolean };
 
 function sleep(ms: number): Promise<void> {
