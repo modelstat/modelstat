@@ -61,6 +61,22 @@ struct AgentStats: Decodable {
   /// (claimed devices). Older daemons that don't write the file leave
   /// this nil.
   let local: LocalStatus?
+  /// Where sessions get summarised (cloud/local/self-hosted). Drives the
+  /// "Summariser" submenu — its title, checkmarks, and enabled state. nil on
+  /// older daemons that don't report it yet.
+  let summarizer: SummarizerInfo?
+}
+
+/// Active summariser mode + (self-hosted only) endpoint, from `status --json`.
+struct SummarizerInfo: Decodable {
+  /// "cloud" | "local" | "self-hosted".
+  let mode: String?
+  /// Self-hosted endpoint — present only in self-hosted mode.
+  let url: String?
+  let model: String?
+  /// True when MODELSTAT_SUMMARIZER_MODE is forcing the mode; a switch from the
+  /// tray would be masked by the env var, so the submenu disables itself.
+  let env_override: Bool?
 }
 
 struct DeviceInfo: Decodable {
@@ -157,6 +173,19 @@ final class TrayController: NSObject {
   private let copyClaimMI = NSMenuItem(title: "Copy claim URL", action: #selector(copyClaimUrl), keyEquivalent: "c")
   private let jobsMI = NSMenuItem(title: "View pipeline…", action: #selector(openJobs), keyEquivalent: "j")
   private let pauseMI = NSMenuItem(title: "Pause", action: #selector(togglePaused), keyEquivalent: "p")
+  /// "Summariser: <mode>" parent + submenu to switch where sessions summarise.
+  /// The active mode carries a checkmark; Local warns about its RAM/battery
+  /// cost before switching; Self-hosted needs a URL+model so it points at the
+  /// CLI. Redaction runs on-device in every mode — this only moves the summary.
+  private let summariserMI = NSMenuItem(title: "Summariser", action: nil, keyEquivalent: "")
+  private let summariserSubmenu = NSMenu()
+  private let modeCloudMI = NSMenuItem(
+    title: "Cloud — modelstat's servers", action: #selector(switchModeCloud), keyEquivalent: "")
+  private let modeLocalMI = NSMenuItem(
+    title: "Local — on this machine…", action: #selector(switchModeLocal), keyEquivalent: "")
+  private let modeSelfHostedMI = NSMenuItem(
+    title: "Self-hosted — your endpoint…", action: #selector(switchModeSelfHosted),
+    keyEquivalent: "")
   /// "Update now" — shown only when the server says this daemon is behind.
   private let updateMI = NSMenuItem(title: "Update now", action: #selector(updateNow), keyEquivalent: "u")
   /// Checkable "Auto-update" — reflects (and toggles) the daemon's setting.
@@ -247,6 +276,15 @@ final class TrayController: NSObject {
     menu.addItem(copyClaimMI)
     menu.addItem(jobsMI)
     menu.addItem(pauseMI)
+    // Summariser mode — a submenu so switching is one click from the menu bar.
+    modeCloudMI.target = self
+    modeLocalMI.target = self
+    modeSelfHostedMI.target = self
+    summariserSubmenu.addItem(modeCloudMI)
+    summariserSubmenu.addItem(modeLocalMI)
+    summariserSubmenu.addItem(modeSelfHostedMI)
+    summariserMI.submenu = summariserSubmenu
+    menu.addItem(summariserMI)
     updateMI.target = self
     autoUpdateMI.target = self
     updateMI.isHidden = true
@@ -501,6 +539,8 @@ final class TrayController: NSObject {
     // Auto-update toggle + "Update now" read straight from the local heartbeat
     // file, so render them before the loading/paired early-returns below.
     renderUpdateItems()
+    // Summariser mode is a local setting — render it regardless of pairing.
+    renderSummariser()
     guard let s = latest else {
       setInfo(statusMI, "Loading…")
       return
@@ -624,6 +664,34 @@ final class TrayController: NSObject {
     }
   }
 
+  /// Reflect the active summariser mode in the "Summariser" submenu: the parent
+  /// title names the mode, the matching child gets a checkmark. Sourced from the
+  /// 15s `status --json` poll (`latest.summarizer`). When an env override forces
+  /// the mode, a switch from here wouldn't take effect, so we grey the children
+  /// out and say so.
+  private func renderSummariser() {
+    let info = latest?.summarizer
+    let mode = info?.mode
+    let envLocked = info?.env_override ?? false
+    summariserMI.title =
+      mode.map { "Summariser: \(Self.modeLabel($0))" } ?? "Summariser"
+    if envLocked { summariserMI.title += " (env-locked)" }
+    modeCloudMI.state = (mode == "cloud") ? .on : .off
+    modeLocalMI.state = (mode == "local") ? .on : .off
+    modeSelfHostedMI.state = (mode == "self-hosted") ? .on : .off
+    for mi in [modeCloudMI, modeLocalMI, modeSelfHostedMI] { mi.isEnabled = !envLocked }
+  }
+
+  /// Human label for a summariser mode string.
+  private static func modeLabel(_ mode: String) -> String {
+    switch mode {
+    case "cloud": return "Cloud"
+    case "local": return "Local"
+    case "self-hosted": return "Self-hosted"
+    default: return mode
+    }
+  }
+
   @objc private func toggleAutoUpdate() {
     runManaged(["autoupdate", "toggle"])
     // Optimistic flip; the next 1s tick confirms the real state from disk.
@@ -632,6 +700,58 @@ final class TrayController: NSObject {
 
   @objc private func updateNow() {
     runManaged(["upgrade"])
+  }
+
+  // ── Summariser mode switching ───────────────────────────────────
+  //
+  // Each switch shells out to `modelstat mode <mode>` (the CLI persists the
+  // choice, re-stages the runtime, and bounces the service). Redaction runs
+  // on-device in every mode; only where the summary is written changes.
+
+  @objc private func switchModeCloud() { applyMode("cloud") }
+
+  @objc private func switchModeLocal() {
+    // Confirm the resource cost before kicking off the ~2.7 GB download — the
+    // same "communicate it up front" warning the installer shows.
+    let alert = NSAlert()
+    alert.messageText = "Summarise on this machine?"
+    alert.informativeText =
+      "Local mode downloads a ~2.7 GB model and uses about 4 GB of RAM plus extra "
+      + "battery and CPU while it summarises your sessions.\n\n"
+      + "Redaction already runs on your machine in every mode — this only changes "
+      + "where the summary is written."
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "Switch to Local")
+    alert.addButton(withTitle: "Cancel")
+    if alert.runModal() == .alertFirstButtonReturn { applyMode("local") }
+  }
+
+  @objc private func switchModeSelfHosted() {
+    // Self-hosted needs a URL + model that can't be typed into a menu, so point
+    // the user at the one CLI command that sets them.
+    let cmd = "modelstat mode self-hosted --url <URL> --model <ID>"
+    let alert = NSAlert()
+    alert.messageText = "Self-hosted summarising needs an endpoint"
+    alert.informativeText =
+      "Point modelstat at your org's OpenAI-compatible endpoint from a terminal:\n\n    "
+      + cmd + "\n\nRedaction still runs on your machine first."
+    alert.addButton(withTitle: "Copy command")
+    alert.addButton(withTitle: "OK")
+    if alert.runModal() == .alertFirstButtonReturn {
+      let pb = NSPasteboard.general
+      pb.clearContents()
+      pb.setString(cmd, forType: .string)
+    }
+  }
+
+  /// Persist a mode switch via the CLI, then refresh shortly after so the
+  /// checkmark + title catch up without waiting for the next 15s poll. The CLI
+  /// persists the mode before any download, so `status --json` reports it fast.
+  private func applyMode(_ mode: String) {
+    runManaged(["mode", mode])
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+      MainActor.assumeIsolated { self?.refreshStats() }
+    }
   }
 
   /// Fire-and-forget a `modelstat <args>` invocation (autoupdate / upgrade).

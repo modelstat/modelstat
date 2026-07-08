@@ -43,9 +43,14 @@ Things to know:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
 - **Summariser mode** is chosen at install (`modelstat connect`, Cloud
   pre-selected) and persisted to `state.json` (`summarizerMode`; env override
-  `MODELSTAT_SUMMARIZER_MODE`; changeable later via `modelstat mode`). Redaction
-  (regex floor + on-device NER/PII) runs client-side in EVERY mode; only the
-  summarisation LOCATION differs — see `resolveProvider` in
+  `MODELSTAT_SUMMARIZER_MODE`). The install chooser (`MODE_INFO` in `cli.ts`)
+  states each mode's RESOURCE + PRIVACY profile — including the RAM/battery
+  warning on local. The active mode is surfaced and changeable after install
+  via `modelstat mode`, `modelstat status` (+ the `summarizer` object in
+  `status --json`), and the macOS tray's **Summariser** submenu (one-click
+  cloud/local switch; self-hosted needs a URL+model, so it points at the CLI).
+  Redaction (regex floor + on-device NER/PII) runs client-side in EVERY mode;
+  only the summarisation LOCATION differs — see `resolveProvider` in
   `apps/daemon/src/pipeline.ts`:
   - `local` — the bundled Qwen GGUF via `node-llama-cpp`, staged by
     `installNativeRuntime`/`_setup-runtime`. The **only** mode that

@@ -21,7 +21,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/modelstat"><img src="https://img.shields.io/npm/v/modelstat?label=modelstat" alt="npm modelstat" /></a>
   <a href="https://www.npmjs.com/package/@modelstat/mcp"><img src="https://img.shields.io/npm/v/@modelstat/mcp?label=%40modelstat%2Fmcp" alt="npm @modelstat/mcp" /></a>
-  <img src="https://img.shields.io/badge/privacy-prompts_stay_on_device-000000" alt="Privacy: prompts stay on device" />
+  <img src="https://img.shields.io/badge/privacy-redaction_runs_on_device-000000" alt="Privacy: redaction runs on device" />
 </p>
 
 ---
@@ -46,7 +46,7 @@ That's it. Open your dashboard at **[modelstat.ai/dashboard](https://modelstat.a
 
 - **Real work, not just raw tokens.** After about a week of passive collection, modelstat learns your team's own vocabulary of projects and work-types — so the dashboard shows *"$133 on DevOps, $114 on testing"*, not just *"you spent $400 on Claude."* No manual tagging.
 - **Your actual sessions.** It reads the logs Claude Code, Codex, Cursor, Cline, Continue, Aider, Windsurf, Zed, Copilot, and Claude Desktop already write — nothing to instrument, nothing to intercept.
-- **Local-first by construction.** A small model on *your* machine summarizes and redacts every session before anything is uploaded. Raw prompts, code, and secrets never leave the box — only token counts, cost, and a short scrubbed abstract. [Audit it below.](#privacy--data-handling-with-proof)
+- **Redaction always runs on your machine.** Every session is scrubbed for secrets and PII on *your* box — a regex floor plus an on-device NER model — before a single byte is uploaded, in **every** mode. Raw keys, passwords, and personal data never leave. You choose *where the summary is written*: on this machine, your own server, or modelstat's cloud (the default) — see [the three modes below](#what-it-does-on-your-machine). [Audit it below.](#privacy--data-handling-with-proof)
 
 ---
 
