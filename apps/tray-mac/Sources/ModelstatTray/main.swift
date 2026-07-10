@@ -364,45 +364,17 @@ final class TrayController: NSObject {
     return decision
   }
 
-  /// True only if the "modelstat agent" launcher can actually LOAD its runtime
-  /// and run. A relocated node whose libnode was orphaned is still an
-  /// executable Mach-O (isExecutableFile == true) but dyld-aborts on exec — so
-  /// we run it (`--version`, exit 0) to prove it before spawning the daemon
-  /// through it. ~30 ms, and only on the down-daemon path. Mirrors
-  /// launcherRuns() in service.ts.
-  private nonisolated static func launcherRuns(_ path: String) -> Bool {
-    guard FileManager.default.isExecutableFile(atPath: path) else { return false }
-    let p = Process()
-    p.launchPath = path
-    p.arguments = ["--version"]
-    p.standardOutput = Pipe()
-    p.standardError = Pipe()
-    do { try p.run() } catch { return false }
-    p.waitUntilExit()
-    return p.terminationStatus == 0
-  }
-
   private func spawnDaemon(cli: URL, force: Bool) {
     let p = Process()
     var args = ["start"]
     if force { args.append("--force") }
-    // Prefer the "modelstat agent" launcher the installer links next to the
-    // bundle (a rename of node) so a tray-spawned daemon shows as "modelstat
-    // Agent" in Activity Monitor too, matching the launchd-managed one. Falls
-    // back to `env node` when it isn't there yet (older install / mid-upgrade)
-    // OR when it can't load its runtime — a launcher whose libnode was orphaned
-    // is still an executable Mach-O, so we PROVE it runs before trusting it
-    // rather than spawn a daemon that dyld-aborts on every launch.
-    // Keep this name in sync with DAEMON_LAUNCHER_NAME in service.ts.
-    let launcher = ("~/.modelstat/bin/modelstat agent" as NSString).expandingTildeInPath
+    // Run the daemon through node IN PLACE — `env node <cli.mjs>` — matching the
+    // launchd-managed agent. We deliberately don't relocate/rename node for a
+    // prettier Activity Monitor name: that orphaned node's libnode and bricked
+    // self-updates. process.title still labels it "modelstat agent" in ps/top.
     if cli.pathExtension == "mjs" {
-      if Self.launcherRuns(launcher) {
-        p.launchPath = launcher
-        p.arguments = [cli.path] + args
-      } else {
-        p.launchPath = "/usr/bin/env"
-        p.arguments = ["node", cli.path] + args
-      }
+      p.launchPath = "/usr/bin/env"
+      p.arguments = ["node", cli.path] + args
     } else {
       p.launchPath = cli.path
       p.arguments = args

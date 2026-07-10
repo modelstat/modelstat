@@ -16,11 +16,10 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
-  linkSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -270,191 +269,39 @@ function nodeBinary(): string {
 }
 
 /**
- * The daemon launches through a link named exactly this so macOS Activity
- * Monitor labels the process "modelstat agent" instead of a bare "node".
- * macOS derives a process's display name from the FILENAME of the running
- * binary (the kernel's p_comm), NOT from Node's process.title — so the only
- * way to rename it in the GUI is to run it from a nicely-named file. Kept at
- * 15 chars (≤ the 16-char p_comm cap) so it never truncates. process.title
- * (set in cli.ts cmdStart) covers `ps`/`top`; this covers the GUI. Must stay
- * in sync with the tray's spawnDaemon() in apps/tray-mac (main.swift).
+ * Remove the retired "modelstat agent" launcher (a rename of node) and any
+ * libnode staged beside it, left behind by older installs.
+ *
+ * We no longer relocate node to give the daemon a pretty Activity-Monitor name.
+ * Homebrew's `node` is a thin stub that loads its engine from a separate
+ * `libnode.<v>.dylib` sitting next to it, so relocating the stub orphaned that
+ * library — and a self-update that wiped the orphan bricked the daemon
+ * (`dyld: Library not loaded: @rpath/libnode.<v>.dylib`). The daemon now runs
+ * through node IN PLACE (what node is built for), which can't break that way.
+ * `process.title` (set in cli.ts cmdStart) still labels it "modelstat agent" in
+ * `ps`/`top` and on Linux; on macOS Activity Monitor it shows as "node" — the
+ * accepted cosmetic cost of not relocating a runtime.
+ *
+ * Runs on install so an upgrade actively clears the old artifacts (including a
+ * hand-made libnode symlink) instead of leaving dead weight. Best-effort; never
+ * throws. macOS-only — nothing else creates these.
  */
-export const DAEMON_LAUNCHER_NAME = "modelstat agent";
-
-function daemonLauncherPath(): string {
-  return join(binDir(), DAEMON_LAUNCHER_NAME);
-}
-
-/**
- * Extract the dylibs a Mach-O loads via `@rpath` from `otool -L` output — the
- * ones that must travel WITH a relocated copy of the binary or dyld can't find
- * them. Pure + exported so the parse is unit-tested without a real Mach-O.
- * Returns bare filenames, e.g. ["libnode.127.dylib"]. (Everything a Homebrew
- * `node` links at an ABSOLUTE path — /opt/homebrew/opt/… kegs — resolves no
- * matter where the launcher lives, so those are intentionally ignored.)
- */
-export function parseRpathDylibs(otoolOutput: string): string[] {
-  const names: string[] = [];
-  for (const raw of otoolOutput.split("\n")) {
-    const name = raw.trim().match(/^@rpath\/(\S+\.dylib)\b/)?.[1];
-    if (name && !names.includes(name)) names.push(name);
-  }
-  return names;
-}
-
-/** The @rpath dylib filenames the node binary at `node` loads (via `otool -L`).
- * These are what a relocated launcher needs staged beside it. Empty on
- * non-macOS, when otool is unavailable, or for a statically-linked node (then
- * the copied launcher is self-contained and needs nothing staged). */
-function rpathDylibNames(node: string): string[] {
-  if (platform() !== "darwin") return [];
-  const r = spawnSync("otool", ["-L", node], { encoding: "utf8" });
-  if (r.status !== 0 || !r.stdout) return [];
-  return parseRpathDylibs(r.stdout);
-}
-
-/** Find the file named `name` that `node` loads via @rpath, by looking where
- * node's own rpaths point: its own dir (@loader_path) and ../lib
- * (@loader_path/../lib). Returns the source path to stage from, or null. */
-function findRpathDylibSource(node: string, name: string): string | null {
-  let real = node;
+export function cleanupStaleLauncher(): void {
+  if (platform() !== "darwin") return;
+  const bin = binDir();
   try {
-    real = realpathSync(node);
+    const legacy = join(bin, "modelstat agent");
+    if (existsSync(legacy)) unlinkSync(legacy);
   } catch {
-    /* not resolvable — fall back to the path as given */
+    /* harmless if it lingers — nothing executes it anymore */
   }
-  const dir = dirname(real);
-  for (const c of [join(dir, name), join(dir, "..", "lib", name)]) {
-    if (existsSync(c)) return c;
-  }
-  return null;
-}
-
-/**
- * Stage the @rpath dylibs a relocated node launcher needs into ~/.modelstat/bin
- * so `@loader_path/<name>` resolves right next to the "modelstat agent"
- * launcher.
- *
- * THIS is the fix for the brick: the rename used to relocate node's ~85 KB stub
- * WITHOUT the ~40 MB libnode it dynamically loads, so a self-update that wiped
- * the orphaned dylib left a launcher dyld couldn't start (`Library not loaded:
- * @rpath/libnode.<v>.dylib` → OS_REASON_DYLD), taking the daemon and its tray
- * down.
- *
- * Hardlink first (zero extra disk, shares node's already-signed bytes); copy on
- * EXDEV. Atomic per file (stage to a temp name, then rename into place) so the
- * launcher is never momentarily paired with a half-written library. Re-stages
- * on every call so a node upgrade (new libnode ABI, e.g. 127→128) is followed.
- * Best-effort: never throws — the caller's runnability preflight is the
- * backstop.
- */
-function stageLauncherDylibs(node: string): void {
-  mkdirSync(binDir(), { recursive: true });
-  for (const name of rpathDylibNames(node)) {
-    const src = findRpathDylibSource(node, name);
-    if (!src) continue;
-    const dest = join(binDir(), name);
-    const tmp = `${dest}.${process.pid}.tmp`;
-    try {
-      if (existsSync(tmp)) unlinkSync(tmp);
-      try {
-        linkSync(src, tmp);
-      } catch {
-        copyFileSync(src, tmp);
-        chmodSync(tmp, 0o444);
-      }
-      renameSync(tmp, dest); // atomic replace
-    } catch {
-      try {
-        if (existsSync(tmp)) unlinkSync(tmp);
-      } catch {
-        /* ignore cleanup failure */
-      }
+  try {
+    for (const f of readdirSync(bin)) {
+      if (/^libnode\..*\.dylib$/.test(f)) unlinkSync(join(bin, f));
     }
-  }
-}
-
-/**
- * Prove a relocated launcher can actually load its dylibs by RUNNING it:
- * `<launcher> --version`. node prints its version and exits 0; a missing libnode
- * makes dyld abort (non-zero exit / signal) BEFORE any JS runs — so this is the
- * real end-to-end test, not a guess. ~30 ms. Decides whether it's safe to hand
- * this launcher to launchd or whether we must fall back to bare node.
- */
-function launcherRuns(launcher: string): boolean {
-  try {
-    return spawnSync(launcher, ["--version"], { stdio: "ignore", timeout: 10_000 }).status === 0;
   } catch {
-    return false;
+    /* bin dir absent, or a file vanished mid-scan — nothing to clean */
   }
-}
-
-/**
- * Ensure ~/.modelstat/bin/"modelstat agent" links to the node binary we launch
- * the daemon with — WITH the libnode it needs staged beside it — and return the
- * path to launch through.
- *
- * A hardlink costs zero extra disk and keeps node's code signature intact
- * (identical bytes). We re-point it on every install so a node upgrade (which
- * gives node a new inode) is picked up — otherwise the link would keep
- * executing the OLD node forever. Unlinking a file a running daemon is still
- * executing is safe on Unix: the inode survives until that process exits.
- *
- * Homebrew's `node` is a thin stub that loads the real engine from a separate
- * `@rpath/libnode.<v>.dylib`, found relative to the binary (@loader_path). So
- * relocating node ALSO requires staging that dylib next to the launcher —
- * stageLauncherDylibs() does this, FIRST, so the launcher never exists without
- * it. We then PROVE the pair works by running the launcher; if it can't load
- * its runtime we re-stage once, and failing that fall back to bare node so
- * launchd is handed a binary that actually starts (it just shows as "node" in
- * Activity Monitor) rather than one it would abort-loop on.
- *
- * macOS only — it's the one platform where process.title can't rename the
- * process for the GUI. On Linux, process.title updates /proc/<pid>/comm, so
- * top/htop/System Monitor already read "modelstat agent" with no link.
- *
- * @param node binary to link to; injectable for tests.
- */
-export function ensureDaemonLauncher(node: string = nodeBinary()): string {
-  if (platform() !== "darwin") return node;
-  const launcher = daemonLauncherPath();
-  // Already launching through the named link — relinking would unlink our own
-  // running binary. Still (re)stage the dylibs in case a prior half-install
-  // left the launcher without them.
-  if (node === launcher) {
-    stageLauncherDylibs(node);
-    return launcher;
-  }
-  try {
-    mkdirSync(binDir(), { recursive: true });
-    // Stage the @rpath dylibs (libnode) FIRST so the launcher never exists
-    // without the library it needs — the ordering that prevents the brick.
-    stageLauncherDylibs(node);
-    if (existsSync(launcher)) unlinkSync(launcher);
-    linkSync(node, launcher);
-  } catch {
-    try {
-      copyFileSync(node, launcher);
-      chmodSync(launcher, 0o755);
-    } catch {
-      return node; // a cosmetic name is never worth a daemon that won't start
-    }
-  }
-  // Preflight: PROVE the launcher loads its dylibs before we hand it to launchd.
-  // Re-stage once on failure; if it still can't run, fall back to bare node so
-  // launchd gets a binary that starts instead of one it abort-loops on.
-  if (launcherRuns(launcher)) return launcher;
-  stageLauncherDylibs(node);
-  if (launcherRuns(launcher)) return launcher;
-  process.stderr.write(
-    `[modelstat] daemon launcher can't load its runtime (missing libnode?) — running the daemon through node directly; it'll show as "node" in Activity Monitor.\n`,
-  );
-  try {
-    if (existsSync(launcher)) unlinkSync(launcher);
-  } catch {
-    /* ignore */
-  }
-  return node;
 }
 
 /* ─── macOS ────────────────────────────────────────────────────────── */
@@ -484,13 +331,14 @@ function locateTrayExecutable(): string | null {
 }
 
 /**
- * Pure launchd plist body for the daemon agent: `launcher` runs the bundled
- * CLI's `start`. Split out from writePlist (which does the filesystem + link
- * side effects) so the launch contract is unit-testable.
+ * Pure launchd plist body for the daemon agent: `nodeBin` runs the bundled
+ * CLI's `start`. Split out from writePlist (the filesystem side effects) so the
+ * launch contract is unit-testable. We exec node directly, in place — not a
+ * relocated/renamed copy; see cleanupStaleLauncher for the why.
  */
-export function daemonPlistContents(launcher: string, cliPath: string): string {
+export function daemonPlistContents(nodeBin: string, cliPath: string): string {
   const programArgs = [
-    `    <string>${launcher}</string>`,
+    `    <string>${nodeBin}</string>`,
     `    <string>${cliPath}</string>`,
     `    <string>start</string>`,
   ].join("\n");
@@ -530,9 +378,9 @@ function writePlist(cliPath: string): string {
   // OWN launchd agent (installTrayAutostart) — keeping them separate means
   // the pipeline stays up even if the GUI tray is quit, and each is
   // supervised independently. The daemon needs no GUI and self-heals via
-  // RunAtLoad + KeepAlive. It launches through ensureDaemonLauncher() so the
-  // process shows as "modelstat agent" in Activity Monitor, not "node".
-  const plist = daemonPlistContents(ensureDaemonLauncher(), cliPath);
+  // RunAtLoad + KeepAlive. It execs node IN PLACE (process.execPath), not a
+  // renamed copy — process.title covers `ps`/`top`; see cleanupStaleLauncher.
+  const plist = daemonPlistContents(nodeBinary(), cliPath);
   writeFileSync(p, plist, { mode: 0o644 });
   return p;
 }
@@ -544,6 +392,9 @@ function launchctl(args: string[]): { ok: boolean; out: string; err: string } {
 
 function macInstall(): void {
   const cliPath = installBundle();
+  // Clear the retired "modelstat agent" launcher + any orphaned libnode from
+  // older installs; the daemon now execs node in place.
+  cleanupStaleLauncher();
   const plist = writePlist(cliPath);
   const uid = userInfo().uid;
   const target = `gui/${uid}/${SERVICE_LABEL}`;
