@@ -344,6 +344,13 @@ export const IngestBatch = z.object({
    * Additive — old daemons omit it, old servers ignore it (the wire has no
    * `deny_unknown_fields`). The join layer between AI spend and shipped work. */
   session_metadata: z.record(z.string(), SessionMetadata).optional(),
+  /** Where this batch's session abstracts were produced: "local" (on-device
+   * model), "self-hosted" (the org's own endpoint), or "cloud" (server-side
+   * edge summariser via /v1/ingest/raw). Redaction stays client-side in every
+   * mode — only the summarisation LOCATION differs. Additive — old daemons omit
+   * it, old servers ignore it; the server records it as the scope's last-seen
+   * mode for ops-alert enrichment. */
+  summarizer_mode: z.enum(["local", "self-hosted", "cloud"]).optional(),
 });
 export type IngestBatch = z.infer<typeof IngestBatch>;
 

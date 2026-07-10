@@ -379,7 +379,14 @@ export async function uploadBatch(
   batch: IngestBatch,
   opts: { raw?: boolean } = {},
 ): Promise<UploadOutcome> {
-  const result = await ingestClient().upload(batch, opts);
+  // Stamp the daemon's configured summariser mode on every batch (both the
+  // normal /v1/ingest and the raw /v1/ingest/raw path go through here). The
+  // server persists it as the scope's last-seen mode so ops alerts can say
+  // whether a scope summarises local / self-hosted / cloud.
+  const result = await ingestClient().upload(
+    { ...batch, summarizer_mode: state.summarizerMode },
+    opts,
+  );
   if (result.kind === "commit") {
     return {
       committed: true,
