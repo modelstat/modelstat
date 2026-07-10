@@ -16,8 +16,8 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
-  linkSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   unlinkSync,
@@ -269,61 +269,38 @@ function nodeBinary(): string {
 }
 
 /**
- * The daemon launches through a link named exactly this so macOS Activity
- * Monitor labels the process "modelstat agent" instead of a bare "node".
- * macOS derives a process's display name from the FILENAME of the running
- * binary (the kernel's p_comm), NOT from Node's process.title — so the only
- * way to rename it in the GUI is to run it from a nicely-named file. Kept at
- * 15 chars (≤ the 16-char p_comm cap) so it never truncates. process.title
- * (set in cli.ts cmdStart) covers `ps`/`top`; this covers the GUI. Must stay
- * in sync with the tray's spawnDaemon() in apps/tray-mac (main.swift).
+ * Remove the retired "modelstat agent" launcher (a rename of node) and any
+ * libnode staged beside it, left behind by older installs.
+ *
+ * We no longer relocate node to give the daemon a pretty Activity-Monitor name.
+ * Homebrew's `node` is a thin stub that loads its engine from a separate
+ * `libnode.<v>.dylib` sitting next to it, so relocating the stub orphaned that
+ * library — and a self-update that wiped the orphan bricked the daemon
+ * (`dyld: Library not loaded: @rpath/libnode.<v>.dylib`). The daemon now runs
+ * through node IN PLACE (what node is built for), which can't break that way.
+ * `process.title` (set in cli.ts cmdStart) still labels it "modelstat agent" in
+ * `ps`/`top` and on Linux; on macOS Activity Monitor it shows as "node" — the
+ * accepted cosmetic cost of not relocating a runtime.
+ *
+ * Runs on install so an upgrade actively clears the old artifacts (including a
+ * hand-made libnode symlink) instead of leaving dead weight. Best-effort; never
+ * throws. macOS-only — nothing else creates these.
  */
-export const DAEMON_LAUNCHER_NAME = "modelstat agent";
-
-function daemonLauncherPath(): string {
-  return join(binDir(), DAEMON_LAUNCHER_NAME);
-}
-
-/**
- * Ensure ~/.modelstat/bin/"modelstat agent" links to the node binary we
- * launch the daemon with, and return the path to launch through.
- *
- * A hardlink costs zero extra disk and keeps node's code signature intact
- * (identical bytes). We re-point it on every install so a node upgrade
- * (which gives node a new inode) is picked up — otherwise the link would
- * keep executing the OLD node forever. Unlinking a file that a running
- * daemon is still executing is safe on Unix: the inode survives until that
- * process exits.
- *
- * macOS only — it's the one platform where process.title can't rename the
- * process for the GUI. On Linux, process.title updates /proc/<pid>/comm, so
- * top/htop/System Monitor already read "modelstat agent" with no link.
- *
- * Falls back to a full copy when the link can't be made (node on another
- * volume → EXDEV), then to the bare node path if even that fails: a cosmetic
- * name is never worth a daemon that won't start.
- *
- * @param node binary to link to; injectable for tests.
- */
-export function ensureDaemonLauncher(node: string = nodeBinary()): string {
-  if (platform() !== "darwin") return node;
-  const launcher = daemonLauncherPath();
-  // Already launching through the named link — relinking would unlink our
-  // own running binary and then fail to find a source. Nothing to do.
-  if (node === launcher) return launcher;
+export function cleanupStaleLauncher(): void {
+  if (platform() !== "darwin") return;
+  const bin = binDir();
   try {
-    mkdirSync(binDir(), { recursive: true });
-    if (existsSync(launcher)) unlinkSync(launcher);
-    linkSync(node, launcher);
-    return launcher;
+    const legacy = join(bin, "modelstat agent");
+    if (existsSync(legacy)) unlinkSync(legacy);
   } catch {
-    try {
-      copyFileSync(node, launcher);
-      chmodSync(launcher, 0o755);
-      return launcher;
-    } catch {
-      return node;
+    /* harmless if it lingers — nothing executes it anymore */
+  }
+  try {
+    for (const f of readdirSync(bin)) {
+      if (/^libnode\..*\.dylib$/.test(f)) unlinkSync(join(bin, f));
     }
+  } catch {
+    /* bin dir absent, or a file vanished mid-scan — nothing to clean */
   }
 }
 
@@ -354,13 +331,14 @@ function locateTrayExecutable(): string | null {
 }
 
 /**
- * Pure launchd plist body for the daemon agent: `launcher` runs the bundled
- * CLI's `start`. Split out from writePlist (which does the filesystem + link
- * side effects) so the launch contract is unit-testable.
+ * Pure launchd plist body for the daemon agent: `nodeBin` runs the bundled
+ * CLI's `start`. Split out from writePlist (the filesystem side effects) so the
+ * launch contract is unit-testable. We exec node directly, in place — not a
+ * relocated/renamed copy; see cleanupStaleLauncher for the why.
  */
-export function daemonPlistContents(launcher: string, cliPath: string): string {
+export function daemonPlistContents(nodeBin: string, cliPath: string): string {
   const programArgs = [
-    `    <string>${launcher}</string>`,
+    `    <string>${nodeBin}</string>`,
     `    <string>${cliPath}</string>`,
     `    <string>start</string>`,
   ].join("\n");
@@ -400,9 +378,9 @@ function writePlist(cliPath: string): string {
   // OWN launchd agent (installTrayAutostart) — keeping them separate means
   // the pipeline stays up even if the GUI tray is quit, and each is
   // supervised independently. The daemon needs no GUI and self-heals via
-  // RunAtLoad + KeepAlive. It launches through ensureDaemonLauncher() so the
-  // process shows as "modelstat agent" in Activity Monitor, not "node".
-  const plist = daemonPlistContents(ensureDaemonLauncher(), cliPath);
+  // RunAtLoad + KeepAlive. It execs node IN PLACE (process.execPath), not a
+  // renamed copy — process.title covers `ps`/`top`; see cleanupStaleLauncher.
+  const plist = daemonPlistContents(nodeBinary(), cliPath);
   writeFileSync(p, plist, { mode: 0o644 });
   return p;
 }
@@ -414,6 +392,9 @@ function launchctl(args: string[]): { ok: boolean; out: string; err: string } {
 
 function macInstall(): void {
   const cliPath = installBundle();
+  // Clear the retired "modelstat agent" launcher + any orphaned libnode from
+  // older installs; the daemon now execs node in place.
+  cleanupStaleLauncher();
   const plist = writePlist(cliPath);
   const uid = userInfo().uid;
   const target = `gui/${uid}/${SERVICE_LABEL}`;

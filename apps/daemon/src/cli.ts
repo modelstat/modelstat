@@ -1090,8 +1090,10 @@ async function cmdWatch(): Promise<void> {
 async function cmdStart(rest: string[]): Promise<void> {
   // Name the long-running daemon "modelstat agent" so `ps`/`top` (and Linux
   // GUI monitors, via /proc/<pid>/comm) show it instead of a bare "node".
-  // On macOS the Activity Monitor name instead comes from the launcher
-  // binary's filename — see ensureDaemonLauncher() in service.ts.
+  // macOS Activity Monitor derives its name from the executable filename, which
+  // we deliberately no longer rename — so it reads "node" there (see
+  // cleanupStaleLauncher in service.ts). process.title is the portable,
+  // non-hacky rename that covers everywhere else.
   process.title = "modelstat agent";
   if (!state.bearer || !state.deviceId) {
     console.error("not paired yet. Run `modelstat` first.");

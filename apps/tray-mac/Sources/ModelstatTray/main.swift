@@ -144,6 +144,13 @@ final class TrayController: NSObject {
   /// "exited cleanly almost immediately" (another daemon owns the
   /// lock) so we back off to the watchdog instead of respawning hot.
   private var daemonSpawnedAt: Date?
+  /// Consecutive sub-5s daemon exits. Drives respawn backoff so a daemon that
+  /// can't stay up (e.g. a launcher that can't load its runtime) is retried on
+  /// a widening delay instead of hammered — the tray-side guard against the
+  /// abort-loop launchd's KeepAlive would otherwise cause too.
+  private var daemonFastCrashes = 0
+  /// While set (and in the future), ensureDaemon() holds off respawning.
+  private var respawnBlockedUntil: Date?
   private var paused = false
   /// Serialises _daemon-health probes; collapses overlapping
   /// ensureDaemon() calls into one in-flight probe.
@@ -326,7 +333,15 @@ final class TrayController: NSObject {
   /// collapse into one in-flight health probe.
   private func ensureDaemon() {
     guard !paused else { return }
-    if let d = daemon, d.isRunning { return }
+    // A prior spawn that's still up (survived past this tick) means we're
+    // healthy — clear any crash backoff.
+    if let d = daemon, d.isRunning {
+      daemonFastCrashes = 0
+      respawnBlockedUntil = nil
+      return
+    }
+    // Backing off after repeated fast crashes — don't respawn yet.
+    if let until = respawnBlockedUntil, until > Date() { return }
     if cli == nil { cli = locateCli() }
     guard let cli else {
       statusMI.title = "modelstat CLI not found — retrying…"
@@ -391,20 +406,13 @@ final class TrayController: NSObject {
     let p = Process()
     var args = ["start"]
     if force { args.append("--force") }
-    // Prefer the "modelstat agent" launcher the installer links next to the
-    // bundle (a rename of node) so a tray-spawned daemon shows as "modelstat
-    // Agent" in Activity Monitor too, matching the launchd-managed one. Falls
-    // back to `env node` when it isn't there yet (older install / mid-upgrade).
-    // Keep this name in sync with DAEMON_LAUNCHER_NAME in service.ts.
-    let launcher = ("~/.modelstat/bin/modelstat agent" as NSString).expandingTildeInPath
+    // Run the daemon through node IN PLACE — `env node <cli.mjs>` — matching the
+    // launchd-managed agent. We deliberately don't relocate/rename node for a
+    // prettier Activity Monitor name: that orphaned node's libnode and bricked
+    // self-updates. process.title still labels it "modelstat agent" in ps/top.
     if cli.pathExtension == "mjs" {
-      if FileManager.default.isExecutableFile(atPath: launcher) {
-        p.launchPath = launcher
-        p.arguments = [cli.path] + args
-      } else {
-        p.launchPath = "/usr/bin/env"
-        p.arguments = ["node", cli.path] + args
-      }
+      p.launchPath = "/usr/bin/env"
+      p.arguments = ["node", cli.path] + args
     } else {
       p.launchPath = cli.path
       p.arguments = args
@@ -433,7 +441,24 @@ final class TrayController: NSObject {
         self.daemon = nil
         self.daemonSpawnedAt = nil
         guard !self.paused else { return }
-        if status == 0 && uptime < 5 { return } // watchdog will re-ensure
+        if uptime < 5 {
+          // Didn't stay up. Count it; once it's clearly a pattern, back off on a
+          // widening delay (8→16→32→60s) so a daemon that can't start (e.g. a
+          // launcher that can't load its runtime) isn't respawned in a hot loop.
+          self.daemonFastCrashes += 1
+          if self.daemonFastCrashes >= 3 {
+            let delay = Double(min(1 << min(self.daemonFastCrashes, 6), 60))
+            self.respawnBlockedUntil = Date().addingTimeInterval(delay)
+            self.statusMI.title = "daemon keeps stopping — retrying in \(Int(delay))s"
+          }
+        } else {
+          self.daemonFastCrashes = 0
+          self.respawnBlockedUntil = nil
+        }
+        // A clean sub-5s exit means another owner has the lock — let the 30s
+        // watchdog re-check. Otherwise nudge a re-ensure (which itself honours
+        // the backoff set above).
+        if status == 0 && uptime < 5 { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
           MainActor.assumeIsolated { self?.ensureDaemon() }
         }
