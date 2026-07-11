@@ -1088,13 +1088,15 @@ async function cmdWatch(): Promise<void> {
 }
 
 async function cmdStart(rest: string[]): Promise<void> {
-  // Name the long-running daemon "modelstat agent" so `ps`/`top` (and Linux
-  // GUI monitors, via /proc/<pid>/comm) show it instead of a bare "node".
-  // macOS Activity Monitor derives its name from the executable filename, which
-  // we deliberately no longer rename — so it reads "node" there (see
-  // cleanupStaleLauncher in service.ts). process.title is the portable,
-  // non-hacky rename that covers everywhere else.
-  process.title = "modelstat agent";
+  // Name the long-running daemon "modelstat agent" so `ps`/`top` and Linux GUI
+  // monitors (via /proc/<pid>/comm) show it instead of a bare "node" — but ONLY
+  // off macOS. On macOS, process.title also overrides what Activity Monitor and
+  // `ps` display, which would hide the honest `node …/modelstat.mjs start` line
+  // and defeat the `pgrep -f modelstat.mjs` the upgrade cleanup relies on. We
+  // run node in place there rather than renaming the binary (a rename orphaned
+  // Homebrew's libnode and bricked self-updates — see cleanupStaleLauncher), so
+  // macOS shows the real "node"; only Linux gets the friendly label.
+  if (platform() !== "darwin") process.title = "modelstat agent";
   if (!state.bearer || !state.deviceId) {
     console.error("not paired yet. Run `modelstat` first.");
     process.exit(1);

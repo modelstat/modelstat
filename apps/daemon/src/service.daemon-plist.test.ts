@@ -8,8 +8,8 @@
  * We deliberately do NOT rename/relocate node for a prettier Activity Monitor
  * name — relocating Homebrew's node orphaned its separate libnode and bricked
  * self-updates (dyld: Library not loaded: @rpath/libnode.<v>.dylib). Running
- * node where it lives can't break that way; process.title (set in cli.ts
- * cmdStart) still shows "modelstat agent" in ps/top and on Linux.
+ * node where it lives can't break that way; off macOS, process.title (set in
+ * cli.ts cmdStart) shows "modelstat agent" in ps/top — on macOS it stays "node".
  */
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

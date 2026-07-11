@@ -278,9 +278,10 @@ function nodeBinary(): string {
  * library — and a self-update that wiped the orphan bricked the daemon
  * (`dyld: Library not loaded: @rpath/libnode.<v>.dylib`). The daemon now runs
  * through node IN PLACE (what node is built for), which can't break that way.
- * `process.title` (set in cli.ts cmdStart) still labels it "modelstat agent" in
- * `ps`/`top` and on Linux; on macOS Activity Monitor it shows as "node" — the
- * accepted cosmetic cost of not relocating a runtime.
+ * On macOS the daemon shows as the real "node" (in Activity Monitor and `ps`
+ * alike) — we do NOT set `process.title` there, since it would override both.
+ * Off macOS, `process.title` (set in cli.ts cmdStart) labels it "modelstat
+ * agent" for `ps`/`top`.
  *
  * Runs on install so an upgrade actively clears the old artifacts (including a
  * hand-made libnode symlink) instead of leaving dead weight. Best-effort; never
@@ -379,7 +380,8 @@ function writePlist(cliPath: string): string {
   // the pipeline stays up even if the GUI tray is quit, and each is
   // supervised independently. The daemon needs no GUI and self-heals via
   // RunAtLoad + KeepAlive. It execs node IN PLACE (process.execPath), not a
-  // renamed copy — process.title covers `ps`/`top`; see cleanupStaleLauncher.
+  // renamed copy — off macOS process.title covers `ps`/`top`; see
+  // cleanupStaleLauncher.
   const plist = daemonPlistContents(nodeBinary(), cliPath);
   writeFileSync(p, plist, { mode: 0o644 });
   return p;
