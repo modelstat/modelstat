@@ -75,9 +75,7 @@ function transcriptRoots(): string[] {
  * prefixes). */
 export function isAllowedTranscriptFile(file: string): boolean {
   const target = resolve(file);
-  return transcriptRoots().some(
-    (root) => target === root || target.startsWith(root + sep),
-  );
+  return transcriptRoots().some((root) => target === root || target.startsWith(root + sep));
 }
 
 let store: FileQueueStore | null = null;
@@ -181,20 +179,16 @@ export async function drainLocalQueue(opts: {
         ...batch,
         events: batch.events.map(({ content_excerpt: _excerpt, ...rest }) => rest),
       };
-      const res = await uploadBatch(shipped);
-      if (!res.committed) {
-        // PERMANENT reject (400/422). Mark sent anyway so this one poison batch
-        // doesn't wedge the queue — a TRANSIENT failure throws above and is
-        // retried, never marked. Loud: it's daemon-side data loss.
-        console.error(
-          `SDK ingest batch ${batch.batch_id} dropped — server rejected it (${res.reason}); skipping so the queue keeps draining`,
-        );
-      }
+      // uploadBatch THROWS on any non-commit — the batch is HELD (not marked
+      // sent), so it stays queued and the next drain retries it. Good data is
+      // never dropped, and the client can't emit a payload the server permanently
+      // rejects (byte-clamped + well-formed at the wire boundary).
+      await uploadBatch(shipped);
       await q.markSent(
         batch.events.map((e) => e.source_event_id),
         batch.batch_id,
       );
-      if (res.committed) events += batch.events.length;
+      events += batch.events.length;
     }
     return { batches: batches.length, events };
   } finally {
@@ -237,9 +231,7 @@ export function startLocalIngestReceiver(
   // plugin + statusline can both fire on one turn) coalesces into at most one
   // in-flight scan plus one queued follow-up, mirroring the daemon's own
   // scan-coalescing so two eager scans never run concurrently.
-  const controlRunner = opts.onControlScan
-    ? createControlRunner(opts.onControlScan)
-    : null;
+  const controlRunner = opts.onControlScan ? createControlRunner(opts.onControlScan) : null;
   return new Promise((resolve) => {
     const server = createServer((req, res) => void handle(req, res, controlRunner));
     let settled = false;

@@ -363,22 +363,20 @@ export async function postHeartbeat(
   return unwrapData<HeartbeatResponse>(raw);
 }
 
-export type UploadOutcome =
-  | {
-      committed: true;
-      accepted: number;
-      new_sessions: number;
-      updated_sessions: number;
-      batch_id: string;
-    }
-  // The server PERMANENTLY rejected this batch (400/422 — malformed). The caller
-  // must QUARANTINE it (skip past + alert), not retry — see scan.ts.
-  | { committed: false; reason: string };
+/** The server's accepted-batch receipt. A non-commit never reaches the caller:
+ * it is ALWAYS a HOLD now (never a permanent drop), so {@link uploadBatch} throws
+ * and the batch is retried next cycle — good data is never discarded. */
+export interface UploadReceipt {
+  accepted: number;
+  new_sessions: number;
+  updated_sessions: number;
+  batch_id: string;
+}
 
 export async function uploadBatch(
   batch: IngestBatch,
   opts: { raw?: boolean } = {},
-): Promise<UploadOutcome> {
+): Promise<UploadReceipt> {
   // Stamp the daemon's configured summariser mode on every batch (both the
   // normal /v1/ingest and the raw /v1/ingest/raw path go through here). The
   // server persists it as the scope's last-seen mode so ops alerts can say
@@ -389,20 +387,17 @@ export async function uploadBatch(
   );
   if (result.kind === "commit") {
     return {
-      committed: true,
       accepted: result.response.accepted,
       new_sessions: result.response.new_sessions,
       updated_sessions: result.response.updated_sessions,
       batch_id: result.response.batch_id,
     };
   }
-  // A PERMANENT reject is returned (not thrown) so the scan loop can advance past
-  // this one poison batch and keep newer data flowing. A TRANSIENT failure (no
-  // token / reauth / 5xx-exhausted / network) still throws → the batch is held
-  // and retried next cycle, never dropped on a server/network blip.
-  if (result.permanent) {
-    return { committed: false, reason: result.reason };
-  }
+  // Every non-commit is a HOLD (no token / reauth failed / retries exhausted on
+  // any non-2xx / network). Throw so the caller retries the SAME batch next cycle:
+  // good data is never dropped, and the client can no longer emit a payload the
+  // server permanently rejects (wellFormedStringify + clampToSchemaBytes at the
+  // wire boundary), so there is no poison batch to quarantine.
   throw new Error(`upload failed: ${result.reason}`);
 }
 

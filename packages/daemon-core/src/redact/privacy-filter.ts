@@ -31,12 +31,15 @@
  */
 
 import type { RedactionResult } from "@modelstat/core/redact";
-import {
-  isMissingOptionalModuleError,
-  OPTIONAL_MODULE_MAX_LOAD_ATTEMPTS,
-} from "../optional-module.js";
+import { isMissingOptionalModuleError } from "../optional-module.js";
 
 export type Redactor = (text: string) => Promise<RedactionResult>;
+
+/** After a TRANSIENT model-load failure (as opposed to a genuinely-missing
+ * package), wait this long before the next real load attempt. Bounds retries to
+ * ~once/minute so a persistent failure can never storm the loader, while still
+ * recovering well within a scan cycle once the model finishes downloading. */
+const DEFAULT_RETRY_COOLDOWN_MS = 60_000;
 
 export interface PrivacyFilterAdapterOptions {
   /** Override the model id. Defaults to "Xenova/bert-base-NER" (a Transformers.js-
@@ -58,6 +61,12 @@ export interface PrivacyFilterAdapterOptions {
    * @huggingface/transformers so tests can simulate a missing or flaky
    * module. Production callers leave this unset. */
   importModule?: (id: string) => Promise<unknown>;
+  /** Cooldown (ms) before retrying a TRANSIENT load failure. Defaults to
+   * {@link DEFAULT_RETRY_COOLDOWN_MS}. Tests shrink it to exercise self-heal. */
+  retryCooldownMs?: number;
+  /** Injectable clock backing the retry cooldown. Defaults to `Date.now`.
+   * Tests pass a controllable clock so a cooldown can be crossed deterministically. */
+  now?: () => number;
 }
 
 /** Escape a string for literal use inside a RegExp. */
@@ -106,22 +115,29 @@ export async function createPrivacyFilterRedactor(
   ) => Promise<Array<{ entity: string; word: string; start?: number; end?: number }>>;
 
   const importModule = opts.importModule ?? ((id: string) => import(/* @vite-ignore */ id));
+  const retryCooldownMs = opts.retryCooldownMs ?? DEFAULT_RETRY_COOLDOWN_MS;
+  const now = opts.now ?? Date.now;
 
   let cached: TokenClassifier | null = null;
   let loadPromise: Promise<TokenClassifier | null> | null = null;
+  // A genuinely-MISSING package latches HARD for the process lifetime: re-running
+  // a failing dynamic import() re-runs ESM resolution and retains per-attempt V8
+  // bookkeeping, so a per-segment retry storm leaks heap + floods err.log (the
+  // 2026-06-11 OOM — see ../optional-module.ts).
   let loadFailedPermanently = false;
-  let loadAttempts = 0;
+  // A TRANSIENT failure (e.g. the model weights racing their lazy first-run
+  // download) must NOT latch. Instead we back off until this timestamp, then
+  // retry — so the redactor SELF-HEALS once the model lands, no restart needed.
+  // The gate also means at most one real load attempt per cooldown window, so a
+  // persistent transient failure still can't storm the loader.
+  let retryNotBefore = 0;
   let warnedUnavailable = false;
   let warnedInferenceError = false;
 
   async function loadPipeline(): Promise<TokenClassifier | null> {
     if (cached) return cached;
-    // Latched-unavailable answers immediately. The redactor runs once
-    // per segment during a scan; re-running a FAILING dynamic import()
-    // from here is the same heap leak + log flood that OOM-crashed the
-    // daemon during the 2026-06-11 full reprocess — see the embedder in
-    // ../node/transformersjs-embed.ts and ../optional-module.ts.
-    if (loadFailedPermanently) return null;
+    if (loadFailedPermanently) return null; // package absent — never retry
+    if (retryNotBefore && now() < retryNotBefore) return null; // in post-failure cooldown
     if (!loadPromise) {
       loadPromise = (async () => {
         try {
@@ -142,21 +158,22 @@ export async function createPrivacyFilterRedactor(
             ...(opts.onProgress ? { progress_callback: opts.onProgress } : {}),
           });
           cached = p;
+          retryNotBefore = 0;
           return p;
         } catch (err) {
           loadPromise = null;
-          loadAttempts += 1;
-          if (
-            isMissingOptionalModuleError(err) ||
-            loadAttempts >= OPTIONAL_MODULE_MAX_LOAD_ATTEMPTS
-          ) {
-            loadFailedPermanently = true;
-          }
+          const missing = isMissingOptionalModuleError(err);
+          if (missing)
+            loadFailedPermanently = true; // package won't appear mid-process — latch
+          else retryNotBefore = now() + retryCooldownMs; // transient — retry after cooldown
           if (!warnedUnavailable) {
             warnedUnavailable = true;
-            // eslint-disable-next-line no-console
             console.warn(
-              "[privacy-filter] adapter unavailable — install @huggingface/transformers in the consuming package to enable model-based redaction. Falling back to pass-through (warning once).",
+              missing
+                ? "[privacy-filter] adapter unavailable — install @huggingface/transformers in the consuming package to enable model-based redaction. Falling back to pass-through (warning once)."
+                : `[privacy-filter] NER model load failed — retrying after ${Math.round(
+                    retryCooldownMs / 1000,
+                  )}s cooldown; pass-through until then (warning once).`,
               (err as Error).message,
             );
           }
@@ -277,4 +294,29 @@ export async function createPrivacyFilterRedactor(
       },
     };
   };
+}
+
+/**
+ * Probe a redactor with a sentinel PERSON entity to prove the on-device NER
+ * model is actually LIVE — not a silent pass-through.
+ * {@link createPrivacyFilterRedactor} degrades to a no-op when its
+ * `@huggingface/transformers` peer dep is missing or the model hasn't finished
+ * downloading; on the fail-closed egress paths (cloud/self-hosted) that would
+ * let names/orgs the regex floor can't catch leave the box unredacted. The
+ * sentinel name is NOT a regex-floor target, so a scrubbed result proves the NER
+ * layer ran. Never throws — a failure answers `false` (treat as unavailable).
+ *
+ * Typed structurally (only `.text` is read) so it accepts any redactor — the
+ * strict-counts {@link Redactor} here and the pipeline's looser one alike.
+ */
+export async function nerRedactorActive(
+  redact: (text: string) => Promise<{ text: string }>,
+): Promise<boolean> {
+  const sentinel = "Escalate the incident to Katherine Johnson at Globex Corporation.";
+  try {
+    const out = (await redact(sentinel)).text;
+    return !out.includes("Katherine Johnson");
+  } catch {
+    return false;
+  }
 }

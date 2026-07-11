@@ -1,14 +1,17 @@
 /**
- * Regression tests for the privacy-filter's optional-dep loading —
- * same contract as the embedder (see ../node/transformersjs-embed.test.ts):
- * a missing @huggingface/transformers must latch the loader off after
- * one import attempt and one warning, with redaction degrading to
- * pass-through, no matter how many segments a scan processes.
+ * Regression tests for the privacy-filter's optional-dep loading. Two distinct
+ * failure modes:
+ *   - a MISSING @huggingface/transformers latches the loader off HARD after one
+ *     import attempt + one warning (a package won't appear mid-process; retrying
+ *     the failing import per segment is the 2026-06-11 OOM), and
+ *   - a TRANSIENT failure (e.g. the model weights racing a first-run download)
+ *     backs off for a cooldown and RETRIES, so the redactor self-heals once the
+ *     model lands — while still capping real attempts to one per cooldown window.
+ * Both degrade redaction to pass-through while unavailable.
  */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { OPTIONAL_MODULE_MAX_LOAD_ATTEMPTS } from "../optional-module.js";
 import { createPrivacyFilterRedactor, reconstructSurface } from "./privacy-filter.js";
 
 /** The fields the redactor reads off a transformers.js token. `start`/`end`
@@ -141,8 +144,9 @@ test("reconstructSurface rebuilds words and ## subwords", () => {
   assert.equal(reconstructSurface(["San", "Franc", "##isco"]), "San Francisco");
 });
 
-test("transient load failure: retries are bounded, then latched off", async () => {
+test("transient load failure: one real attempt per cooldown window, then retries", async () => {
   let importCalls = 0;
+  let clock = 1_000;
   const { restore } = captureWarns();
   try {
     const redactor = await createPrivacyFilterRedactor({
@@ -150,11 +154,49 @@ test("transient load failure: retries are bounded, then latched off", async () =
         importCalls += 1;
         throw new Error("ETIMEDOUT while fetching model weights");
       },
+      retryCooldownMs: 60_000,
+      now: () => clock,
     });
-    for (let i = 0; i < 200; i++) {
-      await redactor(`segment abstract ${i}`);
-    }
-    assert.equal(importCalls, OPTIONAL_MODULE_MAX_LOAD_ATTEMPTS);
+    // A burst of 200 segments inside one cooldown window = exactly ONE import
+    // attempt (the cooldown gate absorbs the rest — no per-segment storm).
+    for (let i = 0; i < 200; i++) await redactor(`segment abstract ${i}`);
+    assert.equal(importCalls, 1, "a transient failure must not re-import per segment");
+    // Still inside the cooldown → no new attempt.
+    clock += 59_000;
+    await redactor("still cooling down");
+    assert.equal(importCalls, 1, "no retry before the cooldown elapses");
+    // Past the cooldown → exactly one more real attempt (a RETRY, not a latch).
+    clock += 2_000;
+    await redactor("cooldown elapsed");
+    assert.equal(importCalls, 2, "retries after the cooldown instead of latching off");
+  } finally {
+    restore();
+  }
+});
+
+test("transient failure self-heals once the model becomes available", async () => {
+  let clock = 0;
+  let ready = false;
+  const { restore } = captureWarns();
+  try {
+    const redactor = await createPrivacyFilterRedactor({
+      importModule: async () => {
+        if (!ready) throw new Error("ETIMEDOUT while fetching model weights");
+        return {
+          pipeline: async () => async (_t: string) => [{ entity: "B-PER", word: "Katherine" }],
+        };
+      },
+      retryCooldownMs: 1_000,
+      now: () => clock,
+    });
+    // Model not ready yet → degrade to pass-through (the name survives).
+    const before = await redactor("Katherine ships it");
+    assert.equal(before.text.includes("Katherine"), true, "pass-through while unavailable");
+    // Model lands; cross the cooldown; the next call retries the load and redacts.
+    ready = true;
+    clock += 2_000;
+    const after = await redactor("Katherine ships it");
+    assert.equal(after.text.includes("Katherine"), false, "self-heals once the model is available");
   } finally {
     restore();
   }
