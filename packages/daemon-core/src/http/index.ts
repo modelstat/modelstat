@@ -9,10 +9,11 @@
  * retry semantics, identical auth header shape, and an explicit
  * reauth hook that runs when the server rejects the token.
  */
-import type { IngestBatch } from "@modelstat/core/schemas";
+import { IngestBatch } from "@modelstat/core/schemas";
 import { expBackoff } from "../config/index.js";
 import type { Logger } from "../logger.js";
 import { describeErrorWithCause } from "../logger.js";
+import { clampToSchemaBytes } from "./clamp.js";
 
 export type UploadDecision =
   | { type: "commit" }
@@ -108,6 +109,12 @@ export class IngestClient {
   async upload(batch: IngestBatch, opts: { raw?: boolean } = {}): Promise<UploadResult> {
     const path = opts.raw ? "/v1/ingest/raw" : "/v1/ingest";
     const url = `${this.opts.apiUrl.replace(/\/+$/, "")}${path}`;
+    // Clamp every bounded string to its schema `.max` in UTF-8 BYTES before it
+    // hits the wire (see ./clamp.ts). The server enforces those caps in bytes;
+    // JS/Zod measure code units, so multibyte text can pass client validation yet
+    // draw a PERMANENT 400 the never-drop retry loop would wedge on. Done once,
+    // outside the retry loop — the payload is identical across attempts.
+    const wireBatch = clampToSchemaBytes(IngestBatch, batch);
     // Track the last network-level failure so we can surface its real
     // cause chain (ENOTFOUND, ECONNREFUSED, CERT_HAS_EXPIRED, etc)
     // instead of the useless "fetch failed" message undici wraps.
@@ -116,7 +123,7 @@ export class IngestClient {
       const token = await this.opts.auth.getToken();
       if (!token) {
         const reauthed = await this.opts.auth.onInvalidToken();
-        if (!reauthed) return { kind: "drop", reason: "no_token", permanent: false };
+        if (!reauthed) return { kind: "drop", reason: "no_token" };
         continue;
       }
       let res: Response;
@@ -130,7 +137,7 @@ export class IngestClient {
           // wellFormedStringify, not JSON.stringify: a truncated-emoji
           // lone surrogate in any excerpt 400s the whole batch on the
           // ingest server's strict JSON decoder. See the helper's doc comment.
-          body: wellFormedStringify(batch),
+          body: wellFormedStringify(wireBatch),
         });
       } catch (err) {
         const detail = describeErrorWithCause(err);
@@ -155,7 +162,7 @@ export class IngestClient {
         // loop during a long backfill.
         await res.body?.cancel().catch(() => {});
         const ok = await this.opts.auth.onInvalidToken();
-        if (!ok) return { kind: "drop", reason: "reauth_failed", permanent: false };
+        if (!ok) return { kind: "drop", reason: "reauth_failed" };
         continue; // retry with new token
       }
       // backoff + HOLD (we never drop). For a 4xx the body usually says WHY the
@@ -184,19 +191,19 @@ export class IngestClient {
     // (ECONNREFUSED/ENOTFOUND/etc) instead of "fetch failed".
     const reason = lastFetchError ? `network: ${lastFetchError}` : "max_attempts_exceeded";
     // Transient: the batch is fine, the server/network wasn't — HOLD + retry.
-    return { kind: "drop", reason, permanent: false };
+    return { kind: "drop", reason };
   }
 }
 
 export type UploadResult =
   | { kind: "commit"; response: IngestResponse }
-  // A non-commit is always a HOLD: the batch wasn't accepted (no token / reauth
-  // failed / retries exhausted on any 4xx/5xx / network), so the caller retries it
-  // next cycle — good data is NEVER discarded. `permanent` is retained for wire
-  // compatibility but is now ALWAYS `false`: classifyStatus no longer marks any
-  // response as un-retryable (see its comment), so the scan loop's quarantine branch
-  // is dormant. Deleting that path (and this field) end-to-end is a follow-up.
-  | { kind: "drop"; reason: string; permanent: boolean };
+  // A non-commit is ALWAYS a HOLD: the batch wasn't accepted (no token / reauth
+  // failed / retries exhausted on any non-2xx / network), so the caller retries it
+  // next cycle — good data is NEVER discarded. classifyStatus never marks a
+  // response un-retryable (see its comment), and the client can no longer emit a
+  // permanently-rejectable payload (surrogates → wellFormedStringify, over-length
+  // → clampToSchemaBytes), so there is no "quarantine" outcome to model.
+  | { kind: "drop"; reason: string };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => {

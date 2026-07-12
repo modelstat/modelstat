@@ -22,6 +22,10 @@ export {
   llamaScriptSummarize,
   llamaSummarize,
 } from "./llama.js";
+// On-device NER/PII redaction model — pre-warmed at `connect` so cloud/
+// self-hosted (fail-closed on it) start at full quality, into a shared cache
+// dir the daemon reads back.
+export { ensureNerModel } from "./ner-model.js";
 export {
   defaultOllamaConfig,
   type OllamaConfig,
@@ -46,6 +50,7 @@ export {
   openaiSummarize,
   validateSummarizerUrl,
 } from "./openai-compat.js";
+export { applyTransformersCacheDir, transformersCacheDir } from "./transformers-cache.js";
 // Transformers.js BGE-small-en-v1.5 embedder — the wire embedding is
 // 384-dim (BGE-small), so CLI and browser segment vectors land in the
 // same space.

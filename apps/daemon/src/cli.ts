@@ -781,6 +781,30 @@ async function cmdConnect(opts: ConnectOpts): Promise<void> {
     );
   }
 
+  // ── 3.5 On-device redactor model (EVERY mode) ────────────────
+  // Redaction (regex floor + on-device NER/PII) runs in every mode, and cloud +
+  // self-hosted are FAIL-CLOSED on the NER pass. The model downloads lazily on
+  // first use otherwise, so a fresh install races that download and starts
+  // degraded (shipping local extractive abstracts) until it lands. Pre-download
+  // it now, into the SHARED cache dir the daemon reads, so the first scan runs at
+  // full quality. Best-effort: on failure the daemon finishes the download on its
+  // first scan and self-heals — never block the install.
+  step("Preparing the on-device redactor (downloads the ~250 MB PII model)");
+  try {
+    const { ensureNerModel } = await import("@modelstat/daemon-core/node");
+    if (await ensureNerModel()) {
+      emitEvent(opts, "redactor_model_ready", {});
+      ok("on-device redactor ready");
+    } else {
+      emitEvent(opts, "redactor_model_not_ready", {});
+      warn("redactor model not ready yet — the daemon finishes the download on its first scan");
+    }
+  } catch (e) {
+    emitEvent(opts, "redactor_model_failed", { error: (e as Error).message });
+    warn(`couldn't prepare the on-device redactor: ${(e as Error).message}`);
+    warn("the background service will finish the download on its first scan");
+  }
+
   // ── 4. Background service (install OR refresh-and-restart) ────
   // Idempotent: a fresh install creates the launchd plist / systemd
   // unit; a re-run on an already-installed machine refreshes the
@@ -1484,6 +1508,22 @@ async function cmdMode(argv: readonly string[]): Promise<void> {
     } catch (e) {
       console.warn(
         `couldn't pre-download the model (${(e as Error).message}); it downloads on first scan`,
+      );
+    }
+  }
+
+  // Switching TO cloud/self-hosted (both FAIL-CLOSED on the on-device NER pass)
+  // pulls the redactor model now so the next scan runs at full quality instead of
+  // racing a lazy download (best-effort; the daemon self-heals if it isn't ready).
+  if (mode === "cloud" || mode === "self-hosted") {
+    try {
+      const { ensureNerModel } = await import("@modelstat/daemon-core/node");
+      console.log("preparing the on-device redactor (downloads on first use)…");
+      if (await ensureNerModel()) console.log("✓ on-device redactor ready");
+      else console.warn("redactor model not ready yet — the daemon finishes it on its first scan");
+    } catch (e) {
+      console.warn(
+        `couldn't pre-download the redactor (${(e as Error).message}); it downloads on first scan`,
       );
     }
   }

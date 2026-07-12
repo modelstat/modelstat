@@ -18,14 +18,14 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import { describeErrorWithCause } from "@modelstat/daemon-core/logger";
 import type { DetectedIdentity, DetectedInstallation } from "@modelstat/core";
+import { describeErrorWithCause } from "@modelstat/daemon-core/logger";
 import { discover } from "@modelstat/parsers";
 import { postHeartbeat } from "./api.js";
 import { state } from "./config.js";
+import { refreshSessionInsights } from "./insights.js";
 import { acquireDaemonLock, formatAge } from "./lock.js";
 import { machineKey } from "./machine-key.js";
-import { refreshSessionInsights } from "./insights.js";
 import {
   drainLocalQueue,
   type LocalIngestReceiver,
@@ -184,9 +184,14 @@ function snapshotBody(): Heartbeat & { device_id: string | null } {
 let lastDiscoveryHash: string | null = null;
 let lastDiscoveryAttachedAt = 0;
 
-function hashDiscovery(d: { installations: DetectedInstallation[]; identities: DetectedIdentity[] }): string {
+function hashDiscovery(d: {
+  installations: DetectedInstallation[];
+  identities: DetectedIdentity[];
+}): string {
   // Stable JSON over the parts that matter; cheap SHA-256 to detect change.
-  return createHash("sha256").update(JSON.stringify({ i: d.installations, a: d.identities })).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify({ i: d.installations, a: d.identities }))
+    .digest("hex");
 }
 
 /**
@@ -423,15 +428,6 @@ async function runScanCycle(reason: string): Promise<void> {
         setStat("segments_sent", state.bumpSegmentsSent(segments));
         setStat("segments_sending", 0);
         status.lastEventAt = new Date().toISOString();
-      },
-      onDropped() {
-        // The server permanently rejected a batch (400/422) and the scanner
-        // quarantined it (logging the reason loudly) so newer data keeps flowing —
-        // surface the COUNT so the (rare) daemon-side data loss is visible in the
-        // tray, not silent. Don't flip phase: the daemon is healthy, it just
-        // skipped one un-encodable batch.
-        bumpStat("batches_dropped", 1);
-        setStat("segments_sending", 0);
       },
     });
     bumpStat("files_scanned", r.filesScanned);

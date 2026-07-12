@@ -1,10 +1,12 @@
 /**
- * upload() never returns a PERMANENT drop: the daemon holds + retries every
- * failure until it succeeds, so a batch is never discarded. Even a 400/422 —
- * which we used to quarantine as an un-acceptable payload — is held (permanent:
- * false) and retried, because it can be a transient edge/WAF response or clear
- * after a server-side fix. Losing good data is worse than a visible, self-draining
- * retry. These tests pin that: no response yields `permanent: true`.
+ * upload() has exactly two outcomes: `commit` (2xx) or `drop` (everything else).
+ * A `drop` is ALWAYS a HOLD — the caller retries the same batch until it succeeds,
+ * so a batch is never discarded. Even a 400/422 — which we used to quarantine as
+ * an un-acceptable payload — is held, because it can be a transient edge/WAF
+ * response or clear after a server-side fix, and the client can no longer emit a
+ * genuinely-un-acceptable payload (well-formed + byte-clamped at the wire). There
+ * is no "permanent" outcome to model. These tests pin that: no response commits
+ * except a 2xx, and everything else is a held drop.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -18,23 +20,21 @@ function client(fetchImpl: typeof fetch, maxAttempts = 1) {
   return new IngestClient({ apiUrl: "http://x", auth, logger, fetchImpl, maxAttempts });
 }
 
-test("400 is HELD (permanent:false), never quarantined", async () => {
+test("400 is HELD (drop), never quarantined", async () => {
   const res = await client(async () => new Response("bad", { status: 400 })).upload({} as never);
   assert.equal(res.kind, "drop");
-  assert.equal(res.kind === "drop" && res.permanent, false);
 });
 
-test("422 is HELD (permanent:false), never quarantined", async () => {
+test("422 is HELD (drop), never quarantined", async () => {
   const res = await client(async () => new Response("invalid", { status: 422 })).upload(
     {} as never,
   );
-  assert.equal(res.kind === "drop" && res.permanent, false);
+  assert.equal(res.kind, "drop");
 });
 
-test("exhausted 5xx → held (permanent:false — hold + retry, never quarantine good data)", async () => {
+test("exhausted 5xx → held (drop — hold + retry, never quarantine good data)", async () => {
   const res = await client(async () => new Response("down", { status: 503 })).upload({} as never);
   assert.equal(res.kind, "drop");
-  assert.equal(res.kind === "drop" && res.permanent, false);
 });
 
 test("2xx → commit", async () => {

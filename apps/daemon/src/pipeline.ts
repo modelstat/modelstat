@@ -33,6 +33,7 @@ import { readFile as fsReadFile } from "node:fs/promises";
 import type { RawEvent, Segment, SessionMetadata } from "@modelstat/core";
 import { redact as redactFloor } from "@modelstat/core/redact";
 import {
+  applyTransformersCacheDir,
   createTransformersJsEmbedder,
   defaultLlamaConfig,
   llamaCognize,
@@ -62,7 +63,10 @@ import {
   type Summarizer,
 } from "@modelstat/daemon-core/pipeline";
 import type { ToolCallDraft } from "@modelstat/daemon-core/queue";
-import { createPrivacyFilterRedactor } from "@modelstat/daemon-core/redact/privacy-filter";
+import {
+  createPrivacyFilterRedactor,
+  nerRedactorActive,
+} from "@modelstat/daemon-core/redact/privacy-filter";
 import {
   checkPullRequestOutcome,
   collectFilesChanged,
@@ -286,22 +290,6 @@ function warnRemoteEgress(cfg: OpenAICompatConfig): void {
   );
 }
 
-/** Probe the on-device NER redactor with a sentinel PERSON entity to prove
- * it actually runs. `createPrivacyFilterRedactor` degrades to a SILENT
- * pass-through when its `@huggingface/transformers` peer dep is missing —
- * which on the remote path would let names/orgs the regex floor can't catch
- * leave the box unredacted. The sentinel name is not a regex-floor target,
- * so a redacted result proves the NER model is live. */
-async function nerRedactorActive(nerRedact: Redactor): Promise<boolean> {
-  const sentinel = "Escalate the incident to Katherine Johnson at Globex Corporation.";
-  try {
-    const out = (await nerRedact(sentinel)).text;
-    return !out.includes("Katherine Johnson");
-  } catch {
-    return false;
-  }
-}
-
 /** Remote OpenAI-compatible adapter set. Chat passes go to the endpoint;
  * the embedder stays local (preserving the 384-dim wire vector) and the
  * redactor is the local Privacy Filter ONLY — no remote redaction
@@ -342,6 +330,10 @@ async function degradedAdapters(): Promise<PipelineAdapters> {
 
 async function getAdapters(): Promise<PipelineAdapters> {
   if (adapters) return adapters;
+  // Point Transformers.js (the NER redactor + the BGE embedder) at the shared
+  // on-disk cache before the first model load, so every mode reads the model
+  // `connect` warmed and upgrades don't re-download it.
+  await applyTransformersCacheDir();
   const provider = resolveProvider();
   // Misconfigured remote provider (bad MODELSTAT_LLM_PROVIDER, or missing
   // base-url/model): never crash a scan over a config typo. Surface it loudly
@@ -419,13 +411,22 @@ async function getAdapters(): Promise<PipelineAdapters> {
 // Cloud mode ships cleaned turns (not a local abstract) to /v1/ingest/raw, so
 // the on-device NER/PII pass has to run over the EXCERPTS themselves — the
 // parser already floor-redacted them, but the NER pass is what the normal path
-// applies only to the derived abstract. Built + probed once; the sentinel proof
-// (nerRedactorActive) makes the fail-closed decision below honest.
+// applies only to the derived abstract. The sentinel proof (nerRedactorActive)
+// makes the fail-closed decision below honest; the healthy verdict is cached,
+// an unhealthy one is re-probed each scan so cloud self-heals (see below).
 let cloudRedactor: { redact: Redactor; nerActive: boolean } | null = null;
 
 async function cloudRawRedactor(): Promise<{ redact: Redactor; nerActive: boolean }> {
-  if (cloudRedactor) return cloudRedactor;
-  const redact = await createPrivacyFilterRedactor();
+  // Cache ONLY the healthy verdict. On a fresh install the NER model may still be
+  // downloading on the first scan; caching an unhealthy verdict would wedge cloud
+  // mode on local extractive abstracts until a daemon restart. So while degraded
+  // we re-probe every scan — cheap, because the REUSED redactor's cooldown makes
+  // a not-yet-ready load return instantly — and cloud SELF-HEALS the moment the
+  // model lands (the 5-min backstop scan picks it up). Reuse the redactor
+  // instance so its load cooldown/cache persist across probes.
+  if (cloudRedactor?.nerActive) return cloudRedactor;
+  await applyTransformersCacheDir();
+  const redact = cloudRedactor?.redact ?? (await createPrivacyFilterRedactor());
   cloudRedactor = { redact, nerActive: await nerRedactorActive(redact) };
   return cloudRedactor;
 }
