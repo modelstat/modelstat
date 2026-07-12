@@ -474,19 +474,63 @@ async function runScanOverJobs(
     if (state.summarizerMode === "cloud") {
       const cloudEvents = await prepareCloudRawEvents(events, toolCallBuffer);
       if (cloudEvents) {
-        await commitBatch(
-          {
-            batch_id: batchId(),
-            device_id: deviceId,
-            daemon_version: DAEMON_VERSION,
-            events: cloudEvents,
-            segments: [],
-            // No local segments to attribute calls to — a null segment_id is
-            // valid wire; the server attaches them when it segments the turns.
-            tool_calls: attachSegmentIdsByMap(toolCallBuffer, new Map<string, string>()),
-          },
-          { raw: true, segmentCount: 0 },
-        );
+        // ONE session per request: /v1/ingest/raw accepts exactly one session
+        // (the unit of send is the unit of retry). Partition the buffered turns +
+        // calls by session and ship each as its own raw batch. Cursor accounting
+        // stays file-atomic — advanced ONCE below, after every session in this
+        // flush has been processed — so a mid-flush transient failure THROWS out
+        // of uploadBatch and holds the whole flush (re-sent idempotently next
+        // cycle), while a permanent 400 skips only that one session instead of
+        // dropping the whole multi-session batch with it.
+        const wireCalls = attachSegmentIdsByMap(toolCallBuffer, new Map<string, string>());
+        const bySession = new Map<string, { events: RawEvent[]; calls: typeof wireCalls }>();
+        const bucket = (sessionId: string) => {
+          let g = bySession.get(sessionId);
+          if (!g) {
+            g = { events: [], calls: [] };
+            bySession.set(sessionId, g);
+          }
+          return g;
+        };
+        for (const e of cloudEvents) bucket(e.session_id).events.push(e);
+        for (const c of wireCalls) bucket(c.session_id).calls.push(c);
+
+        for (const g of bySession.values()) {
+          cb.onUpload?.({ events: g.events.length, segments: 0 });
+          const res = await uploadBatch(
+            {
+              batch_id: batchId(),
+              device_id: deviceId,
+              daemon_version: DAEMON_VERSION,
+              events: g.events,
+              segments: [],
+              // No local segments to attribute calls to — a null segment_id is
+              // valid wire; the server attaches them when it segments the turns.
+              tool_calls: g.calls,
+            },
+            { raw: true },
+          );
+          if (!res.committed) {
+            // Permanent reject for THIS session only (400/422). A transient
+            // failure would have THROWN out of uploadBatch instead (held +
+            // retried), so good data is never lost on a blip.
+            batchesDropped += 1;
+            console.error(
+              `dropped ${g.events.length} event(s) — server rejected a session (${res.reason}); skipping so newer data keeps flowing`,
+            );
+            cb.onDropped?.({ events: g.events.length, segments: 0, reason: res.reason });
+          } else {
+            batchesUploaded += 1;
+            eventsUploaded += res.accepted;
+            cb.onUploaded?.({ events: res.accepted, segments: 0 });
+          }
+        }
+        // Every session processed — advance the buffered files' cursors once,
+        // atomically, exactly like commitBatch's success path.
+        for (const pc of pendingCursors) state.setCursor(pc.path, pc.cs);
+        pendingCursors = [];
+        buffer = [];
+        toolCallBuffer = [];
         return;
       }
       console.warn(

@@ -45,6 +45,30 @@ export function classifyStatus(status: number, attempt: number): UploadDecision 
   return { type: "backoff", delayMs: expBackoff(attempt) };
 }
 
+/**
+ * Parse a `Retry-After` header (delta-seconds form) into ms; `0` if absent or
+ * unparseable. The ingest edge sends it on a `429` (at capacity / scope over its
+ * fair share) and a `503` (summarizer down) so the client waits the amount the
+ * server asked for instead of guessing.
+ */
+export function retryAfterMs(res: Response): number {
+  const raw = res.headers.get("retry-after");
+  if (!raw) return 0;
+  const secs = Number.parseInt(raw.trim(), 10);
+  return Number.isFinite(secs) && secs >= 0 ? secs * 1000 : 0;
+}
+
+/**
+ * Additive jitter: keep `ms` as a floor (so a server `Retry-After` is always
+ * honored) and spread up to +25% at random. Without it a fleet that all backed
+ * off on the same `Retry-After` would retry in lockstep and re-create the
+ * overload — the thundering herd. `ms <= 0` → `0`.
+ */
+export function jitter(ms: number): number {
+  if (ms <= 0) return 0;
+  return ms + Math.floor(Math.random() * ms * 0.25);
+}
+
 /** What a daemon provides so the ingest client can mint + refresh
  * bearer tokens. Token storage details stay in the daemon
  * (Conf file on Node, IndexedDB on browser). */
@@ -147,7 +171,7 @@ export class IngestClient {
           url,
           attempt,
         });
-        await sleep(expBackoff(attempt));
+        await sleep(jitter(expBackoff(attempt)));
         continue;
       }
       const decision = classifyStatus(res.status, attempt);
@@ -177,13 +201,16 @@ export class IngestClient {
       } else {
         await res.body?.cancel().catch(() => {});
       }
+      // Honor the server's Retry-After (429/503 load-shed) as a floor, then add
+      // jitter so a fleet backing off together doesn't retry in lockstep.
+      const delayMs = jitter(Math.max(decision.delayMs, retryAfterMs(res)));
       this.opts.logger.warn("ingest backoff", {
         status: res.status,
-        delay_ms: decision.delayMs,
+        delay_ms: delayMs,
         attempt,
         ...(body ? { body } : {}),
       });
-      await sleep(decision.delayMs);
+      await sleep(delayMs);
     }
     // Out of attempts. If every attempt failed at the fetch layer,
     // surface the underlying cause in the drop reason so the daemon's
