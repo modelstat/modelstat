@@ -15,11 +15,11 @@ import { buildFingerprint, intendedDeviceUuid, machineKeySource } from "./machin
 import { parseSummarizerMode, type SummarizerMode } from "./runtime-state.js";
 import {
   bundledTrayAppPath,
+  ensureTrayInstalled,
   installService,
   installTrayApp,
   installTrayAutostart,
   logsDir,
-  refreshTrayIfInstalled,
   removeTrayApp,
   serviceStatus,
   setupRuntime,
@@ -1611,10 +1611,12 @@ async function main(): Promise<void> {
       // previously hand-spawned daemon gets converted to a managed one.
       const svc = installService();
       console.log(`✓ managed background service installed + started (${svc.path})`);
-      // If a menu-bar tray was already installed, refresh it to this
-      // version and re-arm its autostart agent so an auto-update / upgrade
-      // leaves the NEW tray running. No-op when no tray was installed.
-      if (refreshTrayIfInstalled()) console.log("✓ menu-bar tray refreshed to this version");
+      // Reconcile the menu-bar tray: install it if absent, refresh it to this
+      // version if present, and (re)arm its autostart agent — so every
+      // auto-update / upgrade converges to the icon running at login, even on
+      // a machine whose tray had gone missing. No-op when no prebuilt tray
+      // ships (non-macOS, or a build without the vendor .app).
+      if (ensureTrayInstalled()) console.log("✓ menu-bar tray installed + set to start at login");
       return;
     }
     case "_daemon-health": {

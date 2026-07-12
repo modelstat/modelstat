@@ -716,27 +716,36 @@ export function removeTrayApp(): void {
   if (existsSync(dest)) spawnSync("rm", ["-rf", dest]);
 }
 
-/** True if a tray .app is currently installed in ~/Applications. */
-export function trayInstalled(): boolean {
-  return locateTrayExecutable() !== null;
-}
-
 /**
- * On upgrade, refresh an ALREADY-installed tray to the bundle shipped with
- * THIS package and re-arm its autostart agent, so the NEW tray version ends
- * up running. Called from `_install-service` (the auto-update / npm-update
- * refresh step). Only touches things if a tray was already installed — it
- * won't add a tray to a machine that never had one — and only uses a
- * PREBUILT bundle, so a background upgrade never blocks on a Swift compile.
- * No-op on non-macOS. Best-effort: returns true if it refreshed + re-armed.
+ * Ensure the menu-bar tray is present at THIS package's version and its
+ * autostart agent is armed — INSTALLING it if absent, refreshing it if
+ * already there. Called from `_install-service`, which runs on every
+ * connect / upgrade / auto-update, so the tray reconciles to
+ * "installed + supervised" every time — the daemon's own always-on pattern,
+ * applied to the icon.
+ *
+ * This is what makes the icon return on install, login, reboot AND upgrade
+ * (the product contract). Gating it on "already installed" — as an earlier
+ * version did — meant that once the tray went missing for ANY reason (a
+ * daemon-only install, a stale post-uninstall state, an interrupted connect),
+ * nothing ever brought it back and a reboot had no agent to load.
+ *
+ * Uses ONLY a PREBUILT bundle, so a background upgrade never blocks on a Swift
+ * compile — a no-op (returns false) when none ships (non-macOS, or a build
+ * without the vendor .app; the interactive `connect` path is the one that may
+ * compile from source). Never throws: the daemon already runs headless, so a
+ * tray hiccup must cost only the icon, never the service install.
  */
-export function refreshTrayIfInstalled(): boolean {
+export function ensureTrayInstalled(): boolean {
   if (platform() !== "darwin") return false;
-  if (!trayInstalled()) return false;
-  const src = prebuiltTrayAppPath();
-  if (!src) return false;
-  installTrayApp(src);
-  return installTrayAutostart() !== null;
+  try {
+    const src = prebuiltTrayAppPath();
+    if (!src) return false;
+    installTrayApp(src);
+    return installTrayAutostart() !== null;
+  } catch {
+    return false;
+  }
 }
 
 /** Progress sink for an on-device tray build. `onLine` receives each
