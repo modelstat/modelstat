@@ -497,6 +497,10 @@ async function runScanOverJobs(
 
         for (const g of bySession.values()) {
           cb.onUpload?.({ events: g.events.length, segments: 0 });
+          // uploadBatch THROWS on any non-commit (no token / reauth failed / retries
+          // exhausted / network) — the whole flush is HELD and re-sent idempotently
+          // next cycle. So a returned receipt is ALWAYS a confirmed commit: there is
+          // no permanent per-session drop to account for (mirrors commitBatch).
           const res = await uploadBatch(
             {
               batch_id: batchId(),
@@ -510,20 +514,9 @@ async function runScanOverJobs(
             },
             { raw: true },
           );
-          if (!res.committed) {
-            // Permanent reject for THIS session only (400/422). A transient
-            // failure would have THROWN out of uploadBatch instead (held +
-            // retried), so good data is never lost on a blip.
-            batchesDropped += 1;
-            console.error(
-              `dropped ${g.events.length} event(s) — server rejected a session (${res.reason}); skipping so newer data keeps flowing`,
-            );
-            cb.onDropped?.({ events: g.events.length, segments: 0, reason: res.reason });
-          } else {
-            batchesUploaded += 1;
-            eventsUploaded += res.accepted;
-            cb.onUploaded?.({ events: res.accepted, segments: 0 });
-          }
+          batchesUploaded += 1;
+          eventsUploaded += res.accepted;
+          cb.onUploaded?.({ events: res.accepted, segments: 0 });
         }
         // Every session processed — advance the buffered files' cursors once,
         // atomically, exactly like commitBatch's success path.

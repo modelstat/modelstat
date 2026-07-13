@@ -66,8 +66,29 @@ jobs:
           path: release-plan.json
           retention-days: 3
 
+  # Refuse to publish type-broken or failing code. The daemon builds with
+  # tsup/esbuild (which strips types WITHOUT checking them), so 0.28.1 shipped a
+  # `tsc` error that halted the daemon at runtime. `release` needs this job, so a
+  # red typecheck/test here aborts every publish — the backstop behind ci.yml.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22 # the daemon's real runtime (native deps are node-22 ABI); the test scripts use `node --test` globs, which need node >= 21
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Type-check every package (tsc --noEmit)
+        run: pnpm typecheck
+      - name: Run tests
+        run: pnpm test
+
   release:
-    needs: plan
+    needs: [plan, verify]
     if: needs.plan.outputs.matrix != '' && needs.plan.outputs.matrix != '[]'
     runs-on: ${{ matrix.runner }}
     permissions:
