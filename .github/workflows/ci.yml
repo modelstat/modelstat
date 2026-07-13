@@ -1,0 +1,38 @@
+name: ci
+
+# Pull-request gate: type-check and test every package before it can merge.
+#
+# WHY THIS EXISTS: the daemon ships via tsup/esbuild, which strips TypeScript
+# types out and compiles WITHOUT checking them. So a type error — e.g. a name
+# left dangling by a bad merge (`batchesDropped is not defined`, shipped in
+# 0.28.1) — compiles clean and publishes to npm, then auto-updates onto users'
+# machines. `tsc --noEmit` (pnpm typecheck) is the check that catches that whole
+# class of bug here, before it can merge. Make this a REQUIRED status check in
+# branch protection so a red run blocks the merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20 # matches .nvmrc + daemon engines (>=20.18.0)
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Type-check every package (tsc --noEmit)
+        run: pnpm typecheck
+      - name: Run tests
+        run: pnpm test
