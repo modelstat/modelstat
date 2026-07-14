@@ -1,0 +1,13 @@
+{
+  "device_id": "device-uuid-abc",
+  "status": "scanning",
+  "message": "scanning 3/12 files",
+  "progress_done": 3,
+  "progress_total": 12,
+  "queue_size": 0,
+  "stats": {
+    "files_seen": 42
+  },
+  "last_event_at": "2026-06-01T10:00:00.000Z",
+  "daemon_version": "daemon-0.0.0"
+}

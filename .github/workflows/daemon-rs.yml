@@ -1,0 +1,136 @@
+name: daemon-rs
+
+# CI for the Rust rewrite (daemon/ workspace). Gates every PR that touches the
+# collector/engine crates, the golden fixtures, or the TS↔Rust parity surface.
+#
+# What it proves (M0 acceptance criteria, plan §5):
+#   * all SIX release targets compile;
+#   * `cargo test` is green on every native runner;
+#   * the collector (`modelstat`) never links llama.cpp (`modelstat-llm`);
+#   * the golden fixtures regenerate byte-identically from the TS (no drift);
+#   * TS↔Rust wire parity (both directions) holds.
+on:
+  push:
+    branches: [main, feat/rust-daemon]
+    paths: ["daemon/**", "packages/core/src/wire-parity.test.ts", ".github/workflows/daemon-rs.yml"]
+  pull_request:
+    paths: ["daemon/**", "packages/core/src/wire-parity.test.ts", ".github/workflows/daemon-rs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daemon-rs-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: daemon
+
+jobs:
+  # ---- Native runners: full `cargo test` on four of the six targets --------
+  test:
+    name: test (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: cargo test (all crates, all targets)
+        run: cargo test --workspace --all-targets --locked
+
+  # ---- Cross-compile the remaining two targets (compile-only, plan §6) -----
+  cross-build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, linker: gcc-aarch64-linux-gnu }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, linker: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust + target
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable && rustup target add ${{ matrix.target }}
+      - name: Install cross linker (linux-arm64)
+        if: matrix.linker != ''
+        working-directory: .
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.linker }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+          key: ${{ matrix.target }}
+      - name: cargo build (target)
+        # aarch64-unknown-linux-gnu needs its cross linker wired explicitly.
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --workspace --all-targets --locked --target ${{ matrix.target }}
+
+  # ---- The collector must never link llama.cpp (plan §3, D4) ---------------
+  no-llama-link:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: collector tree excludes modelstat-llm
+        run: |
+          if cargo tree -p modelstat-cli -e normal | grep -q 'modelstat-llm'; then
+            echo "::error::the collector (modelstat-cli) links modelstat-llm — the llama.cpp boundary is broken"
+            cargo tree -p modelstat-cli -e normal
+            exit 1
+          fi
+          echo "OK: modelstat-llm absent from the collector dependency tree"
+      - name: engine tree includes modelstat-llm (sanity)
+        run: |
+          if ! cargo tree -p modelstat-summarizer -e normal | grep -q 'modelstat-llm'; then
+            echo "::error::the engine (modelstat-summarizer) is missing modelstat-llm"
+            exit 1
+          fi
+          echo "OK: modelstat-llm present in the engine dependency tree"
+
+  # ---- Golden fixtures regenerate from TS byte-identically; TS↔Rust parity -
+  fixtures-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install workspace deps
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: Regenerate golden fixtures from the TS
+        working-directory: .
+        run: npx tsx daemon/scripts/fixtures/gen-all.mts
+      - name: Re-emit the Rust wire fixtures
+        run: cargo run -q -p modelstat-wire --example emit_fixtures
+      - name: Fixtures must be reproducible (no drift from committed)
+        working-directory: .
+        run: git diff --exit-code -- daemon/crates/modelstat-wire/tests/golden
+      - name: TS↔Rust wire parity (TS side)
+        working-directory: .
+        run: node --import tsx --test packages/core/src/wire-parity.test.ts
+      - name: Rust golden tests (Rust side)
+        run: cargo test -p modelstat-wire -p modelstat-redact --locked

@@ -1,0 +1,44 @@
+{
+  "segment_id": "seg_bf79y774ikaf",
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "agent": "claude_code",
+  "started_at": "2026-06-01T10:00:00.000Z",
+  "ended_at": "2026-06-01T10:05:00.000Z",
+  "abstract": "Implemented the ingest retry matrix and clamped wire strings.",
+  "tokens": {
+    "input": 100,
+    "output": 200,
+    "cache_creation": 0,
+    "cache_read": 0,
+    "reasoning": 0
+  },
+  "tags": [
+    {
+      "root_key": "projects",
+      "name": "myrepo",
+      "confidence": 1
+    },
+    {
+      "root_key": "work_types",
+      "name": "implementation",
+      "confidence": 0.7,
+      "reason": "branch heuristic"
+    }
+  ],
+  "redaction": {
+    "secrets_found": 1,
+    "emails_redacted": 0,
+    "paths_redacted_absolute": 2,
+    "pf_name": 1
+  },
+  "source_event_ids": [
+    "evt_16zw770jnvito",
+    "evt_irnlblnsf9gx"
+  ],
+  "behavior": {
+    "user_turns": 3,
+    "correction_count": 1,
+    "frustration": 0.25
+  },
+  "user_intent": "make the uploader never drop a batch"
+}

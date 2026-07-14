@@ -1,0 +1,339 @@
+{
+  "floor_order": [
+    "anthropic_key",
+    "openai_key",
+    "google_api_key",
+    "aws_access_key",
+    "github_pat",
+    "github_oauth",
+    "github_app",
+    "slack_token",
+    "stripe_live_key",
+    "stripe_test_key",
+    "discord_token",
+    "jwt",
+    "private_key_header",
+    "modelstat_device_secret",
+    "env_secret",
+    "bearer_header",
+    "db_url_with_password",
+    "aws_secret_key"
+  ],
+  "cases": [
+    {
+      "name": "anthropic_key",
+      "input": "use sk-ant-\u0000api03-abcdefghijklmnopqrstuvwxyz0123456789 now",
+      "repo_root": null,
+      "text": "use [REDACTED:anthropic_key] now",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "openai_key_proj",
+      "input": "token sk-proj-\u0000abcdefghijklmnopqrstuvwxyz0123456789 end",
+      "repo_root": null,
+      "text": "token [REDACTED:openai_key] end",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "openai_key_plain",
+      "input": "token sk-\u0000abcdefghijklmnopqrstuvwxyz0123456789 end",
+      "repo_root": null,
+      "text": "token [REDACTED:openai_key] end",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "google_api_key",
+      "input": "key AIza\u0000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb end",
+      "repo_root": null,
+      "text": "key [REDACTED:google_api_key] end",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "aws_access_key",
+      "input": "cred AKIAIOSFODNN7EXAMPLE here",
+      "repo_root": null,
+      "text": "cred [REDACTED:aws_access_key] here",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "github_pat",
+      "input": "ghp_\u0000abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+      "repo_root": null,
+      "text": "[REDACTED:github_pat]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "github_oauth",
+      "input": "gho_\u0000abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+      "repo_root": null,
+      "text": "[REDACTED:github_oauth]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "github_app",
+      "input": "ghs_\u0000abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+      "repo_root": null,
+      "text": "[REDACTED:github_app]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "slack_token",
+      "input": "xoxb-\u0000abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+      "repo_root": null,
+      "text": "[REDACTED:slack_token]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "stripe_live_key",
+      "input": "sk_live_\u0000abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+      "repo_root": null,
+      "text": "[REDACTED:stripe_live_key]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "stripe_test_key",
+      "input": "pk_test_\u0000abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+      "repo_root": null,
+      "text": "[REDACTED:stripe_test_key]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "discord_token",
+      "input": "Maaaaaaaaaaaaaaaaaaaaaaa.bcdefg.hijklmnopqrstuvwxyz012345678",
+      "repo_root": null,
+      "text": "[REDACTED:discord_token]8",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "jwt",
+      "input": "eyJaaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc",
+      "repo_root": null,
+      "text": "[REDACTED:jwt]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "private_key_pem",
+      "input": "-----BEGIN \u0000RSA PRIVATE KEY-----\nMIIBOwIBAAKblahblahFAKEfixtureKEYbodyblahblahnotarealprivatekey\n-----END \u0000RSA PRIVATE KEY-----",
+      "repo_root": null,
+      "text": "[REDACTED:private_key_header]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "modelstat_device_secret",
+      "input": "auth ds_live_\u0000abcdefghijklmnopqrstuvwxyz0123456789",
+      "repo_root": null,
+      "text": "auth [REDACTED:modelstat_device_secret]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "env_secret_bare_password",
+      "input": "PASSWORD=hunter2hunter2hunter2",
+      "repo_root": null,
+      "text": "[REDACTED:env_secret]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "env_secret_aws",
+      "input": "export AWS_SECRET_ACCESS_KEY=abcd1234efgh5678ijkl9",
+      "repo_root": null,
+      "text": "export [REDACTED:env_secret]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "bearer_header",
+      "input": "Bearer abcdefghijklmnopqrstuvwxyz123456",
+      "repo_root": null,
+      "text": "[REDACTED:bearer_header]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "db_url_with_password",
+      "input": "postgres://user:hunter2@db.host/app",
+      "repo_root": null,
+      "text": "[REDACTED:db_url_with_password]db.host/app",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "aws_secret_key_40blob",
+      "input": "blob AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA end",
+      "repo_root": null,
+      "text": "blob [REDACTED:aws_secret_key] end",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "entropy_hash_md5",
+      "input": "md5: 5d41402abc4b2a76b9719d911017c592",
+      "repo_root": null,
+      "text": "md5: [REDACTED:hash]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "entropy_hash_sha256",
+      "input": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "repo_root": null,
+      "text": "sha256:[REDACTED:hash]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "entropy_base64",
+      "input": "echo aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=",
+      "repo_root": null,
+      "text": "echo [REDACTED:base64]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "entropy_hi_entropy",
+      "input": "id Zx9Kd2Lm7Qp4Rt6Vw8Yc1Df3Gh5Jk0Sabcde",
+      "repo_root": null,
+      "text": "id [REDACTED:hi-entropy]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "keep_screaming_snake",
+      "input": "export MAX_TOOL_ACTION_PARAM_SHAPE_CHARS_LIMIT",
+      "repo_root": null,
+      "text": "export MAX_TOOL_ACTION_PARAM_SHAPE_CHARS_LIMIT",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "keep_relative_path",
+      "input": "tsx packages/daemon-core/src/queue/runner_helper_module",
+      "repo_root": null,
+      "text": "tsx packages/daemon-core/src/queue/runner_helper_module",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "keep_code_identifier",
+      "input": "function calculateTotalRevenueForQuarter(year, quarter)",
+      "repo_root": null,
+      "text": "function calculateTotalRevenueForQuarter(year, quarter)",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "keep_aws_profile",
+      "input": "AWS_PROFILE=dev",
+      "repo_root": null,
+      "text": "AWS_PROFILE=dev",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "keep_chain_id",
+      "input": "CHAIN_ID=1337",
+      "repo_root": null,
+      "text": "CHAIN_ID=1337",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "keep_path_env",
+      "input": "export PATH=\"$HOME/.fly/bin:/opt/homebrew/bin:$PATH\"",
+      "repo_root": null,
+      "text": "export PATH=\"$HOME/.fly/bin:/opt/homebrew/bin:$PATH\"",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "keep_monkey",
+      "input": "MONKEY=banana",
+      "repo_root": null,
+      "text": "MONKEY=banana",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "emails_two",
+      "input": "contact: alice@example.com, bob@example.co.uk",
+      "repo_root": null,
+      "text": "contact: [REDACTED:email], [REDACTED:email]",
+      "secrets_found": 0,
+      "emails_redacted": 2,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "path_inside_repo_relativised",
+      "input": "see /Users/dev/projects/myrepo/src/foo.ts for details",
+      "repo_root": "/Users/dev/projects/myrepo",
+      "text": "see ./src/foo.ts for details",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "path_outside_repo_redacted",
+      "input": "open /Users/dev/secrets/db.conf",
+      "repo_root": "/Users/dev/projects/myrepo",
+      "text": "open [REDACTED:abs-path]",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 1
+    },
+    {
+      "name": "path_linux_home_redacted",
+      "input": "cat /home/alice/.ssh/id_rsa",
+      "repo_root": null,
+      "text": "cat [REDACTED:abs-path]",
+      "secrets_found": 0,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 1
+    }
+  ]
+}

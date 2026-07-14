@@ -1,0 +1,7 @@
+{
+  "decision": "adopt",
+  "lock": true,
+  "ownerAlive": true,
+  "lockAgeMs": 1200,
+  "statusAgeMs": 800
+}

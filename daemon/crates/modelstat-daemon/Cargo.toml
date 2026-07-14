@@ -1,0 +1,19 @@
+[package]
+name = "modelstat-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+modelstat-wire.workspace = true
+modelstat-redact.workspace = true
+modelstat-parsers.workspace = true
+modelstat-pipeline.workspace = true
+modelstat-ingest.workspace = true
+modelstat-receiver.workspace = true
+modelstat-sumclient.workspace = true
+modelstat-service.workspace = true
+modelstat-update.workspace = true
+modelstat-mcp.workspace = true

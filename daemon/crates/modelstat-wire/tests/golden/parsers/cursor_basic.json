@@ -1,0 +1,45 @@
+{
+  "deviceId": "dev_1",
+  "sourceFile": "/tmp/modelstat-fixtures/cursor/state.vscdb",
+  "events": [
+    {
+      "source_event_id": "evt_f09m0iqerg8r",
+      "ts": "2026-06-26T23:53:20.000Z",
+      "kind": "assistant_message",
+      "agent": "cursor",
+      "provider": "cursor",
+      "model": "claude-opus-4-8",
+      "session_id": "conv_1",
+      "turn_index": null,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/cursor/state.vscdb",
+      "source_byte_offset": null
+    },
+    {
+      "source_event_id": "evt_3ekjjj551lhzy",
+      "ts": "2026-06-26T23:54:20.000Z",
+      "kind": "assistant_message",
+      "agent": "cursor",
+      "provider": "cursor",
+      "model": "claude-opus-4-8",
+      "session_id": "conv_1",
+      "turn_index": null,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/cursor/state.vscdb",
+      "source_byte_offset": null
+    }
+  ],
+  "toolCalls": []
+}

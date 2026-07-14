@@ -1,0 +1,74 @@
+/**
+ * TS↔Rust wire parity (plan D16, feature §4.7).
+ *
+ * The golden wire fixtures under daemon/crates/modelstat-wire/tests/golden/wire
+ * are the shared contract between this TS schema and the Rust `modelstat-wire`
+ * port. This test proves the two directions:
+ *
+ *   1. The TS-produced fixtures (`wire/*.json`) still Zod-parse — guards against
+ *      a hand-edit or a TS schema change that would desync the committed golden.
+ *   2. The RUST-emitted fixtures (`wire/rust-emitted/*.json`, written by
+ *      `cargo run -p modelstat-wire --example emit_fixtures`) Zod-parse — i.e.
+ *      **TS accepts Rust's serialization of the wire**.
+ *
+ * The mirror direction (Rust accepts TS wire) is asserted in
+ * daemon/crates/modelstat-wire/tests/golden_wire.rs. Together they close D16.
+ */
+import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import type { ZodTypeAny } from "zod";
+import { HeartbeatPayload, IngestBatch, RawEvent, Segment, ToolCallWire } from "./schemas.js";
+
+const WIRE_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "daemon",
+  "crates",
+  "modelstat-wire",
+  "tests",
+  "golden",
+  "wire",
+);
+
+/** fixture file → the schema that must accept it. */
+const SCHEMA_BY_FILE: Record<string, ZodTypeAny> = {
+  "raw_event_full.json": RawEvent,
+  "raw_event_minimal.json": RawEvent,
+  "tool_call.json": ToolCallWire,
+  "segment.json": Segment,
+  "segment_with_embedding.json": Segment,
+  "ingest_batch.json": IngestBatch,
+  "heartbeat.json": HeartbeatPayload,
+};
+
+function parseFixture(dir: string, file: string): unknown {
+  const schema = SCHEMA_BY_FILE[file]!;
+  const raw = JSON.parse(readFileSync(join(dir, file), "utf8"));
+  // `.parse` throws on any schema violation — that IS the assertion.
+  return schema.parse(raw);
+}
+
+test("TS schemas accept the TS-produced golden wire fixtures", () => {
+  for (const file of Object.keys(SCHEMA_BY_FILE)) {
+    assert.doesNotThrow(() => parseFixture(WIRE_DIR, file), `TS golden ${file}`);
+  }
+});
+
+test("TS schemas accept the Rust-emitted wire fixtures (TS accepts Rust wire)", () => {
+  const rustDir = join(WIRE_DIR, "rust-emitted");
+  for (const file of Object.keys(SCHEMA_BY_FILE)) {
+    assert.doesNotThrow(() => parseFixture(rustDir, file), `rust-emitted ${file}`);
+  }
+  // Spot-check that data survived the Rust round-trip, not just the shape.
+  const batch = IngestBatch.parse(
+    JSON.parse(readFileSync(join(rustDir, "ingest_batch.json"), "utf8")),
+  );
+  assert.equal(batch.events.length, 2);
+  assert.equal(batch.tool_calls.length, 1);
+  assert.equal(batch.summarizer_mode, "cloud");
+});

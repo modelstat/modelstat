@@ -1,0 +1,63 @@
+# modelstat daemon + summarizer engine — Rust workspace.
+#
+# Build order is by milestone (see core/specs/daemon/plan.md §5); this file is
+# the whole crate graph up front so the dependency boundaries — above all
+# "the collector never links llama.cpp" — are enforced from M0 on.
+[workspace]
+resolver = "2"
+members = [
+  "crates/modelstat-wire",
+  "crates/modelstat-redact",
+  "crates/modelstat-parsers",
+  "crates/modelstat-pipeline",
+  "crates/modelstat-sumclient",
+  "crates/modelstat-ingest",
+  "crates/modelstat-receiver",
+  "crates/modelstat-service",
+  "crates/modelstat-update",
+  "crates/modelstat-mcp",
+  "crates/modelstat-daemon",
+  "crates/modelstat-cli",
+  "crates/modelstat-llm",
+  "crates/modelstat-summarizer",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.83"
+license = "MIT"
+repository = "https://github.com/modelstat/modelstat"
+
+# Shared dependency versions — one place to bump. Kept deliberately small and
+# pure-Rust so the six-target cross-compile matrix stays painless (no OpenSSL,
+# no C toolchain outside modelstat-llm, which owns the vendored llama.cpp).
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+regex = "1"
+
+# Internal crates (path deps). The graph here IS the contract: modelstat-cli
+# (the collector binary) must have no path — direct or transitive — to
+# modelstat-llm. CI asserts it (see .github/workflows/daemon-rs.yml).
+modelstat-wire = { path = "crates/modelstat-wire" }
+modelstat-redact = { path = "crates/modelstat-redact" }
+modelstat-parsers = { path = "crates/modelstat-parsers" }
+modelstat-pipeline = { path = "crates/modelstat-pipeline" }
+modelstat-sumclient = { path = "crates/modelstat-sumclient" }
+modelstat-ingest = { path = "crates/modelstat-ingest" }
+modelstat-receiver = { path = "crates/modelstat-receiver" }
+modelstat-service = { path = "crates/modelstat-service" }
+modelstat-update = { path = "crates/modelstat-update" }
+modelstat-mcp = { path = "crates/modelstat-mcp" }
+modelstat-daemon = { path = "crates/modelstat-daemon" }
+modelstat-llm = { path = "crates/modelstat-llm" }
+
+# Release profile: thin LTO + strip for small static binaries (plan §3).
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+panic = "abort"

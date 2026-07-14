@@ -1,0 +1,54 @@
+[
+  {
+    "command": "kubectl rollout restart deploy/payments-api -n prod",
+    "expected": "kubectl"
+  },
+  {
+    "command": "cd x && git push",
+    "expected": "git"
+  },
+  {
+    "command": "./deploy.sh --now",
+    "expected": "deploy.sh"
+  },
+  {
+    "command": "sudo systemctl restart nginx",
+    "expected": "systemctl"
+  },
+  {
+    "command": "FOO=bar realcmd --flag",
+    "expected": "realcmd"
+  },
+  {
+    "command": "WT=$(ssh host uptime) && echo $WT",
+    "expected": "ssh"
+  },
+  {
+    "command": "ls -la",
+    "expected": "ls"
+  },
+  {
+    "command": "echo hello world",
+    "expected": "echo"
+  },
+  {
+    "command": "cd ~",
+    "expected": "cd"
+  },
+  {
+    "command": "# just a comment",
+    "expected": "(other)"
+  },
+  {
+    "command": "CK=\"sk_live_examplefake0123456789\" node index.js",
+    "expected": "node"
+  },
+  {
+    "command": "for i in 1 2 3; do curl https://x; done",
+    "expected": "curl"
+  },
+  {
+    "command": "pnpm -C packages/core test",
+    "expected": "pnpm"
+  }
+]

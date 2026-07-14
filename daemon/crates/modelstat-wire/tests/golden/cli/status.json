@@ -1,0 +1,32 @@
+{
+  "paired": true,
+  "claimed": true,
+  "dashboard": "https://modelstat.ai/dashboard",
+  "device": {
+    "hostname": "marks-mac.local",
+    "os_family": "macos",
+    "daemon_status": "running"
+  },
+  "claim_url": null,
+  "claim_code": null,
+  "local": null,
+  "service": {
+    "running": true,
+    "hint": "launchd agent ai.modelstat.daemon"
+  },
+  "pairing": {
+    "paired": true,
+    "claimed": true
+  },
+  "auto_update": {
+    "enabled": true,
+    "pinned_by_env": false
+  },
+  "summarizer": {
+    "mode": "cloud",
+    "env_override": false
+  },
+  "api": "https://api.modelstat.ai",
+  "logs": "/Users/dev/.modelstat/logs",
+  "state": "/Users/dev/.modelstat/state.json"
+}

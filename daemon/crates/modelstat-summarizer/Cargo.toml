@@ -1,0 +1,20 @@
+[package]
+name = "modelstat-summarizer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The summarizer-engine binary. Named `modelstat-summarizer` on disk (§2/§10).
+[[bin]]
+name = "modelstat-summarizer"
+path = "src/main.rs"
+
+# This is the ONLY binary that pulls in modelstat-llm (llama.cpp). Keeping the
+# edge here — and nowhere in the collector's tree — is the whole point of the
+# two-binary split (feature §1, plan D4).
+[dependencies]
+modelstat-wire.workspace = true
+modelstat-llm.workspace = true
+modelstat-sumclient.workspace = true

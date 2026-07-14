@@ -1,0 +1,46 @@
+[
+  {
+    "input": "rollout restart deploy/payments-api -n prod",
+    "expected": "§ § § -n §"
+  },
+  {
+    "input": "commit -m \"fix bug\"",
+    "expected": "§ -m § §"
+  },
+  {
+    "input": "-la /etc/passwd",
+    "expected": "-la §"
+  },
+  {
+    "input": "install react",
+    "expected": "§ §"
+  },
+  {
+    "input": "--namespace=prod get pods",
+    "expected": "--namespace=§ § §"
+  },
+  {
+    "input": "run --watch -j4 test/unit",
+    "expected": "§ --watch -j4 §"
+  },
+  {
+    "input": "status",
+    "expected": "§"
+  },
+  {
+    "input": "",
+    "expected": ""
+  },
+  {
+    "input": "   ",
+    "expected": ""
+  },
+  {
+    "input": "deploy\tprod\nregion=us",
+    "expected": "§ § §"
+  },
+  {
+    "input": "--label=café --emoji=😀 plain",
+    "expected": "--label=§ --emoji=§ §"
+  }
+]

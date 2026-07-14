@@ -1,0 +1,9 @@
+{
+  "phase": "watching",
+  "queue": 0,
+  "stats": {
+    "segments_sent": 42,
+    "sessions_seen": 7
+  },
+  "dashboard": "https://modelstat.ai/dashboard"
+}

@@ -1,0 +1,93 @@
+{
+  "deviceId": "dev_1",
+  "sourceFile": "/tmp/modelstat-fixtures/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl",
+  "events": [
+    {
+      "source_event_id": "evt_zqd4n169mhou",
+      "ts": "2026-06-26T23:53:39.971Z",
+      "kind": "user_message",
+      "agent": "pi",
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "session_id": "019f0659-dc65-7969-af42-5dc1ced6232a",
+      "turn_index": null,
+      "parent_event_id": null,
+      "cwd": "/Users/dev/projects/acme/myrepo",
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "content_excerpt": "fix the bug please",
+      "source_file": "/tmp/modelstat-fixtures/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl",
+      "source_byte_offset": 300
+    },
+    {
+      "source_event_id": "evt_zqd4n169mcng",
+      "ts": "2026-06-26T23:53:44.372Z",
+      "kind": "assistant_message",
+      "agent": "pi",
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "session_id": "019f0659-dc65-7969-af42-5dc1ced6232a",
+      "turn_index": null,
+      "parent_event_id": null,
+      "cwd": "/Users/dev/projects/acme/myrepo",
+      "git": {
+        "remote_url": null,
+        "remote_host": "github.com",
+        "remote_slug": "acme/myrepo",
+        "branch": null
+      },
+      "tokens": {
+        "input": 2,
+        "output": 142,
+        "cache_creation": 26300,
+        "cache_read": 10,
+        "reasoning": 0
+      },
+      "duration_ms": null,
+      "tool_calls": {
+        "read_file": 1
+      },
+      "files_touched": [],
+      "content_excerpt": "Let me look.",
+      "source_file": "/tmp/modelstat-fixtures/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl",
+      "source_byte_offset": 504
+    }
+  ],
+  "toolCalls": [
+    {
+      "external_call_id": "tc_pi_1",
+      "session_id": "019f0659-dc65-7969-af42-5dc1ced6232a",
+      "source_event_id": "evt_zqd4n169mcng",
+      "agent": "pi",
+      "server": "builtin",
+      "name": "read_file",
+      "turn_index": null,
+      "call_index": 0,
+      "started_at": "2026-06-26T23:53:44.372Z",
+      "ended_at": "2026-06-26T23:53:44.382Z",
+      "status": "success",
+      "args_hash": "95044ed3290cfaba3a50b97a20607ab64200547e802e7eacde59957ed738ec1f",
+      "signature_hash": "a0af9f865bf637e6736817f4ce552e4cdf7b8c36ea75bc254c1d1f0af744b5bf",
+      "args_bytes": 19,
+      "result_bytes": 34,
+      "model": "claude-opus-4-8",
+      "action": {
+        "surface": "builtin",
+        "executable": "read_file",
+        "action": null,
+        "object": null,
+        "qualifiers": [],
+        "param_shape": null,
+        "keywords": [],
+        "abstract": null,
+        "command_redacted": null,
+        "scripts": [],
+        "confidence": 0,
+        "extractor": "builtin.v1"
+      }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "system": "You are the modelstat session summarizer. …(frozen prompt §18)…",
+  "user": "Facts: repo acme/app, branch main, 4 turns.\nExcerpts:\n- did some work",
+  "temperature": 0.2,
+  "max_tokens": 1024,
+  "top_k": 3
+}

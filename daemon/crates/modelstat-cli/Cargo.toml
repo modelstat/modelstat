@@ -1,0 +1,25 @@
+[package]
+name = "modelstat-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The collector binary. Named `modelstat` on disk (§2 command map).
+[[bin]]
+name = "modelstat"
+path = "src/main.rs"
+
+# CRITICAL BOUNDARY (plan §3, D4): the collector links NO llama.cpp. There is
+# deliberately no `modelstat-llm` dependency here, direct or transitive, and CI
+# asserts it via `cargo tree`. Do not add one.
+[dependencies]
+modelstat-wire.workspace = true
+modelstat-redact.workspace = true
+modelstat-daemon.workspace = true
+modelstat-mcp.workspace = true
+modelstat-parsers.workspace = true
+modelstat-ingest.workspace = true
+modelstat-service.workspace = true
+modelstat-update.workspace = true

@@ -1,0 +1,8 @@
+{
+  "ok": true,
+  "protocol": 1,
+  "version": "0.0.0",
+  "model": "qwen3.5-4b-q4_k_m",
+  "model_loaded": true,
+  "backend": "metal"
+}
