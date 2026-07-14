@@ -29,9 +29,31 @@ divergences, a line in feature §23) rather than leaving a silent choice.
 | **`references` / `session_metadata`** | Modeled as opaque `serde_json::Value` passthrough, not typed structs. | Lossless round-trip (more faithful than a hand re-serialization); the full typed port lands with the M4 enrichment work. |
 | **`state.json.selfHostedModel`** | Not a field on the Rust `state` struct — read-tolerated, ignored, dropped on next write (feature §19). | The legacy-state golden (`file_formats/state_legacy.json`) carries it so the M1 reader is tested against it. |
 
+## M1 — identity, config, device API (structural + behavioral decisions)
+
+| Area | Decision | Why it's safe / faithful |
+|---|---|---|
+| **Foundation crate placement** | paths, machine-key probes, the identity + state stores, `Config`, and the device-API client all live in **`modelstat-ingest`**, not `modelstat-daemon`. | Forced by the frozen dep graph: `recoverIdentity` is spec-assigned to `modelstat-ingest` (plan §3) and needs config + identity; `modelstat-daemon` *depends on* `modelstat-ingest`, so the foundation can't live in daemon without a cycle; `modelstat-wire` is pure-contract (no I/O). `ingest` is the lowest I/O crate below both `daemon` and `cli`. The M0 `device.rs` comment guessing "M1 (`modelstat-daemon`)" is superseded by the graph. |
+| **`Config` = explicit struct** | The TS module-level singleton `state` (cached identity + module-level recover backoff) is modeled as a `Config` you construct and pass, identity behind a `Mutex`; the recover backoff lives on the `DeviceApi` instance. | Behaviour is identical — write-through setters, same api-url resolution order, same `[0,2,5,15,30,60]s` recover schedule. The struct makes the five e2e scenarios drivable in one process and keeps env-dependent state out of process globals. |
+| **machine-key fallback honors `MODELSTAT_HOME`** | The fallback key file is `home_path("machine-key")`, not a hard-coded `~/.modelstat/machine-key`. | The one intentional §23 fix. Hardware-id devices (the vast majority) are unaffected; only a fallback-key device that *relocated* may re-derive (documented, acceptable). Unit-tested via `fallback_key_file_honors_modelstat_home`. |
+| **`os_family` gains `windows`** | `build_fingerprint` maps Windows → `"windows"`; the TS returned `"other"`. | Feature §4 mandates it and `OS_FAMILIES` (in `modelstat-wire`) already carries `"windows"`. Additive; the server enum accepts it. |
+| **`os_version`** | `uname -r` on Unix (byte-identical to Node `os.release()` on macOS/Linux); `cmd /c ver` parse on Windows. | Not a golden-tested value (inherently machine-specific); the server just stores/displays it. Windows service specifics land in M5. |
+| **self-hosted URL override** | `MODELSTAT_SUMMARIZER_URL` overrides the stored URL; the `MODELSTAT_LLM_*` family is gone. | Feature §19/§23 (BYO endpoints dropped, one env var replaces the pair). |
+| **`--fresh` convergence** | Proven by the `e2e_m1` integration test and `scripts/e2e-m1.sh` via *back up + wipe identity + re-register* — the exact machine-stable path (feature §21.9). The `connect --fresh` **command** lands in M6. | The convergence mechanism (derive same uuid → dedupe on `machine_id` → same `device_id`) is M1 and fully exercised; only the `connect` wrapper is deferred. Staying inside the milestone boundary. |
+| **Fake device-API server** | The e2e is proven against an in-process axum fake server (dev-dependency only — never linked into the collector) that reproduces the real server's `{data:…}` envelope + `machine_id` dedupe (verified against `core/rust/crates/api/src/devices.rs`). | Docker isn't available here to stand up the real Postgres/ClickHouse/MinIO + API stack; plan §6 explicitly sanctions a "fake … server harness". `scripts/e2e-m1.sh` runs the same flows against a real `$DAEMON_API_URL` when one is provided. |
+| **`token` / prod-guard copy** | `token` unpaired hint and the prod-guard "run it interactively" remedy say `modelstat`, not the TS `npx modelstat@latest`. | The npm path is dropped (§22); the binary is `modelstat`. Not a golden-tested string (stderr help text); the AC checks the **exit code** (1 / 2). |
+| **`cli/status.json` api-vs-dashboard note (not M1)** | The M0 `status.json` golden pairs `api: api.modelstat.ai` with `dashboard: modelstat.ai/dashboard`, which is inconsistent with the TS `dashboard = <apiUrl>/dashboard` derivation. | Flagged here for **M5** (the `status` command) to resolve deliberately. M1 keeps `DEFAULT_API_URL = https://modelstat.ai` (TS parity); the `paths`/`token` `api` field is just `state.apiUrl`. |
+
 ## What is NOT yet ported (by milestone, not omission)
 
 M0 is contracts only. `shell.v3` executable extraction and `normalizeToolName`
 have committed golden fixtures (`shell_executable.json`, `tool_name.json`) but
 their Rust impls land in **M2** (`modelstat-parsers`); the file-format / CLI /
 summarizer-protocol snapshots are consumed in **M1/M4/M5/M6**. See plan §5.
+
+**M1 (`modelstat-ingest` + `modelstat-cli`) ports:** paths/home, machine-key
+probes + fingerprint, the identity + state stores, `Config`, the device-API
+client (register / devices-me / recover / heartbeat + the retry matrix), and the
+`self-register` / `await-claim` / `token` / `paths` commands. Still deferred:
+the reconcile/backfill endpoints that *use* the device matrix (M4), the
+`IngestClient` upload path (M4), and the rest of the CLI surface (M4–M6).

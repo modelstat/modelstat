@@ -23,3 +23,12 @@ modelstat-parsers.workspace = true
 modelstat-ingest.workspace = true
 modelstat-service.workspace = true
 modelstat-update.workspace = true
+# M1 collector commands: the device flow is async (reqwest via modelstat-ingest);
+# serde renders the `--json` shapes (structs, so key order is preserved).
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# The prod/CI register-guard test drives the built binary in a throwaway home.
+tempfile = "3"

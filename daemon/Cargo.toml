@@ -39,6 +39,14 @@ sha1 = "0.10"
 sha2 = "0.10"
 regex = "1"
 
+# Async runtime + HTTP client for the device API (plan D2). reqwest is pinned to
+# rustls — NO OpenSSL linkage — so the six-target cross-compile stays painless.
+# Versions match what core/rust already builds with (guaranteed in the cache).
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+hostname = "0.4"
+
 # Internal crates (path deps). The graph here IS the contract: modelstat-cli
 # (the collector binary) must have no path — direct or transitive — to
 # modelstat-llm. CI asserts it (see .github/workflows/daemon-rs.yml).
