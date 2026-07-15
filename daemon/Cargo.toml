@@ -9,6 +9,7 @@ members = [
   "crates/modelstat-wire",
   "crates/modelstat-redact",
   "crates/modelstat-parsers",
+  "crates/modelstat-download",
   "crates/modelstat-pipeline",
   "crates/modelstat-sumclient",
   "crates/modelstat-ingest",
@@ -57,6 +58,7 @@ hostname = "0.4"
 modelstat-wire = { path = "crates/modelstat-wire" }
 modelstat-redact = { path = "crates/modelstat-redact" }
 modelstat-parsers = { path = "crates/modelstat-parsers" }
+modelstat-download = { path = "crates/modelstat-download" }
 modelstat-pipeline = { path = "crates/modelstat-pipeline" }
 modelstat-sumclient = { path = "crates/modelstat-sumclient" }
 modelstat-ingest = { path = "crates/modelstat-ingest" }
