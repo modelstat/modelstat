@@ -30,7 +30,7 @@ fn script_ext() -> &'static Regex {
 pub fn detect_script_refs(command: &str) -> Vec<String> {
     let mut refs = Vec::new();
     for segment in segment_sep().split(command) {
-        let tokens: Vec<&str> = segment.trim().split_whitespace().collect();
+        let tokens: Vec<&str> = segment.split_whitespace().collect();
         for (i, tok) in tokens.iter().enumerate() {
             let t = strip_quotes(tok);
             if t.is_empty() || t.starts_with('-') || t.contains("://") {

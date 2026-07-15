@@ -279,7 +279,7 @@ fn scan_statement(stmt: &str) -> Scan {
         }
         // leading `(`/`$(`/backtick, then trailing `)`/quote/`;` junk, then path.
         let stripped = strip_opener(&t);
-        let trimmed = stripped.trim_end_matches(|c| matches!(c, ')' | '"' | '\'' | '`' | ';' | ','));
+        let trimmed = stripped.trim_end_matches([')', '"', '\'', '`', ';', ',']);
         let cand = basename(trimmed).to_lowercase();
         if cand.is_empty() || cand.starts_with('-') {
             break; // a flag ⇒ no program here

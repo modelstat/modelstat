@@ -76,7 +76,6 @@ pub fn extract_tool_action(call: &ToolActionInput) -> ToolAction {
     if let Some(cmd) = &command {
         executable = Some(extract_executable(cmd));
         let args = cmd
-            .trim()
             .split_whitespace()
             .skip(1)
             .collect::<Vec<_>>()

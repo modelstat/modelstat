@@ -66,10 +66,7 @@ pub fn parse_git_log(stdout: &str) -> Vec<GitCommit> {
 
 /// The merge/squash commit for a PR number, or None. Matches `#<n>` with
 /// non-digit boundaries so `#123` doesn't hit `#1234`. Pure.
-pub fn find_merge_commit_for_pr<'a>(
-    commits: &'a [GitCommit],
-    pr_number: u64,
-) -> Option<&'a GitCommit> {
+pub fn find_merge_commit_for_pr(commits: &[GitCommit], pr_number: u64) -> Option<&GitCommit> {
     let re = Regex::new(&format!(r"(^|[^0-9])#{pr_number}([^0-9]|$)")).ok()?;
     commits.iter().find(|c| re.is_match(&c.subject))
 }

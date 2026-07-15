@@ -7,9 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use modelstat_wire::GitContext;
 use regex::Regex;
@@ -112,47 +111,10 @@ pub fn guess_repo_slug_from_path(cwd: Option<&str>) -> Option<String> {
 }
 
 /// Run `git` in `cwd`, returning stdout on a zero exit within `timeout`, else
-/// None. Best-effort: any spawn/exit/timeout failure is None (git enrichment is
-/// never allowed to block or fail a scan). A reader thread drains stdout so the
-/// child never blocks on a full pipe; on timeout the child is killed.
+/// None. Thin wrapper over [`crate::util::run_command`] — git enrichment is
+/// never allowed to block or fail a scan.
 pub(crate) fn run_git(args: &[&str], cwd: &str, timeout: Duration) -> Option<String> {
-    let mut child = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = std::io::Read::read_to_string(&mut stdout, &mut buf);
-        buf
-    });
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                break None;
-            }
-        }
-    };
-    let out = reader.join().ok()?;
-    match status {
-        Some(s) if s.success() => Some(out),
-        _ => None,
-    }
+    crate::util::run_command("git", args, Some(cwd), timeout)
 }
 
 /// Resolves authoritative git context per cwd, caching for the process lifetime
@@ -217,6 +179,7 @@ impl GitResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn slug_heuristic() {

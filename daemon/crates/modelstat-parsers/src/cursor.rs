@@ -39,7 +39,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
 
     let result = read_rows(&tmp);
     let _ = fs::remove_file(&tmp);
-    let rows = result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let rows = result.map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let mut events: Vec<RawEvent> = Vec::new();
     let mut raw_lines: u64 = 0;

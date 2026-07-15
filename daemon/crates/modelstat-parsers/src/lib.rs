@@ -27,6 +27,8 @@ pub mod codex;
 pub mod cursor;
 pub mod pi;
 
+pub mod discovery;
+
 // Flat re-exports for the common surface.
 pub use tool_action::{
     detect_script_refs, extract_local_tool_context, extract_tool_action, resolve_script_path,
@@ -48,3 +50,5 @@ pub use claude_code::{
 pub use codex::parse_codex_rollout;
 pub use cursor::parse_cursor_tracking_db;
 pub use pi::parse_pi_session;
+
+pub use discovery::{discover, DetectedIdentity, DetectedInstallation, DiscoveryOptions, DiscoveryOutput};
