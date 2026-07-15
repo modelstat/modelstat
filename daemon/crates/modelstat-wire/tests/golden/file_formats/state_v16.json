@@ -10,6 +10,8 @@
   "segmentsSent": 42,
   "processingVersion": 16,
   "reconcileCache": {},
+  "summariserDegraded": false,
+  "summariserRecoveryAt": 0,
   "reshipState": {},
   "summarizerMode": "cloud",
   "selfHostedUrl": ""
