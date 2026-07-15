@@ -13,6 +13,7 @@ use std::collections::HashSet;
 
 use modelstat_redact::redact;
 use modelstat_sumclient::CompleteRequest;
+use modelstat_wire::TaxonomyHintRooted;
 use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
@@ -256,6 +257,35 @@ fn collapse_hyphens(s: &str) -> String {
     out
 }
 
+/// The PRIMARY (first) mood/mind/posture tag of each field as segment taxonomy
+/// hints (`mood`/`mind`/`posture`, capitalised, confidence 0.7). Port of
+/// `cognitionHints`. Empty when there's nothing to emit.
+pub fn cognition_hints(c: &CognitionTags) -> Vec<TaxonomyHintRooted> {
+    let mut out = Vec::new();
+    let mut push = |root_key: &str, first: Option<&String>| {
+        if let Some(name) = first {
+            out.push(TaxonomyHintRooted {
+                root_key: root_key.to_string(),
+                name: capitalize(name),
+                confidence: 0.7,
+                reason: None,
+            });
+        }
+    };
+    push("mood", c.emotions.first());
+    push("mind", c.meta.first());
+    push("posture", c.posture.first());
+    out
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// `[Mood: …] [Mind: …] [Stance: …]` suffix, "" when empty.
 pub fn format_cognition_suffix(c: &CognitionTags) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -364,6 +394,51 @@ pub fn build_title_user_prompt(abstracts: &[String], facts: Option<&str>) -> Str
         None => String::new(),
     };
     format!("{facts_prefix}Summaries of the session's parts (chronological):\n{lines}\n\nWrite the title.")
+}
+
+/// Deterministic title — the first segment's abstract (the session's intent),
+/// cognition-stripped, cut at the first sentence boundary, sanitised. Never an
+/// LLM call. Port of `fallbackTitle`.
+pub fn fallback_title(abstracts: &[String]) -> String {
+    let Some(first) = abstracts.iter().find(|a| !a.trim().is_empty()) else {
+        return String::new();
+    };
+    sanitise_title(first_sentence(first))
+}
+
+/// Everything up to (and including) the first sentence-ending `.`/`!`/`?` that is
+/// followed by whitespace (JS `split(/(?<=[.!?])\s/, 1)[0]`). Rust regex has no
+/// lookbehind, so this is a manual scan.
+fn first_sentence(s: &str) -> &str {
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    for i in 0..chars.len() {
+        if matches!(chars[i].1, '.' | '!' | '?') {
+            if let Some(&(next_byte, next_char)) = chars.get(i + 1) {
+                if next_char.is_whitespace() {
+                    return &s[..next_byte];
+                }
+            }
+        }
+    }
+    s
+}
+
+/// Evenly sample up to `max` abstracts keeping first + last (port of
+/// `sampleAbstracts`).
+pub fn sample_abstracts(abstracts: &[String], max: usize) -> Vec<String> {
+    if abstracts.len() <= max || max == 0 {
+        return abstracts.to_vec();
+    }
+    let last = abstracts.len() - 1;
+    let mut picks: std::collections::BTreeSet<usize> = [0, last].into_iter().collect();
+    let mut i = 1;
+    while picks.len() < max && i <= last + 2 {
+        // Round(i*(len-1)/(max-1)) — matches the JS spacing (half rounds up).
+        let idx = ((i * last) as f64 / (max - 1) as f64).round() as usize;
+        picks.insert(idx.min(last));
+        i += 1;
+    }
+    picks.into_iter().map(|i| abstracts[i].clone()).collect()
 }
 
 // ── Redaction backstop parsing (redaction.ts) ────────────────────────────────
@@ -547,6 +622,38 @@ mod tests {
             strip_cognition_suffix(&format!("Fixed the bug {suffix}")),
             "Fixed the bug"
         );
+    }
+
+    #[test]
+    fn cognition_hints_emit_primary_capitalised() {
+        let c = CognitionTags {
+            emotions: vec!["frustrated".into(), "curious".into()],
+            meta: vec!["in-flow".into()],
+            posture: vec![],
+        };
+        let h = cognition_hints(&c);
+        assert_eq!(h.len(), 2);
+        assert_eq!((h[0].root_key.as_str(), h[0].name.as_str(), h[0].confidence), ("mood", "Frustrated", 0.7));
+        assert_eq!((h[1].root_key.as_str(), h[1].name.as_str()), ("mind", "In-flow"));
+    }
+
+    #[test]
+    fn fallback_title_cuts_first_sentence() {
+        assert_eq!(
+            fallback_title(&["".into(), "Fixed the bug. Then did more work.".into()]),
+            "Fixed the bug"
+        );
+        assert_eq!(fallback_title(&[]), "");
+    }
+
+    #[test]
+    fn sample_abstracts_keeps_first_last_and_count() {
+        let a: Vec<String> = (0..10).map(|i| i.to_string()).collect();
+        let s = sample_abstracts(&a, 3);
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.first().unwrap(), "0");
+        assert_eq!(s.last().unwrap(), "9");
+        assert_eq!(sample_abstracts(&a, 20), a); // ≤ max → all
     }
 
     #[test]

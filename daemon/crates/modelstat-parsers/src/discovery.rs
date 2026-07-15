@@ -766,6 +766,29 @@ mod tests {
     }
 
     #[test]
+    fn discover_smoke_runs_and_stays_deduped() {
+        // A real discovery pass on the CI runner (M2 AC "discovery smoke"). It is
+        // best-effort — it must never panic, and the output must hold the dedupe
+        // invariants regardless of what (if anything) is installed here.
+        let out = discover(&DiscoveryOptions::default());
+        let mut install_keys = std::collections::HashSet::new();
+        for i in &out.installations {
+            let k = format!(
+                "{}|{}|{}",
+                i.agent,
+                i.binary_path.clone().unwrap_or_default(),
+                i.data_dir.clone().unwrap_or_default()
+            );
+            assert!(install_keys.insert(k), "duplicate install key: {:?}", i.agent);
+        }
+        let mut id_keys = std::collections::HashSet::new();
+        for i in &out.identities {
+            let k = format!("{}|{}", i.provider, i.provider_account_id);
+            assert!(id_keys.insert(k), "duplicate identity key");
+        }
+    }
+
+    #[test]
     fn dedupe_identities_keeps_first_per_key() {
         let mk = |label: &str| DetectedIdentity {
             provider: "anthropic".into(),

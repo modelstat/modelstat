@@ -158,4 +158,55 @@ fn parser_golden_parity() {
         assert_eq!(res.events, events_of(&g), "cursor events");
         assert!(res.tool_calls.is_empty(), "cursor toolCalls empty");
     }
+
+    // 7. Streaming-mode equivalence (M2 AC): each line-based parser must produce
+    //    byte-identical events/tool_calls/stats whether it collects or streams in
+    //    bounded chunks. Cursor is a row-set (not streamed) and is exempt.
+    {
+        use modelstat_parsers::claude_code::parse_claude_code_jsonl_streaming;
+        use modelstat_parsers::codex::parse_codex_rollout_streaming;
+        use modelstat_parsers::pi::parse_pi_session_streaming;
+
+        let claude = format!("{BASE}/claude/11111111-1111-1111-1111-111111111111.jsonl");
+        assert_stream_matches(
+            parse_claude_code_jsonl(&ctx(&claude)).unwrap(),
+            |emit| parse_claude_code_jsonl_streaming(&ctx(&claude), emit).unwrap(),
+            "claude",
+        );
+
+        let codex = format!(
+            "{BASE}/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl"
+        );
+        assert_stream_matches(
+            parse_codex_rollout(&ctx(&codex)).unwrap(),
+            |emit| parse_codex_rollout_streaming(&ctx(&codex), emit).unwrap(),
+            "codex",
+        );
+
+        let pi = format!(
+            "{BASE}/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl"
+        );
+        assert_stream_matches(
+            parse_pi_session(&ctx(&pi)).unwrap(),
+            |emit| parse_pi_session_streaming(&ctx(&pi), emit).unwrap(),
+            "pi",
+        );
+    }
+}
+
+/// Assert a parser's streaming mode yields the same events (via the sink), tool
+/// calls, and stats as its collect mode.
+fn assert_stream_matches<F>(
+    collected: modelstat_parsers::ParseResult,
+    stream: F,
+    label: &str,
+) where
+    F: FnOnce(&mut dyn FnMut(Vec<RawEvent>)) -> modelstat_parsers::ParseResult,
+{
+    let mut streamed_events: Vec<RawEvent> = Vec::new();
+    let res = stream(&mut |chunk| streamed_events.extend(chunk));
+    assert!(res.events.is_empty(), "{label}: streaming mode must not accumulate events");
+    assert_eq!(streamed_events, collected.events, "{label}: streamed events differ");
+    assert_eq!(res.tool_calls, collected.tool_calls, "{label}: streamed tool_calls differ");
+    assert_eq!(res.stats, collected.stats, "{label}: streamed stats differ");
 }
