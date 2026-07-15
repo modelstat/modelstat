@@ -11,11 +11,13 @@
 
 mod entropy;
 mod floor;
+pub mod ner;
 mod paths;
 pub mod policy;
 mod redact;
 
 pub use floor::FLOOR_REPLACEMENT_TEMPLATES;
+pub use ner::{ner_active, ner_redact, NerModel, NerRedaction, NerToken, UnavailableNer};
 pub use policy::{
     compile_policy_patterns, CompiledPattern, RedactionPattern, RedactionPolicyBundle,
     POLICIES_BUNDLED_FALLBACK, POLICIES_CONFIG_KIND,
