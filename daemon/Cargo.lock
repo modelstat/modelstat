@@ -929,6 +929,9 @@ dependencies = [
  "modelstat-redact",
  "modelstat-sumclient",
  "modelstat-wire",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
