@@ -7,9 +7,11 @@
 //! same protocol client + trait seams. No llama.cpp (plan D4): summarization runs
 //! over the summarizer protocol (`modelstat-sumclient`).
 
+pub mod passes;
 pub mod prompts;
 pub mod resilient;
 pub mod segment;
 
+pub use passes::{CognitionTags, THINKING_HEADROOM_TOKENS};
 pub use resilient::{ResilientSummarizer, SummarizeOutcome, Summarizer, DEFAULT_COOLDOWN};
 pub use segment::{cosine_distance, segment_turns, turn_meta, turn_surface, TurnMeta};
