@@ -33,9 +33,9 @@
   ],
   "content_excerpt": "did some work on the ingest path",
   "references": {
-    "issues": [],
+    "repos": [],
     "pull_requests": [],
-    "repos": []
+    "issues": []
   },
   "source_file": "/data/session.jsonl",
   "source_byte_offset": 4096,
