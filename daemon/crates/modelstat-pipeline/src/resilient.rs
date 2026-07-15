@@ -137,6 +137,42 @@ impl<S: Summarizer> ResilientSummarizer<S> {
     }
 }
 
+/// A boot-time preflight result (§9.4): whether the engine answered a smoke
+/// completion, plus a human status line for `status`/logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightReport {
+    pub available: bool,
+    pub message: String,
+}
+
+/// Preflight the summarizer with one smoke completion (§9.4 — "GET /healthz then
+/// one smoke completion"). A non-empty reply ⇒ available, with a ≤60-char sample;
+/// anything else ⇒ a loud "unavailable — held, retrying" status. Reports; never
+/// throws, never blocks boot. `engine_label` is e.g. "local summarizer
+/// (Qwen3.5-4B)" or "self-hosted summarizer at <url>".
+pub async fn preflight<S: Summarizer>(engine_label: &str, summarizer: &S) -> PreflightReport {
+    let req = CompleteRequest {
+        system: "You are a health check. Reply with the single word: ok.".to_string(),
+        user: "ok".to_string(),
+        temperature: 0.0,
+        max_tokens: 16,
+        top_k: None,
+    };
+    match summarizer.complete(&req).await {
+        Ok(text) if !text.trim().is_empty() => {
+            let sample: String = text.trim().chars().take(60).collect();
+            PreflightReport {
+                available: true,
+                message: format!("{engine_label} — \"{sample}\""),
+            }
+        }
+        _ => PreflightReport {
+            available: false,
+            message: "summarizer unavailable — summaries held, retrying".to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +236,17 @@ mod tests {
             SummarizeOutcome::Done("a real LLM abstract".into())
         );
         assert!(r.is_available());
+    }
+
+    #[tokio::test]
+    async fn preflight_reports_up_and_down() {
+        let up = preflight("local summarizer (Qwen3.5-4B)", &Fake::fail_then_ok(0)).await;
+        assert!(up.available);
+        assert!(up.message.contains("local summarizer (Qwen3.5-4B)"));
+        // Always-failing engine → unavailable, loud status.
+        let down = preflight("local summarizer", &Fake::fail_then_ok(usize::MAX)).await;
+        assert!(!down.available);
+        assert!(down.message.contains("held, retrying"));
     }
 
     #[tokio::test]

@@ -14,7 +14,9 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
+pub mod hf;
 mod progress;
+pub use hf::{download_hf_model, HfModel, BERT_NER, BGE_SMALL};
 pub use progress::{ProgressSink, SilentSink, TtyProgress};
 
 /// What to download and where.
