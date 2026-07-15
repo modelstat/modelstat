@@ -9,5 +9,7 @@
 
 pub mod prompts;
 pub mod resilient;
+pub mod segment;
 
 pub use resilient::{ResilientSummarizer, SummarizeOutcome, Summarizer, DEFAULT_COOLDOWN};
+pub use segment::{cosine_distance, segment_turns, turn_meta, turn_surface, TurnMeta};
