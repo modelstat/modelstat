@@ -892,7 +892,11 @@ dependencies = [
 name = "modelstat-llm"
 version = "0.0.0"
 dependencies = [
- "modelstat-wire",
+ "modelstat-download",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -963,9 +967,13 @@ dependencies = [
 name = "modelstat-summarizer"
 version = "0.0.0"
 dependencies = [
+ "axum 0.7.9",
+ "modelstat-download",
  "modelstat-llm",
  "modelstat-sumclient",
- "modelstat-wire",
+ "reqwest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

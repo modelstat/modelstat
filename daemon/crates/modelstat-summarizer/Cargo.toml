@@ -15,6 +15,20 @@ path = "src/main.rs"
 # edge here — and nowhere in the collector's tree — is the whole point of the
 # two-binary split (feature §1, plan D4).
 [dependencies]
-modelstat-wire.workspace = true
 modelstat-llm.workspace = true
 modelstat-sumclient.workspace = true
+modelstat-download.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+axum = "0.7"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+
+[features]
+default = []
+# Forward the native llama.cpp backend feature to the engine crate (needs cmake).
+llama = ["modelstat-llm/llama"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# Drive the server's lifecycle in tests with the mock engine backend.
+modelstat-llm = { workspace = true, features = ["mock"] }

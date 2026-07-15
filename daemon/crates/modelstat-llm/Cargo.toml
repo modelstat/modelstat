@@ -6,5 +6,23 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# LINKED ONLY BY modelstat-summarizer (the engine). The collector must never
+# reach this crate (plan D4 / CI no-llama-link). The `llama` feature pulls in the
+# native llama.cpp backend (needs cmake + a C++ toolchain); it is OFF by default
+# so the workspace compiles anywhere, and the fail-loud UnavailableBackend stands
+# in until a real backend is compiled.
 [dependencies]
-modelstat-wire.workspace = true
+modelstat-download.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+[features]
+default = []
+# The native llama.cpp backend. Enable in release/CI environments that have
+# cmake; `modelstat-summarizer` forwards its own `llama` feature here.
+llama = []
+# Exposes MockBackend so downstream (the engine binary) can drive lifecycle
+# tests without a real model. Dev-only — never enabled in a release build.
+mock = []
