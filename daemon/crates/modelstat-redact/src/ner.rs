@@ -224,6 +224,138 @@ pub fn ner_active<M: NerModel>(model: &M) -> bool {
     !ner_redact(model, sentinel).text.contains("Katherine Johnson")
 }
 
+// ── candle BERT-NER runtime (feature `candle`) ───────────────────────────────
+//
+// Compile-verified against candle-transformers 0.8; run-verification needs the
+// downloaded dslim/bert-base-NER weights. Exact-span parity vs transformers.js is
+// not required — PROCESSING_VERSION 16 absorbs the runtime swap (plan R2/D13);
+// the fail-closed liveness gate (`ner_active`) keeps egress safe regardless.
+#[cfg(feature = "candle")]
+mod candle_ner {
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    use candle_core::{Device, Tensor, D};
+    use candle_nn::{Linear, Module, VarBuilder};
+    use candle_transformers::models::bert::{BertModel, Config, DTYPE};
+    use tokenizers::Tokenizer;
+
+    use super::{NerModel, NerToken};
+
+    /// A BERT token-classification model (dslim/bert-base-NER class) over candle
+    /// (CPU). Loaded from a model dir with `config.json`, `tokenizer.json`,
+    /// `model.safetensors` (HF keys `bert.*` + `classifier.*`).
+    pub struct CandleNer {
+        model: BertModel,
+        classifier: Linear,
+        tokenizer: Tokenizer,
+        id2label: HashMap<usize, String>,
+        device: Device,
+    }
+
+    impl CandleNer {
+        pub fn load(model_dir: &Path) -> Result<Self, String> {
+            let device = Device::Cpu;
+            let cfg_bytes =
+                std::fs::read(model_dir.join("config.json")).map_err(|e| e.to_string())?;
+            let config: Config = serde_json::from_slice(&cfg_bytes).map_err(|e| e.to_string())?;
+            let raw: serde_json::Value =
+                serde_json::from_slice(&cfg_bytes).map_err(|e| e.to_string())?;
+            let id2label = parse_id2label(&raw)?;
+            let num_labels = id2label.len();
+            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
+                .map_err(|e| e.to_string())?;
+            let weights = model_dir.join("model.safetensors");
+            // SAFETY: mmap of a trusted, checksum-verified model file we downloaded.
+            let vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[weights], DTYPE, &device)
+                    .map_err(|e| e.to_string())?
+            };
+            let model = BertModel::load(vb.pp("bert"), &config).map_err(|e| e.to_string())?;
+            let classifier = candle_nn::linear(config.hidden_size, num_labels, vb.pp("classifier"))
+                .map_err(|e| e.to_string())?;
+            Ok(Self {
+                model,
+                classifier,
+                tokenizer,
+                id2label,
+                device,
+            })
+        }
+
+        fn try_classify(&self, text: &str) -> Result<Vec<NerToken>, String> {
+            let enc = self.tokenizer.encode(text, true).map_err(|e| e.to_string())?;
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let input_ids = Tensor::new(ids.as_slice(), &self.device)
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(|e| e.to_string())?;
+            let token_type_ids = input_ids.zeros_like().map_err(|e| e.to_string())?;
+            let hidden = self
+                .model
+                .forward(&input_ids, &token_type_ids, None)
+                .and_then(|h| h.squeeze(0)) // [seq, hidden]
+                .map_err(|e| e.to_string())?;
+            let logits = self.classifier.forward(&hidden).map_err(|e| e.to_string())?; // [seq, labels]
+            let label_ids: Vec<u32> = logits
+                .argmax(D::Minus1)
+                .and_then(|a| a.to_vec1::<u32>())
+                .map_err(|e| e.to_string())?;
+
+            let offsets = enc.get_offsets(); // BYTE offsets into `text`
+            let words = enc.get_tokens();
+            let mut out = Vec::with_capacity(label_ids.len());
+            for (i, &lid) in label_ids.iter().enumerate() {
+                let entity = self
+                    .id2label
+                    .get(&(lid as usize))
+                    .cloned()
+                    .unwrap_or_else(|| "O".to_string());
+                let (sb, eb) = offsets.get(i).copied().unwrap_or((0, 0));
+                out.push(NerToken {
+                    entity,
+                    word: words.get(i).cloned().unwrap_or_default(),
+                    start: Some(byte_to_char(text, sb)),
+                    end: Some(byte_to_char(text, eb)),
+                });
+            }
+            Ok(out)
+        }
+    }
+
+    impl NerModel for CandleNer {
+        fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+            self.try_classify(text).ok()
+        }
+    }
+
+    /// Char index for a byte offset (the NER splice is char-based; candle
+    /// tokenizers report byte offsets).
+    fn byte_to_char(text: &str, byte: usize) -> usize {
+        let b = byte.min(text.len());
+        text[..b].chars().count()
+    }
+
+    fn parse_id2label(raw: &serde_json::Value) -> Result<HashMap<usize, String>, String> {
+        let map = raw
+            .get("id2label")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| "config.json missing id2label".to_string())?;
+        let mut out = HashMap::new();
+        for (k, v) in map {
+            let id: usize = k.parse().map_err(|_| "non-numeric id2label key".to_string())?;
+            let label = v.as_str().unwrap_or("O").to_string();
+            out.insert(id, label);
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(feature = "candle")]
+pub use candle_ner::CandleNer;
+
 #[cfg(test)]
 mod tests {
     use super::*;

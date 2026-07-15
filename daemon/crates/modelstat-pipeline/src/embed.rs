@@ -87,6 +87,89 @@ pub fn embed_turns<E: Embedder>(events: &[RawEvent], embedder: &E) -> Vec<TurnMe
         .collect()
 }
 
+// ── candle BGE runtime (feature `candle`) ────────────────────────────────────
+//
+// Compile-verified against candle-transformers 0.8; run-verification needs the
+// downloaded BGE weights (exact vs transformers.js parity is not required —
+// PROCESSING_VERSION 16 absorbs the runtime swap, plan R2/D13).
+#[cfg(feature = "candle")]
+mod candle_bge {
+    use std::path::Path;
+
+    use candle_core::{Device, Tensor};
+    use candle_nn::VarBuilder;
+    use candle_transformers::models::bert::{BertModel, Config, DTYPE};
+    use tokenizers::Tokenizer;
+
+    use super::{l2_normalize, mean_pool, Embedder};
+
+    /// BAAI/bge-small-en-v1.5 over candle (CPU, 384-dim). Loaded from a model dir
+    /// holding `config.json`, `tokenizer.json`, `model.safetensors`.
+    pub struct CandleEmbedder {
+        model: BertModel,
+        tokenizer: Tokenizer,
+        device: Device,
+    }
+
+    impl CandleEmbedder {
+        /// Load the model from `model_dir`. Errs (String) on any missing/invalid
+        /// artifact — the caller keeps the fail-open [`super::NoEmbedder`] then.
+        pub fn load(model_dir: &Path) -> Result<Self, String> {
+            let device = Device::Cpu;
+            let cfg_bytes = std::fs::read(model_dir.join("config.json")).map_err(|e| e.to_string())?;
+            let config: Config = serde_json::from_slice(&cfg_bytes).map_err(|e| e.to_string())?;
+            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
+                .map_err(|e| e.to_string())?;
+            let weights = model_dir.join("model.safetensors");
+            // SAFETY: mmap of a trusted, checksum-verified model file we downloaded.
+            let vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[weights], DTYPE, &device)
+                    .map_err(|e| e.to_string())?
+            };
+            let model = BertModel::load(vb, &config).map_err(|e| e.to_string())?;
+            Ok(Self {
+                model,
+                tokenizer,
+                device,
+            })
+        }
+
+        fn try_embed(&self, text: &str) -> Result<Vec<f32>, String> {
+            let enc = self.tokenizer.encode(text, true).map_err(|e| e.to_string())?;
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let input_ids = Tensor::new(ids.as_slice(), &self.device)
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(|e| e.to_string())?; // [1, seq]
+            let token_type_ids = input_ids.zeros_like().map_err(|e| e.to_string())?;
+            // Single sentence, no padding → every token is attended (mask all 1s).
+            let hidden = self
+                .model
+                .forward(&input_ids, &token_type_ids, None)
+                .and_then(|h| h.squeeze(0)) // [seq, hidden]
+                .map_err(|e| e.to_string())?;
+            let tokens: Vec<Vec<f32>> = hidden.to_vec2::<f32>().map_err(|e| e.to_string())?;
+            let mask = vec![1.0f32; tokens.len()];
+            let mut pooled = mean_pool(&tokens, &mask);
+            l2_normalize(&mut pooled);
+            Ok(pooled)
+        }
+    }
+
+    impl Embedder for CandleEmbedder {
+        fn embed(&self, text: &str) -> Vec<f32> {
+            // Best-effort: any inference failure → empty vector (§9.5 — segmentation
+            // falls back to time-gap, the scan never dies).
+            self.try_embed(text).unwrap_or_default()
+        }
+    }
+}
+
+#[cfg(feature = "candle")]
+pub use candle_bge::CandleEmbedder;
+
 #[cfg(test)]
 mod tests {
     use super::*;

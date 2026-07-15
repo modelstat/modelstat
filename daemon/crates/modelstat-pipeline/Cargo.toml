@@ -19,5 +19,18 @@ regex.workspace = true
 unicode-normalization = "0.1"
 tokio = { workspace = true, features = ["time"] }
 
+# The candle BGE embedder (feature §9.5 / plan D5). Pure Rust (CPU) — compiles
+# without cmake — but OFF by default: it's a heavy dep and its cross-target CPU
+# build is unproven, so the default collector uses the fail-open NoEmbedder and
+# release/verified builds opt in with `--features candle`.
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+
+[features]
+default = []
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
