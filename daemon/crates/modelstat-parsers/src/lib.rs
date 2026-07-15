@@ -19,6 +19,8 @@ pub mod tool_hash;
 pub mod types;
 
 pub mod git;
+pub mod git_files;
+pub mod git_outcome;
 
 pub mod claude_code;
 pub mod codex;

@@ -5,9 +5,13 @@
 //! `git`-subprocess `resolveGitContext` (authoritative slug/branch) is enrichment
 //! (feature §7.4) and lands with the M4 git-enrichment sub-piece.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
+use modelstat_wire::GitContext;
 use regex::Regex;
 
 /// The main-repo path for a (possibly ephemeral) worktree cwd: strips
@@ -107,6 +111,109 @@ pub fn guess_repo_slug_from_path(cwd: Option<&str>) -> Option<String> {
     Some(format!("{a}/{b}"))
 }
 
+/// Run `git` in `cwd`, returning stdout on a zero exit within `timeout`, else
+/// None. Best-effort: any spawn/exit/timeout failure is None (git enrichment is
+/// never allowed to block or fail a scan). A reader thread drains stdout so the
+/// child never blocks on a full pipe; on timeout the child is killed.
+pub(crate) fn run_git(args: &[&str], cwd: &str, timeout: Duration) -> Option<String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut buf);
+        buf
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                break None;
+            }
+        }
+    };
+    let out = reader.join().ok()?;
+    match status {
+        Some(s) if s.success() => Some(out),
+        _ => None,
+    }
+}
+
+/// Resolves authoritative git context per cwd, caching for the process lifetime
+/// (a byte-faithful model of the TS module-level `cache` Map — worktrees are
+/// collapsed to the main repo so every session of a repo yields the one
+/// canonical remote slug). 2s git timeouts.
+#[derive(Default)]
+pub struct GitResolver {
+    cache: HashMap<String, GitContext>,
+}
+
+impl GitResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The git context for `cwd`, or None when `cwd` is None. A non-repo cwd
+    /// resolves to an all-null context (cached), matching the TS.
+    pub fn resolve(&mut self, cwd: Option<&str>) -> Option<GitContext> {
+        let cwd = cwd?;
+        let target = main_repo_path(cwd).to_string();
+        if let Some(hit) = self.cache.get(&target) {
+            return Some(hit.clone());
+        }
+        let ctx = match find_repo_root(&target) {
+            None => GitContext {
+                remote_url: None,
+                remote_host: None,
+                remote_slug: None,
+                branch: None,
+            },
+            Some(root) => {
+                let ran = |args: &[&str]| -> Option<String> {
+                    run_git(args, &root, Duration::from_millis(2_000)).and_then(|s| {
+                        let t = s.trim().to_string();
+                        if t.is_empty() {
+                            None
+                        } else {
+                            Some(t)
+                        }
+                    })
+                };
+                let remote_url = ran(&["config", "--get", "remote.origin.url"]);
+                let branch = ran(&["rev-parse", "--abbrev-ref", "HEAD"]);
+                let (host, slug) = match &remote_url {
+                    Some(u) => parse_remote(u),
+                    None => (None, None),
+                };
+                GitContext {
+                    remote_url,
+                    remote_host: host,
+                    remote_slug: slug,
+                    branch,
+                }
+            }
+        };
+        self.cache.insert(target, ctx.clone());
+        Some(ctx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +257,38 @@ mod tests {
             parse_remote("https://gitlab.com/group/sub/repo"),
             (Some("gitlab.com".into()), None)
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_reads_remote_from_a_real_repo() {
+        let dir = std::env::temp_dir().join(format!("modelstat-git-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_str().unwrap().to_string();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        };
+        // Skip cleanly if git isn't available on this runner.
+        if run(&["init", "-q"]).map(|s| !s.success()).unwrap_or(true) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let _ = run(&["config", "remote.origin.url", "git@github.com:acme/myrepo.git"]);
+        let mut resolver = GitResolver::new();
+        let ctx = resolver.resolve(Some(&path)).unwrap();
+        assert_eq!(ctx.remote_slug.as_deref(), Some("acme/myrepo"));
+        assert_eq!(ctx.remote_host.as_deref(), Some("github.com"));
+        // Second call is served from cache.
+        assert_eq!(
+            resolver.resolve(Some(&path)).unwrap().remote_slug.as_deref(),
+            Some("acme/myrepo")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
