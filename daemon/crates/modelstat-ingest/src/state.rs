@@ -1,12 +1,14 @@
 //! Per-install runtime state — `~/.modelstat/state.json`. Port of the TS
 //! `apps/daemon/src/runtime-state.ts` (feature §19). Non-secret bookkeeping:
 //! file cursors, the API-URL override, counters, the processing-version marker,
-//! degrade/reconcile/reship state, and the summarizer mode + self-hosted URL.
+//! reconcile/reship state, and the summarizer mode + self-hosted URL.
 //!
-//! **Dropped field:** `selfHostedModel` is read-tolerated, ignored, and dropped
-//! on the next write (feature §19/§23; BYO-endpoint model ids are gone). The
-//! legacy golden `state_legacy.json` carries it so this reader is tested against
-//! it. Missing/corrupt ⇒ defaults (forces a full first scan).
+//! **Dropped fields:** `selfHostedModel` (BYO-endpoint model ids are gone) and
+//! `summariserDegraded` / `summariserRecoveryAt` (obsolete — a down summarizer is
+//! now held-and-retried, never degraded; feature §9.4/§20) are read-tolerated,
+//! ignored, and dropped on the next write. The legacy golden `state_legacy.json`
+//! carries all three so this reader is tested against them. Missing/corrupt ⇒
+//! defaults (forces a full first scan).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -50,10 +52,6 @@ pub struct RuntimeState {
     pub segments_sent: i64,
     pub processing_version: Option<i64>,
     pub reconcile_cache: Value,
-    #[serde(rename = "summariserDegraded")]
-    pub summariser_degraded: bool,
-    #[serde(rename = "summariserRecoveryAt")]
-    pub summariser_recovery_at: i64,
     pub reship_state: Value,
     pub summarizer_mode: String,
     pub self_hosted_url: String,
@@ -67,8 +65,6 @@ impl Default for RuntimeState {
             segments_sent: 0,
             processing_version: None,
             reconcile_cache: json!({}),
-            summariser_degraded: false,
-            summariser_recovery_at: 0,
             reship_state: json!({}),
             summarizer_mode: DEFAULT_SUMMARIZER_MODE.to_string(),
             self_hosted_url: String::new(),
@@ -86,10 +82,6 @@ struct PartialState {
     segments_sent: Option<i64>,
     processing_version: Option<i64>,
     reconcile_cache: Option<Value>,
-    #[serde(rename = "summariserDegraded")]
-    summariser_degraded: Option<bool>,
-    #[serde(rename = "summariserRecoveryAt")]
-    summariser_recovery_at: Option<i64>,
     reship_state: Option<Value>,
     summarizer_mode: Option<String>,
     self_hosted_url: Option<String>,
@@ -118,10 +110,6 @@ pub fn load_state() -> RuntimeState {
         segments_sent: obj.segments_sent.unwrap_or(d.segments_sent),
         processing_version: obj.processing_version,
         reconcile_cache: obj.reconcile_cache.unwrap_or(d.reconcile_cache),
-        summariser_degraded: obj.summariser_degraded.unwrap_or(d.summariser_degraded),
-        summariser_recovery_at: obj
-            .summariser_recovery_at
-            .unwrap_or(d.summariser_recovery_at),
         reship_state: obj.reship_state.unwrap_or(d.reship_state),
         summarizer_mode: parse_summarizer_mode(obj.summarizer_mode.as_deref())
             .unwrap_or(DEFAULT_SUMMARIZER_MODE)
@@ -131,7 +119,8 @@ pub fn load_state() -> RuntimeState {
 }
 
 /// Atomic write (`<file>.<pid>.tmp` + rename, `0600`), matching the TS `persist`.
-/// Note: `selfHostedModel` is never written — it is dropped here on every save.
+/// Note: the obsolete fields (`selfHostedModel`, `summariserDegraded`,
+/// `summariserRecoveryAt`) are never written — they are dropped here on every save.
 pub fn save_state(s: &RuntimeState) -> std::io::Result<()> {
     ensure_home()?;
     let path = state_path();
@@ -145,7 +134,7 @@ pub fn save_state(s: &RuntimeState) -> std::io::Result<()> {
 }
 
 // ── Convenience getters/setters (load → modify → save), the M1 surface. ──
-// Cursor mutation + the reconcile/reship/degrade bookkeeping are scan-loop
+// Cursor mutation + the reconcile/reship bookkeeping are scan-loop
 // concerns and land with M4; the struct round-trips them losslessly meanwhile.
 
 /// The stored API-URL override (empty ⇒ env / production default).
@@ -239,24 +228,30 @@ mod tests {
     }
 
     #[test]
-    fn reads_legacy_and_drops_self_hosted_model() {
+    fn reads_legacy_and_drops_obsolete_fields() {
         let tmp = tempfile::tempdir().unwrap();
         with_home(tmp.path(), || {
             crate::paths::ensure_home().unwrap();
             std::fs::write(state_path(), golden("state_legacy.json")).unwrap();
             let s = load_state();
-            // Legacy fields read tolerantly.
+            // Legacy fields read tolerantly; the obsolete ones are simply ignored.
             assert_eq!(s.processing_version, Some(15));
             assert_eq!(s.summarizer_mode, "self-hosted");
             assert_eq!(s.self_hosted_url, "https://llm.acme.internal");
-            assert!(s.summariser_degraded);
-            // selfHostedModel is dropped on write.
+            // selfHostedModel + summariserDegraded + summariserRecoveryAt are all
+            // dropped on the next write.
             save_state(&s).unwrap();
             let written = std::fs::read_to_string(state_path()).unwrap();
-            assert!(
-                !written.contains("selfHostedModel"),
-                "selfHostedModel must be dropped on the next write"
-            );
+            for gone in [
+                "selfHostedModel",
+                "summariserDegraded",
+                "summariserRecoveryAt",
+            ] {
+                assert!(
+                    !written.contains(gone),
+                    "{gone} must be dropped on the next write"
+                );
+            }
             // apiUrl legacy value is preserved at the store layer (the localhost
             // reinterpretation is a Config-layer concern, not the store's).
             assert_eq!(s.api_url, "http://localhost:3010");

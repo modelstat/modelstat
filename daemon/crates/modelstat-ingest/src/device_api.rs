@@ -298,7 +298,14 @@ impl DeviceApi {
             let code = res.status();
             if code.is_success() {
                 if is_spa_fallback(&res) {
-                    return None; // 200 + text/html = removed route → degrade
+                    // 200 text/html = the SPA served a removed/undeployed route.
+                    // Not transient (retrying won't help) - report loudly and
+                    // return None without a parse crash (feature §17, §21.12).
+                    eprintln!(
+                        "[modelstat] device request to {} returned the dashboard (200 text/html) - route may be undeployed or misconfigured",
+                        url
+                    );
+                    return None;
                 }
                 return res.json::<Value>().await.ok(); // parse failure → None
             }
@@ -358,7 +365,8 @@ impl DeviceApi {
 }
 
 /// The SPA fallback returns `200 text/html` for a removed route — detect it
-/// BEFORE parsing so a route removal degrades to `null` instead of throwing
+/// BEFORE parsing so a route removal returns `null` (logged loudly by the
+/// caller) instead of throwing
 /// "Unexpected token <". Port of TS `isSpaFallback`.
 fn is_spa_fallback(res: &reqwest::Response) -> bool {
     res.headers()
