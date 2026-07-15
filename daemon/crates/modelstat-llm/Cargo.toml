@@ -17,12 +17,19 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
+# The native llama.cpp binding (vendored + built via cmake; Metal on macOS, CPU
+# elsewhere). Optional — only pulled in by the `llama` feature so cmake-free
+# builds still compile.
+llama-cpp-2 = { version = "0.1", optional = true }
+# For streaming, multi-byte-safe token detokenization (llama-cpp-2's
+# non-deprecated `token_to_piece` takes an incremental decoder).
+encoding_rs = { version = "0.8", optional = true }
 
 [features]
 default = []
 # The native llama.cpp backend. Enable in release/CI environments that have
 # cmake; `modelstat-summarizer` forwards its own `llama` feature here.
-llama = []
+llama = ["dep:llama-cpp-2", "dep:encoding_rs"]
 # Exposes MockBackend so downstream (the engine binary) can drive lifecycle
 # tests without a real model. Dev-only — never enabled in a release build.
 mock = []

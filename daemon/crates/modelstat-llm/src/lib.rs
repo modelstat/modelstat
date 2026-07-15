@@ -16,9 +16,15 @@ pub mod config;
 pub mod engine;
 pub mod guard;
 
+#[cfg(feature = "llama")]
+pub mod llama;
+
 pub use backend::{strip_think, Backend, GenParams, UnavailableBackend};
 pub use config::EngineConfig;
 pub use engine::{CompleteOutcome, Engine, EngineState};
+
+#[cfg(feature = "llama")]
+pub use llama::LlamaBackend;
 
 #[cfg(any(test, feature = "mock"))]
 pub use backend::MockBackend;

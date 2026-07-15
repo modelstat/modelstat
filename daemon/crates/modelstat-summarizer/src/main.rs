@@ -17,7 +17,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use modelstat_download::TtyProgress;
-use modelstat_llm::{Backend, Engine, EngineConfig, UnavailableBackend};
+use modelstat_llm::{Backend, Engine, EngineConfig};
+#[cfg(not(feature = "llama"))]
+use modelstat_llm::UnavailableBackend;
 use modelstat_sumclient::SummarizerClient;
 
 /// The `summarizer-<semver>` banner string (§2).
@@ -59,17 +61,25 @@ fn usage() {
 }
 
 /// The engine's inference backend for this build. Default (cmake-free) = the
-/// fail-loud [`UnavailableBackend`]; the native llama.cpp backend slots in here
-/// behind the `llama` feature.
-fn make_backend() -> impl Backend {
+/// fail-loud [`UnavailableBackend`]; the native llama.cpp backend when built
+/// `--features llama`. `models_dir` holds the GPU-abort guard the llama backend
+/// consults.
+#[cfg(feature = "llama")]
+fn make_backend(models_dir: &std::path::Path) -> impl Backend {
+    modelstat_llm::LlamaBackend::new(models_dir, env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(not(feature = "llama"))]
+fn make_backend(_models_dir: &std::path::Path) -> impl Backend {
     UnavailableBackend
 }
 
 async fn serve() -> ExitCode {
     let home = home_dir();
+    let models = models_dir(&home);
     let cfg = EngineConfig::load(&config_path(&home))
-        .unwrap_or_else(|_| EngineConfig::defaults(&models_dir(&home)));
-    let engine = Arc::new(Engine::new(make_backend(), cfg.clone()));
+        .unwrap_or_else(|_| EngineConfig::defaults(&models));
+    let engine = Arc::new(Engine::new(make_backend(&models), cfg.clone()));
 
     let addr = format!("{}:{}", cfg.bind, cfg.port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {

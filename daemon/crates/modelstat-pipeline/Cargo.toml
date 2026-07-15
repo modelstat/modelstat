@@ -30,7 +30,18 @@ tokenizers = { version = "0.20", default-features = false, features = ["onig"], 
 
 [features]
 default = []
-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+# One switch turns on BOTH candle models the collector uses — the BGE embedder
+# here and the BERT-NER in modelstat-redact.
+candle = [
+  "dep:candle-core",
+  "dep:candle-nn",
+  "dep:candle-transformers",
+  "dep:tokenizers",
+  "modelstat-redact/candle",
+]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# For the `candle_verify` example: download the model weights + run inference.
+modelstat-download.workspace = true
+reqwest.workspace = true
