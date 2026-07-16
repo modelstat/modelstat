@@ -1747,7 +1747,11 @@ name = "modelstat-receiver"
 version = "0.0.0"
 dependencies = [
  "modelstat-ingest",
+ "modelstat-parsers",
  "modelstat-wire",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

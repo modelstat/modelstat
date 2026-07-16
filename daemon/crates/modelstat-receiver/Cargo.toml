@@ -9,3 +9,9 @@ repository.workspace = true
 [dependencies]
 modelstat-wire.workspace = true
 modelstat-ingest.workspace = true
+modelstat-parsers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
