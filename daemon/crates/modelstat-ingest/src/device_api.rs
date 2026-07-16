@@ -374,6 +374,14 @@ impl DeviceApi {
         serde_json::from_value(raw).ok()
     }
 
+    /// Authed JSON POST through the shared retry matrix — the write-path sibling
+    /// of [`authed_json_get`]. Returns the raw response JSON (no envelope unwrap),
+    /// or `None` on any non-recoverable failure. Used for MCP tool calls
+    /// (`POST /v1/mcp/call`) whose response envelope the caller destructures itself.
+    pub async fn post_json(&self, url: &str, body: &Value) -> Option<Value> {
+        self.device_request(Method::POST, url, Some(body), 3).await
+    }
+
     /// Authenticated heartbeat POST (feature §6.4). Routed through the shared
     /// matrix, so it gets the same 401→recover + 5xx-backoff handling. Returns
     /// the unwrapped `.data` on success, else `None`. Port of TS `postHeartbeat`.
