@@ -15,6 +15,7 @@ pub mod processing_version;
 pub mod reconcile;
 pub mod runtime;
 pub mod scan;
+pub mod status;
 pub mod single_flight;
 pub mod watch;
 
