@@ -5,12 +5,16 @@
 //! orchestration + main loop compose them.
 
 pub mod authoritative_git;
+pub mod discover_jobs;
 pub mod flush;
 pub mod lock;
 pub mod processing_version;
 pub mod single_flight;
 
 pub use authoritative_git::resolve_authoritative_git;
+pub use discover_jobs::{
+    discover_jobs, order_jobs_newest_first, parse_job, ParserKind, ScanJob,
+};
 pub use flush::{build_flush_batches, with_non_null_tokens, FlushOutcome, PreparedBatch};
 
 pub use lock::{
