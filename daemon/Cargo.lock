@@ -1855,6 +1855,10 @@ dependencies = [
 [[package]]
 name = "modelstat-service"
 version = "0.0.0"
+dependencies = [
+ "libc",
+ "modelstat-ingest",
+]
 
 [[package]]
 name = "modelstat-sumclient"
