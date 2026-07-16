@@ -13,6 +13,7 @@ modelstat-parsers.workspace = true
 modelstat-pipeline.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
