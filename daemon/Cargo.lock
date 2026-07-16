@@ -1721,6 +1721,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "chrono",
+ "getrandom 0.3.4",
  "modelstat-download",
  "modelstat-parsers",
  "modelstat-redact",
