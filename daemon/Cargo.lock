@@ -1781,7 +1781,10 @@ dependencies = [
 name = "modelstat-mcp"
 version = "0.0.0"
 dependencies = [
+ "modelstat-ingest",
  "modelstat-wire",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

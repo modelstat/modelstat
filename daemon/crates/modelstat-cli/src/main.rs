@@ -39,6 +39,9 @@ fn main() -> ExitCode {
             modelstat_daemon::statusline::run_statusline();
             ExitCode::SUCCESS
         }
+        // Embedded MCP (§12). `mcp wire [--heal]` configures clients; bare `mcp`
+        // (the stdio bridge) lands with the bridge module.
+        Some("mcp") if args.get(1).map(String::as_str) == Some("wire") => cmd_mcp_wire(&args[2..]),
         // The tray's adopt/spawn/replace decision (§15) — read-only JSON.
         Some("_daemon-health") => cmd_daemon_health(),
         // Install/refresh the managed daemon service + reconcile the tray (§16/§15).
@@ -71,6 +74,48 @@ fn cmd_run(args: &[String]) -> ExitCode {
     };
     let config = Arc::new(Config::load(VERSION));
     rt.block_on(modelstat_daemon::run::run(config, force))
+}
+
+/// `modelstat mcp wire [--heal]` (§12) — configure the modelstat MCP server into
+/// every detected AI tool. `--heal` (run by the daemon on startup) touches only
+/// clients we haven't wired before. Always exits 0. Logs to stderr prefixed
+/// `modelstat-mcp: ` (stdout is reserved for the MCP protocol).
+fn cmd_mcp_wire(args: &[String]) -> ExitCode {
+    use modelstat_mcp::wire::{heal_wire, run_wire, wired_state_path, Plat, WireStatus};
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "modelstat".to_string());
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    if args.iter().any(|a| a == "--heal") {
+        let r = heal_wire(&home, Plat::current(), &exe, true, &wired_state_path());
+        if !r.configured.is_empty() {
+            eprintln!("modelstat-mcp: wired {}", r.configured.join(", "));
+        }
+        return ExitCode::SUCCESS;
+    }
+    let results = run_wire(&home, Plat::current(), &exe, true);
+    eprintln!("modelstat MCP — wiring your AI tools:");
+    for r in &results {
+        eprintln!("  {} {} — {}", r.status.mark(), r.name, r.status.label());
+    }
+    let n = results
+        .iter()
+        .filter(|r| r.status == WireStatus::Configured)
+        .count();
+    if n > 0 {
+        eprintln!(
+            "Configured {n} tool{}. Restart any open tool to load the modelstat MCP.",
+            if n == 1 { "" } else { "s" }
+        );
+    } else {
+        eprintln!("Nothing new to configure (already set up, or no supported tools detected).");
+    }
+    ExitCode::SUCCESS
 }
 
 /// `modelstat _daemon-health` — the tray's read-only adopt/spawn/replace decision

@@ -8,3 +8,6 @@ repository.workspace = true
 
 [dependencies]
 modelstat-wire.workspace = true
+modelstat-ingest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
