@@ -321,12 +321,15 @@ impl DeviceApi {
             }
             if code == StatusCode::BAD_REQUEST || code == StatusCode::UNPROCESSABLE_ENTITY {
                 // Permanent client error — will never succeed as-is (log ≤300).
+                // Slice by CHARS, not bytes — a multibyte char straddling byte 300
+                // would panic a byte-slice (matches the `.chars().take(..)` upload path).
                 let text = res.text().await.unwrap_or_default();
+                let snippet: String = text.chars().take(300).collect();
                 eprintln!(
                     "[modelstat] device request rejected {} {}: {}",
                     url,
                     code.as_u16(),
-                    &text[..text.len().min(300)]
+                    snippet
                 );
                 return None;
             }
