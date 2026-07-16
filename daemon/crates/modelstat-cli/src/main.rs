@@ -33,6 +33,12 @@ fn main() -> ExitCode {
         // The long-running collector daemon (feature §5). `start` and `run` are
         // aliases; `--force` replaces a live owner (see the singleton lock).
         Some("start") | Some("run") => cmd_run(&args[1..]),
+        // Claude Code statusline (§14) — reads stdin, prints one line, never
+        // blocks/throws. No async runtime + no network: a pure cache read.
+        Some("statusline") => {
+            modelstat_daemon::statusline::run_statusline();
+            ExitCode::SUCCESS
+        }
         _ => {
             println!("{VERSION}");
             println!("the collector CLI is implemented across milestones M1–M6");

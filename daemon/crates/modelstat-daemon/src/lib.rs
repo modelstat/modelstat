@@ -6,6 +6,7 @@
 
 pub mod adapters;
 pub mod authoritative_git;
+pub mod claude_settings;
 pub mod discover_jobs;
 pub mod engine;
 pub mod enrich_scripts;
@@ -19,6 +20,7 @@ pub mod run;
 pub mod runtime;
 pub mod scan;
 pub mod status;
+pub mod statusline;
 pub mod single_flight;
 pub mod watch;
 
