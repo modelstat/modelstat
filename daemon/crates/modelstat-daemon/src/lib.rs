@@ -13,6 +13,7 @@ pub mod processing_version;
 pub mod reconcile;
 pub mod scan;
 pub mod single_flight;
+pub mod watch;
 
 pub use authoritative_git::resolve_authoritative_git;
 pub use discover_jobs::{
