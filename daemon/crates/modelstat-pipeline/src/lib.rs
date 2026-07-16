@@ -14,7 +14,7 @@ pub mod prompts;
 pub mod resilient;
 pub mod segment;
 
-pub use build::{build_for_one_session, BuildOutcome};
+pub use build::{build_for_one_session, build_session_titles, BuildOutcome};
 pub use embed::{embed_turns, l2_normalize, mean_pool, Embedder, NoEmbedder, EMBED_DIM};
 pub use passes::{CognitionTags, THINKING_HEADROOM_TOKENS};
 pub use resilient::{

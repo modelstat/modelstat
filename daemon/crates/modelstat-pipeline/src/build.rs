@@ -30,14 +30,15 @@ use modelstat_wire::{
 
 use crate::embed::{Embedder, EMBED_DIM};
 use crate::passes::{
-    cognition, cognition_hints, format_cognition_suffix, summarize, CognitionTags,
+    build_title_user_prompt, cognition, cognition_hints, fallback_title, format_cognition_suffix,
+    sample_abstracts, sanitise_title, strip_cognition_suffix, summarize, title, CognitionTags,
     THINKING_HEADROOM_TOKENS,
 };
 use crate::prompts::{
     build_summariser_user_prompt, build_user_intent_user_prompt, ABSTRACT_MAX_CHARS,
     ABSTRACT_OUTPUT_MAX_CHARS, EXCERPT_SAMPLE_MAX_CHARS, SUMMARISER_SYSTEM_PROMPT,
-    SUMMARISER_TEMPERATURE, SUMMARISER_TOP_K, USER_INTENT_MAX_CHARS, USER_INTENT_MAX_TOKENS,
-    USER_INTENT_SAMPLE_HEAD, USER_INTENT_SAMPLE_TAIL,
+    SUMMARISER_TEMPERATURE, SUMMARISER_TOP_K, TITLER_MAX_ABSTRACTS, USER_INTENT_MAX_CHARS,
+    USER_INTENT_MAX_TOKENS, USER_INTENT_SAMPLE_HEAD, USER_INTENT_SAMPLE_TAIL,
 };
 use crate::resilient::{ResilientSummarizer, SummarizeOutcome, Summarizer};
 use crate::segment::{parse_ts_ms, segment_turns, turn_meta, turn_surface};
@@ -115,6 +116,72 @@ where
         }
     }
     BuildOutcome::Ready(segments)
+}
+
+/// Build one dashboard title per session from a batch's segments (title.ts
+/// `buildSessionTitles`). Groups by session (chronological within each), asks the
+/// titler once per session, sanitises, and falls back to a deterministic
+/// first-sentence title when the model is unavailable or returns noise. Sessions
+/// whose segments carry no usable abstract are omitted — shipping an empty title
+/// would only overwrite better server state.
+///
+/// Best-effort throughout: the titler is the raw engine (a failure is a fallback,
+/// never a hold). Returns a map suitable for `IngestBatch.session_titles`.
+pub async fn build_session_titles<S: Summarizer>(
+    segments: &[Segment],
+    engine: &S,
+) -> BTreeMap<String, String> {
+    // Group by session. The result is session-keyed, so grouping order is
+    // immaterial; BTreeMap keeps iteration deterministic for tests.
+    let mut by_session: BTreeMap<&str, Vec<&Segment>> = BTreeMap::new();
+    for s in segments {
+        by_session.entry(s.session_id.as_str()).or_default().push(s);
+    }
+
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for (session_id, mut segs) in by_session {
+        segs.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        let abstracts: Vec<String> = segs
+            .iter()
+            .map(|s| strip_cognition_suffix(&s.r#abstract))
+            .filter(|a| !a.is_empty())
+            .collect();
+        if abstracts.is_empty() {
+            continue;
+        }
+        // Ground the titler with cheap facts: the project (if tagged) + part count.
+        let first = segs[0];
+        let mut facts_parts: Vec<String> = Vec::new();
+        if let Some(project) = first
+            .tags
+            .iter()
+            .find(|t| t.root_key == "projects")
+            .map(|t| t.name.as_str())
+        {
+            facts_parts.push(format!("repo {project}"));
+        }
+        facts_parts.push(format!(
+            "{} part{} on {}",
+            segs.len(),
+            if segs.len() == 1 { "" } else { "s" },
+            first.agent
+        ));
+        let facts = facts_parts.join("; ");
+
+        let prompt =
+            build_title_user_prompt(&sample_abstracts(&abstracts, TITLER_MAX_ABSTRACTS), Some(&facts));
+        let mut session_title = title(engine, &prompt)
+            .await
+            .map(|raw| sanitise_title(&raw))
+            .unwrap_or_default();
+        if session_title.is_empty() {
+            session_title = fallback_title(&abstracts);
+        }
+        if !session_title.is_empty() {
+            out.insert(session_id.to_string(), session_title);
+        }
+    }
+    out
 }
 
 /// The outcome of summarising one slice. `Built` on success, `Skipped` for a
@@ -856,5 +923,65 @@ mod tests {
         let a = ev("e", "2026-06-01T10:00:00Z", "tool_use", None);
         let refs: Vec<&RawEvent> = vec![&a];
         assert!(sample_and_redact_excerpts(&refs).is_empty());
+    }
+
+    fn seg(session: &str, started_at: &str, abstract_text: &str, project: Option<&str>) -> Segment {
+        let mut tags = Vec::new();
+        if let Some(p) = project {
+            tags.push(hint("projects", p, 1.0));
+        }
+        Segment {
+            segment_id: "seg_x".into(),
+            session_id: session.into(),
+            agent: "claude_code".into(),
+            started_at: started_at.into(),
+            ended_at: started_at.into(),
+            r#abstract: abstract_text.into(),
+            tokens: TokenUsage::default(),
+            tags,
+            redaction: RedactionReport::default(),
+            source_event_ids: vec![],
+            abstract_embedding: None,
+            behavior: None,
+            user_intent: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn titles_from_a_healthy_titler() {
+        let segs = vec![
+            seg("s1", "2026-06-01T10:00:00Z", "Refactored the auth middleware", Some("acme/web")),
+            seg("s1", "2026-06-01T10:05:00Z", "Added retry logic", None),
+        ];
+        let engine = Fake::reply("Auth Middleware Refactor");
+        let titles = build_session_titles(&segs, &engine).await;
+        assert_eq!(
+            titles.get("s1").map(String::as_str),
+            Some("Auth Middleware Refactor")
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_first_sentence_when_titler_fails() {
+        let segs = vec![seg(
+            "s1",
+            "2026-06-01T10:00:00Z",
+            "Fixed the null deref. Then shipped it.",
+            None,
+        )];
+        let engine = Fake::failing();
+        let titles = build_session_titles(&segs, &engine).await;
+        // Deterministic fallback = first sentence of the first abstract, sanitised.
+        assert_eq!(
+            titles.get("s1").map(String::as_str),
+            Some("Fixed the null deref")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_with_only_empty_abstracts_is_omitted() {
+        let segs = vec![seg("s1", "2026-06-01T10:00:00Z", "", None)];
+        let engine = Fake::reply("won't be used");
+        assert!(build_session_titles(&segs, &engine).await.is_empty());
     }
 }
