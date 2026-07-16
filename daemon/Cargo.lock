@@ -1636,6 +1636,8 @@ dependencies = [
 name = "modelstat-daemon"
 version = "0.0.0"
 dependencies = [
+ "chrono",
+ "libc",
  "modelstat-ingest",
  "modelstat-mcp",
  "modelstat-parsers",
@@ -1649,6 +1651,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

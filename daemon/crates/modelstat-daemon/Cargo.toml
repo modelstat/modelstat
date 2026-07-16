@@ -19,7 +19,16 @@ modelstat-update.workspace = true
 modelstat-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+
+# Singleton-lock process-liveness probe (kill(pid,0) / OpenProcess). Both already
+# in the tree via tokio; the daemon only needs OpenProcess/CloseHandle on Windows.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_Foundation"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
