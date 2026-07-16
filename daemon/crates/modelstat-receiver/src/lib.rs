@@ -7,6 +7,7 @@
 pub mod build_batches;
 pub mod ingest;
 pub mod queue;
+pub mod server;
 
 pub use build_batches::{
     build_batches, BuildBatchesOpts, DrainBatches, PipelineRunner, FORCE_SHIP_THRESHOLD,
@@ -16,3 +17,7 @@ pub use ingest::{
     drain_local_queue, enqueue, parse_batch, DrainResult, DrainUploader, Hold, WireBatch,
 };
 pub use queue::{FileQueueStore, QueueItem, QueueStore};
+pub use server::{
+    is_allowed_transcript_file, start_local_ingest_receiver, ControlRunner, ControlScanHandler,
+    ControlTarget, LocalIngestReceiver, DEFAULT_LOCAL_INGEST_PORT,
+};

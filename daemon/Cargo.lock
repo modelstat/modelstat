@@ -1746,6 +1746,7 @@ dependencies = [
 name = "modelstat-receiver"
 version = "0.0.0"
 dependencies = [
+ "axum 0.7.9",
  "chrono",
  "modelstat-ingest",
  "modelstat-parsers",
@@ -1754,6 +1755,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
 ]
 
 [[package]]
