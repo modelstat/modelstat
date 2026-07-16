@@ -4,6 +4,10 @@
 //! self-contained runtime primitives land first (each green + tested); the scan
 //! orchestration + main loop compose them.
 
+pub mod processing_version;
 pub mod single_flight;
 
+pub use processing_version::{
+    reconcile_processing_version, ProcessingState, VersionReconcile, PROCESSING_VERSION,
+};
 pub use single_flight::CoalescingRunner;
