@@ -29,6 +29,12 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[features]
+# Opt into the real on-device candle models (BGE embedder + BERT-NER) for a
+# release/verified collector build. Forwards to modelstat-daemon. Still NO
+# llama.cpp in this binary (plan §3, D4) — candle is CPU embeddings + NER only.
+candle = ["modelstat-daemon/candle"]
+
 [dev-dependencies]
 # The prod/CI register-guard test drives the built binary in a throwaway home.
 tempfile = "3"

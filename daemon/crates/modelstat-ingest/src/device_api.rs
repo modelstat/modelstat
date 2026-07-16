@@ -111,6 +111,28 @@ pub struct DeviceApi {
     recover: Mutex<RecoverState>,
 }
 
+impl Clone for DeviceApi {
+    /// A near-free handle clone: the reqwest [`Client`] shares its connection
+    /// pool + DNS cache across clones, and `config` is an `Arc`. The recover
+    /// backoff starts FRESH — recovery is idempotent, self-rate-limited,
+    /// machine-stable re-register, so each subsystem's handle can hold its own
+    /// transient backoff without needing to share it. This is what lets the
+    /// daemon hand a `&mut` handle to each `&mut self` trait consumer (the scan
+    /// uploader, the SDK drain, the reconcile digest) while they run concurrently
+    /// over ONE shared HTTP pool — DeviceApi's own methods are all `&self`, so a
+    /// clone is purely to satisfy those traits' exclusive borrows.
+    fn clone(&self) -> Self {
+        DeviceApi {
+            http: self.http.clone(),
+            config: self.config.clone(),
+            recover: Mutex::new(RecoverState {
+                backoff_until: None,
+                attempt: 0,
+            }),
+        }
+    }
+}
+
 impl DeviceApi {
     pub fn new(config: std::sync::Arc<Config>) -> Self {
         let http = Client::builder()

@@ -7,6 +7,7 @@
 pub mod adapters;
 pub mod authoritative_git;
 pub mod discover_jobs;
+pub mod engine;
 pub mod enrich_scripts;
 pub mod flush;
 pub mod insights;
