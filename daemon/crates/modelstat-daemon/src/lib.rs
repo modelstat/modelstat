@@ -9,6 +9,7 @@ pub mod discover_jobs;
 pub mod flush;
 pub mod lock;
 pub mod processing_version;
+pub mod reconcile;
 pub mod scan;
 pub mod single_flight;
 
@@ -17,6 +18,10 @@ pub use discover_jobs::{
     discover_jobs, order_jobs_newest_first, parse_job, ParserKind, ScanJob,
 };
 pub use flush::{build_flush_batches, with_non_null_tokens, FlushOutcome, PreparedBatch};
+pub use reconcile::{
+    reconcile_backfill, BackfillDays, BackfillDaySessions, ReconcileOutcome, ReconcileStore,
+    BackfillDigest,
+};
 pub use scan::{
     run_scan_over_jobs, BatchUploader, CursorStore, Hold, RunScanOptions, ScanObserver,
     ScanTallies, BATCH_MAX_EVENTS, BATCH_MAX_TOOL_CALLS, MAX_FILES_PER_SCAN,
