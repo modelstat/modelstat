@@ -18,6 +18,10 @@ serde_json.workspace = true
 regex.workspace = true
 unicode-normalization = "0.1"
 tokio = { workspace = true, features = ["time"] }
+# Local wall-clock for the temporal taxonomy hints (§18) — the one place the
+# pipeline needs the machine's timezone (segmentation's ts math is hand-rolled to
+# stay chrono-free). `clock` + `std` come from the workspace default.
+chrono.workspace = true
 
 # The candle BGE embedder (feature §9.5 / plan D5). Pure Rust (CPU) — compiles
 # without cmake — but OFF by default: it's a heavy dep and its cross-target CPU

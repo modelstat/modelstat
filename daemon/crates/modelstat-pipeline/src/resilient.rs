@@ -72,6 +72,15 @@ impl<S: Summarizer> ResilientSummarizer<S> {
         }
     }
 
+    /// The wrapped engine, for the best-effort auxiliary passes (cognition,
+    /// user-intent, title, links, script-summary, redaction backstop). Only the
+    /// **summarize** pass goes through the hold-and-retry state machine (§9.4); an
+    /// aux pass failing is a `None` signal, never a session hold — so those passes
+    /// call the raw engine directly via this accessor.
+    pub fn engine(&self) -> &S {
+        &self.summarizer
+    }
+
     /// True unless the engine is currently marked unavailable. Surfaced in
     /// `status` + the heartbeat; the batch loop flushes held work when it flips
     /// back to true.

@@ -81,6 +81,17 @@ pub const SEGMENT_MAX_CONTENT_CHARS: usize = 12_000;
 pub const SUMMARISER_EXCERPT_COUNT: usize = 7;
 pub const SUMMARISER_EXCERPT_MAX_CHARS: usize = 350;
 
+/// Per-excerpt slice inside the summariser prompt (index.ts `sampleAndRedactExcerpts`).
+pub const EXCERPT_SAMPLE_MAX_CHARS: usize = 200;
+
+/// User-intent distillation caps (index.ts `summariseUserIntent`) — kept separate
+/// from the abstract so the abstract's contract is untouched. ≤6 user messages
+/// (4 head + 2 tail) feed one ≤240-char, 120-token best-effort call.
+pub const USER_INTENT_MAX_CHARS: usize = 240;
+pub const USER_INTENT_MAX_TOKENS: u32 = 120;
+pub const USER_INTENT_SAMPLE_HEAD: usize = 4;
+pub const USER_INTENT_SAMPLE_TAIL: usize = 2;
+
 // ── Pure user-prompt builders (cheap, so tests pin the exact prompt) ──────────
 
 /// Collapse whitespace runs to a single space and trim (JS `.replace(/\s+/g," ").trim()`).
@@ -126,6 +137,50 @@ pub fn build_script_summary_user_prompt(reference: &str, content: &str) -> Strin
         "One sentence (≤200 chars): what does running this script do?".to_string(),
     ]
     .join("\n")
+}
+
+/// The summariser user message — the per-slice facts line + sampled excerpts
+/// (index.ts `summariseSlice`). `passes::summarize` supplies the frozen SYSTEM
+/// prompt; this is the USER turn. `facts` is the `repo …; branch …; N turns on …`
+/// line; `excerpts` are the already-redacted, ≤200-char samples (each whitespace-
+/// collapsed into the `[turn i] "…"` block here). Empty facts → "generic coding
+/// session" (TS `promptFacts || …`).
+pub fn build_summariser_user_prompt(facts: &str, excerpts: &[String]) -> String {
+    let excerpt_block = excerpts
+        .iter()
+        .enumerate()
+        .map(|(i, e)| format!("  [turn {}] \"{}\"", i + 1, collapse(e)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let facts = if facts.is_empty() {
+        "generic coding session"
+    } else {
+        facts
+    };
+    format!(
+        "Session context: {facts}.\n\nSampled excerpts from the conversation (already redacted of PII and secrets):\n{excerpt_block}\n\nWrite a ≤{ABSTRACT_OUTPUT_MAX_CHARS}-char summary (1-2 sentences) naming exactly what was achieved: the concrete action, what it acted on, and the specific target (repo/branch/service/component) when identifiable from the context above. Lead with an outcome verb and pack in concrete domain keywords (frameworks, features, decisions). Skip narration and filler."
+    )
+}
+
+/// The user-intent user message — distills what the DEVELOPER asked for from
+/// their OWN messages (index.ts `summariseUserIntent`). Each already-collapsed
+/// message is sliced to [`USER_INTENT_MAX_CHARS`] in the `[msg i] "…"` block.
+pub fn build_user_intent_user_prompt(messages: &[String]) -> String {
+    let block = messages
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            format!(
+                "  [msg {}] \"{}\"",
+                i + 1,
+                take_chars(e, USER_INTENT_MAX_CHARS)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "The developer's own messages to an AI coding assistant (already redacted of PII and secrets):\n{block}\n\nIn ≤{USER_INTENT_MAX_CHARS} chars, summarise WHAT THE DEVELOPER ASKED FOR or DIRECTED — their goal or task in their own framing, AND any standing preferences / directives / conventions they expressed (e.g. \"always be thorough\", \"ship fast\", a naming or workflow convention). Focus on the DEVELOPER'S intent and voice, NOT what the assistant did. Reply with only the summary."
+    )
 }
 
 #[cfg(test)]
