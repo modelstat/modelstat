@@ -315,7 +315,7 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         &exists,
         &read_file,
         &mut uploader,
-        &mut *guard as &mut dyn CursorStore,
+        &mut *guard as &mut (dyn CursorStore + Send),
         &mut observer,
     )
     .await;

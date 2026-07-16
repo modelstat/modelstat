@@ -139,15 +139,15 @@ async fn flush_buffer<S, E, N, G, U, CE>(
     extract_links: Option<&LinkExtractor<'_>>,
     correct_events: &mut CE,
     uploader: &mut U,
-    cursors: &mut dyn CursorStore,
-    observer: &mut dyn ScanObserver,
+    cursors: &mut (dyn CursorStore + Send),
+    observer: &mut (dyn ScanObserver + Send),
     tallies: &mut ScanTallies,
 ) -> Result<(), Hold>
 where
     S: Summarizer,
     E: Embedder,
     N: NerModel,
-    G: GitEnrichment,
+    G: GitEnrichment + Send,
     U: BatchUploader,
     CE: FnMut(Vec<RawEvent>) -> Vec<RawEvent>,
 {
@@ -170,8 +170,9 @@ where
         embedder,
         ner,
         // Fresh reborrow per flush — `git` outlives every flush, so this dodges
-        // the reborrow-across-await lifetime trap (see flush.rs LESSON).
-        Some(&mut *git as &mut dyn GitEnrichment),
+        // the reborrow-across-await lifetime trap (see flush.rs LESSON). `+ Send`
+        // so the erased trait object stays `Send` for the spawned scan task.
+        Some(&mut *git as &mut (dyn GitEnrichment + Send)),
         extract_links,
         run_segments,
     )
@@ -231,17 +232,23 @@ pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE>(
     mut parse: P,
     checksum: C,
     mut correct_events: CE,
-    exists: &dyn Fn(&str) -> bool,
-    read_file: &dyn Fn(&str) -> Option<String>,
+    // `+ Sync` so `&exists`/`&read_file` are `Send` — the scan runs inside the
+    // daemon's tokio-spawned single-flight task, whose future must be `Send`.
+    exists: &(dyn Fn(&str) -> bool + Sync),
+    read_file: &(dyn Fn(&str) -> Option<String> + Sync),
     uploader: &mut U,
-    cursors: &mut dyn CursorStore,
-    observer: &mut dyn ScanObserver,
+    // `+ Send` on the trait objects: the scan runs in the daemon's tokio-spawned
+    // single-flight task, whose future must be `Send` — and a `dyn Trait` erases
+    // the concrete type's Send-ness unless the bound is spelled out. Every real
+    // impl (RuntimeState, StatusObserver, RealGitEnrichment) is `Send`.
+    cursors: &mut (dyn CursorStore + Send),
+    observer: &mut (dyn ScanObserver + Send),
 ) -> ScanTallies
 where
     S: Summarizer,
     E: Embedder,
     N: NerModel,
-    G: GitEnrichment,
+    G: GitEnrichment + Send,
     U: BatchUploader,
     P: FnMut(&ScanJob) -> std::io::Result<ParseResult>,
     C: Fn(&str) -> Option<FileCursor>,

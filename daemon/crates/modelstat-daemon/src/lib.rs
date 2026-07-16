@@ -15,6 +15,7 @@ pub mod lock;
 pub mod processing_version;
 pub mod reconcile;
 pub mod rotate;
+pub mod run;
 pub mod runtime;
 pub mod scan;
 pub mod status;

@@ -38,8 +38,14 @@ use crate::prompts::LINK_EXTRACT_MAX_ABSTRACTS;
 /// never links the engine directly — the collector builds it from the frozen
 /// [`crate::prompts::LINK_EXTRACT_SYSTEM_PROMPT`] +
 /// [`crate::prompts::build_link_extract_user_prompt`] + the summarizer client.
-pub type LinkExtractor<'a> =
-    dyn Fn(Vec<String>) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>> + 'a;
+// `Send + Sync` on the outer `dyn Fn` so a `Box<LinkExtractor>` can be held
+// across an await inside the daemon's single-flight scan task (which tokio spawns,
+// and so requires `Send`). The one constructor — `make_extract_links` over the
+// summarizer client — already satisfies both.
+pub type LinkExtractor<'a> = dyn Fn(Vec<String>) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>
+    + Send
+    + Sync
+    + 'a;
 
 /// Commits usually land when a session wraps up — a little AFTER its active
 /// window closes — so the per-file capture extends `until` by this grace period
@@ -122,7 +128,10 @@ fn ms_to_iso(ms: i64) -> String {
 pub async fn build_session_metadata(
     segments: &[Segment],
     events: &[RawEvent],
-    mut git: Option<&mut dyn GitEnrichment>,
+    // `+ Send`: this git handle is held across the link-extract await, and the
+    // whole pass runs inside the daemon's tokio-spawned scan (Send future). Every
+    // real impl (RealGitEnrichment) is Send.
+    mut git: Option<&mut (dyn GitEnrichment + Send)>,
     extract_links: Option<&LinkExtractor<'_>>,
 ) -> BTreeMap<String, SessionMetadata> {
     // Group by session. BTreeMap → sorted, deterministic output map; per-session

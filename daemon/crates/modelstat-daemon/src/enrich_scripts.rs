@@ -63,8 +63,11 @@ pub async fn enrich_tool_call_scripts<S, N>(
     drafts: &mut [ToolCallDraft],
     contexts: &[LocalToolContext],
     engine: &S,
-    exists: &dyn Fn(&str) -> bool,
-    read_file: &dyn Fn(&str) -> Option<String>,
+    // `+ Sync` so `&exists`/`&read_file` stay `Send` across this fn's awaits — it
+    // runs inside the daemon's tokio-spawned scan task (Send future). Harmless to
+    // the offline unit tests, which pass plain fn items (already Sync).
+    exists: &(dyn Fn(&str) -> bool + Sync),
+    read_file: &(dyn Fn(&str) -> Option<String> + Sync),
     model_redact: Option<&N>,
 ) where
     S: Summarizer,
@@ -94,8 +97,8 @@ async fn enrich_one_action<S, N>(
     action: &mut ToolAction,
     ctx: &LocalToolContext,
     engine: &S,
-    exists: &dyn Fn(&str) -> bool,
-    read_file: &dyn Fn(&str) -> Option<String>,
+    exists: &(dyn Fn(&str) -> bool + Sync),
+    read_file: &(dyn Fn(&str) -> Option<String> + Sync),
     model_redact: Option<&N>,
 ) where
     S: Summarizer,

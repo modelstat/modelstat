@@ -66,7 +66,9 @@ pub async fn build_flush_batches<S, E, N>(
     embedder: &E,
     ner: &N,
     // Moved into the metadata pass (its only use), so no reborrow lifetime dance.
-    git: Option<&mut dyn GitEnrichment>,
+    // `+ Send`: this runs inside the daemon's tokio-spawned single-flight scan,
+    // whose future must be `Send` (a `dyn Trait` erases the concrete Send-ness).
+    git: Option<&mut (dyn GitEnrichment + Send)>,
     extract_links: Option<&LinkExtractor<'_>>,
     run_segments_by_session: &mut BTreeMap<String, Vec<Segment>>,
 ) -> FlushOutcome
