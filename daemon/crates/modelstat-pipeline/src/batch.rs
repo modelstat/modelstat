@@ -123,6 +123,38 @@ pub fn enrich_tool_call_redaction<N: NerModel>(drafts: &mut [ToolCallDraft], ner
     }
 }
 
+/// LAYER-3 deep redaction of the SHIPPED tool commands (§9.5/§21.13) — LOCAL mode
+/// only. Runs the LLM backstop ([`crate::passes::redact_backstop`]) over each
+/// draft's `command_redacted` on top of the floor (L1) + NER (L2), deduped per
+/// distinct command. Fail-safe: a model error / prefilter miss leaves the command
+/// UNCHANGED, and the backstop can only ever ADD a redaction of a substring that
+/// genuinely appears — never reword, invent, or leak. The caller gates this to
+/// `mode == "local"` so the deep pass never crosses the machine boundary.
+pub async fn deep_redact_tool_commands<S: crate::Summarizer>(
+    drafts: &mut [ToolCallDraft],
+    engine: &S,
+) {
+    let mut cache: HashMap<String, String> = HashMap::new();
+    for draft in drafts.iter_mut() {
+        let Some(action) = draft.action.as_mut() else {
+            continue;
+        };
+        let cmd = match action.command_redacted.as_deref().filter(|c| !c.is_empty()) {
+            Some(c) => c.to_string(),
+            None => continue,
+        };
+        let deep = match cache.get(&cmd) {
+            Some(hit) => hit.clone(),
+            None => {
+                let (redacted, _n) = crate::passes::redact_backstop(engine, &cmd).await;
+                cache.insert(cmd, redacted.clone());
+                redacted
+            }
+        };
+        action.command_redacted = Some(deep);
+    }
+}
+
 /// Prepare a Cloud-mode raw batch: run the FULL redaction (regex floor + the
 /// on-device NER/PII pass) over every event excerpt AND tool-call command before
 /// they leave the machine. FAIL-CLOSED — returns `None` when NER is unavailable,
@@ -332,5 +364,34 @@ mod tests {
             drafts[0].action.as_ref().unwrap().command_redacted.as_deref(),
             Some("mail [REDACTED:PER]")
         );
+    }
+
+    #[tokio::test]
+    async fn deep_redact_replaces_named_secrets_in_local_commands() {
+        // A Fake engine that NAMES the secret substring to strip (L3 backstop).
+        struct FakeEngine;
+        impl crate::Summarizer for FakeEngine {
+            async fn complete(
+                &self,
+                _req: &modelstat_sumclient::CompleteRequest,
+            ) -> Result<String, modelstat_sumclient::SumError> {
+                Ok("sk_live_abcdef123456".into())
+            }
+        }
+        let mut drafts = vec![draft(
+            "c1",
+            "e1",
+            Some("curl -H 'Authorization: Bearer sk_live_abcdef123456' https://x"),
+        )];
+        deep_redact_tool_commands(&mut drafts, &FakeEngine).await;
+        let cmd = drafts[0]
+            .action
+            .as_ref()
+            .unwrap()
+            .command_redacted
+            .as_deref()
+            .unwrap();
+        assert!(cmd.contains("[REDACTED:llm]"), "L3 must redact the named secret: {cmd}");
+        assert!(!cmd.contains("sk_live_abcdef123456"));
     }
 }

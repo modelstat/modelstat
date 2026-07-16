@@ -20,8 +20,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use modelstat_parsers::{GitEnrichment, ToolCallDraft};
 use modelstat_pipeline::{
     attach_segment_ids_by_map, batch_id, build_for_one_session, build_session_metadata,
-    build_session_titles, prepare_cloud_raw_events, BuildOutcome, Embedder, LinkExtractor,
-    ResilientSummarizer, Summarizer,
+    build_session_titles, deep_redact_tool_commands, enrich_tool_call_redaction,
+    prepare_cloud_raw_events, BuildOutcome, Embedder, LinkExtractor, ResilientSummarizer,
+    Summarizer,
 };
 use modelstat_redact::NerModel;
 use modelstat_wire::{IngestBatch, RawEvent, Segment, TokenUsage};
@@ -166,6 +167,15 @@ where
     let session_titles = build_session_titles(&title_input, resilient.engine()).await;
     let session_metadata =
         build_session_metadata(&title_input, &events, git, extract_links).await;
+
+    // Deep-redact the SHIPPED tool commands before attribution: L2 (NER, always
+    // on-device) + L3 (LLM backstop, LOCAL mode only — §21.13, never crosses the
+    // machine boundary). Both fail-safe: a down NER/engine leaves the L1-floored
+    // command unchanged. The cloud path already ran L2 inside prepare_cloud_raw_events.
+    enrich_tool_call_redaction(&mut drafts, ner);
+    if mode == "local" {
+        deep_redact_tool_commands(&mut drafts, resilient.engine()).await;
+    }
 
     // Attribute each buffered call to the segment covering its source event,
     // resolved against every segment seen this run for the call's session.
