@@ -1722,6 +1722,7 @@ dependencies = [
  "candle-transformers",
  "chrono",
  "modelstat-download",
+ "modelstat-parsers",
  "modelstat-redact",
  "modelstat-sumclient",
  "modelstat-wire",

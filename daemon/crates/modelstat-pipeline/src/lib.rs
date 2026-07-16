@@ -13,8 +13,10 @@ pub mod passes;
 pub mod prompts;
 pub mod resilient;
 pub mod segment;
+pub mod session_metadata;
 
 pub use build::{build_for_one_session, build_session_titles, BuildOutcome};
+pub use session_metadata::{build_session_metadata, LinkExtractor};
 pub use embed::{embed_turns, l2_normalize, mean_pool, Embedder, NoEmbedder, EMBED_DIM};
 pub use passes::{CognitionTags, THINKING_HEADROOM_TOKENS};
 pub use resilient::{

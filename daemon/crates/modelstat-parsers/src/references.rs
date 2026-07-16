@@ -1,18 +1,42 @@
-//! Public-reference mining — a port of the `detectReferences` /
-//! `detectEventReferences` half of `packages/core/src/session-metadata.ts`.
+//! Public-reference mining + the pure session-metadata core — a port of
+//! `packages/core/src/session-metadata.ts` in full.
 //!
 //! The parsers call [`detect_event_references`] over each turn's full text and
 //! stamp the result on `RawEvent.references` (an opaque `Value` passthrough on the
-//! wire, per PARITY.md — the full typed `SessionMetadata` port + git-outcome
-//! enrichment lands in M4). Only PUBLIC reference shapes ride this — `org/repo`,
+//! wire, per PARITY.md). Only PUBLIC reference shapes ride this — `org/repo`,
 //! PR/issue numbers, ticket keys, and the URLs that contain them — so it is safe
 //! to run over un-redacted turn text (same safety class as a repo slug).
+//!
+//! The rest of the module is the pure fold that the M4 session-metadata pass
+//! ([`crate::git_enrich`] + `modelstat-pipeline`) drives: the typed
+//! [`SessionMetadata`] / [`FileRef`], the branch-ticket miner
+//! ([`detect_branch_tickets`]), and the deduplicators ([`dedupe_session_metadata`],
+//! [`dedupe_files`]). Everything here is deterministic + I/O-free; the git + model
+//! channels are injected by the pass.
 
 use std::sync::OnceLock;
 
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+// ── Zod-parity defaults (used when deserializing a `RawEvent.references` blob or
+//    a replayed reference back into the typed shape). ──────────────────────────
+fn default_content_source() -> String {
+    "content".to_string()
+}
+fn default_git_source() -> String {
+    "git".to_string()
+}
+fn default_pr_confidence() -> f64 {
+    0.9
+}
+fn default_issue_confidence() -> f64 {
+    0.8
+}
+fn default_issue_provider() -> String {
+    "other".to_string()
+}
 
 /// Trust ranking — higher wins when the same entity is seen twice.
 fn source_rank(s: &str) -> i32 {
@@ -25,41 +49,101 @@ fn source_rank(s: &str) -> i32 {
 }
 
 /// A git host + `org/repo`, with every branch seen.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoRef {
+    #[serde(default)]
     pub host: Option<String>,
     pub slug: String,
+    #[serde(default)]
     pub branches: Vec<String>,
+    #[serde(default = "default_content_source")]
     pub source: String,
 }
 
-/// A pull/merge request the session referenced.
-#[derive(Debug, Clone, Serialize)]
+/// A pull/merge request the session referenced. The `merged*`/`reverted` fields
+/// are the on-device verified-outcome signals filled by the pass's local
+/// git-check (`checkPullRequestOutcome`); they are `.optional()` in the TS schema,
+/// so they are OMITTED (not `null`) until enrichment sets them. `merged_at` is
+/// additionally nullable — an enriched-but-unmerged PR serializes it as `null` —
+/// hence the nested `Option<Option<…>>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequestRef {
+    #[serde(default)]
     pub host: Option<String>,
+    #[serde(default)]
     pub slug: Option<String>,
     pub number: u64,
+    #[serde(default)]
     pub url: Option<String>,
+    #[serde(default = "default_content_source")]
     pub source: String,
+    #[serde(default = "default_pr_confidence")]
     pub confidence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverted: Option<bool>,
 }
 
 /// An issue / ticket the session referenced.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueRef {
+    #[serde(default = "default_issue_provider")]
     pub provider: String,
     pub key: String,
+    #[serde(default)]
     pub slug: Option<String>,
+    #[serde(default)]
     pub url: Option<String>,
+    #[serde(default = "default_content_source")]
     pub source: String,
+    #[serde(default = "default_issue_confidence")]
     pub confidence: f64,
 }
 
-/// The mutable accumulation shape the detectors emit.
-#[derive(Debug, Default)]
-pub struct DetectedRefs {
+/// A file a session changed, with the lines added/deleted across the session's
+/// window (git `--numstat`). Always `git`-sourced + repo-relative — the same
+/// public-shape safety class as a slug (no contents, no home paths).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileRef {
+    #[serde(default)]
+    pub slug: Option<String>,
+    pub path: String,
+    #[serde(default)]
+    pub lines_added: u64,
+    #[serde(default)]
+    pub lines_deleted: u64,
+    #[serde(default = "default_git_source")]
+    pub source: String,
+}
+
+/// The deterministic metadata for one session — attached to the ingest batch
+/// under `session_metadata[session_id]`. Every collection is plural + capped; an
+/// empty one ([`is_empty_session_metadata`]) is simply not shipped.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionMetadata {
+    #[serde(default)]
     pub repos: Vec<RepoRef>,
+    #[serde(default)]
     pub pull_requests: Vec<PullRequestRef>,
+    #[serde(default)]
+    pub issues: Vec<IssueRef>,
+    #[serde(default)]
+    pub files: Vec<FileRef>,
+}
+
+/// The mutable accumulation shape the detectors emit. Deserialize is how a
+/// `RawEvent.references` blob (the per-event `{repos,pull_requests,issues}`) is
+/// folded back into the session-level dedupe.
+#[derive(Debug, Default, Deserialize)]
+pub struct DetectedRefs {
+    #[serde(default)]
+    pub repos: Vec<RepoRef>,
+    #[serde(default)]
+    pub pull_requests: Vec<PullRequestRef>,
+    #[serde(default)]
     pub issues: Vec<IssueRef>,
 }
 
@@ -143,6 +227,9 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             url: Some(c[0].to_string()),
             source: source.into(),
             confidence: 0.95,
+            merged: None,
+            merged_at: None,
+            reverted: None,
         });
         out.repos.push(repo_from(Some("github.com".into()), &slug, source));
     }
@@ -154,6 +241,9 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             url: Some(c[0].to_string()),
             source: source.into(),
             confidence: 0.95,
+            merged: None,
+            merged_at: None,
+            reverted: None,
         });
         out.repos.push(repo_from(Some("gitlab.com".into()), &c[1], source));
     }
@@ -166,6 +256,9 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             url: Some(c[0].to_string()),
             source: source.into(),
             confidence: 0.95,
+            merged: None,
+            merged_at: None,
+            reverted: None,
         });
         out.repos.push(repo_from(Some("bitbucket.org".into()), &slug, source));
     }
@@ -230,6 +323,9 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
                 url: None,
                 source: source.into(),
                 confidence: 0.6,
+                merged: None,
+                merged_at: None,
+                reverted: None,
             });
             out.repos.push(repo_from(Some("github.com".into()), &slug, source));
         } else {
@@ -329,6 +425,11 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
                     url: win.url.or(lose.url),
                     source: win.source,
                     confidence: win.confidence.max(lose.confidence),
+                    // Outcome signals are filled AFTER dedupe (like the TS merge,
+                    // which returns only the six core fields), so reset to unknown.
+                    merged: None,
+                    merged_at: None,
+                    reverted: None,
                 };
             }
             None => {
@@ -451,6 +552,89 @@ pub fn detect_event_references(text: &str) -> Option<Value> {
     }))
 }
 
+/// Mine ticket keys (`TEAM-123`) out of a branch name — a high-signal, low-noise
+/// place to find them (`feature/ENG-742-retry-logic`). Returns `git`-sourced issue
+/// refs (a branch is deterministic, not content). Port of `detectBranchTickets`.
+pub fn detect_branch_tickets(branch: Option<&str>) -> Vec<IssueRef> {
+    let mut out = Vec::new();
+    let Some(branch) = branch.filter(|b| !b.is_empty()) else {
+        return out;
+    };
+    for c in bare_ticket().captures_iter(branch) {
+        out.push(IssueRef {
+            provider: "other".into(),
+            key: c[1].to_string(),
+            slug: None,
+            url: None,
+            source: "git".into(),
+            confidence: 0.7,
+        });
+    }
+    out
+}
+
+/// Fold any number of [`DetectedRefs`] (from every channel + every event/segment
+/// of a session) into one validated, deduped, capped [`SessionMetadata`]. Reuses
+/// the exact per-field [`dedupe`] core (caps 50/100/100, reconcile, keep-valid);
+/// `files` is left empty — the pass fills it after dedupe via [`dedupe_files`].
+/// Port of `dedupeSessionMetadata`.
+pub fn dedupe_session_metadata(parts: Vec<DetectedRefs>) -> SessionMetadata {
+    let mut all = DetectedRefs::default();
+    for p in parts {
+        all.repos.extend(p.repos);
+        all.pull_requests.extend(p.pull_requests);
+        all.issues.extend(p.issues);
+    }
+    let (repos, pull_requests, issues) = dedupe(all);
+    SessionMetadata {
+        repos,
+        pull_requests,
+        issues,
+        files: Vec::new(),
+    }
+}
+
+fn valid_file(f: &FileRef) -> bool {
+    chars(&f.path) <= 400 && opt_chars(&f.slug) <= 200
+}
+
+/// Fold a session's [`FileRef`]s (collected per repo from git) into one deduped,
+/// capped list: the same `(slug, path)` sums its line counts and keeps the
+/// strongest source. Preserves first-seen order (JS `Map`). Port of `dedupeFiles`.
+pub fn dedupe_files(files: Vec<FileRef>) -> Vec<FileRef> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_key: std::collections::HashMap<String, FileRef> = std::collections::HashMap::new();
+    for f in files {
+        let key = format!("{}:{}", f.slug.clone().unwrap_or_default().to_lowercase(), f.path);
+        match by_key.get_mut(&key) {
+            Some(e) => {
+                if e.slug.is_none() {
+                    e.slug = f.slug.clone();
+                }
+                e.lines_added += f.lines_added;
+                e.lines_deleted += f.lines_deleted;
+                e.source = stronger(&e.source, &f.source);
+            }
+            None => {
+                order.push(key.clone());
+                by_key.insert(key, f);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|k| by_key.remove(&k))
+        .filter(valid_file)
+        .take(500)
+        .collect()
+}
+
+/// True when a [`SessionMetadata`] carries no references — the pass uses this to
+/// avoid shipping (and overwriting server state with) an empty map.
+pub fn is_empty_session_metadata(m: &SessionMetadata) -> bool {
+    m.repos.is_empty() && m.pull_requests.is_empty() && m.issues.is_empty() && m.files.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +678,125 @@ mod tests {
     fn bare_ticket_not_mined_in_content() {
         // UTF-8 must NOT be mined as a ticket from content text.
         assert!(detect_event_references("we use UTF-8 here").is_none());
+    }
+
+    #[test]
+    fn branch_tickets_are_git_sourced() {
+        let issues = detect_branch_tickets(Some("feature/ENG-742-retry-logic"));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "ENG-742");
+        assert_eq!(issues[0].provider, "other");
+        assert_eq!(issues[0].source, "git");
+        assert_eq!(issues[0].confidence, 0.7);
+        // None / empty / ticket-free branches yield nothing.
+        assert!(detect_branch_tickets(None).is_empty());
+        assert!(detect_branch_tickets(Some("")).is_empty());
+        assert!(detect_branch_tickets(Some("main")).is_empty());
+    }
+
+    #[test]
+    fn dedupe_session_metadata_unions_repos_and_ranks_sources() {
+        // Same repo seen from a weak content mention and a strong git context:
+        // branches union, git source wins, one repo survives.
+        let content = detect_references("touched acme/api#7", "content");
+        let mut git = DetectedRefs::default();
+        git.repos.push(RepoRef {
+            host: Some("github.com".into()),
+            slug: "acme/api".into(),
+            branches: vec!["main".into()],
+            source: "git".into(),
+        });
+        let meta = dedupe_session_metadata(vec![content, git]);
+        assert_eq!(meta.repos.len(), 1);
+        assert_eq!(meta.repos[0].slug, "acme/api");
+        assert_eq!(meta.repos[0].source, "git");
+        assert_eq!(meta.repos[0].branches, vec!["main".to_string()]);
+        assert!(meta.files.is_empty());
+    }
+
+    #[test]
+    fn event_references_blob_round_trips_into_detected_refs() {
+        // The opaque `RawEvent.references` Value folds back into the typed shape
+        // (the pass's channel 3a). Outcome fields are absent → deserialize None.
+        let blob = detect_event_references("see https://github.com/acme/api/pull/42").unwrap();
+        let refs: DetectedRefs = serde_json::from_value(blob).unwrap();
+        assert_eq!(refs.pull_requests.len(), 1);
+        assert_eq!(refs.pull_requests[0].number, 42);
+        assert_eq!(refs.pull_requests[0].slug.as_deref(), Some("acme/api"));
+        assert!(refs.pull_requests[0].merged.is_none());
+    }
+
+    #[test]
+    fn pr_outcome_fields_serialize_only_once_enriched() {
+        let mut pr = PullRequestRef {
+            host: Some("github.com".into()),
+            slug: Some("acme/api".into()),
+            number: 42,
+            url: None,
+            source: "git".into(),
+            confidence: 0.95,
+            merged: None,
+            merged_at: None,
+            reverted: None,
+        };
+        // Unenriched: the three keys are omitted entirely.
+        let bare = serde_json::to_value(&pr).unwrap();
+        assert!(bare.get("merged").is_none());
+        assert!(bare.get("merged_at").is_none());
+        // Enriched-but-unmerged: keys present, merged_at is explicit null.
+        pr.merged = Some(false);
+        pr.merged_at = Some(None);
+        pr.reverted = Some(false);
+        let enriched = serde_json::to_value(&pr).unwrap();
+        assert_eq!(enriched["merged"], serde_json::json!(false));
+        assert_eq!(enriched["merged_at"], serde_json::Value::Null);
+        assert!(enriched.get("merged_at").is_some());
+    }
+
+    #[test]
+    fn dedupe_files_sums_lines_and_keeps_first_seen_order() {
+        let files = vec![
+            FileRef {
+                slug: Some("acme/api".into()),
+                path: "src/a.ts".into(),
+                lines_added: 3,
+                lines_deleted: 1,
+                source: "git".into(),
+            },
+            FileRef {
+                slug: Some("acme/api".into()),
+                path: "src/b.ts".into(),
+                lines_added: 1,
+                lines_deleted: 0,
+                source: "git".into(),
+            },
+            FileRef {
+                slug: Some("acme/api".into()),
+                path: "src/a.ts".into(),
+                lines_added: 2,
+                lines_deleted: 4,
+                source: "git".into(),
+            },
+        ];
+        let out = dedupe_files(files);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].path, "src/a.ts");
+        assert_eq!(out[0].lines_added, 5);
+        assert_eq!(out[0].lines_deleted, 5);
+        assert_eq!(out[1].path, "src/b.ts");
+    }
+
+    #[test]
+    fn empty_metadata_is_flagged() {
+        assert!(is_empty_session_metadata(&SessionMetadata::default()));
+        let mut m = SessionMetadata::default();
+        m.files.push(FileRef {
+            slug: None,
+            path: "x".into(),
+            lines_added: 0,
+            lines_deleted: 0,
+            source: "git".into(),
+        });
+        assert!(!is_empty_session_metadata(&m));
     }
 }

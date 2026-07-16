@@ -13,6 +13,11 @@ repository.workspace = true
 modelstat-wire.workspace = true
 modelstat-redact.workspace = true
 modelstat-sumclient.workspace = true
+# The session-metadata pass (§7.4) reuses the parsers' pure reference core + the
+# git-enrichment seam; the pass itself lives here (next to the titler) because it
+# needs the titler's abstract sampling/stripping. Parsers is a sibling collector
+# crate (no llama), so this stays within the collector's own dependency island.
+modelstat-parsers.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
