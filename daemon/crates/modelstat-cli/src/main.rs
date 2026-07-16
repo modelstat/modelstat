@@ -40,8 +40,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         // Embedded MCP (§12). `mcp wire [--heal]` configures clients; bare `mcp`
-        // (the stdio bridge) lands with the bridge module.
-        Some("mcp") if args.get(1).map(String::as_str) == Some("wire") => cmd_mcp_wire(&args[2..]),
+        // runs the stdio bridge.
+        Some("mcp") => cmd_mcp(&args[1..]),
         // The tray's adopt/spawn/replace decision (§15) — read-only JSON.
         Some("_daemon-health") => cmd_daemon_health(),
         // Install/refresh the managed daemon service + reconcile the tray (§16/§15).
@@ -74,6 +74,27 @@ fn cmd_run(args: &[String]) -> ExitCode {
     };
     let config = Arc::new(Config::load(VERSION));
     rt.block_on(modelstat_daemon::run::run(config, force))
+}
+
+/// `modelstat mcp [wire [--heal]]` (§12). Bare `mcp` runs the stdio JSON-RPC
+/// bridge (stdout = protocol only; logs to stderr; fatal → stderr + exit 1);
+/// `mcp wire` configures the MCP into detected clients.
+fn cmd_mcp(args: &[String]) -> ExitCode {
+    if args.first().map(String::as_str) == Some("wire") {
+        return cmd_mcp_wire(&args[1..]);
+    }
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("modelstat-mcp: fatal: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    rt.block_on(modelstat_mcp::runtime::run_bridge(VERSION));
+    ExitCode::SUCCESS
 }
 
 /// `modelstat mcp wire [--heal]` (§12) — configure the modelstat MCP server into

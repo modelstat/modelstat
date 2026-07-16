@@ -9,4 +9,7 @@
 //! - [`bridge`] — the stdio JSON-RPC bridge that forwards `tools/call` to
 //!   `POST /v1/mcp/call` and serves `tools/list` from the cache/static catalog.
 
+pub mod bridge;
+pub mod catalog;
+pub mod runtime;
 pub mod wire;

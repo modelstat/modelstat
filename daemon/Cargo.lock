@@ -1783,8 +1783,10 @@ version = "0.0.0"
 dependencies = [
  "modelstat-ingest",
  "modelstat-wire",
+ "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
