@@ -152,13 +152,30 @@ mod tests {
     async fn oversized_body_is_rejected() {
         let base = spawn(MockBackend::ready()).await;
         let big = "x".repeat(2 * 1024 * 1024); // 2 MB > the 1 MB cap
-        let resp = reqwest::Client::new()
+        // The body-limit layer refuses the upload. Depending on timing the client
+        // either reads the 413 response cleanly, or — if the server sends 413 and
+        // closes the connection before we finish writing all 2 MB — reqwest
+        // surfaces the reset as a transport error instead. BOTH mean the oversized
+        // body was rejected (never accepted + processed), which is what this test
+        // guards. Asserting *only* 413 made it flaky (~1/3) on the RST race; a 200
+        // or a timeout would still (correctly) fail here.
+        match reqwest::Client::new()
             .post(format!("{base}/v1/complete"))
             .header("content-type", "application/json")
             .body(big)
             .send()
             .await
-            .unwrap();
-        assert_eq!(resp.status().as_u16(), 413);
+        {
+            Ok(resp) => assert_eq!(
+                resp.status().as_u16(),
+                413,
+                "a response to the oversized body must be 413, got {}",
+                resp.status()
+            ),
+            Err(e) => assert!(
+                !e.is_timeout(),
+                "oversized body must be rejected (413 or connection reset), not time out: {e}"
+            ),
+        }
     }
 }
