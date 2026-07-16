@@ -1646,6 +1646,9 @@ dependencies = [
  "modelstat-sumclient",
  "modelstat-update",
  "modelstat-wire",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
