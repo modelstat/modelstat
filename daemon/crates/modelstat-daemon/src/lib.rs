@@ -4,9 +4,14 @@
 //! self-contained runtime primitives land first (each green + tested); the scan
 //! orchestration + main loop compose them.
 
+pub mod authoritative_git;
+pub mod flush;
 pub mod lock;
 pub mod processing_version;
 pub mod single_flight;
+
+pub use authoritative_git::resolve_authoritative_git;
+pub use flush::{build_flush_batches, with_non_null_tokens, FlushOutcome, PreparedBatch};
 
 pub use lock::{
     acquire_daemon_lock, check_lock_ownership, daemon_lock_path, is_process_alive,
