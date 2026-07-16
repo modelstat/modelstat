@@ -45,12 +45,12 @@ pub use types::{
 };
 
 pub use claude_code::{
-    decode_encoded_dir, derive_session_id_from_filename, parse_claude_code_jsonl, quick_checksum,
-    QuickChecksum,
+    decode_encoded_dir, derive_session_id_from_filename, parse_claude_code_jsonl,
+    parse_claude_code_jsonl_streaming, quick_checksum, QuickChecksum,
 };
-pub use codex::parse_codex_rollout;
+pub use codex::{parse_codex_rollout, parse_codex_rollout_streaming};
 pub use cursor::parse_cursor_tracking_db;
-pub use pi::parse_pi_session;
+pub use pi::{parse_pi_session, parse_pi_session_streaming};
 
 pub use discovery::{discover, DetectedIdentity, DetectedInstallation, DiscoveryOptions, DiscoveryOutput};
 

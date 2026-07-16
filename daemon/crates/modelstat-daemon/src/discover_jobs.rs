@@ -11,8 +11,11 @@
 use std::path::{Path, PathBuf};
 
 use modelstat_parsers::{
-    parse_claude_code_jsonl, parse_codex_rollout, parse_pi_session, ParseResult, ParserContext,
+    parse_claude_code_jsonl, parse_claude_code_jsonl_streaming, parse_codex_rollout,
+    parse_codex_rollout_streaming, parse_pi_session, parse_pi_session_streaming, ParseResult,
+    ParserContext,
 };
+use modelstat_wire::RawEvent;
 
 /// Which parser a discovered transcript needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +125,25 @@ pub fn parse_job(device_id: &str, job: &ScanJob) -> std::io::Result<ParseResult>
         ParserKind::ClaudeCode => parse_claude_code_jsonl(&ctx),
         ParserKind::Codex => parse_codex_rollout(&ctx),
         ParserKind::Pi => parse_pi_session(&ctx),
+    }
+}
+
+/// Parse one job in STREAMING mode: events flow to `emit` in bounded ≤256-event
+/// chunks (never fully materialised), and the returned [`ParseResult`] carries the
+/// collected tool-call drafts + script contexts + stats with `events` empty. This
+/// is what the scan loop drives (via a spawn-blocking + bounded-channel bridge) so
+/// a multi-hundred-MB transcript stays within a fixed memory ceiling. Mirrors
+/// [`parse_job`]'s parser dispatch.
+pub fn parse_job_streaming(
+    device_id: &str,
+    job: &ScanJob,
+    emit: &mut dyn FnMut(Vec<RawEvent>),
+) -> std::io::Result<ParseResult> {
+    let ctx = ParserContext::new(device_id, job.path.clone());
+    match job.kind {
+        ParserKind::ClaudeCode => parse_claude_code_jsonl_streaming(&ctx, emit),
+        ParserKind::Codex => parse_codex_rollout_streaming(&ctx, emit),
+        ParserKind::Pi => parse_pi_session_streaming(&ctx, emit),
     }
 }
 

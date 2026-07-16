@@ -37,6 +37,12 @@ pub const BATCH_BUFFER_HARD_CAP: usize = BATCH_MAX_EVENTS * 2;
 /// scan. Newest-first + this cap means a session you just finished lands fast
 /// while a big backlog drains over quick follow-up cycles (`more_pending`).
 pub const MAX_FILES_PER_SCAN: usize = 12;
+/// How many event chunks (≤256 events each) the streaming parser may run ahead of
+/// the buffer/flush loop. Bounds the in-flight memory to this × chunk + one batch,
+/// so even a multi-hundred-MB transcript never fully materialises. Backpressure:
+/// the (blocking-thread) parser parks on `blocking_send` once this many chunks
+/// queue, so it stops reading while a batch is being summarised + uploaded.
+const STREAM_CHANNEL_CAP: usize = 4;
 
 /// Per-cycle scan bounds. `scan_all` passes `{ Some(MAX_FILES_PER_SCAN), false }`;
 /// the eager single-session force-scan passes `{ None, true }`.
@@ -229,7 +235,7 @@ pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE>(
     ner: &N,
     git: &mut G,
     extract_links: Option<&LinkExtractor<'_>>,
-    mut parse: P,
+    parse: P,
     checksum: C,
     mut correct_events: CE,
     // `+ Sync` so `&exists`/`&read_file` are `Send` — the scan runs inside the
@@ -250,7 +256,16 @@ where
     N: NerModel,
     G: GitEnrichment + Send,
     U: BatchUploader,
-    P: FnMut(&ScanJob) -> std::io::Result<ParseResult>,
+    // The streaming parse seam: emits events in bounded chunks (never a full
+    // materialised `ParseResult.events`) + returns the tool-call/stats tail. `Fn +
+    // Send + Sync + Clone + 'static` so the loop can run it on a `spawn_blocking`
+    // thread (a fresh clone per file) — a sync parser can't await the async flush,
+    // so the bounded channel is what carries backpressure between them.
+    P: Fn(&ScanJob, &mut dyn FnMut(Vec<RawEvent>)) -> std::io::Result<ParseResult>
+        + Send
+        + Sync
+        + Clone
+        + 'static,
     C: Fn(&str) -> Option<FileCursor>,
     CE: FnMut(Vec<RawEvent>) -> Vec<RawEvent>,
 {
@@ -311,62 +326,91 @@ where
             }
         }
         tallies.files_scanned += 1;
-        match parse(job) {
-            Ok(mut r) => {
-                // Stream this file's events into the buffer, flushing the moment a
-                // full batch accumulates (backpressure: memory stays near one
-                // batch even mid-file). A held flush stops the scan — the file's
-                // cursor was never queued (that happens post-parse below), so it
-                // re-parses whole next cycle.
-                for e in r.events.drain(..) {
-                    buffer.push(e);
-                    if buffer.len() >= BATCH_MAX_EVENTS && flush!().is_err() {
-                        tallies.held = true;
-                        return tallies;
-                    }
-                }
-                debug_assert!(
-                    buffer.len() <= BATCH_BUFFER_HARD_CAP,
-                    "scan event buffer exceeded {BATCH_BUFFER_HARD_CAP} events — \
-                     incremental batch flushing has regressed"
-                );
-                // Summarise each command's script/bash FILES into the drafts'
-                // redacted abstracts — best-effort + additive; a failure leaves
-                // them empty and never blocks the upload. Runs before the drafts
-                // buffer so the enriched version ships. Uses the RAW engine
-                // (`resilient.engine()`), NOT the resilient wrapper: script
-                // abstracts are additive, so an engine-down failure must simply
-                // omit the script — never trip the hold-and-retry that the
-                // mandatory summarise path (build_flush_batches) owns.
-                crate::enrich_scripts::enrich_tool_call_scripts(
-                    &mut r.tool_calls,
-                    &r.script_contexts,
-                    resilient.engine(),
-                    exists,
-                    read_file,
-                    Some(ner),
-                )
-                .await;
-                for c in r.tool_calls.drain(..) {
-                    if tool_buffer.len() >= BATCH_MAX_TOOL_CALLS && flush!().is_err() {
-                        tallies.held = true;
-                        return tallies;
-                    }
-                    tool_buffer.push(c);
-                }
-                // Queue the cursor advance — applied by the next successful flush,
-                // not before. If we're offline the next scan retries from the same
-                // position. A checksum read that failed leaves no cursor (the file
-                // re-parses next time), matching the TS `.catch(() => null)`.
-                if let Some(cs) = cs {
-                    pending_cursors.push((job.path.clone(), cs));
+        // Stream this file's events through a bounded channel while the SYNC
+        // streaming parser runs on a spawn-blocking thread. The parser can't await
+        // the async flush, so the channel bridges them: the async side drains a
+        // chunk, buffers it, and flushes the moment a full batch accumulates; the
+        // parser parks on a full channel (backpressure) so it never reads ahead of
+        // the flush — memory stays near one batch + the channel even mid-file, so
+        // a multi-hundred-MB transcript never fully materialises. A held flush
+        // stops the scan — the file's cursor was never queued (that happens
+        // post-parse below), so it re-parses whole next cycle.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<RawEvent>>(STREAM_CHANNEL_CAP);
+        let parse_one = parse.clone();
+        let job_owned = job.clone();
+        let parse_handle = tokio::task::spawn_blocking(move || {
+            let mut emit = move |chunk: Vec<RawEvent>| {
+                // A closed channel (the async side held + returned) just drops the
+                // remainder — the cursor never advanced, so the file re-parses.
+                let _ = tx.blocking_send(chunk);
+            };
+            parse_one(&job_owned, &mut emit)
+        });
+        let mut held = false;
+        while let Some(chunk) = rx.recv().await {
+            for e in chunk {
+                buffer.push(e);
+                if buffer.len() >= BATCH_MAX_EVENTS && flush!().is_err() {
+                    held = true;
+                    break;
                 }
             }
-            Err(e) => {
-                // A single unparseable file is skipped loudly — the scan carries
-                // on with the rest (the file re-tries next cycle).
+            if held {
+                break;
+            }
+        }
+        if held {
+            tallies.held = true;
+            return tallies;
+        }
+        debug_assert!(
+            buffer.len() <= BATCH_BUFFER_HARD_CAP,
+            "scan event buffer exceeded {BATCH_BUFFER_HARD_CAP} events — \
+             incremental batch flushing has regressed"
+        );
+        // The parser finished streaming; take its tail (tool-call drafts + script
+        // contexts + stats). A parse error / task panic skips this one file loudly
+        // — the scan carries on and the file re-tries next cycle.
+        let mut r = match parse_handle.await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 eprintln!("modelstat: parse failed for {}: {e}", job.path);
+                continue;
             }
+            Err(join) => {
+                eprintln!("modelstat: parse task panicked for {}: {join}", job.path);
+                continue;
+            }
+        };
+        // Summarise each command's script/bash FILES into the drafts' redacted
+        // abstracts — best-effort + additive; a failure leaves them empty and never
+        // blocks the upload. Runs before the drafts buffer so the enriched version
+        // ships. Uses the RAW engine (`resilient.engine()`), NOT the resilient
+        // wrapper: script abstracts are additive, so an engine-down failure must
+        // simply omit the script — never trip the hold-and-retry that the mandatory
+        // summarise path (build_flush_batches) owns.
+        crate::enrich_scripts::enrich_tool_call_scripts(
+            &mut r.tool_calls,
+            &r.script_contexts,
+            resilient.engine(),
+            exists,
+            read_file,
+            Some(ner),
+        )
+        .await;
+        for c in r.tool_calls.drain(..) {
+            if tool_buffer.len() >= BATCH_MAX_TOOL_CALLS && flush!().is_err() {
+                tallies.held = true;
+                return tallies;
+            }
+            tool_buffer.push(c);
+        }
+        // Queue the cursor advance — applied by the next successful flush, not
+        // before. If we're offline the next scan retries from the same position. A
+        // checksum read that failed leaves no cursor (the file re-parses next
+        // time), matching the TS `.catch(() => null)`.
+        if let Some(cs) = cs {
+            pending_cursors.push((job.path.clone(), cs));
         }
         // Stop after the cap so memory + time per cycle stay bounded. The trailing
         // flush uploads what's buffered; `more_pending` tells the daemon to
@@ -503,13 +547,46 @@ mod tests {
         }
     }
 
-    // A parse seam that returns the given events for every job (source_file set).
+    // A streaming parse seam that emits the given events (as ONE chunk) for every
+    // job, returning an empty-`events` tail (mirrors the real streaming parsers).
     fn parse_with(
         events: Vec<RawEvent>,
-    ) -> impl FnMut(&ScanJob) -> std::io::Result<ParseResult> {
-        move |j: &ScanJob| {
+    ) -> impl Fn(&ScanJob, &mut dyn FnMut(Vec<RawEvent>)) -> std::io::Result<ParseResult>
+           + Send
+           + Sync
+           + Clone
+           + 'static {
+        move |j: &ScanJob, emit: &mut dyn FnMut(Vec<RawEvent>)| {
+            if !events.is_empty() {
+                emit(events.clone());
+            }
             Ok(ParseResult {
-                events: events.clone(),
+                events: Vec::new(),
+                tool_calls: Vec::new(),
+                script_contexts: Vec::new(),
+                stats: ParseStats::default(),
+                source_file: j.path.clone(),
+            })
+        }
+    }
+
+    // A streaming parse seam that emits events in MULTIPLE chunks of `chunk_size`
+    // — exercises the spawn-blocking + bounded-channel bridge across chunk
+    // boundaries (the memory-ceiling path a single huge transcript takes).
+    fn parse_in_chunks(
+        events: Vec<RawEvent>,
+        chunk_size: usize,
+    ) -> impl Fn(&ScanJob, &mut dyn FnMut(Vec<RawEvent>)) -> std::io::Result<ParseResult>
+           + Send
+           + Sync
+           + Clone
+           + 'static {
+        move |j: &ScanJob, emit: &mut dyn FnMut(Vec<RawEvent>)| {
+            for chunk in events.chunks(chunk_size.max(1)) {
+                emit(chunk.to_vec());
+            }
+            Ok(ParseResult {
+                events: Vec::new(),
                 tool_calls: Vec::new(),
                 script_contexts: Vec::new(),
                 stats: ParseStats::default(),
@@ -826,6 +903,53 @@ mod tests {
         assert_eq!(uploader.uploaded[0].0, 1000);
         assert_eq!(uploader.uploaded[1].0, 100);
         // Cursor advanced exactly once, after the final batch.
+        assert!(cursors.get_cursor("/big.jsonl").is_some());
+    }
+
+    #[tokio::test]
+    async fn streams_a_large_file_in_many_chunks_with_backpressure() {
+        // 1100 events emitted in 11 chunks of 100 — MORE chunks than
+        // STREAM_CHANNEL_CAP (4), so the spawn-blocking parser parks on a full
+        // channel (backpressure) while batches flush. The batching is identical to
+        // a single-chunk emission (1000 + 100), proving the bridge is transparent:
+        // memory stays bounded even though the "file" is streamed piecemeal.
+        let resilient = healthy();
+        let mut git = NoGit;
+        let mut uploader = RecordingUploader::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        let mut events = Vec::with_capacity(1100);
+        for i in 0..1100u32 {
+            let (h, m) = (i / 60, i % 60);
+            events.push(ev("s1", &format!("2026-07-16T{h:02}:{m:02}:00.000Z")));
+        }
+        let t = run_scan_over_jobs(
+            vec![job("/big.jsonl")],
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(None, false),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            &mut git,
+            None,
+            parse_in_chunks(events, 100),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &mut uploader,
+            &mut cursors,
+            &mut obs,
+        )
+        .await;
+
+        assert!(!t.held);
+        assert_eq!(t.events_uploaded, 1100);
+        assert_eq!(uploader.uploaded.len(), 2);
+        assert_eq!(uploader.uploaded[0].0, 1000);
+        assert_eq!(uploader.uploaded[1].0, 100);
         assert!(cursors.get_cursor("/big.jsonl").is_some());
     }
 }

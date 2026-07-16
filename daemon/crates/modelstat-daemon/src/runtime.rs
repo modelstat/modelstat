@@ -28,7 +28,7 @@ use modelstat_wire::RawEvent;
 
 use crate::authoritative_git::resolve_authoritative_git;
 use crate::discover_jobs::{
-    discover_jobs, order_jobs_newest_first, parse_job, ParserKind, ScanJob,
+    discover_jobs, order_jobs_newest_first, parse_job_streaming, ParserKind, ScanJob,
 };
 use crate::engine::{build_embedder, build_ner, engine_base_url, DaemonEmbedder, DaemonNer};
 use crate::insights::{refresh_session_insights, SessionInsightsFetcher};
@@ -288,7 +288,12 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     };
     let exists = |p: &str| std::path::Path::new(p).exists();
     let read_file = |p: &str| read_capped(p);
-    let parse = |job: &ScanJob| parse_job(device_id, job);
+    // The streaming parse seam runs on a spawn-blocking thread (a clone per file),
+    // so it owns its device id + is Send/Sync/Clone/'static.
+    let device_id_owned = daemon.device_id.clone();
+    let parse = move |job: &ScanJob, emit: &mut dyn FnMut(Vec<RawEvent>)| {
+        parse_job_streaming(&device_id_owned, job, emit)
+    };
     let checksum = |path: &str| {
         quick_checksum(path).ok().map(|c| FileCursor {
             size: c.size,
