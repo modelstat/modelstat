@@ -31,4 +31,4 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_Foundation"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }

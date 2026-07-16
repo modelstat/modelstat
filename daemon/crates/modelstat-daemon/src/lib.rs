@@ -9,6 +9,7 @@ pub mod authoritative_git;
 pub mod discover_jobs;
 pub mod enrich_scripts;
 pub mod flush;
+pub mod insights;
 pub mod lock;
 pub mod processing_version;
 pub mod reconcile;
