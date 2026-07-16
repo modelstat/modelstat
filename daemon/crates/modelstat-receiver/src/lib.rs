@@ -4,6 +4,7 @@
 //! stands the crate up so the workspace builds on all six targets and the
 //! dependency graph (esp. the no-llama-link boundary) is enforced now.
 
+pub mod adapters;
 pub mod build_batches;
 pub mod ingest;
 pub mod queue;

@@ -4,6 +4,7 @@
 //! self-contained runtime primitives land first (each green + tested); the scan
 //! orchestration + main loop compose them.
 
+pub mod adapters;
 pub mod authoritative_git;
 pub mod discover_jobs;
 pub mod flush;
