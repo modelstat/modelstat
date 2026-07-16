@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use modelstat_ingest::state::FileCursor;
-use modelstat_parsers::{GitEnrichment, LocalToolContext, ParseResult, ToolCallDraft};
+use modelstat_parsers::{GitEnrichment, ParseResult, ToolCallDraft};
 use modelstat_pipeline::{Embedder, LinkExtractor, ResilientSummarizer, Summarizer};
 use modelstat_redact::NerModel;
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
@@ -211,12 +211,13 @@ where
 /// `parse`/`checksum` read a job (daemon wires `parse_job`/`quick_checksum`),
 /// `correct_events` applies authoritative-git correction (daemon wires
 /// `resolve_authoritative_git` over its own resolver — kept separate from `git`
-/// so two callers don't double-borrow one resolver), `enrich_scripts` fills the
-/// script-summary abstracts (best-effort), `uploader`/`cursors`/`observer` are
-/// the sinks. `git` is the metadata enrichment the loop OWNS and lends to each
-/// flush.
+/// so two callers don't double-borrow one resolver), `exists`/`read_file` probe +
+/// read referenced script files for the best-effort script-summary enrichment
+/// (daemon wires the real `Path::exists` + a capped file read), `uploader`/
+/// `cursors`/`observer` are the sinks. `git` is the metadata enrichment the loop
+/// OWNS and lends to each flush.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE, ES>(
+pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE>(
     ordered: Vec<ScanJob>,
     device_id: &str,
     daemon_version: &str,
@@ -230,7 +231,8 @@ pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE, ES>(
     mut parse: P,
     checksum: C,
     mut correct_events: CE,
-    mut enrich_scripts: ES,
+    exists: &dyn Fn(&str) -> bool,
+    read_file: &dyn Fn(&str) -> Option<String>,
     uploader: &mut U,
     cursors: &mut dyn CursorStore,
     observer: &mut dyn ScanObserver,
@@ -244,7 +246,6 @@ where
     P: FnMut(&ScanJob) -> std::io::Result<ParseResult>,
     C: Fn(&str) -> Option<FileCursor>,
     CE: FnMut(Vec<RawEvent>) -> Vec<RawEvent>,
-    ES: FnMut(&mut Vec<ToolCallDraft>, &[LocalToolContext]),
 {
     let mut tallies = ScanTallies::default();
     // The current batch's events + the tool-call drafts travelling with them.
@@ -325,8 +326,20 @@ where
                 // Summarise each command's script/bash FILES into the drafts'
                 // redacted abstracts — best-effort + additive; a failure leaves
                 // them empty and never blocks the upload. Runs before the drafts
-                // buffer so the enriched version ships.
-                enrich_scripts(&mut r.tool_calls, &r.script_contexts);
+                // buffer so the enriched version ships. Uses the RAW engine
+                // (`resilient.engine()`), NOT the resilient wrapper: script
+                // abstracts are additive, so an engine-down failure must simply
+                // omit the script — never trip the hold-and-retry that the
+                // mandatory summarise path (build_flush_batches) owns.
+                crate::enrich_scripts::enrich_tool_call_scripts(
+                    &mut r.tool_calls,
+                    &r.script_contexts,
+                    resilient.engine(),
+                    exists,
+                    read_file,
+                    Some(ner),
+                )
+                .await;
                 for c in r.tool_calls.drain(..) {
                     if tool_buffer.len() >= BATCH_MAX_TOOL_CALLS && flush!().is_err() {
                         tallies.held = true;
@@ -376,6 +389,17 @@ mod tests {
     use modelstat_sumclient::{CompleteRequest, SumError};
     use modelstat_wire::GitContext;
     use std::time::Duration;
+
+    // The scan's script-enrichment file seams. Every test here parses events with
+    // NO script contexts (parse_with sets `script_contexts` empty), so
+    // enrich_tool_call_scripts returns early and these are never actually called —
+    // they exist only to satisfy the two seam parameters.
+    fn no_exists(_path: &str) -> bool {
+        false
+    }
+    fn no_read(_path: &str) -> Option<String> {
+        None
+    }
 
     // A fake engine: healthy → a fixed reply for every pass; failing → 503 so the
     // resilient wrapper reports Held.
@@ -528,7 +552,8 @@ mod tests {
             parse_with(events),
             checksum,
             |e| e,
-            |_calls, _ctx| {},
+            &no_exists,
+            &no_read,
             &mut uploader,
             &mut cursors,
             &mut obs,
@@ -576,7 +601,8 @@ mod tests {
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
             checksum,
             |e| e,
-            |_c, _x| {},
+            &no_exists,
+            &no_read,
             &mut uploader,
             &mut cursors,
             &mut obs,
@@ -618,7 +644,8 @@ mod tests {
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
             checksum,
             |e| e,
-            |_c, _x| {},
+            &no_exists,
+            &no_read,
             &mut uploader,
             &mut cursors,
             &mut obs,
@@ -657,7 +684,8 @@ mod tests {
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
             checksum,
             |e| e,
-            |_c, _x| {},
+            &no_exists,
+            &no_read,
             &mut uploader,
             &mut cursors,
             &mut obs,
@@ -696,7 +724,8 @@ mod tests {
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
             checksum,
             |e| e,
-            |_c, _x| {},
+            &no_exists,
+            &no_read,
             &mut uploader,
             &mut cursors,
             &mut obs,
@@ -729,7 +758,8 @@ mod tests {
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
             checksum,
             |e| e,
-            |_c, _x| {},
+            &no_exists,
+            &no_read,
             &mut uploader,
             &mut cursors,
             &mut obs,
@@ -773,7 +803,8 @@ mod tests {
             parse_with(events),
             checksum,
             |e| e,
-            |_c, _x| {},
+            &no_exists,
+            &no_read,
             &mut uploader,
             &mut cursors,
             &mut obs,
