@@ -51,8 +51,13 @@ pub struct ServiceDef {
     pub unit_name: &'static str,
     /// Human description for the unit/task.
     pub description: &'static str,
-    /// The absolute binary path.
-    pub binary: PathBuf,
+    /// The directory holding the staged binaries (`modelstat`(`.exe`) +
+    /// `modelstat-summarizer`). Each generator renders the full path in its
+    /// TARGET convention (launchd/systemd = POSIX no-exe; schtasks/sc = Windows
+    /// `.exe`) — independent of the host that built it.
+    pub bin_dir: PathBuf,
+    /// The binary's base name, no extension (`modelstat` / `modelstat-summarizer`).
+    pub bin_base: &'static str,
     /// The subcommand the supervisor runs (`start` / `serve`).
     pub subcommand: &'static str,
     /// `MODELSTAT_HOME` for this scope (drives the log dir).
@@ -96,13 +101,29 @@ impl ServiceDef {
             label,
             unit_name,
             description,
-            binary: bin_dir.join(exe_name(bin_base)),
+            bin_dir: bin_dir.to_path_buf(),
+            bin_base,
             subcommand,
             home: home.to_path_buf(),
             out_log: logs.join(format!("{log_prefix}out.log")),
             err_log: logs.join(format!("{log_prefix}err.log")),
             throttle,
         }
+    }
+
+    /// The binary reference for the POSIX service managers (launchd, systemd):
+    /// forward slashes, no `.exe`. Forced regardless of build host so the plist /
+    /// unit body is byte-identical everywhere (a no-op on macOS/Linux, where they
+    /// actually run; correct on a Windows CI host that only compiles the test).
+    fn posix_binary(&self) -> String {
+        format!("{}/{}", posix(&self.bin_dir), self.bin_base)
+    }
+
+    /// The binary path for the Windows consumers (schtasks `<Command>`, `sc
+    /// create binPath=`): native separators + the `.exe` extension. Windows-only
+    /// artifacts, so `.exe` is unconditional (not host-`cfg`-gated).
+    pub fn windows_binary(&self) -> PathBuf {
+        self.bin_dir.join(format!("{}.exe", self.bin_base))
     }
 
     /// The launchd plist body (§16 — no node, no `NODE_OPTIONS`).
@@ -141,13 +162,13 @@ impl ServiceDef {
 </plist>
 "#,
             label = self.label,
-            bin = self.binary.display(),
+            bin = self.posix_binary(),
             sub = self.subcommand,
             throttle = self.throttle,
-            out = self.out_log.display(),
-            err = self.err_log.display(),
+            out = posix(&self.out_log),
+            err = posix(&self.err_log),
             env = env,
-            home = self.home.display(),
+            home = posix(&self.home),
         )
     }
 
@@ -185,10 +206,10 @@ impl ServiceDef {
              WantedBy={wanted_by}\n",
             desc = self.description,
             env_line = env_line,
-            bin = self.binary.display(),
+            bin = self.posix_binary(),
             sub = self.subcommand,
-            out = self.out_log.display(),
-            err = self.err_log.display(),
+            out = posix(&self.out_log),
+            err = posix(&self.err_log),
             wanted_by = wanted_by,
         )
     }
@@ -253,19 +274,18 @@ impl ServiceDef {
             trigger = trigger,
             logon_type = logon_type,
             run_level = run_level,
-            bin = self.binary.display(),
+            bin = self.windows_binary().display(),
             sub = self.subcommand,
         )
     }
 }
 
-/// Append `.exe` on Windows targets.
-fn exe_name(base: &str) -> String {
-    if cfg!(windows) {
-        format!("{base}.exe")
-    } else {
-        base.to_string()
-    }
+/// Render a path with forward-slash separators. launchd plists and systemd units
+/// are POSIX-only artifacts; forcing `/` keeps their bodies identical regardless
+/// of the host that built them — a no-op on macOS/Linux (where they run), and the
+/// fix that lets these bodies be unit-tested on a Windows CI host.
+fn posix(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
 }
 
 #[cfg(test)]
@@ -341,7 +361,9 @@ mod tests {
     #[test]
     fn schtasks_xml_runs_binary_with_restart_and_hidden() {
         let xml = daemon_user().schtasks_xml();
-        assert!(xml.contains("<Command>/home/dev/.modelstat/bin/modelstat</Command>"));
+        // The Windows artifact always names the `.exe` (separator differs by host,
+        // so assert the binary + closing tag, not the full absolute path).
+        assert!(xml.contains("modelstat.exe</Command>"), "{xml}");
         assert!(xml.contains("<Arguments>start</Arguments>"));
         assert!(xml.contains("<LogonTrigger>"));
         assert!(xml.contains("<Hidden>true</Hidden>"));

@@ -55,7 +55,10 @@ pub fn service_def(component: Component, scope: Scope) -> ServiceDef {
     ServiceDef::resolve(component, scope, &bin_dir(), &scope_home(scope))
 }
 
-/// The OS home (NOT `MODELSTAT_HOME`) — where launchd LaunchAgents live.
+/// The OS home (NOT `MODELSTAT_HOME`) — where launchd LaunchAgents live. Only the
+/// macOS/Linux branches of [`service_file_path`] consult it; Windows uses
+/// `home_path`, so it's dead there.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn os_home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -96,7 +99,12 @@ pub fn service_file_path(def: &ServiceDef) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         // The task XML we stage before registering it (schtasks reads it by path).
-        home_path("service").join(format!("{}.xml", def.unit_name))
+        // Suffix by scope so a system install never clobbers the user's task XML.
+        let scope_suffix = match def.scope {
+            Scope::User => "",
+            Scope::System => "-system",
+        };
+        home_path("service").join(format!("{}{}.xml", def.unit_name, scope_suffix))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -318,7 +326,7 @@ fn windows_load(def: &ServiceDef, xml_path: &std::path::Path) -> std::io::Result
             Ok(())
         }
         Scope::System => {
-            let bin_path = format!("\"{}\" {}", def.binary.display(), def.subcommand);
+            let bin_path = format!("\"{}\" {}", def.windows_binary().display(), def.subcommand);
             run("sc", &["stop", def.unit_name]);
             run("sc", &["delete", def.unit_name]);
             let (ok, _o, err) = run(

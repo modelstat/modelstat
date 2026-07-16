@@ -166,12 +166,11 @@ mod tests {
 
     #[test]
     fn tray_paths_are_under_the_os_home() {
-        // (Only asserts the shape — HOME resolution is environment-dependent.)
-        assert!(tray_plist_path()
-            .to_string_lossy()
-            .ends_with("Library/LaunchAgents/ai.modelstat.tray.plist"));
-        assert!(tray_app_path()
-            .to_string_lossy()
-            .ends_with("Applications/ModelstatTray.app"));
+        // (Only asserts the shape — HOME resolution is environment-dependent, and
+        // the separator differs by host, so normalize to `/` before matching.)
+        let plist = tray_plist_path().to_string_lossy().replace('\\', "/");
+        assert!(plist.ends_with("Library/LaunchAgents/ai.modelstat.tray.plist"));
+        let app = tray_app_path().to_string_lossy().replace('\\', "/");
+        assert!(app.ends_with("Applications/ModelstatTray.app"));
     }
 }
