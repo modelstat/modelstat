@@ -30,12 +30,37 @@ fn main() -> ExitCode {
         Some("await-claim") => block_on(|api| async move { cmd_await_claim(&api).await }),
         Some("token") => cmd_token(&args[1..]),
         Some("paths") => cmd_paths(&args[1..]),
+        // The long-running collector daemon (feature §5). `start` and `run` are
+        // aliases; `--force` replaces a live owner (see the singleton lock).
+        Some("start") | Some("run") => cmd_run(&args[1..]),
         _ => {
             println!("{VERSION}");
             println!("the collector CLI is implemented across milestones M1–M6");
             ExitCode::SUCCESS
         }
     }
+}
+
+/// `modelstat start` / `modelstat run` — the collector daemon. Builds a
+/// multi-thread runtime (the daemon fans heartbeat + receiver + scan + drain +
+/// reconcile across worker threads, and a scan's synchronous git subprocess reads
+/// must not block liveness) and hands control to the main loop. The process runs
+/// until a signal or a lost lock race; its exit code (0 / 130 / 143 / 1) comes
+/// straight from `run`.
+fn cmd_run(args: &[String]) -> ExitCode {
+    let force = args.iter().any(|a| a == "--force");
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("modelstat: failed to start async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let config = Arc::new(Config::load(VERSION));
+    rt.block_on(modelstat_daemon::run::run(config, force))
 }
 
 /// Build a runtime, construct the shared [`Config`] + [`DeviceApi`], and run one
