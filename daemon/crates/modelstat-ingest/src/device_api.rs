@@ -17,8 +17,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::{Config, FreshIdentity};
+use crate::ingest::{
+    classify_status, describe_error, ingest_backoff, jitter, retry_after, IngestResponse,
+    UploadDecision, UploadResult, INGEST_MAX_ATTEMPTS,
+};
 use crate::machine_key::{build_fingerprint, intended_device_uuid};
-use modelstat_wire::{Fingerprint, RegisterRequest};
+use modelstat_wire::{Fingerprint, IngestBatch, RegisterRequest};
 
 /// Register-door response (`POST /v1/tokens`), the server's `{data:…}` payload.
 #[derive(Debug, Clone, Deserialize)]
@@ -361,6 +365,104 @@ impl DeviceApi {
             .device_request(Method::POST, &url, Some(body), 3)
             .await?;
         Self::unwrap_data(raw).ok()
+    }
+
+    /// Ship one batch to `/v1/ingest` (or `/v1/ingest/raw` when `raw` — the cloud
+    /// per-session path for turns the server summarises itself). The never-drop
+    /// uploader (feature §17.1/§17.2, §21.2): a 2xx COMMITS; 401/403 reauths once
+    /// (machine-stable recover) then retries; **everything else HOLDS + retries**
+    /// with jittered backoff (`Retry-After` honored as a floor). A non-commit
+    /// returns [`UploadResult::Hold`] — the scan loop leaves the file's cursor
+    /// un-advanced and re-sends the SAME batch next cycle, so good data is never
+    /// dropped. Port of TS `IngestClient.upload` + `apps/daemon/src/api.ts::uploadBatch`.
+    pub async fn upload_batch(&self, batch: &IngestBatch, raw: bool) -> UploadResult {
+        let path = if raw { "/v1/ingest/raw" } else { "/v1/ingest" };
+        let url = format!("{}{}", self.config.api_url().trim_end_matches('/'), path);
+        // Stamp the daemon's summarizer mode on every batch (both paths — the
+        // server persists it as the scope's last-seen mode for ops alerts) and
+        // clamp every bounded string to its schema byte cap ONCE, outside the
+        // retry loop: the payload is identical across attempts, and the clamp
+        // guarantees no permanently-rejectable (over-cap) batch. Rust strings are
+        // inherently well-formed UTF-8, so TS's `wellFormedStringify` is a no-op.
+        let mut wire = batch.clone();
+        wire.summarizer_mode = Some(self.config.summarizer_mode());
+        wire.clamp();
+
+        let mut last_fetch_error: Option<String> = None;
+        for attempt in 0..INGEST_MAX_ATTEMPTS {
+            let Some(bearer) = self.config.bearer() else {
+                // No token — one-shot recovery, then retry. If recovery fails or
+                // is backing off, HOLD (never drop): retried next cycle.
+                if !self.recover_identity().await {
+                    return UploadResult::Hold("no_token".to_string());
+                }
+                continue;
+            };
+            let res = match self
+                .http
+                .post(&url)
+                .bearer_auth(&bearer)
+                .json(&wire)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    // Network blip — surface the real cause chain, back off + retry.
+                    let detail = describe_error(&e);
+                    eprintln!("[modelstat] ingest fetch failed (attempt {attempt}): {detail}");
+                    last_fetch_error = Some(detail);
+                    tokio::time::sleep(jitter(ingest_backoff(attempt))).await;
+                    continue;
+                }
+            };
+            let status = res.status().as_u16();
+            match classify_status(status, attempt) {
+                UploadDecision::Commit => {
+                    // A 2xx with an opaque/empty body still reads as a commit.
+                    let receipt = res.json::<IngestResponse>().await.unwrap_or_default();
+                    return UploadResult::Commit(receipt);
+                }
+                UploadDecision::Reauth => {
+                    // Bearer revoked/rotated server-side — recover by machine-stable
+                    // re-register, then retry with the fresh bearer.
+                    if !self.recover_identity().await {
+                        return UploadResult::Hold("reauth_failed".to_string());
+                    }
+                    continue;
+                }
+                UploadDecision::Backoff(base) => {
+                    // Read `Retry-After` (a FLOOR) BEFORE the body consumes `res`;
+                    // add jitter so a fleet doesn't retry in lockstep.
+                    let delay = jitter(base.max(retry_after(res.headers())));
+                    // A 4xx body usually says WHY (a WAF/edge notice, a validation
+                    // message) — surface ≤500 chars so a stuck batch is
+                    // diagnosable. 5xx/429 bodies are noise; drop unread.
+                    let body = if (400..500).contains(&status) {
+                        res.text()
+                            .await
+                            .ok()
+                            .map(|t| t.chars().take(500).collect::<String>())
+                            .filter(|t| !t.is_empty())
+                    } else {
+                        None
+                    };
+                    eprintln!(
+                        "[modelstat] ingest backoff status={status} delay_ms={} attempt={attempt}{}",
+                        delay.as_millis(),
+                        body.map(|b| format!(" body={b}")).unwrap_or_default()
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue; // HOLD + retry
+                }
+            }
+        }
+        // Attempts exhausted — HOLD (never drop). Surface the underlying network
+        // cause when every attempt failed at the fetch layer, else a generic reason.
+        let reason = last_fetch_error
+            .map(|e| format!("network: {e}"))
+            .unwrap_or_else(|| "max_attempts_exceeded".to_string());
+        UploadResult::Hold(reason)
     }
 }
 

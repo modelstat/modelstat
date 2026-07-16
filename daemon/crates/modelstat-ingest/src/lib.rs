@@ -22,6 +22,7 @@ mod atomic;
 pub mod config;
 pub mod device_api;
 pub mod identity;
+pub mod ingest;
 pub mod machine_key;
 pub mod paths;
 pub mod state;
@@ -35,6 +36,7 @@ pub use device_api::{
 pub use identity::{
     backup_identity, has_identity_file, identity_path, load_identity, save_identity, DeviceIdentity,
 };
+pub use ingest::{classify_status, retry_after, IngestResponse, UploadDecision, UploadResult};
 pub use machine_key::{build_fingerprint, intended_device_uuid, machine_key_source};
 pub use paths::{home_path, logs_dir, modelstat_home};
 pub use state::{state_path, RuntimeState};
