@@ -21,6 +21,7 @@ pub mod runtime;
 pub mod scan;
 pub mod status;
 pub mod statusline;
+pub mod supervise;
 pub mod single_flight;
 pub mod watch;
 

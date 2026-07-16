@@ -39,6 +39,10 @@ fn main() -> ExitCode {
             modelstat_daemon::statusline::run_statusline();
             ExitCode::SUCCESS
         }
+        // The tray's adopt/spawn/replace decision (§15) — read-only JSON.
+        Some("_daemon-health") => cmd_daemon_health(),
+        // Install/refresh the managed daemon service + reconcile the tray (§16/§15).
+        Some("_install-service") => cmd_install_service(),
         _ => {
             println!("{VERSION}");
             println!("the collector CLI is implemented across milestones M1–M6");
@@ -67,6 +71,42 @@ fn cmd_run(args: &[String]) -> ExitCode {
     };
     let config = Arc::new(Config::load(VERSION));
     rt.block_on(modelstat_daemon::run::run(config, force))
+}
+
+/// `modelstat _daemon-health` — the tray's read-only adopt/spawn/replace decision
+/// (§15). Never throws: `daemon_health` returns a valid decision even with no
+/// lock (→ spawn).
+fn cmd_daemon_health() -> ExitCode {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let health = modelstat_daemon::supervise::daemon_health(now_ms, Some(VERSION));
+    let json = modelstat_daemon::supervise::daemon_health_json(&health);
+    println!("{}", serde_json::to_string(&json).unwrap());
+    ExitCode::SUCCESS
+}
+
+/// `modelstat _install-service` — install/refresh the managed daemon service +
+/// reconcile the macOS tray agent, one idempotent step (used by connect +
+/// self-update). The summarizer engine service + statusline are installed by
+/// `connect` when the mode calls for them (M6).
+fn cmd_install_service() -> ExitCode {
+    use modelstat_service::{install_service, tray, Component, Scope};
+    match install_service(Component::Daemon, Scope::User) {
+        Ok(r) => {
+            println!("\x1b[32m✓\x1b[0m daemon service installed: {}", r.path.display());
+            println!("  logs: {}", r.logs.display());
+        }
+        Err(e) => {
+            eprintln!("modelstat: service install failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if tray::ensure_tray_installed() {
+        println!("\x1b[32m✓\x1b[0m tray agent reconciled");
+    }
+    ExitCode::SUCCESS
 }
 
 /// Build a runtime, construct the shared [`Config`] + [`DeviceApi`], and run one
