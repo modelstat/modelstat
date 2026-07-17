@@ -1911,8 +1911,11 @@ version = "0.0.0"
 dependencies = [
  "axum 0.7.9",
  "modelstat-download",
+ "modelstat-ingest",
  "modelstat-llm",
+ "modelstat-service",
  "modelstat-sumclient",
+ "modelstat-update",
  "reqwest",
  "serde_json",
  "tokio",

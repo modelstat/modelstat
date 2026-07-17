@@ -177,7 +177,9 @@ async fn reconcile_local_engine(mode: &str) {
 pub(crate) fn pre_download_engine_model() {
     let engine = engine_binary_path();
     println!("preparing local summariser model (downloads on first use)…");
-    let _ = std::process::Command::new(engine).arg("setup").status();
+    // `--loopback`: config + model only, no prompts, no service — the collector
+    // arms the loopback engine service itself (§10.3 "driven inline").
+    let _ = std::process::Command::new(engine).args(["setup", "--loopback"]).status();
 }
 
 /// The engine binary next to this collector (install layout), else on PATH.

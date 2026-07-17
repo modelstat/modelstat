@@ -12,6 +12,7 @@
 
 mod server;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -36,8 +37,11 @@ fn main() -> ExitCode {
     };
     match args.first().map(String::as_str) {
         Some("serve") => rt.block_on(serve()),
-        Some("setup") => rt.block_on(setup()),
+        Some("setup") => rt.block_on(setup(&args[1..])),
         Some("status") => rt.block_on(status()),
+        Some("stop") => cmd_stop(&args[1..]),
+        Some("uninstall") => cmd_uninstall(&args[1..]),
+        Some("upgrade") => rt.block_on(cmd_upgrade()),
         Some("--version") | Some("-v") | Some("version") => {
             println!("{CLI_VERSION}");
             ExitCode::SUCCESS
@@ -54,10 +58,69 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!("{CLI_VERSION}");
-    eprintln!("usage: modelstat-summarizer <serve|setup|status|--version>");
-    eprintln!("  serve    run the protocol-v1 inference server");
-    eprintln!("  setup    write summarizer.json + pre-download the model");
-    eprintln!("  status   show config + probe the running engine");
+    eprintln!("usage: modelstat-summarizer <serve|setup|status|stop|uninstall|upgrade|--version>");
+    eprintln!("  serve      run the protocol-v1 inference server");
+    eprintln!("  setup      configure summarizer.json + download the model + install the service");
+    eprintln!("  status     show config + probe the running engine");
+    eprintln!("  stop       stop the engine service (keeps it installed)");
+    eprintln!("  uninstall  stop + remove the engine service (keeps model files)");
+    eprintln!("  upgrade    self-update to the latest published release (§13)");
+}
+
+/// The install scope (`--system` = system-wide, else per-user).
+fn arg_scope(args: &[String]) -> modelstat_service::Scope {
+    if args.iter().any(|a| a == "--system") {
+        modelstat_service::Scope::System
+    } else {
+        modelstat_service::Scope::User
+    }
+}
+
+/// `modelstat-summarizer stop` — halt the engine service without removing it.
+fn cmd_stop(args: &[String]) -> ExitCode {
+    match modelstat_service::stop_service(modelstat_service::Component::Summarizer, arg_scope(args)) {
+        Ok(()) => {
+            println!("✓ summariser engine stopped");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("modelstat-summarizer: stop failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `modelstat-summarizer uninstall` — stop + remove the engine service. Model
+/// files stay on disk (a re-`setup` reuses them).
+fn cmd_uninstall(args: &[String]) -> ExitCode {
+    match modelstat_service::uninstall_service(modelstat_service::Component::Summarizer, arg_scope(args)) {
+        Ok(()) => {
+            println!("✓ summariser engine service removed (model files kept)");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("modelstat-summarizer: uninstall failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `modelstat-summarizer upgrade` — the self-hosted-box self-update path (no
+/// heartbeat verdict; resolves GitHub's latest directly, §13).
+async fn cmd_upgrade() -> ExitCode {
+    println!("upgrading the summariser engine to the latest published release…");
+    match modelstat_update::upgrade_now().await {
+        modelstat_update::UpgradeOutcome::Completed(note) => {
+            println!("  ✓ {note}");
+            ExitCode::SUCCESS
+        }
+        other => {
+            if let Some(n) = other.note() {
+                println!("  {n}");
+            }
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 /// The engine's inference backend for this build. Default (cmake-free) = the
@@ -106,7 +169,17 @@ async fn serve() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-async fn setup() -> ExitCode {
+/// `setup` (feature §10.3). Two shapes:
+///   - `--loopback` (driven by `connect`/`mode local`): write `summarizer.json`
+///     defaults + download the model. No prompts, no service (the collector arms
+///     the loopback service itself).
+///   - standalone (the installer's `summarizer` component, an org engine box):
+///     prompt bind/port (`0.0.0.0` needs an explicit confirm), download, install
+///     the service, ask about daily auto-update, print the collector command.
+async fn setup(args: &[String]) -> ExitCode {
+    let loopback = args.iter().any(|a| a == "--loopback");
+    let interactive =
+        !loopback && !args.iter().any(|a| a == "--yes") && std::io::stdin().is_terminal();
     let home = home_dir();
     let models = models_dir(&home);
     if let Err(e) = std::fs::create_dir_all(&models) {
@@ -114,7 +187,32 @@ async fn setup() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cfg_path = config_path(&home);
-    let cfg = EngineConfig::load(&cfg_path).unwrap_or_else(|_| EngineConfig::defaults(&models));
+    let mut cfg = EngineConfig::load(&cfg_path).unwrap_or_else(|_| EngineConfig::defaults(&models));
+
+    // Resolve bind + port: flags always; else prompt (standalone interactive);
+    // else keep the loaded/default values.
+    if let Some(b) = flag_value(args, "--bind") {
+        cfg.bind = b;
+    } else if interactive {
+        cfg.bind = prompt(&format!("Bind address [{}]: ", cfg.bind), &cfg.bind);
+    }
+    if cfg.bind == "0.0.0.0" && interactive {
+        eprintln!("⚠ 0.0.0.0 exposes the engine on the network — it has NO authentication.");
+        eprintln!("  Only do this behind a reverse proxy / firewall you trust.");
+        if prompt("  Type 'expose' to confirm: ", "") != "expose" {
+            eprintln!("  aborting — re-run and choose 127.0.0.1 to bind to loopback only.");
+            return ExitCode::FAILURE;
+        }
+    }
+    if let Some(p) = flag_value(args, "--port").and_then(|v| v.parse::<u16>().ok()) {
+        cfg.port = p;
+    } else if interactive {
+        let p = prompt(&format!("Port [{}]: ", cfg.port), &cfg.port.to_string());
+        if let Ok(p) = p.parse::<u16>() {
+            cfg.port = p;
+        }
+    }
+
     if let Err(e) = cfg.save(&cfg_path) {
         eprintln!("modelstat-summarizer: cannot write {}: {e}", cfg_path.display());
         return ExitCode::FAILURE;
@@ -135,10 +233,61 @@ async fn setup() -> ExitCode {
         Err(e) => eprintln!("⚠ model download deferred (lazy-downloads on first use): {e}"),
     }
 
+    // Loopback (collector-driven): the collector installs + bounces the service.
+    if loopback {
+        return ExitCode::SUCCESS;
+    }
+
+    // Standalone engine box: install the service + configure daily auto-update.
+    let scope = arg_scope(args);
+    match modelstat_service::install_service(modelstat_service::Component::Summarizer, scope) {
+        Ok(svc) => eprintln!("✓ engine service installed: {}", svc.path.display()),
+        Err(e) => eprintln!("⚠ couldn't install the engine service ({e}) — run `serve` manually"),
+    }
+    if interactive {
+        // Default OFF — a shared box should change predictably (§10.3/§13).
+        let daily = prompt("Enable daily auto-update? [y/N]: ", "n");
+        let on = matches!(daily.trim().to_lowercase().as_str(), "y" | "yes");
+        let _ = modelstat_update::set_stored_auto_update(on);
+    }
+
     println!();
     println!("Collectors point at this engine with:");
     println!("  modelstat mode self-hosted --url http://{}:{}", cfg.bind, cfg.port);
     ExitCode::SUCCESS
+}
+
+/// `--flag v` / `--flag=v` reader.
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == name {
+            return it.next().cloned();
+        }
+        if let Some(v) = a.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Read a line from stdin; empty input (or a closed stdin) yields `default`.
+fn prompt(msg: &str, default: &str) -> String {
+    use std::io::Write;
+    print!("{msg}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => default.to_string(),
+        Ok(_) => {
+            let v = line.trim();
+            if v.is_empty() {
+                default.to_string()
+            } else {
+                v.to_string()
+            }
+        }
+    }
 }
 
 async fn status() -> ExitCode {
