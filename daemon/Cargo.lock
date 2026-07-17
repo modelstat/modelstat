@@ -1730,6 +1730,7 @@ dependencies = [
  "modelstat-parsers",
  "modelstat-redact",
  "modelstat-service",
+ "modelstat-sumclient",
  "modelstat-update",
  "modelstat-wire",
  "serde",
@@ -1744,6 +1745,7 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "libc",
+ "modelstat-download",
  "modelstat-ingest",
  "modelstat-mcp",
  "modelstat-parsers",

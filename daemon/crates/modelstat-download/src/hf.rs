@@ -104,6 +104,16 @@ pub async fn download_hf_model(
     Ok(model.dir(models_dir))
 }
 
+/// [`download_hf_model`] with a fresh client — the convenience the collector's
+/// `connect`/`mode` model pre-warm uses (they hold no long-lived client).
+pub async fn ensure_hf_model(
+    model: &HfModel,
+    models_dir: &Path,
+    sink: &dyn ProgressSink,
+) -> Result<PathBuf, DownloadError> {
+    download_hf_model(&reqwest::Client::new(), model, models_dir, sink).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

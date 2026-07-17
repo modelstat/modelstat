@@ -86,9 +86,36 @@ fn models_cache_dir() -> PathBuf {
         .unwrap_or_else(|| home_path("models/hf"))
 }
 
+/// Best-effort pre-warm of the layer-2 NER redactor model into the shared cache
+/// (§9.5). Returns whether the model dir is now present. `connect`/`mode` call it
+/// so the first scan runs at full redaction quality instead of racing a lazy
+/// download; a failure is never fatal (the daemon self-heals — §9.5).
+pub async fn ensure_ner_model() -> bool {
+    modelstat_download::ensure_hf_model(
+        &modelstat_download::BERT_NER,
+        &models_cache_dir(),
+        &modelstat_download::TtyProgress::new("PII redactor"),
+    )
+    .await
+    .is_ok()
+}
+
+/// Best-effort pre-warm of the embedding model (§9.5); embeddings are fail-open
+/// (absent ⇒ time-gap segmentation), so this is purely a warm-up.
+pub async fn ensure_embedder_model() -> bool {
+    modelstat_download::ensure_hf_model(
+        &modelstat_download::BGE_SMALL,
+        &models_cache_dir(),
+        &modelstat_download::TtyProgress::new("embedder"),
+    )
+    .await
+    .is_ok()
+}
+
 /// Resolve one model's on-disk directory: an explicit `env_override` wins,
 /// otherwise `<cache>/<subdir>`. `connect` (M6, §9.5) populates these dirs; until
 /// then they're absent and the loaders below fall back to the fail-safe models.
+#[cfg_attr(not(feature = "candle"), allow(dead_code))]
 fn model_dir(env_override: &str, subdir: &str) -> PathBuf {
     std::env::var_os(env_override)
         .map(PathBuf::from)

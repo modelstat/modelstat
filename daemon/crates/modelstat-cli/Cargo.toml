@@ -23,6 +23,7 @@ modelstat-parsers.workspace = true
 modelstat-ingest.workspace = true
 modelstat-service.workspace = true
 modelstat-update.workspace = true
+modelstat-sumclient.workspace = true
 # M1 collector commands: the device flow is async (reqwest via modelstat-ingest);
 # serde renders the `--json` shapes (structs, so key order is preserved).
 tokio.workspace = true

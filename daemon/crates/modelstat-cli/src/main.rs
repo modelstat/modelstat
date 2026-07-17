@@ -16,6 +16,11 @@ use modelstat_ingest::{
 };
 use serde::Serialize;
 
+mod cmd_connect;
+mod cmd_mode;
+mod cmd_status;
+mod util;
+
 /// Compile-time version string, `daemon-<semver>` (feature §5).
 const VERSION: &str = concat!("daemon-", env!("CARGO_PKG_VERSION"));
 
@@ -26,10 +31,25 @@ fn main() -> ExitCode {
             println!("{VERSION}");
             ExitCode::SUCCESS
         }
+        // Onboarding (feature §5). The default command (no subcommand), `connect`,
+        // and `reinstall` are identical; it registers/reuses identity, installs
+        // services, wires the MCP, and prints the banner.
+        None | Some("connect") | Some("reinstall") => {
+            let start = if args.is_empty() { 0 } else { 1 };
+            let opts = cmd_connect::parse_connect_opts(&args[start..]);
+            block_on(|api| async move { cmd_connect::cmd_connect(&api, opts).await })
+        }
         Some("self-register") => block_on(|api| async move { cmd_self_register(&api).await }),
         Some("await-claim") => block_on(|api| async move { cmd_await_claim(&api).await }),
         Some("token") => cmd_token(&args[1..]),
         Some("paths") => cmd_paths(&args[1..]),
+        // Pairing + service + usage snapshot; `--json` is the tray's frozen poll
+        // API. Strictly side-effect-free (§5) — hence the device probe rides the
+        // shared DeviceApi but never recovers identity.
+        Some("status") => block_on(|api| async move { cmd_status::cmd_status(&api, &args[1..]).await }),
+        Some("jobs") => block_on(|api| async move { cmd_status::cmd_jobs(&api, &args[1..]).await }),
+        // Show/change the summarizer mode (§9); interactive set = the consent gate.
+        Some("mode") => block_on_config(|config| async move { cmd_mode::cmd_mode(config, &args[1..]).await }),
         // The long-running collector daemon (feature §5). `start` and `run` are
         // aliases; `--force` replaces a live owner (see the singleton lock).
         Some("start") | Some("run") => cmd_run(&args[1..]),
@@ -196,6 +216,28 @@ where
     let config = Arc::new(Config::load(VERSION));
     let api = Arc::new(DeviceApi::new(config));
     rt.block_on(f(api))
+}
+
+/// Like [`block_on`] but hands the command the shared [`Config`] directly (for
+/// commands that reconcile services / download models but don't drive the device
+/// register/recover flow). A current-thread runtime is plenty — these commands
+/// run one thing at a time.
+fn block_on_config<F, Fut>(f: F) -> ExitCode
+where
+    F: FnOnce(Arc<Config>) -> Fut,
+    Fut: std::future::Future<Output = ExitCode>,
+{
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("modelstat: failed to start async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    rt.block_on(f(Arc::new(Config::load(VERSION))))
 }
 
 // ── env / TTY helpers (TS cli.ts) ───────────────────────────────────────

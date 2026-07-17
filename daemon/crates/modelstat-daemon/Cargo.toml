@@ -11,6 +11,7 @@ modelstat-wire.workspace = true
 modelstat-redact.workspace = true
 modelstat-parsers.workspace = true
 modelstat-pipeline.workspace = true
+modelstat-download.workspace = true
 modelstat-ingest.workspace = true
 modelstat-receiver.workspace = true
 modelstat-sumclient.workspace = true
