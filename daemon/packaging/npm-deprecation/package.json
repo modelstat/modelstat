@@ -1,0 +1,22 @@
+{
+  "name": "modelstat",
+  "version": "0.0.0",
+  "description": "modelstat has moved to a native binary. This package migrates you to it. Install directly: curl -fsSL https://install.modelstat.ai | sh (Windows: irm https://install.modelstat.ai/ps | iex)",
+  "bin": {
+    "modelstat": "postinstall.mjs"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.mjs"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "keywords": [
+    "modelstat",
+    "deprecated"
+  ],
+  "homepage": "https://modelstat.ai",
+  "license": "MIT"
+}

@@ -81,6 +81,9 @@ fn main() -> ExitCode {
         Some("_daemon-health") => cmd_daemon_health(),
         // Install/refresh the managed daemon service + reconcile the tray (§16/§15).
         Some("_install-service") => cmd_install_service(),
+        // Stage the running binaries + tray into the stable install path (§5) — no
+        // service, no identity. The installer runs this from the extracted archive.
+        Some("_setup-runtime") => cmd_setup_runtime(),
         // The detached self-update worker the daemon spawns on an auto-update
         // verdict (§13): download + verify + swap BOTH binaries + health-probe +
         // rollback. Runs in its own process so the service bounce it triggers
@@ -220,6 +223,74 @@ fn cmd_mcp_wire(args: &[String]) -> ExitCode {
         eprintln!("Nothing new to configure (already set up, or no supported tools detected).");
     }
     ExitCode::SUCCESS
+}
+
+/// `modelstat _setup-runtime` (feature §5, **changed** — no npm staging) — copy
+/// the running binaries (+ macOS tray) from the extracted archive into the stable
+/// install path `~/.modelstat/bin`, so the managed service + self-update always
+/// launch a fixed path. Stages ONLY; installs no service and touches no identity.
+fn cmd_setup_runtime() -> ExitCode {
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("modelstat: can't resolve the running binary path");
+        return ExitCode::FAILURE;
+    };
+    let Some(src_dir) = exe.parent() else {
+        return ExitCode::FAILURE;
+    };
+    let bin_dir = modelstat_service::bin_dir();
+    if let Err(e) = std::fs::create_dir_all(&bin_dir) {
+        eprintln!("modelstat: can't create {}: {e}", bin_dir.display());
+        return ExitCode::FAILURE;
+    }
+    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
+    for base in ["modelstat", "modelstat-summarizer"] {
+        let name = format!("{base}{exe_suffix}");
+        let src = src_dir.join(&name);
+        let dst = bin_dir.join(&name);
+        if !src.exists() || src == dst {
+            continue; // engine may be absent on a collector-only archive; self = no-op
+        }
+        if let Err(e) = stage_file(&src, &dst) {
+            eprintln!("modelstat: couldn't stage {name}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("\x1b[32m✓\x1b[0m staged {}", dst.display());
+    }
+    // macOS: stage the prebuilt tray bundle where `connect` installs it from.
+    #[cfg(target_os = "macos")]
+    {
+        let tray_src = src_dir.join("ModelstatTray.app");
+        if tray_src.exists() {
+            let tray_dst = modelstat_service::tray::tray_app_path();
+            let _ = std::fs::remove_dir_all(&tray_dst);
+            if let Some(parent) = tray_dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::process::Command::new("cp")
+                .args(["-R"])
+                .arg(&tray_src)
+                .arg(&tray_dst)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                println!("\x1b[32m✓\x1b[0m staged tray: {}", tray_dst.display());
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Copy `src` → `dst` atomically (temp + rename) with an executable mode on Unix.
+fn stage_file(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let tmp = dst.with_extension(format!("stage-{}", std::process::id()));
+    std::fs::copy(src, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&tmp, dst)
 }
 
 /// `modelstat _daemon-health` — the tray's read-only adopt/spawn/replace decision
