@@ -91,6 +91,73 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The foreground `modelstat watch` loop (feature §5, dev convenience): an
+/// initial scan, then a debounced (1s) re-scan whenever a transcript changes,
+/// plus the 5-minute backstop. Runs until Ctrl-C. Shares the notify/scan glue
+/// with the daemon's own watcher (`run.rs`) but without the service machinery.
+pub async fn watch_forever(daemon: std::sync::Arc<crate::runtime::Daemon>) {
+    use notify::{Event, RecursiveMode, Watcher};
+
+    let dirs = resolve_watch_dirs();
+    let joined = dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("watching: {joined}");
+    crate::runtime::run_scan_cycle(daemon.clone(), "startup".to_string()).await;
+
+    // notify's callback runs on its own thread; bridge to async via a channel.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| {
+        if let Ok(ev) = res {
+            if ev.paths.iter().any(|p| is_transcript_file(p)) {
+                let _ = tx.send(());
+            }
+        }
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("watcher error: {e}");
+            return;
+        }
+    };
+    for dir in &dirs {
+        let _ = watcher.watch(dir, RecursiveMode::Recursive);
+    }
+
+    // 5-minute backstop — catches anything the OS event stream missed.
+    let backstop = daemon.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+        tick.tick().await; // consume the immediate first tick
+        loop {
+            tick.tick().await;
+            crate::runtime::run_scan_cycle(backstop.clone(), "interval".to_string()).await;
+        }
+    });
+
+    let sig = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    tokio::pin!(sig);
+    loop {
+        tokio::select! {
+            _ = &mut sig => break,
+            r = rx.recv() => {
+                if r.is_none() {
+                    break;
+                }
+                // 1s debounce: collapse a burst of writes into one coalesced scan.
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                while rx.try_recv().is_ok() {}
+                crate::runtime::run_scan_cycle(daemon.clone(), "change".to_string()).await;
+            }
+        }
+    }
+    drop(watcher);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

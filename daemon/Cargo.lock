@@ -1733,6 +1733,7 @@ dependencies = [
  "modelstat-sumclient",
  "modelstat-update",
  "modelstat-wire",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

@@ -16,9 +16,11 @@ use modelstat_ingest::{
 };
 use serde::Serialize;
 
+mod cmd_admin;
 mod cmd_connect;
 mod cmd_mode;
 mod cmd_status;
+mod cmd_update;
 mod util;
 
 /// Compile-time version string, `daemon-<semver>` (feature §5).
@@ -50,6 +52,19 @@ fn main() -> ExitCode {
         Some("jobs") => block_on(|api| async move { cmd_status::cmd_jobs(&api, &args[1..]).await }),
         // Show/change the summarizer mode (§9); interactive set = the consent gate.
         Some("mode") => block_on_config(|config| async move { cmd_mode::cmd_mode(config, &args[1..]).await }),
+        // Wipe cursors + stamp the processing version so the next scan re-reads all.
+        Some("reset") => cmd_admin::cmd_reset(),
+        // Tear down the managed service(s) + tray + statusline; identity preserved.
+        Some("stop") | Some("remove") | Some("uninstall") => cmd_admin::cmd_stop(),
+        // Warm-daemon-first force-scan of a session; cold in-process fallback.
+        Some("sync") => block_on_config(|config| async move { cmd_admin::cmd_sync(config, &args[1..]).await }),
+        // Read-only local discovery printout (POSTs nothing).
+        Some("discover") => cmd_admin::cmd_discover(),
+        // Foreground watcher (dev convenience) — runs until Ctrl-C.
+        Some("watch") => block_on_config(|config| async move { cmd_admin::cmd_watch(config).await }),
+        // Self-update now (§13), and the auto-update preference toggle.
+        Some("upgrade") => block_on_config(|_c| async move { cmd_update::cmd_upgrade().await }),
+        Some("autoupdate") => cmd_update::cmd_autoupdate(&args[1..]),
         // The long-running collector daemon (feature §5). `start` and `run` are
         // aliases; `--force` replaces a live owner (see the singleton lock).
         Some("start") | Some("run") => cmd_run(&args[1..]),
@@ -66,12 +81,39 @@ fn main() -> ExitCode {
         Some("_daemon-health") => cmd_daemon_health(),
         // Install/refresh the managed daemon service + reconcile the tray (§16/§15).
         Some("_install-service") => cmd_install_service(),
-        _ => {
-            println!("{VERSION}");
-            println!("the collector CLI is implemented across milestones M1–M6");
-            ExitCode::SUCCESS
+        Some(other) => {
+            eprintln!("modelstat: unknown command `{other}`\n");
+            print_usage();
+            ExitCode::FAILURE
         }
     }
+}
+
+/// The grouped usage screen (feature §5) — unknown command → this + exit 1.
+fn print_usage() {
+    eprintln!("{VERSION}");
+    eprintln!("usage: modelstat <command> [flags]\n");
+    eprintln!("Onboarding");
+    eprintln!("  (none) / connect / reinstall   register + install everything (idempotent)");
+    eprintln!("  self-register                  register this device (manual door)");
+    eprintln!("  await-claim                    wait until a human claims this device\n");
+    eprintln!("Status");
+    eprintln!("  status [--json]                pairing + service + usage snapshot");
+    eprintln!("  jobs [--json]                  local pipeline view");
+    eprintln!("  paths [--json]                 resolved file paths");
+    eprintln!("  token [--json]                 print the device bearer\n");
+    eprintln!("Control");
+    eprintln!("  mode [cloud|local|self-hosted] show/change where sessions summarise");
+    eprintln!("  sync --session <id> [--wait]   force-scan one session now");
+    eprintln!("  discover                       list detected AI tools + accounts");
+    eprintln!("  watch                          foreground watcher (dev)");
+    eprintln!("  reset                          re-read + re-summarise everything");
+    eprintln!("  stop / uninstall               remove the service (keeps your pairing)\n");
+    eprintln!("Maintenance");
+    eprintln!("  upgrade                        update to the latest release now");
+    eprintln!("  autoupdate [on|off|toggle]     auto-update preference");
+    eprintln!("  statusline                     Claude Code statusline (stdin→one line)");
+    eprintln!("  mcp / mcp wire [--heal]        embedded MCP server / configure clients");
 }
 
 /// `modelstat start` / `modelstat run` — the collector daemon. Builds a

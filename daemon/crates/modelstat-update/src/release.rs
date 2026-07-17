@@ -1,10 +1,15 @@
 //! The release verdict (from the heartbeat's `daemon_release`, §13/§17.1) + the
 //! GitHub-Releases archive URL for this target triple (plan D9).
 
+use std::time::Duration;
+
 use serde::Deserialize;
 
 /// GitHub repo the releases live under (plan D9).
 const RELEASES_BASE: &str = "https://github.com/modelstat/modelstat/releases/download";
+/// The GitHub API `releases/latest` endpoint (manual-upgrade + self-hosted-box
+/// path — they have no heartbeat verdict to key off).
+const LATEST_API: &str = "https://api.github.com/repos/modelstat/modelstat/releases/latest";
 
 /// The server's release verdict for this daemon. Three values (TS parity):
 /// `ok` (up to date), `update_available` (newer exists), `upgrade_required`
@@ -86,6 +91,31 @@ pub fn archive_url(version: &str, triple: &str) -> String {
         "{RELEASES_BASE}/daemon-{v}/modelstat-{v}-{triple}.{ext}",
         ext = archive_ext()
     )
+}
+
+/// The daemon-release tag names are `daemon-<semver>`, so a `latest` release
+/// whose tag is `daemon-1.4.2` yields `1.4.2`.
+#[derive(Deserialize)]
+struct LatestRelease {
+    tag_name: String,
+}
+
+/// Resolve the latest published version from the GitHub API (bare semver), or
+/// `None` on any failure — the caller reports "couldn't resolve latest".
+pub async fn resolve_latest_version() -> Option<String> {
+    let resp = reqwest::Client::new()
+        .get(LATEST_API)
+        .header("User-Agent", "modelstat-updater")
+        .header("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let latest: LatestRelease = resp.json().await.ok()?;
+    Some(bare_version(&latest.tag_name).to_string())
 }
 
 #[cfg(test)]

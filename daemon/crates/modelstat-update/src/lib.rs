@@ -25,9 +25,12 @@ pub use auto_update::{
 };
 pub use marker::{clear_upgrade_marker, upgrade_in_progress, write_upgrade_marker};
 pub use perform::{
-    maybe_auto_update, perform_upgrade, rollback_pair, swap_pair, AutoUpdateStep, UpgradeOutcome,
+    maybe_auto_update, perform_upgrade, rollback_pair, swap_pair, upgrade_now, AutoUpdateStep,
+    UpgradeOutcome,
 };
-pub use release::{archive_url, target_triple, DaemonRelease, ReleaseVerdict};
+pub use release::{
+    archive_url, resolve_latest_version, target_triple, DaemonRelease, ReleaseVerdict,
+};
 
 /// Serializes tests that mutate the process-global `MODELSTAT_HOME` /
 /// `MODELSTAT_AUTO_UPDATE` env (cargo runs a crate's tests in parallel threads

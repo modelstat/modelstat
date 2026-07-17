@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use modelstat_download::{download, DownloadSpec, TtyProgress};
 
@@ -219,22 +219,15 @@ async fn health_probe(bin_dir: &Path, target: &str) -> Result<(), String> {
     ))
 }
 
-/// Run the fully-implemented binary self-replace. `quiesce` frees the summarizer
-/// device before the swap (best-effort, §13). `now_ms` seeds the marker clock.
+/// Run the fully-implemented binary self-replace. `now_ms` seeds the marker
+/// clock. The caller quiesces its own collector scans first (the daemon
+/// heartbeat path does; the manual `upgrade` command has nothing to quiesce);
+/// this function stops the local engine service itself before the swap.
 ///
 /// The live download/bounce path is exercised end-to-end against a staging
 /// release in M7; the pure pieces (URL naming, swap, rollback, decision) are
 /// unit-tested here.
-pub async fn perform_upgrade<F, Fut>(
-    target: &str,
-    sha256: Option<&str>,
-    quiesce: Option<F>,
-    now_ms: i64,
-) -> UpgradeOutcome
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
+pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) -> UpgradeOutcome {
     let bin_dir = modelstat_service::bin_dir();
     write_upgrade_marker(Some(target), Some(std::process::id()), now_ms).ok();
 
@@ -250,11 +243,8 @@ where
         }
     };
 
-    // Free the Metal device + stop the local engine so the swap doesn't race two
-    // processes onto the model (best-effort — never block the upgrade on it).
-    if let Some(q) = quiesce {
-        q().await;
-    }
+    // Stop the local engine so the swap doesn't race two processes onto the model
+    // (best-effort — never block the upgrade on it).
     let _ = modelstat_service::stop_service(modelstat_service::Component::Summarizer, modelstat_service::Scope::User);
 
     if let Err(e) = swap_pair(&bin_dir, collector.as_deref(), engine.as_deref()) {
@@ -284,6 +274,29 @@ where
             UpgradeOutcome::Failed(format!("auto-update health probe failed ({e}); rolled back to the previous build"))
         }
     }
+}
+
+/// Milliseconds since the Unix epoch (marker clock).
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Manual `modelstat upgrade` / `modelstat-summarizer upgrade`: resolve the
+/// latest published release from GitHub, then run the self-replace. No heartbeat
+/// verdict is involved (this is the path self-hosted engine boxes use too, §13).
+pub async fn upgrade_now() -> UpgradeOutcome {
+    let target = match crate::release::resolve_latest_version().await {
+        Some(v) => v,
+        None => {
+            return UpgradeOutcome::Failed(
+                "couldn't resolve the latest release from GitHub — check your connection, or reinstall with the curl one-liner".into(),
+            )
+        }
+    };
+    perform_upgrade(&target, None, now_ms()).await
 }
 
 /// The daemon-side auto-update decision (§13), byte-parity structure with the TS
