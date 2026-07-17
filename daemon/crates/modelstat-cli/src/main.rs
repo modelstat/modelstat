@@ -81,6 +81,27 @@ fn main() -> ExitCode {
         Some("_daemon-health") => cmd_daemon_health(),
         // Install/refresh the managed daemon service + reconcile the tray (§16/§15).
         Some("_install-service") => cmd_install_service(),
+        // The detached self-update worker the daemon spawns on an auto-update
+        // verdict (§13): download + verify + swap BOTH binaries + health-probe +
+        // rollback. Runs in its own process so the service bounce it triggers
+        // can't kill it mid-swap.
+        Some("_apply-update") => {
+            let target = args.get(1).cloned().unwrap_or_default();
+            block_on_config(|_c| async move {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let outcome = modelstat_update::perform_upgrade(&target, None, now).await;
+                if let Some(n) = outcome.note() {
+                    eprintln!("modelstat: {n}");
+                }
+                match outcome {
+                    modelstat_update::UpgradeOutcome::Failed(_) => ExitCode::FAILURE,
+                    _ => ExitCode::SUCCESS,
+                }
+            })
+        }
         Some(other) => {
             eprintln!("modelstat: unknown command `{other}`\n");
             print_usage();

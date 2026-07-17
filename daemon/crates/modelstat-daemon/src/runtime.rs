@@ -108,6 +108,9 @@ pub struct Daemon {
     /// The install-time summariser mode, resolved ONCE (a change bounces the
     /// service): `local` / `self-hosted` / `cloud`.
     pub mode: String,
+    /// Auto-update dedup (§13): the `(verdict, target)` keys already acted on this
+    /// process, so a heartbeat every 10s never stacks a second self-update.
+    pub handled_updates: Arc<StdMutex<std::collections::HashSet<String>>>,
 }
 
 impl Daemon {
@@ -129,6 +132,7 @@ impl Daemon {
             machine_id,
             mode,
             config,
+            handled_updates: Arc::new(StdMutex::new(std::collections::HashSet::new())),
         })
     }
 

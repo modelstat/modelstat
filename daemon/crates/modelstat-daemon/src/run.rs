@@ -301,14 +301,18 @@ async fn post_heartbeat_now(daemon: &Daemon, discovery: Option<DiscoveryOutput>)
 }
 
 /// Surface the server's release verdict on the status line + last-status mirror
-/// (the tray/CLI render it). The ACTION — auto-update download + swap — is M7; M4
-/// only reports the verdict. Port of `handleRelease` minus `maybeAutoUpdate`.
+/// (tray/CLI render it) AND act on it (§13): auto-update off → a one-time nudge;
+/// on → a DETACHED `_apply-update` helper that downloads + swaps both binaries.
+/// Port of `handleRelease` + `maybeAutoUpdate`.
 fn handle_release(daemon: &Daemon, release: Option<Value>) {
-    let verdict = release
-        .as_ref()
-        .and_then(|r| r.get("verdict"))
-        .and_then(Value::as_str)
-        .unwrap_or("ok");
+    use modelstat_update::{maybe_auto_update, AutoUpdateStep, DaemonRelease};
+
+    let rel: DaemonRelease = release
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let verdict = rel.verdict.clone().unwrap_or_else(|| "ok".to_string());
+
+    // Mirror the verdict onto the status line first (unchanged behaviour).
     if verdict == "ok" {
         daemon.with_status(|s| {
             if s.update.is_some() {
@@ -317,17 +321,69 @@ fn handle_release(daemon: &Daemon, release: Option<Value>) {
         });
         return;
     }
-    let latest = release
-        .as_ref()
-        .and_then(|r| r.get("latest"))
-        .and_then(Value::as_str)
-        .map(String::from);
     daemon.with_status(|s| {
         s.set_update(Some(UpdateInfo {
-            verdict: verdict.to_string(),
-            latest,
+            verdict: verdict.clone(),
+            latest: rel.latest.clone(),
         }))
     });
+
+    // Decide (verdict guard → in-progress marker → per-process dedup → on/off).
+    let step = {
+        let mut handled = daemon
+            .handled_updates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        maybe_auto_update(&rel, &mut handled, now_ms())
+    };
+    match step {
+        AutoUpdateStep::Skip => {}
+        AutoUpdateStep::Nudge(note) => println!("[modelstat] {note}"),
+        AutoUpdateStep::Proceed { target } => {
+            let t = target.unwrap_or_default();
+            let label = if t.is_empty() { "latest" } else { &t };
+            println!("[modelstat] auto-updating to {label} — downloading + swapping both binaries; the service restarts on the new build");
+            spawn_detached_update(&t);
+        }
+    }
+}
+
+/// Milliseconds since the Unix epoch (the marker/decision clock).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Spawn `modelstat _apply-update <target>` DETACHED — a separate process that
+/// outlives this daemon, because the swap it performs runs `_install-service`,
+/// which bounces (and kills) this very daemon mid-upgrade. A new process
+/// group/session keeps the updater alive through that bounce (§13 — the TS
+/// daemon likewise ran the update in a detached worker).
+fn spawn_detached_update(target: &str) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("_apply-update")
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    let _ = cmd.spawn();
 }
 
 /// The 5s SDK-drain loop with skip-backoff: build local segments from the durable
