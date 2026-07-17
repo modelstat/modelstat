@@ -188,6 +188,39 @@ pub fn uninstall_service(component: Component, scope: Scope) -> std::io::Result<
     Ok(())
 }
 
+/// Stop a managed service WITHOUT removing its unit file (§16) — used by the
+/// engine `stop` command and by the self-updater before it swaps the engine
+/// binary. Best-effort: a service that isn't installed is a no-op. Idempotent.
+pub fn stop_service(component: Component, scope: Scope) -> std::io::Result<()> {
+    let def = service_def(component, scope);
+    #[cfg(target_os = "macos")]
+    {
+        let target = format!("{}/{}", launchd_domain(def.scope), def.label);
+        run("launchctl", &["bootout", &target]);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let unit = format!("{}.service", def.unit_name);
+        systemctl(def.scope, &["stop", &unit]);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        match def.scope {
+            Scope::User => {
+                run("schtasks", &["/End", "/TN", def.unit_name]);
+            }
+            Scope::System => {
+                run("sc", &["stop", def.unit_name]);
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = &def;
+    }
+    Ok(())
+}
+
 /// Whether the service is running + a per-platform hint (§16).
 pub fn service_status(component: Component, scope: Scope) -> ServiceStatus {
     let def = service_def(component, scope);
