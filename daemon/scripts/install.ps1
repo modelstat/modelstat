@@ -15,7 +15,8 @@ param(
   [ValidateSet('cloud', 'local', 'self-hosted', '')][string]$Mode = '',
   [string]$Url = '',
   [switch]$Yes,
-  [switch]$NoBrowser
+  [switch]$NoBrowser,
+  [switch]$NoAutoUpdate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,7 +38,16 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
 }
 $triple = "$arch-pc-windows-msvc"
 
-# ── legacy Node install migration ──────────────────────────────────
+# ── replace an existing daemon (legacy Node OR a previous install) ──
+# Ours registers the same scheduled-task name, so it would replace the old one
+# anyway — but end it explicitly so the handover is visible and two daemons never
+# race the same home dir. %USERPROFILE%\.modelstat is KEPT (the device identity),
+# so the new daemon continues as the SAME device.
+if (schtasks /Query /TN 'modelstat' 2>$null) {
+  Step 'Found an existing modelstat daemon - replacing it'
+  schtasks /End /TN 'modelstat' 2>$null | Out-Null
+  Ok "stopped the old daemon (your device pairing in $HomeDir is kept)"
+}
 if ((Test-Path (Join-Path $HomeDir 'bin\modelstat.mjs')) -or (Test-Path (Join-Path $HomeDir 'bin\node_modules'))) {
   Step 'Migrating off the old Node install'
   Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $HomeDir 'bin\modelstat.mjs')
@@ -54,6 +64,23 @@ if (-not $Version) {
 }
 $Version = $Version -replace '^v', '' -replace '^daemon-', ''
 Ok "version $Version - target $triple"
+
+# Auto-update policy (feature §13). Default ON — it is how users receive fixes.
+# OFF only when asked (-NoAutoUpdate), or when this release is marked a
+# PRE-RELEASE on GitHub: you deliberately installed a test build, so the daemon
+# must not update itself off the very thing you're testing. (Detected via
+# GitHub's prerelease flag, NOT a version suffix — the version stays clean semver.)
+if (-not $NoAutoUpdate) {
+  try {
+    $rel = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/tags/daemon-$Version" -Headers @{ 'User-Agent' = 'modelstat-installer' }
+    if ($rel.prerelease) {
+      $NoAutoUpdate = $true
+      Write-Host '  (pre-release - auto-update will be disabled so it stays on this build)'
+    }
+  } catch {
+    # Can't tell -> leave the default (on). Not fatal.
+  }
+}
 
 # ── download + verify + extract ────────────────────────────────────
 $base = "https://github.com/$Repo/releases/download/daemon-$Version"
@@ -81,6 +108,14 @@ try {
   if ($LASTEXITCODE -ne 0) { Die 'staging failed' }
   $binHome = if ($env:MODELSTAT_HOME) { $env:MODELSTAT_HOME } else { $HomeDir }
   Ok "staged $binHome\bin\modelstat.exe"
+
+  # Apply the auto-update policy BEFORE the daemon starts, so it never acts on a
+  # release verdict for a build the server doesn't know about.
+  if ($NoAutoUpdate) {
+    Step 'Disabling auto-update for this build'
+    & (Join-Path $binHome 'bin\modelstat.exe') autoupdate off 2>$null | Out-Null
+    Ok 'auto-update off - re-enable any time with: modelstat autoupdate on'
+  }
 
   $fwd = @()
   if ($Mode) { $fwd += '--mode'; $fwd += $Mode }
