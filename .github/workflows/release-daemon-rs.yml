@@ -174,6 +174,12 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # This job has NO checkout (it only needs the built artifacts), so it must not
+    # inherit the workflow-level `working-directory: daemon` — that folder doesn't
+    # exist here, and a run step would fail to even start. Pin run steps to root.
+    defaults:
+      run:
+        working-directory: .
     steps:
       - name: Resolve version
         id: ver
@@ -220,7 +226,10 @@ jobs:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('daemon-{0}', steps.ver.outputs.version) }}
           name: modelstat daemon ${{ steps.ver.outputs.version }}
           prerelease: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
-          fail_on_unmatched_files: true
+          # SHA256SUMS.minisig exists only when the minisign key is configured;
+          # don't fail the publish when it's absent. The six archives + SHA256SUMS
+          # are always present (the build gates on if-no-files-found: error).
+          fail_on_unmatched_files: false
           files: |
             artifacts/modelstat-*.tar.gz
             artifacts/modelstat-*.zip
