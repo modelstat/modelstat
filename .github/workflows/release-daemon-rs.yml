@@ -86,8 +86,16 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
+          # Collector: opt into the on-device candle models (BGE embedder + BERT-NER,
+          # §9.5). WITHOUT `--features candle` the redactor is compiled out to a stub,
+          # so cloud/self-hosted flushes hold forever and nothing ever ships. Candle
+          # is pure-Rust CPU; the collector still links NO llama.cpp (plan D4).
           cargo build --release --locked --target ${{ matrix.target }} \
-            -p modelstat-cli -p modelstat-summarizer
+            -p modelstat-cli --features candle
+          # Summariser engine built separately — it has no `candle` feature; its
+          # llama.cpp backend is its own, env-gated switch.
+          cargo build --release --locked --target ${{ matrix.target }} \
+            -p modelstat-summarizer
 
       # The macOS archives ship the prebuilt Swift tray (D15). Universal build so
       # both mac archives carry the same .app.
