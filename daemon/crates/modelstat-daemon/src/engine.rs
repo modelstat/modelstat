@@ -77,13 +77,16 @@ pub fn engine_base_url(config: &Config) -> String {
     format!("http://127.0.0.1:{}", engine_port())
 }
 
-/// The shared on-device model cache (`MODELSTAT_MODELS_DIR` override, else
-/// `~/.modelstat/models/hf`) — one cache for `connect` + the daemon so the ~250 MB
-/// NER + BGE weights download once and survive upgrades (§9.5).
+/// The base on-device model dir (`MODELSTAT_MODELS_DIR` override, else
+/// `~/.modelstat/models`) — one cache for `connect` + the daemon so the ~250 MB
+/// NER + BGE weights download once and survive upgrades (§9.5). The `hf/<name>`
+/// cache subdir is owned by `modelstat-download` (`HfModel::dir`); callers pass
+/// this BASE so the downloader and the loaders below agree on `<base>/hf/<name>`
+/// (passing `.../models/hf` here previously doubled it to `.../models/hf/hf/…`).
 fn models_cache_dir() -> PathBuf {
     std::env::var_os("MODELSTAT_MODELS_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_path("models/hf"))
+        .unwrap_or_else(|| home_path("models"))
 }
 
 /// Best-effort pre-warm of the layer-2 NER redactor model into the shared cache
@@ -113,13 +116,15 @@ pub async fn ensure_embedder_model() -> bool {
 }
 
 /// Resolve one model's on-disk directory: an explicit `env_override` wins,
-/// otherwise `<cache>/<subdir>`. `connect` (M6, §9.5) populates these dirs; until
-/// then they're absent and the loaders below fall back to the fail-safe models.
+/// otherwise `<base>/hf/<subdir>` — the exact path `modelstat-download` writes to
+/// (`HfModel::dir`), so the loader and the downloader match. `connect` (M6, §9.5)
+/// populates these dirs; until then they're absent and the loaders below fall back
+/// to the fail-safe models.
 #[cfg_attr(not(feature = "candle"), allow(dead_code))]
 fn model_dir(env_override: &str, subdir: &str) -> PathBuf {
     std::env::var_os(env_override)
         .map(PathBuf::from)
-        .unwrap_or_else(|| models_cache_dir().join(subdir))
+        .unwrap_or_else(|| models_cache_dir().join("hf").join(subdir))
 }
 
 /// The daemon's embedder — the real candle BGE model when available, else the
