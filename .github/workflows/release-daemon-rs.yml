@@ -19,6 +19,10 @@ on:
       version:
         description: "Version to build (bare semver, e.g. 1.4.2)"
         required: true
+      prerelease:
+        description: "Publish as a pre-release (out of 'latest'; installer turns auto-update off)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write # create the release + upload assets
@@ -206,11 +210,16 @@ jobs:
           minisign -S -s minisign.key -m SHA256SUMS -x SHA256SUMS.minisig
           rm -f minisign.key
 
+      # Safe-by-default: every daemon release is born a PRE-RELEASE (kept out of
+      # `releases/latest`; the installer disables auto-update for it) unless a
+      # manual workflow_dispatch explicitly sets `prerelease: false` to cut GA.
+      # No version suffix is used — the GitHub flag alone marks the pre-release.
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('daemon-{0}', steps.ver.outputs.version) }}
           name: modelstat daemon ${{ steps.ver.outputs.version }}
+          prerelease: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
           fail_on_unmatched_files: true
           files: |
             artifacts/modelstat-*.tar.gz
