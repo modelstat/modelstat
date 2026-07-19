@@ -30,7 +30,7 @@ fn mode_info(mode: &str) -> (&'static str, &'static str, &'static str) {
             "your cleaned, redacted turns are uploaded and summarised server-side",
         ),
         "local" => (
-            "Local — a bundled model summarises on THIS machine",
+            "Local (beta) — a bundled model summarises on THIS machine",
             "⚠ downloads a ~2.7 GB model (Qwen3.5-4B) and uses ~4 GB RAM plus extra battery/CPU while summarising",
             "only a ≤240-char abstract is uploaded; the raw turns never leave this machine",
         ),
@@ -213,6 +213,7 @@ pub async fn cmd_mode(config: Arc<Config>, args: &[String]) -> ExitCode {
         if as_json {
             let mut m = Map::new();
             m.insert("mode".into(), json!(mode));
+            m.insert("beta".into(), json!(mode == "local"));
             if mode == "self-hosted" {
                 m.insert("url".into(), json!(config.self_hosted_url()));
             }
@@ -228,6 +229,9 @@ pub async fn cmd_mode(config: Arc<Config>, args: &[String]) -> ExitCode {
         println!("  {label}");
         println!("  resource: {resource}");
         println!("  privacy:  {privacy}");
+        if mode == "local" {
+            println!("  status:   beta — on-device summarising isn't validated end-to-end yet; cloud is recommended.");
+        }
         if mode == "self-hosted" {
             let url = config.self_hosted_url();
             println!("  endpoint: {}", if url.is_empty() { "(unset)" } else { &url });
@@ -249,6 +253,9 @@ pub async fn cmd_mode(config: Arc<Config>, args: &[String]) -> ExitCode {
         }
     };
     println!("✓ summariser mode set to {mode}");
+    if mode == "local" {
+        eprintln!("  ⚠ local mode is beta — not yet validated end-to-end; switch back any time with `modelstat mode cloud`.");
+    }
     if config.summarizer_mode_is_env_overridden() {
         eprintln!(
             "⚠ MODELSTAT_SUMMARIZER_MODE is set — the daemon will use \"{}\" until you unset it",
@@ -294,4 +301,41 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_summarizer_url_accepts_http_and_https() {
+        assert!(validate_summarizer_url("http://llm.internal:4321").is_ok());
+        assert!(validate_summarizer_url("https://engine.acme.com").is_ok());
+    }
+
+    #[test]
+    fn validate_summarizer_url_rejects_bad_or_missing_scheme() {
+        assert!(validate_summarizer_url("ftp://x").is_err()); // wrong scheme
+        assert!(validate_summarizer_url("not-a-url").is_err()); // no scheme at all
+        assert!(validate_summarizer_url("http://").is_err()); // scheme ok, empty host
+    }
+
+    // The M6 consent-gate negative: choosing self-hosted with no URL (none on the
+    // flag, none in the env) in a non-interactive run must FAIL loudly, never
+    // silently fall back to cloud (feature §3.3 / §23).
+    #[tokio::test]
+    async fn self_hosted_without_url_is_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("MODELSTAT_HOME", tmp.path());
+        std::env::remove_var("MODELSTAT_SUMMARIZER_URL");
+        let config = Config::load("daemon-0.0.0");
+        let err = resolve_and_persist_mode(&config, Some("self-hosted"), None, false)
+            .await
+            .expect_err("self-hosted with no URL must be fatal");
+        assert!(
+            err.to_lowercase().contains("url"),
+            "error should name the missing URL, got: {err}"
+        );
+        std::env::remove_var("MODELSTAT_HOME");
+    }
 }

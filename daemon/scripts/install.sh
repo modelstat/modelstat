@@ -82,6 +82,9 @@ if command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"; else need shasum;
 # and there is never a moment where two daemons race the same home dir.
 # ~/.modelstat is deliberately KEPT: it holds the device identity, so the new
 # daemon continues as the SAME device (no duplicate on the dashboard).
+# The CI installer-logic lane (MODELSTAT_INSTALL_STAGE_ONLY) manages no services,
+# so it must never stop or replace a real daemon on the host running the test.
+if [ -z "${MODELSTAT_INSTALL_STAGE_ONLY:-}" ]; then
 if [ "$OS_PART" = apple-darwin ]; then
   if launchctl print "gui/$(id -u)/ai.modelstat.daemon" >/dev/null 2>&1; then
     step "Found an existing modelstat daemon — replacing it"
@@ -100,6 +103,7 @@ if [ -f "$HOME_DIR/bin/modelstat.mjs" ] || [ -d "$HOME_DIR/bin/node_modules" ]; 
   rm -f "$HOME_DIR/bin/modelstat.mjs"
   rm -rf "$HOME_DIR/bin/node_modules"
   ok "removed the old npm launcher (your device pairing is untouched)"
+fi
 fi
 
 # ─── resolve version ────────────────────────────────────────────────
@@ -128,7 +132,10 @@ if [ -z "$NO_AUTO_UPDATE" ]; then
 fi
 
 # ─── download + verify + extract ────────────────────────────────────
-BASE="https://github.com/$REPO/releases/download/daemon-$VERSION"
+# The release download base. Overridable ONLY for the CI installer-logic lane
+# (scripts/e2e-install.sh points it at a local file:// archive so the test runs
+# offline + service-free); unset in normal use → the real GitHub Releases URL.
+BASE="${MODELSTAT_INSTALL_BASE_URL:-https://github.com/$REPO/releases/download/daemon-$VERSION}"
 ARCHIVE="modelstat-${VERSION}-${TRIPLE}.tar.gz"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 step "Downloading $ARCHIVE"
@@ -157,6 +164,13 @@ if [ -n "$NO_AUTO_UPDATE" ]; then
   step "Disabling auto-update for this build"
   "$STAGED" autoupdate off >/dev/null 2>&1 || true
   ok "auto-update off — re-enable any time with: modelstat autoupdate on"
+fi
+
+# Test hook (scripts/e2e-install.sh): stop right after staging, before pairing.
+# Never set in normal use — keeps the CI installer-logic lane offline + service-free.
+if [ -n "${MODELSTAT_INSTALL_STAGE_ONLY:-}" ]; then
+  ok "staged (MODELSTAT_INSTALL_STAGE_ONLY set) — skipping connect"
+  exit 0
 fi
 
 # ─── hand off to connect / engine setup ─────────────────────────────

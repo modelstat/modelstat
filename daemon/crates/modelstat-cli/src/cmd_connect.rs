@@ -75,15 +75,10 @@ fn warn_line(json: bool, msg: &str) {
     }
 }
 
-/// One NDJSON line `{v:1, ts, event, …fields}` (schema v1) — only in `--json`.
-fn emit(json: bool, event: &str, fields: Value) {
-    if !json {
-        return;
-    }
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+/// Build the schema-v1 NDJSON envelope `{v:1, ts, event, …fields}`. Pure — `emit`
+/// stamps the clock and prints; this is the unit-testable core so the onboarding
+/// stream's wire contract (what the tray + harness consume) stays locked.
+fn connect_line(event: &str, ts: u64, fields: Value) -> Value {
     let mut m = Map::new();
     m.insert("v".into(), json!(1));
     m.insert("ts".into(), json!(ts));
@@ -93,7 +88,19 @@ fn emit(json: bool, event: &str, fields: Value) {
             m.insert(k, v);
         }
     }
-    println!("{}", serde_json::to_string(&Value::Object(m)).unwrap());
+    Value::Object(m)
+}
+
+/// One NDJSON line `{v:1, ts, event, …fields}` (schema v1) — only in `--json`.
+fn emit(json: bool, event: &str, fields: Value) {
+    if !json {
+        return;
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    println!("{}", serde_json::to_string(&connect_line(event, ts, fields)).unwrap());
 }
 
 fn now_bak_suffix() -> String {
@@ -220,7 +227,7 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
             "modelstat: a summariser mode is required on a fresh non-interactive install.\n\
              Re-run with --mode <cloud|local|self-hosted>:\n\
              \x20 cloud        redacted turns are summarised on modelstat's servers (nothing extra installs)\n\
-             \x20 local        a bundled model summarises on this machine (~2.7 GB download, ~4 GB RAM)\n\
+             \x20 local        (beta) a bundled model summarises on this machine (~2.7 GB download, ~4 GB RAM)\n\
              \x20 self-hosted  redacted excerpts go to your org's own summariser (needs --url)\n\
              Redaction always runs on-device first, in every mode."
         );
@@ -453,4 +460,69 @@ fn env_flag(name: &str) -> bool {
         std::env::var(name).unwrap_or_default().trim().to_lowercase().as_str(),
         "1" | "true" | "yes"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_connect_opts_reads_flags_and_values() {
+        let o = parse_connect_opts(&args(&[
+            "--json",
+            "--no-browser",
+            "-y",
+            "--mode",
+            "self-hosted",
+            "--url",
+            "http://x:4321",
+        ]));
+        assert!(o.json && o.no_browser && o.yes);
+        assert!(!o.fresh && !o.system);
+        assert_eq!(o.mode.as_deref(), Some("self-hosted"));
+        assert_eq!(o.url.as_deref(), Some("http://x:4321"));
+    }
+
+    #[test]
+    fn parse_connect_opts_defaults_all_off() {
+        let o = parse_connect_opts(&args(&[]));
+        assert!(!o.json && !o.no_browser && !o.fresh && !o.yes && !o.system);
+        assert!(o.mode.is_none() && o.url.is_none());
+    }
+
+    #[test]
+    fn parse_connect_opts_accepts_equals_form_and_long_yes() {
+        let o = parse_connect_opts(&args(&["--mode=local", "--yes"]));
+        assert_eq!(o.mode.as_deref(), Some("local"));
+        assert!(o.yes);
+    }
+
+    // Locks the onboarding stream's wire contract (schema v1): the tray + harness
+    // parse exactly `{v:1, ts, event, …fields}`.
+    #[test]
+    fn connect_line_wraps_event_in_schema_v1_envelope() {
+        let line = connect_line(
+            "registered",
+            1_700_000_000_000,
+            json!({ "device_id": "dev_x", "claimed": true }),
+        );
+        assert_eq!(line["v"], json!(1));
+        assert_eq!(line["ts"], json!(1_700_000_000_000u64));
+        assert_eq!(line["event"], json!("registered"));
+        assert_eq!(line["device_id"], json!("dev_x"));
+        assert_eq!(line["claimed"], json!(true));
+    }
+
+    #[test]
+    fn connect_line_tolerates_non_object_fields() {
+        // A null/non-object `fields` payload contributes no keys — still valid.
+        let line = connect_line("tray_not_bundled", 1, json!(null));
+        assert_eq!(line["event"], json!("tray_not_bundled"));
+        assert_eq!(line.as_object().unwrap().len(), 3); // v, ts, event only
+    }
 }

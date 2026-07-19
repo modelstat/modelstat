@@ -381,6 +381,48 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_new_pair_rolls_both_binaries_back_in_lockstep() {
+        // Models the "deliberately-broken build" health-probe failure: swap in a NEW
+        // collector+engine pair, then roll BOTH back. The pair must move in lockstep
+        // — both new after the swap, both old after the rollback. That lockstep is
+        // what kills the collector↔engine version skew (§13); a rollback that
+        // restored only one binary would resurrect exactly the skew we prevent.
+        let dir = std::env::temp_dir().join(format!("msu-pair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+
+        // Live "old" collector + engine.
+        std::fs::write(bin.join(exe(COLLECTOR_BIN)), b"COLLECTOR_OLD").unwrap();
+        std::fs::write(bin.join(exe(ENGINE_BIN)), b"ENGINE_OLD").unwrap();
+        // Staged "new" (pretend-broken) pair.
+        let staged_c = dir.join("staged-collector");
+        let staged_e = dir.join("staged-engine");
+        std::fs::write(&staged_c, b"COLLECTOR_NEW").unwrap();
+        std::fs::write(&staged_e, b"ENGINE_NEW").unwrap();
+
+        swap_pair(&bin, Some(&staged_c), Some(&staged_e)).unwrap();
+        assert_eq!(std::fs::read(bin.join(exe(COLLECTOR_BIN))).unwrap(), b"COLLECTOR_NEW");
+        assert_eq!(std::fs::read(bin.join(exe(ENGINE_BIN))).unwrap(), b"ENGINE_NEW");
+        // Both old builds are preserved as the rollback pair.
+        assert_eq!(
+            std::fs::read(bin.join(format!("{}.prev", exe(COLLECTOR_BIN)))).unwrap(),
+            b"COLLECTOR_OLD"
+        );
+        assert_eq!(
+            std::fs::read(bin.join(format!("{}.prev", exe(ENGINE_BIN)))).unwrap(),
+            b"ENGINE_OLD"
+        );
+
+        // Health probe "fails" on the new build → roll the whole pair back.
+        rollback_pair(&bin);
+        assert_eq!(std::fs::read(bin.join(exe(COLLECTOR_BIN))).unwrap(), b"COLLECTOR_OLD");
+        assert_eq!(std::fs::read(bin.join(exe(ENGINE_BIN))).unwrap(), b"ENGINE_OLD");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn maybe_auto_update_decision_matrix() {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut handled = HashSet::new();

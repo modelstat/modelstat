@@ -141,3 +141,47 @@ jobs:
         run: node --import tsx --test packages/core/src/wire-parity.test.ts
       - name: Rust golden tests (Rust side)
         run: cargo test -p modelstat-wire -p modelstat-redact --locked
+
+  # ---- Installer-logic lane (plan §5 M7) ----------------------------------
+  # The installer's offline, service-free logic — sha256 verify + stage BOTH
+  # binaries + idempotent re-run + tamper-reject (scripts/e2e-install.sh) — plus a
+  # shellcheck of install.sh. The live `curl | sh` + real-service path is validated
+  # on a real machine: service start/stop isn't reliable on CI runners (plan §5 M7
+  # "where possible"), and the service-file generation is already unit-tested (M5).
+  installer:
+    name: installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: shellcheck install.sh (errors only)
+        if: matrix.os == 'ubuntu-latest'
+        run: shellcheck -S error scripts/install.sh
+      - name: installer-logic lane (verify · stage · idempotent · tamper-reject)
+        run: bash scripts/e2e-install.sh
+
+  # ---- Windows installer lint (install.ps1) -------------------------------
+  installer-windows:
+    name: installer (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Parse + lint install.ps1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # AST parse — fails on a malformed script.
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path scripts/install.ps1), [ref]$null, [ref]$null) | Out-Null
+          Write-Host "install.ps1 parses"
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $errs = Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Error
+          if ($errs) { $errs | Format-Table -AutoSize; throw "PSScriptAnalyzer found errors in install.ps1" }
+          Write-Host "install.ps1: no analyzer errors"

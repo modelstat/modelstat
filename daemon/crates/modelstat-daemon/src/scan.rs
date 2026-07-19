@@ -492,10 +492,16 @@ mod tests {
     struct RecordingUploader {
         /// (event_count, raw) per committed batch.
         uploaded: Vec<(usize, bool)>,
+        /// `source_event_id`s of EVERY upload attempt (held or committed) — lets a
+        /// test prove a crash-held batch and its resend are byte-identical, so the
+        /// server dedupes on id (no duplicates after a crash).
+        attempts: Vec<Vec<String>>,
         hold: bool,
     }
     impl BatchUploader for RecordingUploader {
         async fn upload(&mut self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold> {
+            self.attempts
+                .push(batch.events.iter().map(|e| e.source_event_id.clone()).collect());
             if self.hold {
                 return Err(Hold);
             }
@@ -819,6 +825,95 @@ mod tests {
         assert!(t.held);
         assert_eq!(t.batches_uploaded, 0);
         assert!(cursors.get_cursor("/a.jsonl").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_held_flush_is_re_shipped_identically_and_commits_on_retry() {
+        // The crash story end-to-end: an upload can't commit (offline / server 5xx /
+        // a crash between commit and cursor-persist), so the cursor never advances
+        // and the batch re-ships next cycle. Proves the whole never-drop cycle:
+        //   1. hold → no loss (cursor un-advanced);
+        //   2. the retry ships the IDENTICAL events (same source_event_ids → the
+        //      server dedupes on id: no duplicates after a crash);
+        //   3. the commit finally advances the cursor.
+        let resilient = healthy();
+        let mut git = NoGit;
+        let mut uploader = RecordingUploader {
+            hold: true,
+            ..Default::default()
+        };
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        let events = vec![
+            ev("s1", "2026-07-16T10:00:00.000Z"),
+            ev("s1", "2026-07-16T10:01:00.000Z"),
+        ];
+
+        // Cycle 1 — the upload holds.
+        let t1 = run_scan_over_jobs(
+            vec![job("/a.jsonl")],
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(Some(12), false),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            &mut git,
+            None,
+            parse_with(events.clone()),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &mut uploader,
+            &mut cursors,
+            &mut obs,
+        )
+        .await;
+        assert!(t1.held, "cycle 1 must hold");
+        assert!(
+            cursors.get_cursor("/a.jsonl").is_none(),
+            "a held flush must NOT advance the cursor (no loss)"
+        );
+
+        // Cycle 2 — the server recovers; the same file re-ships and commits.
+        uploader.hold = false;
+        let t2 = run_scan_over_jobs(
+            vec![job("/a.jsonl")],
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(Some(12), false),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            &mut git,
+            None,
+            parse_with(events),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &mut uploader,
+            &mut cursors,
+            &mut obs,
+        )
+        .await;
+        assert!(!t2.held, "cycle 2 must commit");
+        assert!(
+            cursors.get_cursor("/a.jsonl").is_some(),
+            "a committed flush advances the cursor"
+        );
+
+        // The held attempt and the successful resend carried the IDENTICAL events —
+        // same source_event_ids, so the server dedupes: a crash never duplicates.
+        assert_eq!(uploader.attempts.len(), 2, "one held attempt + one resend");
+        assert!(!uploader.attempts[0].is_empty());
+        assert_eq!(
+            uploader.attempts[0], uploader.attempts[1],
+            "resend must carry byte-identical event ids (server dedupes on id)"
+        );
     }
 
     #[tokio::test]
