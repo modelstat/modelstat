@@ -16,23 +16,21 @@ import AppKit
 import Darwin
 import Foundation
 
-// ── Resolve the `modelstat` CLI on $PATH, then at the install-path
-//    the agent-dev installer writes into (~/.modelstat/bin/modelstat.mjs)
-//    so we don't rely on shell profiles loading in launchd's env.
+// ── Resolve the `modelstat` CLI at the canonical runtime location every
+//    installer stages the collector into (~/.modelstat/bin/modelstat) — so we
+//    don't rely on shell profiles loading in launchd's env — then fall back to a
+//    login-shell `which` for PATH-based (e.g. Homebrew) installs.
 func locateCli() -> URL? {
   let fm = FileManager.default
   let home = NSHomeDirectory()
   let candidates = [
-    "\(home)/.modelstat/bin/modelstat.mjs",
-    "/opt/homebrew/bin/modelstat",
-    "/usr/local/bin/modelstat",
-    "/usr/bin/modelstat",
+    "\(home)/.modelstat/bin/modelstat",
   ]
   for p in candidates {
     if fm.isExecutableFile(atPath: p) { return URL(fileURLWithPath: p) }
   }
   // Last-ditch: `which modelstat` via a login shell so PATH lookups
-  // honour the user's zsh/bash config.
+  // honour the user's zsh/bash config (covers Homebrew / PATH installs).
   let task = Process()
   task.launchPath = "/bin/zsh"
   task.arguments = ["-l", "-c", "which modelstat"]
