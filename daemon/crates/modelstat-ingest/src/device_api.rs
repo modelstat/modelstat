@@ -456,8 +456,23 @@ impl DeviceApi {
             let status = res.status().as_u16();
             match classify_status(status, attempt) {
                 UploadDecision::Commit => {
-                    // A 2xx with an opaque/empty body still reads as a commit.
-                    let receipt = res.json::<IngestResponse>().await.unwrap_or_default();
+                    // The two ingest endpoints return DIFFERENT commit bodies:
+                    //   /v1/ingest     → { "accepted": <count>, … }  (a per-event count)
+                    //   /v1/ingest/raw → { "accepted": true, … }     (a boolean ack)
+                    // `IngestResponse.accepted` is a u64, so the raw body's boolean
+                    // can't deserialize and serde falls back to default (0) — the
+                    // reason cloud mode reported events_uploaded=0 while every event
+                    // landed. A 2xx on the raw path commits the WHOLE batch, so its
+                    // accepted count is exactly what we sent. (A 2xx with an
+                    // opaque/empty body on either path still reads as a commit.)
+                    let receipt = if raw {
+                        IngestResponse {
+                            accepted: wire.events.len() as u64,
+                            ..Default::default()
+                        }
+                    } else {
+                        res.json::<IngestResponse>().await.unwrap_or_default()
+                    };
                     return UploadResult::Commit(receipt);
                 }
                 UploadDecision::Reauth => {

@@ -165,9 +165,18 @@ impl ScanObserver for StatusObserver<'_> {
             s.set_message(format!("Scanning {}/{}: {name}", index + 1, total));
         });
     }
-    fn on_upload(&mut self, _events: usize, segments: usize) {
+    fn on_upload(&mut self, events: usize, segments: usize) {
         self.with(|s| {
-            s.set_phase(Phase::Uploading, format!("Uploading {segments} segments"));
+            // Cloud mode ships raw EVENTS (a batch has 0 segments); local /
+            // self-hosted ship SEGMENTS. Report whichever unit this batch actually
+            // carries, so the status never reads a misleading "Uploading 0 segments"
+            // in cloud mode while events are in flight.
+            let (n, unit) = if segments > 0 {
+                (segments, "segments")
+            } else {
+                (events, "events")
+            };
+            s.set_phase(Phase::Uploading, format!("Uploading {n} {unit}"));
             s.set_stat("segments_sending", json!(segments));
         });
     }
@@ -545,6 +554,27 @@ mod tests {
         assert_eq!(s.stats["batches_uploaded"], json!(1));
         assert_eq!(s.stats["segments_sending"], json!(0)); // reset after upload
         assert!(s.last_event_at.is_some());
+    }
+
+    #[test]
+    fn on_upload_message_names_events_in_cloud_mode_segments_otherwise() {
+        // Local / self-hosted ship segments; cloud ships raw events (0 segments).
+        // The status message must name whichever unit is actually in flight — never
+        // a misleading "Uploading 0 segments" while cloud events are uploading.
+        let status = StdMutex::new(Status::default());
+        let mut obs = StatusObserver { status: &status };
+
+        obs.on_upload(120, 3); // segment batch (local / self-hosted)
+        assert_eq!(
+            status.lock().unwrap().message.as_deref(),
+            Some("Uploading 3 segments")
+        );
+
+        obs.on_upload(120, 0); // raw event batch (cloud)
+        assert_eq!(
+            status.lock().unwrap().message.as_deref(),
+            Some("Uploading 120 events")
+        );
     }
 
     #[test]

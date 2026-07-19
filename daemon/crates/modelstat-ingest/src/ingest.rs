@@ -238,4 +238,26 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn raw_ingest_boolean_accepted_cannot_parse_as_a_count() {
+        // /v1/ingest/raw acks with `{"accepted": true}` (a boolean); /v1/ingest
+        // reports `{"accepted": <count>}`. The boolean CANNOT deserialize into
+        // `IngestResponse.accepted` (u64) — it errors, so a naive
+        // `unwrap_or_default()` would read 0. That is exactly why `upload_batch`
+        // counts a raw commit by events-sent rather than trusting the raw body
+        // (which is why cloud mode reported events_uploaded=0 while every event
+        // landed).
+        assert!(
+            serde_json::from_str::<IngestResponse>(r#"{"accepted": true}"#).is_err(),
+            "a boolean `accepted` must NOT silently parse as a count"
+        );
+        // The non-raw numeric ack still parses fine.
+        assert_eq!(
+            serde_json::from_str::<IngestResponse>(r#"{"accepted": 42}"#)
+                .unwrap()
+                .accepted,
+            42
+        );
+    }
 }
