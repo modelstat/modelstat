@@ -1,0 +1,187 @@
+name: daemon-rs
+
+# CI for the Rust rewrite (daemon/ workspace). Gates every PR that touches the
+# collector/engine crates, the golden fixtures, or the TS↔Rust parity surface.
+#
+# What it proves (M0 acceptance criteria, plan §5):
+#   * all SIX release targets compile;
+#   * `cargo test` is green on every native runner;
+#   * the collector (`modelstat`) never links llama.cpp (`modelstat-llm`);
+#   * the golden fixtures regenerate byte-identically from the TS (no drift);
+#   * TS↔Rust wire parity (both directions) holds.
+on:
+  # Only `main` on push; feature-branch work runs once via pull_request (so an
+  # open PR doesn't double-trigger). Mirrors the repo's ci.yml convention.
+  push:
+    branches: [main]
+    paths: ["daemon/**", "packages/core/src/wire-parity.test.ts", ".github/workflows/daemon-rs.yml"]
+  pull_request:
+    paths: ["daemon/**", "packages/core/src/wire-parity.test.ts", ".github/workflows/daemon-rs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daemon-rs-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: daemon
+
+jobs:
+  # ---- Native runners: full `cargo test` on three of the six targets -------
+  # x86_64-apple-darwin is compile-only in the cross-build job below: GitHub's
+  # Intel `macos-13` runners are deprecated/capacity-starved (jobs sit queued and
+  # never start), and the M0 contracts are arch-independent, so the suite runs
+  # natively on arm64-mac + x86_64-linux + x86_64-windows and x86_64-mac is
+  # compile-verified (cross-built from the arm64 runner).
+  test:
+    name: test (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: cargo test (all crates, all targets)
+        run: cargo test --workspace --all-targets --locked
+
+  # ---- Cross-compile the remaining three targets (compile-only, plan §6) ---
+  cross-build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: x86_64-apple-darwin, linker: "" }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, linker: gcc-aarch64-linux-gnu }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, linker: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust + target
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable && rustup target add ${{ matrix.target }}
+      - name: Install cross linker (linux-arm64)
+        if: matrix.linker != ''
+        working-directory: .
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.linker }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+          key: ${{ matrix.target }}
+      - name: cargo build (target)
+        # aarch64-unknown-linux-gnu needs its cross linker wired explicitly.
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --workspace --all-targets --locked --target ${{ matrix.target }}
+
+  # ---- The collector must never link llama.cpp (plan §3, D4) ---------------
+  no-llama-link:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: collector tree excludes modelstat-llm
+        run: |
+          if cargo tree -p modelstat-cli -e normal | grep -q 'modelstat-llm'; then
+            echo "::error::the collector (modelstat-cli) links modelstat-llm — the llama.cpp boundary is broken"
+            cargo tree -p modelstat-cli -e normal
+            exit 1
+          fi
+          echo "OK: modelstat-llm absent from the collector dependency tree"
+      - name: engine tree includes modelstat-llm (sanity)
+        run: |
+          if ! cargo tree -p modelstat-summarizer -e normal | grep -q 'modelstat-llm'; then
+            echo "::error::the engine (modelstat-summarizer) is missing modelstat-llm"
+            exit 1
+          fi
+          echo "OK: modelstat-llm present in the engine dependency tree"
+
+  # ---- Golden fixtures regenerate from TS byte-identically; TS↔Rust parity -
+  fixtures-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install workspace deps
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: Regenerate golden fixtures from the TS
+        working-directory: .
+        run: npx tsx daemon/scripts/fixtures/gen-all.mts
+      - name: Re-emit the Rust wire fixtures
+        run: cargo run -q -p modelstat-wire --example emit_fixtures
+      - name: Fixtures must be reproducible (no drift from committed)
+        working-directory: .
+        run: git diff --exit-code -- daemon/crates/modelstat-wire/tests/golden
+      - name: TS↔Rust wire parity (TS side)
+        working-directory: .
+        run: node --import tsx --test packages/core/src/wire-parity.test.ts
+      - name: Rust golden tests (Rust side)
+        run: cargo test -p modelstat-wire -p modelstat-redact --locked
+
+  # ---- Installer-logic lane (plan §5 M7) ----------------------------------
+  # The installer's offline, service-free logic — sha256 verify + stage BOTH
+  # binaries + idempotent re-run + tamper-reject (scripts/e2e-install.sh) — plus a
+  # shellcheck of install.sh. The live `curl | sh` + real-service path is validated
+  # on a real machine: service start/stop isn't reliable on CI runners (plan §5 M7
+  # "where possible"), and the service-file generation is already unit-tested (M5).
+  installer:
+    name: installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: shellcheck install.sh (errors only)
+        if: matrix.os == 'ubuntu-latest'
+        run: shellcheck -S error scripts/install.sh
+      - name: installer-logic lane (verify · stage · idempotent · tamper-reject)
+        run: bash scripts/e2e-install.sh
+
+  # ---- Windows installer lint (install.ps1) -------------------------------
+  installer-windows:
+    name: installer (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Parse + lint install.ps1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # AST parse — fails on a malformed script.
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path scripts/install.ps1), [ref]$null, [ref]$null) | Out-Null
+          Write-Host "install.ps1 parses"
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $errs = Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Error
+          if ($errs) { $errs | Format-Table -AutoSize; throw "PSScriptAnalyzer found errors in install.ps1" }
+          Write-Host "install.ps1: no analyzer errors"

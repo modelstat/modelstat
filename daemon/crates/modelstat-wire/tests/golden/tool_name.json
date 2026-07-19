@@ -1,0 +1,55 @@
+{
+  "normalize": [
+    {
+      "input": "  Bash  ",
+      "expected": "Bash"
+    },
+    {
+      "input": "café",
+      "expected": "café"
+    },
+    {
+      "input": "subscribe_a1b2c3d4e5f6",
+      "expected": "subscribe_<dyn>"
+    },
+    {
+      "input": "job-550e8400-e29b-41d4-a716-446655440000",
+      "expected": "job-<dyn>"
+    },
+    {
+      "input": "create_pr",
+      "expected": "create_pr"
+    },
+    {
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+  ],
+  "split": [
+    {
+      "input": "mcp__github__create_pr",
+      "server": "mcp:github",
+      "name": "create_pr"
+    },
+    {
+      "input": "mcp__brave-search__web_search",
+      "server": "mcp:brave-search",
+      "name": "web_search"
+    },
+    {
+      "input": "mcp__my_server__tool",
+      "server": "mcp:my_server",
+      "name": "tool"
+    },
+    {
+      "input": "Bash",
+      "server": "builtin",
+      "name": "Bash"
+    },
+    {
+      "input": "WebSearch",
+      "server": "builtin",
+      "name": "WebSearch"
+    }
+  ]
+}

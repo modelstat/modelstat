@@ -1,0 +1,28 @@
+{
+  "deviceId": "dev_1",
+  "sourceFile": "/tmp/modelstat-fixtures/claude-resume/projects/myproj/44444444-4444-4444-4444-444444444444.jsonl",
+  "note": "the ancestor-sessioned copy line is dropped; only the native line survives",
+  "events": [
+    {
+      "source_event_id": "evt_3a6y8dhy020k5",
+      "ts": "2026-06-01T11:00:00.000Z",
+      "kind": "user_message",
+      "agent": "claude_code",
+      "provider": "anthropic",
+      "model": null,
+      "session_id": "44444444-4444-4444-4444-444444444444",
+      "turn_index": null,
+      "parent_event_id": null,
+      "cwd": "/Users/dev/projects/myrepo",
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "content_excerpt": "new work in resumed session",
+      "source_file": "/tmp/modelstat-fixtures/claude-resume/projects/myproj/44444444-4444-4444-4444-444444444444.jsonl",
+      "source_byte_offset": 204,
+      "pricing_mode": "subscription"
+    }
+  ]
+}

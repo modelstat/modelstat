@@ -1,0 +1,20 @@
+[package]
+name = "modelstat-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+modelstat-wire.workspace = true
+modelstat-ingest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The stdio bridge: async runtime + line-delimited stdin/stdout + the HTTP
+# forward to /v1/mcp/* (rustls, no OpenSSL — matches the rest of the workspace).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "io-std"] }

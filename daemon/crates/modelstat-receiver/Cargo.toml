@@ -1,0 +1,21 @@
+[package]
+name = "modelstat-receiver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+modelstat-wire.workspace = true
+modelstat-ingest.workspace = true
+modelstat-parsers.workspace = true
+modelstat-pipeline.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+axum = "0.7"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "net"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

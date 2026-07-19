@@ -1,0 +1,13 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "updated_at": "2026-06-01T10:00:00.000Z",
+  "title": "Ingest retry matrix",
+  "segments": 3,
+  "tokens": {
+    "input": 300,
+    "output": 600,
+    "cache_creation": 0,
+    "cache_read": 0,
+    "reasoning": 0
+  }
+}

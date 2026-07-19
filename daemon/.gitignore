@@ -1,0 +1,3 @@
+# Rust build artifacts. Cargo.lock IS committed (this workspace ships binaries)
+# and so are the golden fixtures under crates/*/tests/golden.
+/target

@@ -1,0 +1,28 @@
+[package]
+name = "modelstat-update"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+modelstat-ingest.workspace = true
+modelstat-download.workspace = true
+modelstat-service.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+
+# Release-archive extraction (plan D9). Pure-Rust codecs only — no C libs — so
+# the six-target cross-compile (incl. the collector) stays painless.
+[target.'cfg(not(windows))'.dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

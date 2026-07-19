@@ -1,0 +1,32 @@
+[package]
+name = "modelstat-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# M1 (plan §5): this crate is the daemon's identity/config/device-API foundation
+# as well as the (M4) IngestClient. It sits BELOW both modelstat-daemon and
+# modelstat-cli in the graph, and `recoverIdentity` — spec-assigned here — needs
+# the identity store + config, so the whole impure foundation (paths, machine-key
+# probes, identity/state stores, Config) lives here rather than in
+# modelstat-daemon (which depends on this crate). See daemon/PARITY.md.
+[dependencies]
+modelstat-wire.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+regex.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+hostname.workspace = true
+
+[dev-dependencies]
+# The fake device-API server harness (plan §6) — an in-process axum server used
+# by the integration tests and the `fake_device_server` example that the e2e
+# script spawns. dev-only: it is NOT linked into the release collector binary.
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"

@@ -1,0 +1,38 @@
+{
+  "version": 2,
+  "items": {
+    "evt_sdkexample1": {
+      "source_event_id": "evt_sdkexample1",
+      "session_id": "sdk-session-1",
+      "agent": "raw_sdk_anthropic",
+      "event": {
+        "source_event_id": "evt_sdkexample1",
+        "ts": "2026-06-01T10:00:00.000Z",
+        "kind": "assistant_message",
+        "agent": "raw_sdk_anthropic",
+        "provider": "anthropic",
+        "model": "claude-opus-4-8",
+        "session_id": "sdk-session-1",
+        "turn_index": 0,
+        "parent_event_id": null,
+        "cwd": null,
+        "git": null,
+        "tokens": {
+          "input": 5,
+          "output": 9,
+          "cache_creation": 0,
+          "cache_read": 0,
+          "reasoning": 0
+        },
+        "duration_ms": null,
+        "tool_calls": {},
+        "files_touched": [],
+        "source_file": null,
+        "source_byte_offset": null
+      },
+      "last_event_ts_ms": 1782518000000,
+      "synced": false,
+      "sent_batch_id": null
+    }
+  }
+}

@@ -36,4 +36,5 @@ regexes = [
   '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9''',   # textbook jwt.io HS256 header (node SDK)
   '''SflKxwRJSMeKKF2QT4''',                     # textbook jwt.io signature (python SDK fake JWT)
   '''dozjgNryP4J3''',                           # node SDK fake JWT signature
+  '''abcdef123456''',                           # fake stripe-key body in the redaction test (sk_live_abcdef123456, passes.rs)
 ]

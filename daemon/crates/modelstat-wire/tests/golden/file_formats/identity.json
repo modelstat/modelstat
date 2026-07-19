@@ -1,0 +1,11 @@
+{
+  "deviceUuid": "6f9619ff-8b86-5d11-b42d-00cf4fc964ff",
+  "deviceId": "device-server-uuid-abc",
+  "bearerToken": "ds_live_examplefake0000000000000000000000000000",
+  "claimCode": "brave-otter-lake",
+  "claimUrl": "https://modelstat.ai/claim/brave-otter-lake",
+  "hostname": "marks-mac.local",
+  "createdAt": "2026-06-01T10:00:00.000Z",
+  "userEmail": null,
+  "defaultOrgId": null
+}

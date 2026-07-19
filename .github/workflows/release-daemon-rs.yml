@@ -1,0 +1,245 @@
+name: release-daemon-rs
+
+# Tag-driven release of the Rust daemon (feature §13, plan D9/§8). Pushing a
+# `daemon-<semver>` tag builds BOTH binaries (collector + engine) for all six
+# targets, bakes the prebuilt macOS tray into the mac archives, checksums +
+# (optionally) minisign-signs everything, and publishes a GitHub Release. The
+# installer + the binary self-updater consume exactly these assets.
+#
+# Signing is conditional (§13 "+ signature when enabled"): macOS codesign +
+# notarize run only when the Apple secrets exist; the minisign signature is
+# produced only when MINISIGN_SECRET_KEY exists. Absent either, the release still
+# ships with SHA256SUMS — the sha256 verification the installer always enforces.
+
+on:
+  push:
+    tags: ["daemon-*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (bare semver, e.g. 1.4.2)"
+        required: true
+      prerelease:
+        description: "Publish as a pre-release (out of 'latest'; installer turns auto-update off)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # create the release + upload assets
+
+concurrency:
+  group: release-daemon-rs-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: daemon
+
+jobs:
+  # ---- Build + package both binaries for every target ---------------------
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin, ext: tar.gz, mac: true }
+          - { os: macos-14, target: x86_64-apple-darwin, ext: tar.gz, mac: true }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, ext: tar.gz }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, ext: tar.gz, linker: gcc-aarch64-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: zip }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, ext: zip }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#daemon-}"
+          fi
+          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust + target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cross linker (linux-arm64)
+        if: matrix.linker != ''
+        working-directory: .
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.linker }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+          key: release-${{ matrix.target }}
+
+      - name: Build both binaries (release)
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          # Collector: opt into the on-device candle models (BGE embedder + BERT-NER,
+          # §9.5). WITHOUT `--features candle` the redactor is compiled out to a stub,
+          # so cloud/self-hosted flushes hold forever and nothing ever ships. Candle
+          # is pure-Rust CPU; the collector still links NO llama.cpp (plan D4).
+          cargo build --release --locked --target ${{ matrix.target }} \
+            -p modelstat-cli --features candle
+          # Summariser engine built separately — it has no `candle` feature; its
+          # llama.cpp backend is its own, env-gated switch.
+          cargo build --release --locked --target ${{ matrix.target }} \
+            -p modelstat-summarizer
+
+      # The macOS archives ship the prebuilt Swift tray (D15). Universal build so
+      # both mac archives carry the same .app.
+      - name: Build macOS tray
+        if: matrix.mac
+        working-directory: .
+        run: TRAY_UNIVERSAL=1 bash apps/tray-mac/build-app.sh
+
+      # Developer-ID codesign + notarize the tray ONLY when the Apple secrets are
+      # present. The collector/engine CLI binaries are installed via curl|sh (not
+      # a browser download), so they carry no quarantine bit and run unsigned; it
+      # is the launchable .app that Gatekeeper checks. Absent creds → ad-hoc.
+      - name: Codesign + notarize tray (macOS, when configured)
+        if: matrix.mac && env.APPLE_TEAM_ID != ''
+        working-directory: .
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          APP="apps/tray-mac/build/ModelstatTray.app"
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p ci "$KC"
+          echo "$APPLE_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KC" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KC" >/dev/null
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application: ($APPLE_TEAM_ID)" "$APP"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/tray.zip"
+          echo "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/nk.p8"
+          xcrun notarytool submit "$RUNNER_TEMP/tray.zip" \
+            --key "$RUNNER_TEMP/nk.p8" --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER" --wait
+          xcrun stapler staple "$APP"
+
+      - name: Package archive
+        id: pkg
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          T="${{ matrix.target }}"
+          NAME="modelstat-${V}-${T}"
+          BIN="target/${T}/release"
+          STAGE="$(mktemp -d)"
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            cp "${BIN}/modelstat.exe" "${BIN}/modelstat-summarizer.exe" "$STAGE/"
+          else
+            cp "${BIN}/modelstat" "${BIN}/modelstat-summarizer" "$STAGE/"
+          fi
+          if [ "${{ matrix.mac }}" = "true" ] && [ -d "../apps/tray-mac/build/ModelstatTray.app" ]; then
+            cp -R "../apps/tray-mac/build/ModelstatTray.app" "$STAGE/"
+          fi
+          mkdir -p dist
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            ( cd "$STAGE" && 7z a -tzip "$OLDPWD/dist/${NAME}.zip" . >/dev/null )
+          else
+            tar -czf "dist/${NAME}.tar.gz" -C "$STAGE" .
+          fi
+          ASSET="dist/${NAME}.${{ matrix.ext }}"
+          # Per-target sha256 line (target-named so the release job can concat).
+          if command -v sha256sum >/dev/null; then
+            ( cd dist && sha256sum "${NAME}.${{ matrix.ext }}" > "${NAME}.${{ matrix.ext }}.sha256" )
+          else
+            ( cd dist && shasum -a 256 "${NAME}.${{ matrix.ext }}" > "${NAME}.${{ matrix.ext }}.sha256" )
+          fi
+          echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            daemon/dist/*.${{ matrix.ext }}
+            daemon/dist/*.sha256
+          if-no-files-found: error
+
+  # ---- Assemble SHA256SUMS, sign, publish the GitHub Release --------------
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # This job has NO checkout (it only needs the built artifacts), so it must not
+    # inherit the workflow-level `working-directory: daemon` — that folder doesn't
+    # exist here, and a run step would fail to even start. Pin run steps to root.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#daemon-}"
+          fi
+          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Assemble SHA256SUMS
+        working-directory: artifacts
+        run: |
+          cat *.sha256 > SHA256SUMS
+          rm -f *.sha256
+          echo "── SHA256SUMS ──"; cat SHA256SUMS
+
+      # minisign the checksums when the release key is configured (§13 / D10).
+      - name: Sign SHA256SUMS (minisign, when configured)
+        if: env.MINISIGN_SECRET_KEY != ''
+        working-directory: artifacts
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y minisign
+          printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
+          minisign -S -s minisign.key -m SHA256SUMS -x SHA256SUMS.minisig
+          rm -f minisign.key
+
+      # Safe-by-default: every daemon release is born a PRE-RELEASE (kept out of
+      # `releases/latest`; the installer disables auto-update for it) unless a
+      # manual workflow_dispatch explicitly sets `prerelease: false` to cut GA.
+      # No version suffix is used — the GitHub flag alone marks the pre-release.
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('daemon-{0}', steps.ver.outputs.version) }}
+          name: modelstat daemon ${{ steps.ver.outputs.version }}
+          prerelease: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
+          # SHA256SUMS.minisig exists only when the minisign key is configured;
+          # don't fail the publish when it's absent. The six archives + SHA256SUMS
+          # are always present (the build gates on if-no-files-found: error).
+          fail_on_unmatched_files: false
+          files: |
+            artifacts/modelstat-*.tar.gz
+            artifacts/modelstat-*.zip
+            artifacts/SHA256SUMS
+            artifacts/SHA256SUMS.minisig

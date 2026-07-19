@@ -1,0 +1,19 @@
+{
+  "source_event_id": "evt_min",
+  "ts": "2026-06-01T10:00:00.000Z",
+  "kind": "user_message",
+  "agent": "codex_cli",
+  "provider": "openai",
+  "model": null,
+  "session_id": "s-min",
+  "turn_index": null,
+  "parent_event_id": null,
+  "cwd": null,
+  "git": null,
+  "tokens": null,
+  "duration_ms": null,
+  "tool_calls": {},
+  "files_touched": [],
+  "source_file": null,
+  "source_byte_offset": null
+}

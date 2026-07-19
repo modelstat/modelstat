@@ -1,0 +1,59 @@
+[package]
+name = "modelstat-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Collector-side summarization: segmentation, the six frozen prompts, the passes
+# (over the summarizer protocol), and the resilient hold-and-retry wrapper. NER +
+# embeddings run here via candle (added behind traits). No llama.cpp (plan D4).
+[dependencies]
+modelstat-wire.workspace = true
+modelstat-redact.workspace = true
+modelstat-sumclient.workspace = true
+# The session-metadata pass (§7.4) reuses the parsers' pure reference core + the
+# git-enrichment seam; the pass itself lives here (next to the titler) because it
+# needs the titler's abstract sampling/stripping. Parsers is a sibling collector
+# crate (no llama), so this stays within the collector's own dependency island.
+modelstat-parsers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+unicode-normalization = "0.1"
+tokio = { workspace = true, features = ["time"] }
+# Local wall-clock for the temporal taxonomy hints (§18) — the one place the
+# pipeline needs the machine's timezone (segmentation's ts math is hand-rolled to
+# stay chrono-free). `clock` + `std` come from the workspace default.
+chrono.workspace = true
+# System entropy for the ULID batch id (core/ids.ts::batchId). Tiny + already in
+# the tree; only the batch-assembly module uses it.
+getrandom = "0.3"
+
+# The candle BGE embedder (feature §9.5 / plan D5). Pure Rust (CPU) — compiles
+# without cmake — but OFF by default: it's a heavy dep and its cross-target CPU
+# build is unproven, so the default collector uses the fail-open NoEmbedder and
+# release/verified builds opt in with `--features candle`.
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+
+[features]
+default = []
+# One switch turns on BOTH candle models the collector uses — the BGE embedder
+# here and the BERT-NER in modelstat-redact.
+candle = [
+  "dep:candle-core",
+  "dep:candle-nn",
+  "dep:candle-transformers",
+  "dep:tokenizers",
+  "modelstat-redact/candle",
+]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# For the `candle_verify` example: download the model weights + run inference.
+modelstat-download.workspace = true
+reqwest.workspace = true

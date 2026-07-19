@@ -1,0 +1,11 @@
+{
+  "state": "/Users/dev/.modelstat/state.json",
+  "identity": "/Users/dev/.modelstat/identity.json",
+  "logs": "/Users/dev/.modelstat/logs",
+  "api": "https://api.modelstat.ai",
+  "paired": true,
+  "device_id": "device-server-uuid-abc",
+  "device_uuid": "6f9619ff-8b86-5d11-b42d-00cf4fc964ff",
+  "intended_uuid": "6f9619ff-8b86-5d11-b42d-00cf4fc964ff",
+  "machine_key_source": "macos-ioplatform"
+}

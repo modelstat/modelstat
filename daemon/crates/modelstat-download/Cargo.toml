@@ -1,0 +1,21 @@
+[package]
+name = "modelstat-download"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# One shared model-artifact downloader (feature §11), used by BOTH binaries: the
+# engine fetches the Qwen GGUF, the collector fetches the NER + embedder models.
+# Pure Rust (reqwest/rustls) — no llama.cpp, so the collector links it freely.
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+tokio = { workspace = true, features = ["fs", "io-util"] }
+futures-util = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+axum = "0.7"

@@ -1,0 +1,35 @@
+[package]
+name = "modelstat-llm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# LINKED ONLY BY modelstat-summarizer (the engine). The collector must never
+# reach this crate (plan D4 / CI no-llama-link). The `llama` feature pulls in the
+# native llama.cpp backend (needs cmake + a C++ toolchain); it is OFF by default
+# so the workspace compiles anywhere, and the fail-loud UnavailableBackend stands
+# in until a real backend is compiled.
+[dependencies]
+modelstat-download.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+# The native llama.cpp binding (vendored + built via cmake; Metal on macOS, CPU
+# elsewhere). Optional — only pulled in by the `llama` feature so cmake-free
+# builds still compile.
+llama-cpp-2 = { version = "0.1", optional = true }
+# For streaming, multi-byte-safe token detokenization (llama-cpp-2's
+# non-deprecated `token_to_piece` takes an incremental decoder).
+encoding_rs = { version = "0.8", optional = true }
+
+[features]
+default = []
+# The native llama.cpp backend. Enable in release/CI environments that have
+# cmake; `modelstat-summarizer` forwards its own `llama` feature here.
+llama = ["dep:llama-cpp-2", "dep:encoding_rs"]
+# Exposes MockBackend so downstream (the engine binary) can drive lifecycle
+# tests without a real model. Dev-only — never enabled in a release build.
+mock = []

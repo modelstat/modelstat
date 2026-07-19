@@ -1,0 +1,18 @@
+{
+  "apiUrl": "",
+  "cursor": {
+    "/Users/dev/.claude/projects/x/11111111-1111-1111-1111-111111111111.jsonl": {
+      "size": 4096,
+      "mtime": 1782518000000,
+      "tailHash": "deadbeefcafebabe"
+    }
+  },
+  "segmentsSent": 42,
+  "processingVersion": 16,
+  "reconcileCache": {},
+  "summariserDegraded": false,
+  "summariserRecoveryAt": 0,
+  "reshipState": {},
+  "summarizerMode": "cloud",
+  "selfHostedUrl": ""
+}

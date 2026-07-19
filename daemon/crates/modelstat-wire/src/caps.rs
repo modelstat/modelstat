@@ -1,0 +1,77 @@
+//! Frozen wire caps (feature §17.3, §18). Every bounded string on the wire has a
+//! declared maximum that the server enforces in **UTF-8 bytes**; the daemon
+//! clamps to the same numbers in bytes (see [`crate::clamp`]) so no payload can
+//! be permanently 400'd and wedge a cursor (the CJK-abstract bug, §17.2).
+//!
+//! Named constants so drift is a diff, not an incident (plan §6): a test names
+//! each one. The values mirror the Zod `.max(N)` in `packages/core/src/schemas.ts`.
+
+/// Pipeline generation stamped on every scan; bumping it forces a full re-scan.
+/// Starts at 16 in the Rust daemon (feature §18): the candle NER/embedder swap
+/// shifts segment boundaries + redaction output, so first Rust boot re-processes
+/// the world once (server upserts by segment_id).
+pub const PROCESSING_VERSION: u32 = 16;
+
+// --- RawEvent -------------------------------------------------------------
+pub const MODEL_MAX: usize = 120;
+pub const SESSION_ID_MAX: usize = 120;
+pub const FILES_TOUCHED_ITEM_MAX: usize = 512;
+pub const FILES_TOUCHED_COUNT_MAX: usize = 256;
+pub const CONTENT_EXCERPT_MAX: usize = 320;
+pub const SOURCE_FILE_MAX: usize = 1024;
+
+// --- Segment --------------------------------------------------------------
+pub const SEGMENT_ID_MAX: usize = 64;
+pub const ABSTRACT_MAX: usize = 512;
+pub const TAGS_COUNT_MAX: usize = 40;
+pub const SOURCE_EVENT_IDS_COUNT_MAX: usize = 2000;
+pub const ABSTRACT_EMBEDDING_LEN: usize = 384;
+pub const USER_INTENT_MAX: usize = 512;
+
+// --- TaxonomyHintRooted ---------------------------------------------------
+pub const TAG_ROOT_KEY_MAX: usize = 60;
+pub const TAG_NAME_MAX: usize = 120;
+pub const TAG_REASON_MAX: usize = 200;
+
+// --- ToolAction -----------------------------------------------------------
+pub const TA_SURFACE_MAX: usize = 40;
+pub const TA_EXECUTABLE_MAX: usize = 80;
+pub const TA_ACTION_MAX: usize = 40;
+pub const TA_OBJECT_MAX: usize = 60;
+pub const TA_QUALIFIER_ITEM_MAX: usize = 40;
+pub const TA_QUALIFIERS_COUNT_MAX: usize = 8;
+pub const TA_PARAM_SHAPE_MAX: usize = 16_384;
+pub const TA_KEYWORD_ITEM_MAX: usize = 40;
+pub const TA_KEYWORDS_COUNT_MAX: usize = 12;
+pub const TA_ABSTRACT_MAX: usize = 200;
+pub const TA_COMMAND_REDACTED_MAX: usize = 16_384;
+pub const TA_SCRIPT_TOKEN_MAX: usize = 200;
+pub const TA_SCRIPT_SUMMARY_MAX: usize = 200;
+pub const TA_SCRIPTS_COUNT_MAX: usize = 8;
+pub const TA_EXTRACTOR_MAX: usize = 40;
+
+// --- ToolCallWire ---------------------------------------------------------
+pub const EXTERNAL_CALL_ID_MAX: usize = 120;
+pub const SERVER_MAX: usize = 120;
+pub const NAME_MAX: usize = 120;
+pub const ARGS_HASH_MAX: usize = 64;
+pub const SIGNATURE_HASH_MAX: usize = 64;
+/// The `mcp:<server>` name is clamped to 116 before the `mcp:` prefix so the
+/// whole `server` field fits its 120 cap (tool-hash `splitObservedToolName`).
+pub const MCP_SERVER_NAME_MAX: usize = 116;
+
+// --- IngestBatch ----------------------------------------------------------
+pub const DAEMON_VERSION_MAX: usize = 40;
+pub const EVENTS_COUNT_MAX: usize = 10_000;
+pub const SEGMENTS_COUNT_MAX: usize = 2_000;
+pub const TOOL_CALLS_COUNT_MAX: usize = 20_000;
+pub const SESSION_TITLE_MAX: usize = 120;
+
+// --- HeartbeatPayload -----------------------------------------------------
+pub const HEARTBEAT_MESSAGE_MAX: usize = 240;
+
+// --- DetectedInstallation / DetectedIdentity ------------------------------
+pub const INSTALL_VERSION_MAX: usize = 40;
+pub const DETECTED_VIA_COUNT_MAX: usize = 6;
+pub const PROVIDER_ACCOUNT_ID_MAX: usize = 200;
+pub const DETECTION_SOURCE_MAX: usize = 80;

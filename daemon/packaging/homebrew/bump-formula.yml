@@ -1,0 +1,71 @@
+name: bump-formula
+
+# The tap-side listener (plan §8 — "the listener is missing today, which is why
+# the formula has been stale since 0.0.9"). Goes in the TAP repo
+# (modelstat/homebrew-tap) as `.github/workflows/bump-formula.yml`. On the
+# `agent-released` repository_dispatch (fired by the main repo's release
+# pipeline), it pulls the new release's SHA256SUMS and rewrites version + the
+# four per-target sha256 lines in Formula/modelstat.rb, then commits.
+
+on:
+  repository_dispatch:
+    types: [agent-released]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Bare semver, e.g. 1.4.2"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: v
+        run: |
+          V="${{ github.event.client_payload.version || github.event.inputs.version }}"
+          echo "version=${V#daemon-}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch checksums + rewrite the formula
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/modelstat/modelstat/releases/download/daemon-$V"
+          curl -fsSL "$BASE/SHA256SUMS" -o SHA256SUMS
+          sha() { grep " modelstat-$V-$1.tar.gz\$" SHA256SUMS | awk '{print $1}'; }
+          ARM_MAC="$(sha aarch64-apple-darwin)"
+          X86_MAC="$(sha x86_64-apple-darwin)"
+          ARM_LNX="$(sha aarch64-unknown-linux-gnu)"
+          X86_LNX="$(sha x86_64-unknown-linux-gnu)"
+          for s in "$ARM_MAC" "$X86_MAC" "$ARM_LNX" "$X86_LNX"; do
+            [ -n "$s" ] || { echo "::error::missing a checksum for $V"; exit 1; }
+          done
+          F="Formula/modelstat.rb"
+          python3 - "$F" "$V" "$ARM_MAC" "$X86_MAC" "$ARM_LNX" "$X86_LNX" <<'PY'
+          import re, sys
+          f, v, arm_mac, x86_mac, arm_lnx, x86_lnx = sys.argv[1:7]
+          src = open(f).read()
+          src = re.sub(r'version "[^"]*"', f'version "{v}"', src, count=1)
+          # Replace the four sha256 lines in declared order: arm-mac, x86-mac, arm-lnx, x86-lnx.
+          shas = [arm_mac, x86_mac, arm_lnx, x86_lnx]
+          i = [0]
+          def repl(m):
+              s = shas[i[0]]; i[0] += 1; return f'sha256 "{s}"'
+          src = re.sub(r'sha256 "[0-9a-f]{64}"', repl, src)
+          open(f, "w").write(src)
+          print(f"bumped to {v}")
+          PY
+
+      - name: Commit
+        run: |
+          git config user.name "modelstat-bot"
+          git config user.email "bot@modelstat.ai"
+          git add Formula/modelstat.rb
+          git commit -m "modelstat ${{ steps.v.outputs.version }}" || echo "no changes"
+          git push

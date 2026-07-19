@@ -1,0 +1,47 @@
+[package]
+name = "modelstat-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+modelstat-wire.workspace = true
+modelstat-redact.workspace = true
+modelstat-parsers.workspace = true
+modelstat-pipeline.workspace = true
+modelstat-download.workspace = true
+modelstat-ingest.workspace = true
+modelstat-receiver.workspace = true
+modelstat-sumclient.workspace = true
+modelstat-service.workspace = true
+modelstat-update.workspace = true
+modelstat-mcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "signal"] }
+# Filesystem watcher (feature §6): the recommended per-OS backend (FSEvents /
+# inotify / ReadDirectoryChangesW). The 1s debounce + scan-trigger glue is the
+# daemon's; notify is just the event source.
+notify = "6"
+
+[features]
+# Turn on the real on-device candle models (BGE embedder + BERT-NER). OFF by
+# default (heavy CPU compile); release/verified builds opt in. Forwards to the
+# pipeline + redact candle features so `build_embedder`/`build_ner` compile the
+# real loaders. The collector still links NO llama.cpp (plan D4) — candle is
+# pure-Rust CPU inference for embeddings + NER only.
+candle = ["modelstat-pipeline/candle", "modelstat-redact/candle"]
+
+# Singleton-lock process-liveness probe (kill(pid,0) / OpenProcess). Both already
+# in the tree via tokio; the daemon only needs OpenProcess/CloseHandle on Windows.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }

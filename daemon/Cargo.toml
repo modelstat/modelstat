@@ -1,0 +1,81 @@
+# modelstat daemon + summarizer engine — Rust workspace.
+#
+# Build order is by milestone (see core/specs/daemon/plan.md §5); this file is
+# the whole crate graph up front so the dependency boundaries — above all
+# "the collector never links llama.cpp" — are enforced from M0 on.
+[workspace]
+resolver = "2"
+members = [
+  "crates/modelstat-wire",
+  "crates/modelstat-redact",
+  "crates/modelstat-parsers",
+  "crates/modelstat-download",
+  "crates/modelstat-pipeline",
+  "crates/modelstat-sumclient",
+  "crates/modelstat-ingest",
+  "crates/modelstat-receiver",
+  "crates/modelstat-service",
+  "crates/modelstat-update",
+  "crates/modelstat-mcp",
+  "crates/modelstat-daemon",
+  "crates/modelstat-cli",
+  "crates/modelstat-llm",
+  "crates/modelstat-summarizer",
+]
+
+[workspace.package]
+# Bumped past the TS daemon's 0.28.x line so the server never reads a Rust build
+# as out-of-date. The release tag is `daemon-<this>`; a test build is published as
+# a GitHub PRE-RELEASE (which keeps the version a clean semver, keeps it out of
+# `releases/latest`, and makes the installer disable auto-update for it).
+version = "1.0.2"
+edition = "2021"
+rust-version = "1.83"
+license = "MIT"
+repository = "https://github.com/modelstat/modelstat"
+
+# Shared dependency versions — one place to bump. Kept deliberately small and
+# pure-Rust so the six-target cross-compile matrix stays painless (no OpenSSL,
+# no C toolchain outside modelstat-llm, which owns the vendored llama.cpp).
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+# `preserve_order`: `serde_json::Value` objects serialize in insertion order, not
+# sorted. Required for tool-arg hashing parity — `args_hash` is sha256 over the
+# JSON exactly as `JSON.stringify` emits it (source-key order). Only affects
+# `Value` serialization; struct-field `BTreeMap`s are unchanged.
+serde_json = { version = "1", features = ["preserve_order"] }
+sha1 = "0.10"
+sha2 = "0.10"
+regex = "1"
+
+# Async runtime + HTTP client for the device API (plan D2). reqwest is pinned to
+# rustls — NO OpenSSL linkage — so the six-target cross-compile stays painless.
+# Versions match what core/rust already builds with (guaranteed in the cache).
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+hostname = "0.4"
+
+# Internal crates (path deps). The graph here IS the contract: modelstat-cli
+# (the collector binary) must have no path — direct or transitive — to
+# modelstat-llm. CI asserts it (see .github/workflows/daemon-rs.yml).
+modelstat-wire = { path = "crates/modelstat-wire" }
+modelstat-redact = { path = "crates/modelstat-redact" }
+modelstat-parsers = { path = "crates/modelstat-parsers" }
+modelstat-download = { path = "crates/modelstat-download" }
+modelstat-pipeline = { path = "crates/modelstat-pipeline" }
+modelstat-sumclient = { path = "crates/modelstat-sumclient" }
+modelstat-ingest = { path = "crates/modelstat-ingest" }
+modelstat-receiver = { path = "crates/modelstat-receiver" }
+modelstat-service = { path = "crates/modelstat-service" }
+modelstat-update = { path = "crates/modelstat-update" }
+modelstat-mcp = { path = "crates/modelstat-mcp" }
+modelstat-daemon = { path = "crates/modelstat-daemon" }
+modelstat-llm = { path = "crates/modelstat-llm" }
+
+# Release profile: thin LTO + strip for small static binaries (plan §3).
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+panic = "abort"

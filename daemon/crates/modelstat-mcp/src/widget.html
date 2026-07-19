@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>modelstat session insights</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        color: #1a1a1a;
+        background: transparent;
+      }
+      @media (prefers-color-scheme: dark) { body { color: #e6e6e6; } }
+      .card { padding: 12px 14px; }
+      .brand { font-weight: 600; letter-spacing: .01em; opacity: .7; }
+      .row { display: flex; gap: 16px; margin-top: 8px; flex-wrap: wrap; }
+      .metric b { font-size: 18px; font-variant-numeric: tabular-nums; }
+      .metric span { display: block; font-size: 11px; opacity: .6; }
+      .chips { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+      .chip { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+              background: rgba(127,127,127,.15); }
+      .status { margin-top: 10px; font-size: 11px; opacity: .6; }
+    </style>
+  </head>
+  <body>
+    <div class="card" id="root">
+      <div class="brand">modelstat</div>
+      <div class="status">Loading session insights…</div>
+    </div>
+    <script>
+      // MCP-Apps hosts inject the tool's structuredContent. Read it defensively
+      // from the known globals; render whatever is present, never throw.
+      function data() {
+        try {
+          return (
+            (window.openai && window.openai.toolOutput) ||
+            (window.mcp && window.mcp.structuredContent) ||
+            window.__MODELSTAT_INSIGHTS__ ||
+            null
+          );
+        } catch { return null; }
+      }
+      function fmtTokens(n) {
+        n = Number(n) || 0;
+        if (n < 1000) return String(Math.round(n));
+        if (n < 1e6) return (n / 1000).toFixed(n < 1e4 ? 1 : 0) + "k";
+        return (n / 1e6).toFixed(1) + "M";
+      }
+      function render() {
+        var d = data();
+        var root = document.getElementById("root");
+        if (!d) return;
+        var tokens = d.tokens && (d.tokens.total || d.tokens) || 0;
+        var cost = d.cost_usd != null ? "$" + Number(d.cost_usd).toFixed(2) : "—";
+        var nodes = Array.isArray(d.taxonomy_nodes) ? d.taxonomy_nodes : [];
+        var chips = nodes
+          .slice(0, 8)
+          .map(function (n) {
+            return '<span class="chip">' + ((n.emoji ? n.emoji + " " : "") + (n.name || "")) + "</span>";
+          })
+          .join("");
+        root.innerHTML =
+          '<div class="brand">modelstat</div>' +
+          '<div class="row">' +
+          '<div class="metric"><b>' + fmtTokens(tokens) + '</b><span>tokens</span></div>' +
+          '<div class="metric"><b>' + cost + '</b><span>assigned</span></div>' +
+          "</div>" +
+          (chips ? '<div class="chips">' + chips + "</div>" : "") +
+          (d.status ? '<div class="status">' + d.status + "</div>" : "");
+      }
+      render();
+      // Some hosts populate data after load — re-render on the next tick + on message.
+      setTimeout(render, 50);
+      window.addEventListener("message", render);
+    </script>
+  </body>
+</html>

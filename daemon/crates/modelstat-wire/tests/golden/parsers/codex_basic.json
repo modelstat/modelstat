@@ -1,0 +1,67 @@
+{
+  "deviceId": "dev_1",
+  "sourceFile": "/tmp/modelstat-fixtures/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl",
+  "events": [
+    {
+      "source_event_id": "evt_2mpv0mc8gcpiz",
+      "ts": "2026-06-08T15:50:00.000Z",
+      "kind": "assistant_message",
+      "agent": "codex_cli",
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "session_id": "55555555-5555-5555-5555-555555555555",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": "/Users/dev/projects/api",
+      "git": null,
+      "tokens": {
+        "input": 70,
+        "output": 30,
+        "cache_creation": 0,
+        "cache_read": 30,
+        "reasoning": 20
+      },
+      "duration_ms": null,
+      "tool_calls": {
+        "update_plan": 1
+      },
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl",
+      "source_byte_offset": 635
+    }
+  ],
+  "toolCalls": [
+    {
+      "external_call_id": "call_1",
+      "session_id": "55555555-5555-5555-5555-555555555555",
+      "source_event_id": "evt_2mpv0mc8gcm9k",
+      "agent": "codex_cli",
+      "server": "builtin",
+      "name": "update_plan",
+      "turn_index": 0,
+      "call_index": 0,
+      "started_at": "2026-06-08T15:49:39.854Z",
+      "ended_at": "2026-06-08T15:49:40.072Z",
+      "status": "success",
+      "args_hash": "e189f36f6e430ec191ae78163dcf2b98bb55958af64771e942a729e68dc7b10c",
+      "signature_hash": "64879f7d6b960a01909762d911a32d4582c20010c5641ee90278b644a9e3b525",
+      "args_bytes": 46,
+      "result_bytes": 14,
+      "model": "gpt-5.5",
+      "action": {
+        "surface": "builtin",
+        "executable": "update_plan",
+        "action": null,
+        "object": null,
+        "qualifiers": [],
+        "param_shape": null,
+        "keywords": [],
+        "abstract": null,
+        "command_redacted": null,
+        "scripts": [],
+        "confidence": 0,
+        "extractor": "builtin.v1"
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "machine_key_hash": [
+    {
+      "raw": "abc",
+      "expected": "83e1f54b7647831ace65558cc07bf155d2a013199582a6a9d256d32224d8b698"
+    },
+    {
+      "raw": "IOPlatform-UUID-1234",
+      "expected": "8b2c1443843812af7e8d9471428cafb884fa30a1507b089ce26b7cb0c1f07111"
+    },
+    {
+      "raw": "",
+      "expected": "83182528227f96e2dfbbd913b183b3f0e789456131a22adbd92f06fe7145f92e"
+    }
+  ],
+  "device_uuid": [
+    {
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expected": "2d4ccb3a-e272-5403-b977-4b29072521ef"
+    },
+    {
+      "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": "6b6d7479-ab40-5d9a-a3bc-df0ee0f72b70"
+    },
+    {
+      "key": "examplefake01234567890123456789012345678901234567890123456789abc",
+      "expected": "996b5bbb-a9f3-5513-978a-a0143003885c"
+    }
+  ],
+  "device_uuid_salted": [
+    {
+      "machine_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "salt": "ci-2",
+      "expected": "49bfb3e8-45c9-5875-85ff-bd080bc6201a"
+    },
+    {
+      "machine_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "salt": "tenant-b",
+      "expected": "a05c7d75-61b3-59c8-87f9-c9b14754e697"
+    }
+  ]
+}

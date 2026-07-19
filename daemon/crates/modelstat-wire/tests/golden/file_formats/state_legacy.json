@@ -1,0 +1,18 @@
+{
+  "apiUrl": "http://localhost:3010",
+  "cursor": {},
+  "segmentsSent": 3,
+  "processingVersion": 15,
+  "reconcileCache": {},
+  "summariserDegraded": true,
+  "summariserRecoveryAt": 1782517000000,
+  "reshipState": {
+    "2026-06-01\u0000sid-1": {
+      "attempts": 2,
+      "lastAt": 1782517000000
+    }
+  },
+  "summarizerMode": "self-hosted",
+  "selfHostedUrl": "https://llm.acme.internal",
+  "selfHostedModel": "qwen2.5-7b-instruct"
+}

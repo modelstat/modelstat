@@ -1,0 +1,5 @@
+{
+  "startedAt": "2026-06-01T10:00:00.000Z",
+  "fromVersion": "daemon-0.0.0",
+  "toVersion": "daemon-0.0.1"
+}

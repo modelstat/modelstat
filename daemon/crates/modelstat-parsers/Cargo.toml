@@ -1,0 +1,25 @@
+[package]
+name = "modelstat-parsers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+modelstat-wire.workspace = true
+modelstat-redact.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+regex.workspace = true
+chrono.workspace = true
+# NFC normalization for tool-name parity (JS `String.normalize("NFC")`).
+unicode-normalization = "0.1"
+# Cursor's tracking DB is SQLite; `bundled` static-links the amalgamation so the
+# collector stays self-contained (plan D6). We open a byte-snapshot copy read-only.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+serde_json.workspace = true
