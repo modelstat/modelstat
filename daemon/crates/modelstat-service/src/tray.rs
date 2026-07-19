@@ -18,9 +18,13 @@ pub fn tray_app_path() -> PathBuf {
     os_home().join("Applications/ModelstatTray.app")
 }
 
-/// The tray's inner executable the launchd agent runs.
+/// The tray's inner executable the launchd agent runs. The bundle is
+/// `ModelstatTray.app`, but its `CFBundleExecutable` — the file `build-app.sh`
+/// copies into `Contents/MacOS/` — is `modelstat-tray`. This name MUST match
+/// that, or `tray_status()` reports "not bundled" and the autostart agent is
+/// never installed (the tray then never launches).
 pub fn tray_binary() -> PathBuf {
-    tray_app_path().join("Contents/MacOS/ModelstatTray")
+    tray_app_path().join("Contents/MacOS/modelstat-tray")
 }
 
 /// `~/Library/LaunchAgents/ai.modelstat.tray.plist`.
@@ -152,12 +156,12 @@ mod tests {
     #[test]
     fn tray_plist_runs_the_inner_binary_with_keepalive_no_node() {
         let body = tray_plist_contents(
-            Path::new("/Users/x/Applications/ModelstatTray.app/Contents/MacOS/ModelstatTray"),
+            Path::new("/Users/x/Applications/ModelstatTray.app/Contents/MacOS/modelstat-tray"),
             Path::new("/Users/x/.modelstat/logs/tray-out.log"),
             Path::new("/Users/x/.modelstat/logs/tray-err.log"),
         );
         assert!(body.contains("<key>Label</key><string>ai.modelstat.tray</string>"));
-        assert!(body.contains("Contents/MacOS/ModelstatTray</string>"));
+        assert!(body.contains("Contents/MacOS/modelstat-tray</string>"));
         assert!(body.contains("<key>ThrottleInterval</key><integer>10</integer>"));
         assert!(body.contains("<key>SuccessfulExit</key><false/>"));
         assert!(!body.contains("node"), "{body}");
@@ -172,5 +176,14 @@ mod tests {
         assert!(plist.ends_with("Library/LaunchAgents/ai.modelstat.tray.plist"));
         let app = tray_app_path().to_string_lossy().replace('\\', "/");
         assert!(app.ends_with("Applications/ModelstatTray.app"));
+        // The inner executable name MUST equal build-app.sh's CFBundleExecutable
+        // (`modelstat-tray`). A mismatch makes `tray_status()` report "not
+        // bundled", so the autostart agent is never installed and the tray never
+        // launches — the daemon-1.0.3 regression this guard exists to catch.
+        let bin = tray_binary().to_string_lossy().replace('\\', "/");
+        assert!(
+            bin.ends_with("ModelstatTray.app/Contents/MacOS/modelstat-tray"),
+            "{bin}"
+        );
     }
 }

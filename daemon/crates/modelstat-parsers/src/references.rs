@@ -313,7 +313,15 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
         let number: u64 = c[2].parse().unwrap_or(0);
         // The `org/repo#N` shorthand is ambiguous. Default to an issue, but an
         // adjacent PR cue ("PR org/repo#N", "merged …") disambiguates to a PR.
-        let lead_start = m0.start().saturating_sub(20);
+        // `m0.start()` is a byte offset. Backing up a fixed 20 bytes can land
+        // *inside* a multi-byte char (e.g. an em-dash `—` = 3 bytes); slicing a
+        // &str at a non-boundary panics — and with `panic = "abort"` that crashes
+        // the whole daemon (crash-loop). Walk back to the nearest char boundary
+        // first. `m0.start()` itself is always a boundary (a regex match start).
+        let mut lead_start = m0.start().saturating_sub(20);
+        while lead_start > 0 && !text.is_char_boundary(lead_start) {
+            lead_start -= 1;
+        }
         let lead = &text[lead_start..m0.start()];
         if pr_cue().is_match(lead) {
             out.pull_requests.push(PullRequestRef {
@@ -665,6 +673,20 @@ mod tests {
         assert_eq!(pr["pull_requests"][0]["number"], 7);
         // The phantom issue is reconciled away (same slug+number).
         assert!(pr["issues"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn slug_after_a_multibyte_lead_does_not_panic() {
+        // Regression (daemon-1.0.3 crash-loop): the PR-cue look-behind sliced
+        // `text[m0.start()-20 .. m0.start()]`, and `start-20` landed *inside* an
+        // em-dash (`—`, 3 bytes). Slicing a &str off a char boundary panics —
+        // and under `panic = "abort"` that aborted the whole daemon, so it
+        // crash-looped and never sent a segment. A run of em-dashes guarantees
+        // `start-20` falls mid-char; this must now scan cleanly.
+        let text = format!("{} acme/api#7", "—".repeat(7));
+        let refs = detect_event_references(&text).unwrap();
+        assert_eq!(refs["issues"][0]["key"], "7");
+        assert_eq!(refs["issues"][0]["provider"], "github");
     }
 
     #[test]
