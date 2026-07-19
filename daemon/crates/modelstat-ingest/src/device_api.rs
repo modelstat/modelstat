@@ -59,10 +59,6 @@ pub struct DeviceMeResponse {
     pub claim_url: Option<String>,
     #[serde(default)]
     pub user_id: Option<String>,
-    /// Server-reported daemon status; overrides the local mirror in `status`
-    /// when present (§5).
-    #[serde(default)]
-    pub daemon_status: Option<String>,
 }
 
 /// Heartbeat response (`POST /v1/devices/{id}/heartbeat`). `daemon_release` (the

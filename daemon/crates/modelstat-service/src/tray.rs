@@ -85,38 +85,35 @@ pub fn tray_status() -> (bool, Option<PathBuf>) {
 }
 
 /// Install (or refresh) the tray launchd agent so the menu-bar app autostarts.
-/// No-op (returns `None`) when the tray app isn't staged, or off macOS.
-pub fn install_tray_autostart() -> Option<PathBuf> {
+/// `Ok(None)` when there's nothing to do (tray app not staged, or off macOS);
+/// `Err` when the plist can't be written or launchd never accepts the bootstrap
+/// — loud, because the silent version of that failure left the tray agent
+/// missing from the domain with nothing to relaunch it.
+pub fn install_tray_autostart() -> std::io::Result<Option<PathBuf>> {
     #[cfg(target_os = "macos")]
     {
         if !tray_binary().exists() {
-            return None;
+            return Ok(None);
         }
         let logs = modelstat_ingest::home_path("logs");
-        let _ = std::fs::create_dir_all(&logs);
+        std::fs::create_dir_all(&logs)?;
         let plist = tray_plist_path();
         if let Some(dir) = plist.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
         let body = tray_plist_contents(
             &tray_binary(),
             &logs.join("tray-out.log"),
             &logs.join("tray-err.log"),
         );
-        if std::fs::write(&plist, body).is_err() {
-            return None;
-        }
-        let uid = unsafe { libc::getuid() };
-        let domain = format!("gui/{uid}");
-        let target = format!("{domain}/{TRAY_LABEL}");
-        let _ = crate::run("launchctl", &["bootout", &target]);
-        let _ = crate::run("launchctl", &["bootstrap", &domain, &plist.to_string_lossy()]);
-        let _ = crate::run("launchctl", &["kickstart", "-k", &target]);
-        Some(plist)
+        std::fs::write(&plist, body)?;
+        let domain = format!("gui/{}", unsafe { libc::getuid() });
+        crate::launchd_reload(&domain, TRAY_LABEL, &plist)?;
+        Ok(Some(plist))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        None
+        Ok(None)
     }
 }
 
@@ -135,17 +132,11 @@ pub fn uninstall_tray_autostart() {
 }
 
 /// Reconcile the tray agent on every `_install-service`: install it when the app
-/// is staged, leave things alone otherwise. Returns whether the agent is active.
-/// No-op off macOS.
-pub fn ensure_tray_installed() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        install_tray_autostart().is_some()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+/// is staged, leave things alone otherwise. `Ok(true)` = agent active,
+/// `Ok(false)` = nothing to do, `Err` = the install failed (loud). No-op off
+/// macOS.
+pub fn ensure_tray_installed() -> std::io::Result<bool> {
+    install_tray_autostart().map(|p| p.is_some())
 }
 
 #[cfg(test)]

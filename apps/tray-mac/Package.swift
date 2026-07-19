@@ -11,12 +11,12 @@
 //   swift build -c release             (executable at .build/release/modelstat-tray)
 //   ./build-app.sh                     (wraps the binary in ModelstatTray.app)
 //
-// Wired into the macOS install path in apps/daemon/src/service.ts: the
-// installer stages this bundle (installTrayApp) and installs a launchd
-// agent for it (installTrayAutostart) that execs this binary directly,
-// so the menu-bar icon starts at login and is restarted on crash. The
-// daemon has its own separate agent. The tray spawns `modelstat start`
-// as a child, with the singleton lock keeping it to one live daemon.
+// Wired into the macOS install path by the Rust CLI (modelstat-service):
+// `_setup-runtime` stages this bundle and `install_tray_autostart` installs
+// a launchd agent that execs this binary directly, so the menu-bar icon
+// starts at login and is restarted on crash. The daemon has its own
+// separate launchd agent — its ONLY supervisor. The tray never runs the
+// daemon; it converges it via `modelstat _ensure-daemon`.
 import PackageDescription
 
 let package = Package(
