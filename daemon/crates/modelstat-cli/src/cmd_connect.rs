@@ -197,24 +197,6 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
         }),
     );
 
-    // ── 2. macOS tray (PREBUILT — no on-device compile, §5.2) ───────────
-    if cfg!(target_os = "macos") {
-        step(j, "Installing menu-bar tray (macOS)");
-        if tray::tray_status().0 {
-            match tray::install_tray_autostart() {
-                Some(path) => {
-                    ok_line(j, "menu-bar tray ready");
-                    emit(j, "tray_installed", json!({ "path": path.display().to_string() }));
-                    emit(j, "tray_autostart_installed", json!({ "ok": true }));
-                }
-                None => emit(j, "tray_autostart_installed", json!({ "ok": false })),
-            }
-        } else {
-            warn_line(j, "prebuilt tray not bundled in this build — skipping");
-            emit(j, "tray_not_bundled", json!({}));
-        }
-    }
-
     // ── 3. Summariser mode — the consent gate (§3.3) ────────────────────
     step(
         j,
@@ -315,6 +297,31 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
         Err(e) => {
             warn_line(j, &format!("service install failed ({e}) — run `modelstat start` manually"));
             emit(j, "service_install_failed", json!({ "error": e.to_string() }));
+        }
+    }
+
+    // ── 5b. macOS tray (PREBUILT — no on-device compile, §5.2) ──────────
+    // AFTER the daemon service on purpose: the tray's supervisor adopts a live
+    // launchd-managed daemon, so booting it into a world where that daemon
+    // already runs avoids ever hitting its converge path during install.
+    if cfg!(target_os = "macos") {
+        step(j, "Installing menu-bar tray (macOS)");
+        if tray::tray_status().0 {
+            match tray::install_tray_autostart() {
+                Ok(Some(path)) => {
+                    ok_line(j, "menu-bar tray ready");
+                    emit(j, "tray_installed", json!({ "path": path.display().to_string() }));
+                    emit(j, "tray_autostart_installed", json!({ "ok": true }));
+                }
+                Ok(None) => emit(j, "tray_autostart_installed", json!({ "ok": false })),
+                Err(e) => {
+                    warn_line(j, &format!("tray autostart install failed: {e}"));
+                    emit(j, "tray_autostart_installed", json!({ "ok": false, "error": e.to_string() }));
+                }
+            }
+        } else {
+            warn_line(j, "prebuilt tray not bundled in this build — skipping");
+            emit(j, "tray_not_bundled", json!({}));
         }
     }
 

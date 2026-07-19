@@ -1,16 +1,18 @@
-// ModelstatTray — macOS menu-bar daemon for the modelstat agent.
+// ModelstatTray — macOS menu-bar app for the modelstat agent.
 //
 // What it does:
 //   · puts a "◉" status item in the menu bar
-//   · runs `modelstat start` as a child process so the pipeline is live
-//   · polls `modelstat status --json` every 5 s to refresh the dropdown
+//   · keeps the launchd-managed daemon converged via `modelstat
+//     _ensure-daemon` (boot + a 30s watchdog) — the tray NEVER runs the
+//     daemon itself
+//   · reads ~/.modelstat/last-status.json every second for the live phase
+//   · polls `modelstat status --json` every 15 s for the slow-moving data
 //   · offers: Open dashboard, Copy claim URL, View pipeline, Pause/Resume,
 //     Quit
 //
-// Spawning the CLI is deliberate: the CLI already owns discover/scan/
-// watch + IngestClient retry semantics, and the tray never needs to
-// touch ingestion or auth. Keeps this binary a thin shell — one file,
-// ~300 LOC, no dependencies beyond AppKit/Foundation.
+// Shelling the CLI is deliberate: the CLI owns supervision, ingestion and
+// auth; the tray is a thin renderer + nudger — one file, no dependencies
+// beyond AppKit/Foundation.
 
 import AppKit
 import Darwin
@@ -100,6 +102,10 @@ struct LocalStatus: Decodable {
   let queue_size: Int?
   let last_event_at: String?
   let daemon_version: String?
+  /// When the daemon last wrote the mirror. It rewrites at least every 10s
+  /// even when nothing changed, so this is the local liveness signal: a stale
+  /// written_at means the file is a fossil from a daemon that's gone.
+  let written_at: String?
   let stats: LocalStatsCounters?
   /// Server release verdict (the daemon sets this from the heartbeat response).
   let update: UpdateInfo?
@@ -137,21 +143,9 @@ final class TrayController: NSObject {
   /// failure at tray boot (e.g. the installer is mid-rewrite of
   /// ~/.modelstat/bin) must not permanently strand the daemon.
   private var cli: URL?
-  private var daemon: Process?
-  /// When the current `daemon` child was spawned — used to detect
-  /// "exited cleanly almost immediately" (another daemon owns the
-  /// lock) so we back off to the watchdog instead of respawning hot.
-  private var daemonSpawnedAt: Date?
-  /// Consecutive sub-5s daemon exits. Drives respawn backoff so a daemon that
-  /// can't stay up (e.g. a launcher that can't load its runtime) is retried on
-  /// a widening delay instead of hammered — the tray-side guard against the
-  /// abort-loop launchd's KeepAlive would otherwise cause too.
-  private var daemonFastCrashes = 0
-  /// While set (and in the future), ensureDaemon() holds off respawning.
-  private var respawnBlockedUntil: Date?
   private var paused = false
-  /// Serialises _daemon-health probes; collapses overlapping
-  /// ensureDaemon() calls into one in-flight probe.
+  /// Serialises `_ensure-daemon` runs; collapses overlapping
+  /// ensureDaemon() calls into one in-flight run.
   private let superviseQueue = DispatchQueue(label: "ai.modelstat.tray.supervise", qos: .utility)
   private var ensureInFlight = false
   private var latest: AgentStats?
@@ -308,38 +302,22 @@ final class TrayController: NSObject {
 
   // ── Daemon lifecycle ─────────────────────────────────────────────
   //
-  // The tray no longer spawns `start --force` blindly. Blind --force
-  // SIGTERMs whatever live daemon owns the singleton lock (see
-  // apps/daemon/src/lock.ts), so two briefly-coexisting trays
-  // (kickstart -k racing a reinstall, KeepAlive respawn overlap) had
-  // their daemons kill each other in a loop — observed 2026-06-12
-  // ending with zero daemons and nothing restarting them. Instead,
-  // every (re)start funnels through ensureDaemon(), which asks the CLI
-  // `_daemon-health` (decision logic + tests live in
-  // apps/daemon/src/supervise.ts):
-  //   adopt   → a live, heartbeating daemon owns the lock — leave it.
-  //   spawn   → no live owner — plain `start` (a dead owner's stale
-  //             lock is reclaimed without --force by lock.ts).
-  //   replace → live owner that stopped heartbeating — `start --force`.
-  // A 30s watchdog re-runs ensureDaemon() so one-shot failure modes
-  // (CLI unresolvable at boot, Process.run() throw, adopted daemon
-  // dying with no terminationHandler) heal on the next tick instead of
-  // stranding the pipeline forever.
+  // The tray NEVER runs the daemon. It used to spawn `modelstat start`
+  // as its own child, which made it a second supervisor competing with
+  // launchd (ai.modelstat.daemon): boot races ended with a tray-parented
+  // daemon the service manager knew nothing about — the launchd service
+  // stood down (exit 0; KeepAlive SuccessfulExit=false never revives
+  // that), and when the tray quit, the collector silently died with it.
+  // Now every trigger (boot, 30s watchdog, resume) shells
+  // `modelstat _ensure-daemon`, which adopts a healthy lock owner and
+  // otherwise reconciles the launchd service — the ONE supervisor.
+  // Pause/Quit shell `modelstat _stop-daemon` (service stays installed;
+  // the next ensure or login brings it back).
 
-  /// Converge toward "exactly one live daemon". Safe to call from any
-  /// trigger (boot, watchdog, child exit, resume) — overlapping calls
-  /// collapse into one in-flight health probe.
+  /// Converge toward "exactly one live daemon" via the CLI. Safe to call
+  /// from any trigger — overlapping calls collapse into one in-flight run.
   private func ensureDaemon() {
     guard !paused else { return }
-    // A prior spawn that's still up (survived past this tick) means we're
-    // healthy — clear any crash backoff.
-    if let d = daemon, d.isRunning {
-      daemonFastCrashes = 0
-      respawnBlockedUntil = nil
-      return
-    }
-    // Backing off after repeated fast crashes — don't respawn yet.
-    if let until = respawnBlockedUntil, until > Date() { return }
     if cli == nil { cli = locateCli() }
     guard let cli else {
       statusMI.title = "modelstat CLI not found — retrying…"
@@ -348,66 +326,29 @@ final class TrayController: NSObject {
     guard !ensureInFlight else { return }
     ensureInFlight = true
     superviseQueue.async {
-      // Probe off-main: the health command boots node (~100-300ms).
-      let decision = Self.queryDaemonHealth(cli: cli) ?? "spawn"
-      // Capture self on the closure that actually hops back to @MainActor,
-      // not the supervise-queue closure (which only touches statics) — a weak
-      // *var* captured across the actor hop is a data race the CI toolchain
-      // rejects outright.
+      // Off-main: adopt is a sub-ms lock probe, but the reconcile path can
+      // spend seconds in launchctl.
+      let ok = Self.runCli(cli: cli, args: ["_ensure-daemon"])
+      // Capture self on the closure that hops back to @MainActor, not the
+      // supervise-queue closure — a weak var captured across the actor hop
+      // is a data race the CI toolchain rejects.
       DispatchQueue.main.async { [weak self] in
         MainActor.assumeIsolated {
           guard let self else { return }
           self.ensureInFlight = false
-          guard !self.paused else { return }
-          if let d = self.daemon, d.isRunning { return }
-          switch decision {
-          case "adopt":
-            // A healthy daemon someone else spawned. Adopt: render its
-            // heartbeat (tickLocal already does) and spawn nothing.
-            break
-          case "replace":
-            self.spawnDaemon(cli: cli, force: true)
-          default:
-            self.spawnDaemon(cli: cli, force: false)
+          if !ok {
+            // Watchdog retries in ≤30s — surface it, don't give up.
+            self.statusMI.title = "daemon supervision failed — retrying…"
           }
         }
       }
     }
   }
 
-  /// Run `modelstat _daemon-health` and return its decision, or nil if
-  /// the command failed (older CLI, node missing) — caller treats nil
-  /// as "spawn", which is safe: an unforced spawn against a healthy
-  /// owner exits 0 in <1s without killing anything.
-  private nonisolated static func queryDaemonHealth(cli: URL) -> String? {
+  /// Run `modelstat <args>` to completion, output onto the daemon log.
+  /// Returns whether it exited 0.
+  private nonisolated static func runCli(cli: URL, args: [String]) -> Bool {
     let p = Process()
-    if cli.pathExtension == "mjs" {
-      p.launchPath = "/usr/bin/env"
-      p.arguments = ["node", cli.path, "_daemon-health"]
-    } else {
-      p.launchPath = cli.path
-      p.arguments = ["_daemon-health"]
-    }
-    let pipe = Pipe()
-    p.standardOutput = pipe
-    p.standardError = Pipe()
-    do { try p.run() } catch { return nil }
-    p.waitUntilExit()
-    guard p.terminationStatus == 0 else { return nil }
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let decision = obj["decision"] as? String else { return nil }
-    return decision
-  }
-
-  private func spawnDaemon(cli: URL, force: Bool) {
-    let p = Process()
-    var args = ["start"]
-    if force { args.append("--force") }
-    // Run the daemon through node IN PLACE — `env node <cli.mjs>` — matching the
-    // launchd-managed agent. We deliberately don't relocate/rename node for a
-    // prettier Activity Monitor name: that orphaned node's libnode and bricked
-    // self-updates. process.title still labels it "modelstat agent" in ps/top.
     if cli.pathExtension == "mjs" {
       p.launchPath = "/usr/bin/env"
       p.arguments = ["node", cli.path] + args
@@ -415,86 +356,22 @@ final class TrayController: NSObject {
       p.launchPath = cli.path
       p.arguments = args
     }
-    // Bolt stdout/stderr onto the same log the launchd plist uses so
-    // `modelstat status` still sees the same tail.
     let logsDir = ("~/.modelstat/logs" as NSString).expandingTildeInPath
     try? FileManager.default.createDirectory(atPath: logsDir, withIntermediateDirectories: true)
     let out = FileHandle(forWritingAtPath: "\(logsDir)/out.log") ?? FileHandle.standardOutput
-    let err = FileHandle(forWritingAtPath: "\(logsDir)/err.log") ?? FileHandle.standardError
     p.standardOutput = out
-    p.standardError = err
-    p.terminationHandler = { proc in
-      // Daemon exited — re-converge via the health check, which adopts
-      // a replacement daemon instead of counter-killing it. A clean
-      // sub-5s exit means "another daemon owns the lock" (or an equally
-      // immediate no-op); skip the hot retry and let the 30s watchdog
-      // re-check, so a stale CLI can't put us in a 2s spawn loop.
-      let status = proc.terminationStatus
-      // Capture weak self on the @MainActor Task, not the (non-isolated)
-      // terminationHandler — capturing the outer weak var across the actor
-      // boundary is a data race the CI toolchain rejects.
-      Task { @MainActor [weak self] in
-        guard let self else { return }
-        let uptime = self.daemonSpawnedAt.map { Date().timeIntervalSince($0) } ?? .infinity
-        self.daemon = nil
-        self.daemonSpawnedAt = nil
-        guard !self.paused else { return }
-        if uptime < 5 {
-          // Didn't stay up. Count it; once it's clearly a pattern, back off on a
-          // widening delay (8→16→32→60s) so a daemon that can't start (e.g. a
-          // launcher that can't load its runtime) isn't respawned in a hot loop.
-          self.daemonFastCrashes += 1
-          if self.daemonFastCrashes >= 3 {
-            let delay = Double(min(1 << min(self.daemonFastCrashes, 6), 60))
-            self.respawnBlockedUntil = Date().addingTimeInterval(delay)
-            self.statusMI.title = "daemon keeps stopping — retrying in \(Int(delay))s"
-          }
-        } else {
-          self.daemonFastCrashes = 0
-          self.respawnBlockedUntil = nil
-        }
-        // A clean sub-5s exit means another owner has the lock — let the 30s
-        // watchdog re-check. Otherwise nudge a re-ensure (which itself honours
-        // the backoff set above).
-        if status == 0 && uptime < 5 { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-          MainActor.assumeIsolated { self?.ensureDaemon() }
-        }
-      }
-    }
-    do {
-      try p.run()
-      daemon = p
-      daemonSpawnedAt = Date()
-    } catch {
-      // Watchdog retries in ≤30s — do NOT give up permanently here.
-      statusMI.title = "modelstat start failed (retrying): \(error.localizedDescription)"
-    }
+    p.standardError = out
+    do { try p.run() } catch { return false }
+    p.waitUntilExit()
+    return p.terminationStatus == 0
   }
 
+  /// Stop the collector (managed service stays installed) — Pause/Quit.
+  /// Serialised on the supervise queue so it lands after any in-flight
+  /// ensure rather than racing it.
   private func stopDaemon() {
-    if let d = daemon {
-      d.terminate()
-      daemon = nil
-      daemonSpawnedAt = nil
-      return
-    }
-    // No child of our own — but Pause/Quit must also stop an ADOPTED
-    // daemon (one we found healthy and left alone). SIGTERM the lock
-    // owner; harmless no-op if it's already gone.
-    if let pid = Self.readLockOwnerPid() {
-      kill(pid, SIGTERM)
-    }
-  }
-
-  /// pid from ~/.modelstat/daemon.lock, for stopping an adopted daemon.
-  private nonisolated static func readLockOwnerPid() -> pid_t? {
-    let path = ("~/.modelstat/daemon.lock" as NSString).expandingTildeInPath
-    guard let data = FileManager.default.contents(atPath: path),
-          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let pid = obj["pid"] as? Int, pid > 0
-    else { return nil }
-    return pid_t(pid)
+    guard let cli = cli ?? locateCli() else { return }
+    superviseQueue.async { _ = Self.runCli(cli: cli, args: ["_stop-daemon"]) }
   }
 
   // ── Live local heartbeat (fast path) ────────────────────────────
@@ -579,12 +456,24 @@ final class TrayController: NSObject {
       return
     }
 
-    // Live agent phase comes from the local heartbeat mirror.
-    // Falls back to the device-view's reported daemon_status. If
-    // both are missing we say "running" rather than "starting" so
-    // the menu doesn't lie about the daemon's state.
-    let phase = local?.status ?? s.device?.daemon_status ?? "running"
-    let phaseMsg = local?.message
+    // Live agent phase comes from the local heartbeat mirror — but the
+    // mirror is only as honest as the process writing it. The daemon
+    // rewrites it at least every 10s even when idle, so a stale
+    // written_at means the file is a fossil from a daemon that's gone:
+    // say offline, don't parrot its last words. (This tray once showed
+    // "Shutting down" for hours off exactly such a fossil.)
+    let phase: String
+    let phaseMsg: String?
+    if let ls = local, Self.mirrorIsFresh(ls.written_at) {
+      phase = ls.status ?? "starting"
+      phaseMsg = ls.message
+    } else if local != nil {
+      phase = "offline"
+      phaseMsg = "daemon not running"
+    } else {
+      phase = s.device?.daemon_status ?? "starting"
+      phaseMsg = nil
+    }
     // Pulse the leading dot while the agent is actively working so the
     // menu reads as alive even on the rare beat where the numbers don't
     // change. Steady dot when idle/watching/offline.
@@ -796,6 +685,19 @@ final class TrayController: NSObject {
     try? p.run()
   }
 
+  /// Whether a mirror `written_at` stamp is young enough to trust (<30s).
+  /// The daemon rewrites last-status.json at least every 10s, so 30s of
+  /// silence means the process behind it is gone.
+  private static func mirrorIsFresh(_ writtenAt: String?) -> Bool {
+    guard let writtenAt else { return false }
+    let withFrac = ISO8601DateFormatter()
+    withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let date = withFrac.date(from: writtenAt)
+        ?? ISO8601DateFormatter().date(from: writtenAt)
+    else { return false }
+    return Date().timeIntervalSince(date) < 30
+  }
+
   /// Phases where the agent is doing visible work right now — drives the
   /// pulsing status dot. "watching"/"idle" are healthy-but-quiet (steady
   /// dot); "offline"/"error" are problems (steady dot, not a busy pulse).
@@ -873,11 +775,17 @@ final class TrayController: NSObject {
   }
 
   @objc private func quit() {
-    stopDaemon()
     fastTimer?.invalidate()
     slowTimer?.invalidate()
     watchdogTimer?.invalidate()
-    NSApp.terminate(nil)
+    // "Quit modelstat" quits the product: stop the collector too, and only
+    // terminate once `_stop-daemon` has actually run (NSApp.terminate first
+    // would kill the queue before it fires).
+    let cli = self.cli ?? locateCli()
+    superviseQueue.async {
+      if let cli { _ = Self.runCli(cli: cli, args: ["_stop-daemon"]) }
+      DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
   }
 }
 

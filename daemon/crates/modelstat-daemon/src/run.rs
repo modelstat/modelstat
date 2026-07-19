@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::sync::oneshot;
 
 use modelstat_ingest::state::save_state;
 use modelstat_ingest::{home_path, Config};
@@ -50,6 +49,9 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const RECONCILE_FIRST_DELAY: Duration = Duration::from_secs(60);
 const WATCH_DEBOUNCE: Duration = Duration::from_secs(1);
 const LOCAL_FLUSH_THROTTLE: Duration = Duration::from_millis(400);
+/// Rewrite the last-status mirror at least this often even when nothing changed,
+/// so its `written_at` is a real liveness signal (see [`last_status_loop`]).
+const MIRROR_LIVENESS_REWRITE: Duration = Duration::from_secs(10);
 
 /// The loopback ingest port (`MODELSTAT_LOCAL_INGEST_PORT`, else 4319 — must match
 /// the SDKs' `DEFAULT_DAEMON_URL`).
@@ -111,22 +113,6 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
         daemon.with_status(|s| s.set_stat("segments_sent", json!(sent)));
     }
 
-    // The racing-daemon convergence recheck (feature §21.7): 5s after acquiring,
-    // confirm we still own the lock — if a rival out-renamed us, stand down (0).
-    let (lost_tx, lost_rx) = oneshot::channel::<()>();
-    {
-        let lock_path = lock_path.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(LOCK_RECHECK_MS)).await;
-            let current = read_daemon_lock(&lock_path);
-            if check_lock_ownership(std::process::id() as i64, current.as_ref(), is_process_alive)
-                == OwnershipCheck::Lost
-            {
-                let _ = lost_tx.send(());
-            }
-        });
-    }
-
     // The single-flight scan runner — the load-bearing memory bound (never two
     // scans at once; triggers coalesce into one follow-up). `quiescing` latches
     // at shutdown so no new scan is admitted onto a device we're about to free.
@@ -140,7 +126,16 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     };
 
     // ── Heartbeat ticker (+ prime) ──────────────────────────────────────────
-    tokio::spawn(heartbeat_loop(daemon.clone()));
+    // Handles kept: shutdown aborts these AFTER the drain so they broadcast the
+    // live truth for exactly as long as it is the truth, and not a beat longer.
+    let heartbeat_task = tokio::spawn(heartbeat_loop(daemon.clone()));
+
+    // ── Throttled last-status mirror (tray/statusline read this file) ───────
+    // BEFORE any scan: a fresh boot must immediately replace whatever a
+    // predecessor left in `last-status.json` — spawning the mirror only after
+    // the first scan (the old shape) let a stale "Shutting down" sit there for
+    // the entire (possibly hours-long) startup backfill.
+    let mirror_task = tokio::spawn(last_status_loop(daemon.clone()));
 
     // ── Preflight the summariser (never throws, never stops the daemon) ──────
     preflight(&daemon).await;
@@ -175,6 +170,30 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
         }
     }
 
+    // ── The racing-daemon convergence recheck (feature §21.7) ───────────────
+    // Wait out the recheck window BEFORE the first scan: if a rival out-renamed
+    // our lock write, stand down NOW — and stand down SILENTLY. The winner owns
+    // the device row and the status mirror; a parting "offline" heartbeat or
+    // mirror write from us would clobber its truth. (The old shape raced the
+    // recheck against the signal wait, which only ran after the awaited first
+    // scan — so a losing daemon spent the whole startup backfill double-scanning
+    // and double-uploading before it ever noticed it had lost.)
+    tokio::time::sleep(Duration::from_millis(LOCK_RECHECK_MS)).await;
+    {
+        let current = read_daemon_lock(&lock_path);
+        if check_lock_ownership(std::process::id() as i64, current.as_ref(), is_process_alive)
+            == OwnershipCheck::Lost
+        {
+            println!("[modelstat] another daemon took the lock during boot — standing down");
+            heartbeat_task.abort();
+            mirror_task.abort();
+            if let Some(r) = &receiver {
+                r.abort();
+            }
+            return ExitCode::SUCCESS;
+        }
+    }
+
     // ── First scan (awaited) ────────────────────────────────────────────────
     // Discovery rides the primed heartbeat, so go straight to scanning.
     runner.trigger("startup".to_string());
@@ -185,21 +204,38 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     tokio::spawn(backstop_loop(runner.clone(), quiescing.clone()));
     tokio::spawn(reconcile_loop(daemon.clone(), runner.clone(), quiescing.clone()));
 
-    // ── Throttled last-status mirror (tray/statusline read this file) ───────
-    tokio::spawn(last_status_loop(daemon.clone()));
-
-    // ── Park until a signal or a lost lock race, then quiesce + exit ────────
-    let code = wait_for_shutdown(lost_rx).await;
+    // ── Park until a signal, then drain, THEN go offline ────────────────────
+    let code = wait_for_shutdown().await;
     quiescing.store(true, Ordering::SeqCst);
-    daemon.with_status(|s| s.set_phase(Phase::Offline, "Shutting down"));
-    // Final liveness so the dashboard flips to offline immediately (bare — no
-    // discovery fold at teardown).
-    post_heartbeat_now(&daemon, None).await;
     if let Some(r) = &receiver {
         r.abort();
     }
-    // Let the in-flight scan drain before we exit (frees the engine cleanly).
-    runner.idle().await;
+    // Drain the in-flight scan FIRST, without touching the phase: until the
+    // drain completes this daemon is still scanning/uploading, and the heartbeat
+    // + mirror loops keep reporting that truth. (The old order flipped the phase
+    // to Offline "Shutting down" up front, so a daemon spending an hour
+    // finishing a big backfill broadcast "Shutting down" the whole time — a
+    // live, actively uploading collector every surface called dead.) A second
+    // signal skips the wait for people who really mean "now".
+    tokio::select! {
+        _ = runner.idle() => {}
+        _ = wait_for_shutdown() => {
+            eprintln!("[modelstat] second signal — exiting without draining the in-flight scan");
+        }
+    }
+    // NOW offline is true: stop the broadcasters, say it once, and leave.
+    heartbeat_task.abort();
+    mirror_task.abort();
+    daemon.with_status(|s| s.set_phase(Phase::Offline, "Stopped"));
+    post_heartbeat_now(&daemon, None).await;
+    let snap = daemon.with_status(|s| {
+        s.snapshot_body(
+            Some(&daemon.device_id),
+            daemon.config.version(),
+            &daemon.machine_id,
+        )
+    });
+    let _ = write_last_status(&home_path("last-status.json"), &snap, &now_iso());
     remove_lock_if_owned(&lock_path, std::process::id() as i64);
     ExitCode::from(code)
 }
@@ -530,14 +566,19 @@ fn file_mtime_secs(path: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The throttled last-status mirror: ~every 400ms, write `last-status.json` IF the
-/// snapshot changed (deduped by its device-id-carrying body, ignoring the
-/// per-write `written_at`). Decoupled from the 10s heartbeat so the tray + the
-/// statusline see fresh phase/progress through a long summarise pass. Port of
-/// `scheduleLocalFlush` + `writeLocalStatus`.
+/// The throttled last-status mirror: ~every 400ms, write `last-status.json` when
+/// the snapshot changed — and at least every [`MIRROR_LIVENESS_REWRITE`] even
+/// when it hasn't, so `written_at` doubles as the LOCAL liveness beat. The
+/// supervisor probe (`_daemon-health`) and the tray judge daemon liveness by
+/// that freshness; the old changed-only dedupe let a healthy-but-idle daemon's
+/// mirror age past the probe's threshold, which then "replaced" (force-killed)
+/// a perfectly live collector. Decoupled from the 10s network heartbeat so the
+/// tray + statusline see fresh phase/progress through a long summarise pass.
+/// Port of `scheduleLocalFlush` + `writeLocalStatus`.
 async fn last_status_loop(daemon: Arc<Daemon>) {
     let path = home_path("last-status.json");
     let mut last: Option<String> = None;
+    let mut last_write = Instant::now();
     loop {
         let snap = daemon.with_status(|s| {
             s.snapshot_body(
@@ -547,9 +588,11 @@ async fn last_status_loop(daemon: Arc<Daemon>) {
             )
         });
         let key = snap.to_string();
-        if last.as_deref() != Some(key.as_str()) {
+        if last.as_deref() != Some(key.as_str()) || last_write.elapsed() >= MIRROR_LIVENESS_REWRITE
+        {
             let _ = write_last_status(&path, &snap, &now_iso());
             last = Some(key);
+            last_write = Instant::now();
         }
         tokio::time::sleep(LOCAL_FLUSH_THROTTLE).await;
     }
@@ -612,11 +655,10 @@ fn spawn_watcher(
     Some(watcher)
 }
 
-/// Wait for a shutdown trigger and return the process exit code: SIGINT → 130,
-/// SIGTERM → 143, a lost lock race → 0 (a rival won; our supervisor adopts it).
-/// A single unified wait (NOT two racing handlers) so the lock's stand-down and
-/// the graceful teardown never preempt each other.
-async fn wait_for_shutdown(lost_rx: oneshot::Receiver<()>) -> u8 {
+/// Wait for a shutdown signal and return the process exit code: SIGINT → 130,
+/// SIGTERM → 143. (The lost-lock stand-down no longer rides this wait — the
+/// ownership recheck resolves inline before the first scan.)
+async fn wait_for_shutdown() -> u8 {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -627,14 +669,11 @@ async fn wait_for_shutdown(lost_rx: oneshot::Receiver<()>) -> u8 {
         tokio::select! {
             _ = sigint.recv() => 130,
             _ = sigterm.recv() => 143,
-            _ = lost_rx => 0,
         }
     }
     #[cfg(not(unix))]
     {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => 130,
-            _ = lost_rx => 0,
-        }
+        let _ = tokio::signal::ctrl_c().await;
+        130
     }
 }

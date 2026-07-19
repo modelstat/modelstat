@@ -6,15 +6,49 @@
 //! "modulo the documented deltas"): the `summarizer.model` field is GONE with
 //! BYO endpoints, and `summarizer.url` is now present in BOTH self-hosted and
 //! local (the loopback engine URL) — the tray reads both optionally.
+//!
+//! The daemon phase is LOCAL truth: the lock owner's liveness + the
+//! `last-status.json` mirror, never the server's `daemon_status` echo. This
+//! command runs on the same machine as the daemon — the server's copy is just
+//! our own last heartbeat played back, and it was stale in BOTH directions
+//! (a stuck "Shutting down" for a live daemon; a stuck "uploading" for a dead
+//! one killed before its parting beat).
 
 use std::process::ExitCode;
 
+use modelstat_daemon::lock::{age_in_seconds, format_age};
+use modelstat_daemon::supervise::daemon_health;
 use modelstat_ingest::{build_fingerprint, logs_dir, state_path, Config, DeviceApi};
 use modelstat_service::{service_status, Component, Scope};
 use modelstat_update::{auto_update_enabled, auto_update_pinned_by_env};
 use serde_json::{json, Map, Value};
 
 use crate::util::{api_base, dashboard_url, read_local_status};
+
+/// Wall-clock ms since the Unix epoch, for the health probe.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// `last-status.json` is only as honest as the process that wrote it: when no
+/// live process owns the daemon lock, the mirror is a fossil — override its
+/// phase so no surface renders a dead daemon's last words ("Shutting down",
+/// "uploading") as live state. Stats stay: they're history, and labelled so.
+fn honest_local(local: Option<Value>, owner_alive: bool) -> Option<Value> {
+    match local {
+        Some(mut l) if !owner_alive => {
+            if let Some(obj) = l.as_object_mut() {
+                obj.insert("status".into(), json!("offline"));
+                obj.insert("message".into(), json!("daemon not running"));
+            }
+            Some(l)
+        }
+        other => other,
+    }
+}
 
 /// The active summarizer engine URL for this mode, or `None` for cloud. Pure —
 /// no probe, no side effect (self-hosted → the stored URL; local → loopback).
@@ -51,18 +85,26 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
     let paired = config.bearer().is_some() && config.device_id().is_some();
     let dashboard = dashboard_url(&config);
     let svc = service_status(Component::Daemon, Scope::User);
-    let local = read_local_status();
+    let health = daemon_health(now_ms(), None);
+    let local = honest_local(read_local_status(), health.owner_alive);
     let fp = build_fingerprint(config.version());
 
     let user_email = config.identity().and_then(|i| i.user_email);
     let mut claimed = user_email.is_some();
     let mut claim_url = config.claim_url();
     let mut claim_code = config.claim_code();
-    let mut daemon_status = local
-        .as_ref()
-        .and_then(|l| l.get("status"))
-        .and_then(Value::as_str)
-        .map(String::from);
+    // The daemon phase is local truth (see the module docs): a live lock owner's
+    // mirror, or "offline" when no live process owns the lock.
+    let daemon_status = if health.owner_alive {
+        local
+            .as_ref()
+            .and_then(|l| l.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("starting")
+            .to_string()
+    } else {
+        "offline".to_string()
+    };
 
     // Side-effect-free probe: refresh claim fields when paired, but NEVER recover
     // identity here — the heartbeat loop owns 401 recovery (§5). Any error keeps
@@ -77,9 +119,6 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
                 if me.claim_code.is_some() {
                     claim_code = me.claim_code.clone();
                 }
-                if me.daemon_status.is_some() {
-                    daemon_status = me.daemon_status.clone();
-                }
             }
         }
     }
@@ -88,6 +127,11 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
         "hostname": fp.hostname,
         "os_family": fp.os_family,
         "daemon_status": daemon_status,
+    });
+    let daemon_obj = json!({
+        "running": health.owner_alive,
+        "pid": health.lock.as_ref().map(|l| l.pid),
+        "started_at": health.lock.as_ref().map(|l| l.started_at.clone()),
     });
     let pairing = if paired {
         json!({
@@ -109,6 +153,7 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
             "claim_url": claim_url,
             "claim_code": claim_code,
             "local": local,
+            "daemon": daemon_obj,
             "service": { "running": svc.running, "hint": svc.hint },
             "pairing": pairing,
             "auto_update": { "enabled": auto_update_enabled(), "pinned_by_env": auto_update_pinned_by_env() },
@@ -136,6 +181,14 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
         if svc.running { "running" } else { "stopped" },
         svc.hint
     );
+    match &health.lock {
+        Some(lock) if health.owner_alive => println!(
+            "daemon:  running (pid {}, up {})",
+            lock.pid,
+            format_age(age_in_seconds(&lock.started_at))
+        ),
+        _ => println!("daemon:  not running"),
+    }
     println!("logs:    {}", logs_dir().display());
     println!("state:   {}", state_path().display());
     println!("api:     {}", config.api_url());
@@ -191,7 +244,8 @@ pub async fn cmd_jobs(api: &DeviceApi, args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let local = read_local_status();
+    let health = daemon_health(now_ms(), None);
+    let local = honest_local(read_local_status(), health.owner_alive);
     let phase = local
         .as_ref()
         .and_then(|l| l.get("status"))

@@ -6,11 +6,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use modelstat_daemon::lock::{
+    daemon_lock_path, is_process_alive, read_daemon_lock, terminate_process,
+    terminate_process_hard,
+};
 use modelstat_daemon::processing_version::PROCESSING_VERSION;
 use modelstat_daemon::runtime::{scan_session, Daemon};
+use modelstat_daemon::supervise::{daemon_health, SuperviseDecision};
 use modelstat_ingest::state::{load_state, save_state};
 use modelstat_ingest::{state_path, Config};
-use modelstat_service::{tray, uninstall_service, Component, Scope};
+use modelstat_service::{
+    install_service, service_pid, stop_service, tray, uninstall_service, Component, Scope,
+};
 use std::process::ExitCode;
 
 /// `reset` — wipe all file cursors + stamp the current PROCESSING_VERSION so the
@@ -72,6 +79,100 @@ pub fn cmd_stop() -> ExitCode {
 
     println!("  Your device pairing is still in {}", state_path().display());
     println!("  Run `modelstat` again to re-enable.");
+    ExitCode::SUCCESS
+}
+
+/// `_ensure-daemon` — converge toward "exactly one live daemon, run by the
+/// managed service" (§15). The service manager (launchd/systemd) is the daemon's
+/// ONLY supervisor; this command never runs the daemon itself — it reconciles
+/// the managed service and lets the manager do the running. The tray's boot +
+/// 30s watchdog shell this instead of spawning `modelstat start` as their own
+/// child (two supervisors is how a machine ends up with a tray-parented daemon
+/// nobody restarts). Decision (supervise::daemon_health):
+///   adopt   → a live daemon owns the lock and its status mirror is fresh — do
+///             nothing (whoever runs it, it's healthy).
+///   spawn   → no live owner. A managed daemon that's seconds into boot hasn't
+///             written its lock yet — leave it to finish rather than bouncing
+///             it; otherwise reinstall + start the service (idempotent).
+///   replace → a live owner stopped updating its mirror: SIGTERM it, escalate to
+///             SIGKILL after a grace, then reinstall + start the service.
+pub fn cmd_ensure_daemon(version: &str) -> ExitCode {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let health = daemon_health(now_ms, Some(version));
+    match health.decision {
+        SuperviseDecision::Adopt => {
+            let pid = health.lock.as_ref().map(|l| l.pid).unwrap_or(0);
+            println!("[modelstat] daemon healthy (pid {pid}) — nothing to do");
+            ExitCode::SUCCESS
+        }
+        SuperviseDecision::Spawn => {
+            if let Some(pid) = service_pid(Component::Daemon, Scope::User) {
+                println!("[modelstat] managed daemon (pid {pid}) is booting — leaving it to finish");
+                return ExitCode::SUCCESS;
+            }
+            reload_daemon_service()
+        }
+        SuperviseDecision::Replace => {
+            if let Some(lock) = &health.lock {
+                eprintln!(
+                    "[modelstat] daemon pid {} stopped updating its status (age {:?}ms) — replacing it",
+                    lock.pid, health.status_age_ms
+                );
+                terminate_owner(lock.pid);
+            }
+            reload_daemon_service()
+        }
+    }
+}
+
+/// SIGTERM `pid` and wait for it to exit; escalate to SIGKILL after ~10s.
+fn terminate_owner(pid: i64) {
+    terminate_process(pid);
+    for _ in 0..40 {
+        if !is_process_alive(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    eprintln!("[modelstat] daemon pid {pid} ignored SIGTERM for 10s — SIGKILL");
+    terminate_process_hard(pid);
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+/// Reinstall + start the managed daemon service, loudly.
+fn reload_daemon_service() -> ExitCode {
+    match install_service(Component::Daemon, Scope::User) {
+        Ok(r) => {
+            println!("[modelstat] daemon service reloaded ({})", r.path.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("modelstat: couldn't reload the daemon service: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `_stop-daemon` — stop the collector WITHOUT uninstalling anything: stop the
+/// managed service instance (it stays installed; the next `_ensure-daemon` or
+/// login starts it again) and SIGTERM any non-managed lock owner. The tray's
+/// Pause/Quit verb.
+pub fn cmd_stop_daemon() -> ExitCode {
+    if let Err(e) = stop_service(Component::Daemon, Scope::User) {
+        eprintln!("modelstat: couldn't stop the daemon service: {e}");
+        return ExitCode::FAILURE;
+    }
+    // An owner running outside the service manager (a dev's terminal daemon, an
+    // orphan from an old tray) doesn't hear the service stop — terminate it too.
+    if let Some(lock) = read_daemon_lock(&daemon_lock_path()) {
+        if is_process_alive(lock.pid) {
+            terminate_process(lock.pid);
+        }
+    }
+    println!("✓ daemon stopped (service stays installed — `modelstat _ensure-daemon` or the next login restarts it)");
     ExitCode::SUCCESS
 }
 

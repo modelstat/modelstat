@@ -71,10 +71,11 @@ pub fn is_process_alive(pid: i64) -> bool {
     }
 }
 
-/// Best-effort terminate (the `--force` recovery path). Unix SIGTERM; Windows
-/// `TerminateProcess`. A gone/unpermitted process is silently ignored.
+/// Best-effort terminate (the `--force` recovery path + the supervisor's
+/// replace-a-wedged-owner path). Unix SIGTERM; Windows `TerminateProcess`. A
+/// gone/unpermitted process is silently ignored.
 #[cfg(unix)]
-fn kill_process(pid: i64) {
+pub fn terminate_process(pid: i64) {
     if pid > 0 {
         // SAFETY: SIGTERM to a pid we already probed; the OS handles a since-dead
         // pid with ESRCH, which we ignore.
@@ -85,7 +86,7 @@ fn kill_process(pid: i64) {
 }
 
 #[cfg(windows)]
-fn kill_process(pid: i64) {
+pub fn terminate_process(pid: i64) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     if pid <= 0 {
@@ -100,6 +101,24 @@ fn kill_process(pid: i64) {
             CloseHandle(h);
         }
     }
+}
+
+/// Last-resort kill for an owner that ignored SIGTERM (the supervisor's replace
+/// escalation). Unix SIGKILL; on Windows [`terminate_process`] is already
+/// immediate, so this is the same call.
+#[cfg(unix)]
+pub fn terminate_process_hard(pid: i64) {
+    if pid > 0 {
+        // SAFETY: SIGKILL to a probed pid; a since-dead pid yields ESRCH, ignored.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn terminate_process_hard(pid: i64) {
+    terminate_process(pid);
 }
 
 /// The default lockfile path: `<MODELSTAT_HOME>/daemon.lock`.
@@ -199,7 +218,7 @@ pub fn acquire_daemon_lock(lock_file: &Path, opts: &AcquireOpts) -> std::io::Res
                     age_sec,
                 });
             }
-            kill_process(e.pid);
+            terminate_process(e.pid);
         }
     }
     // Either no lock, a stale lock, or we just killed the owner.

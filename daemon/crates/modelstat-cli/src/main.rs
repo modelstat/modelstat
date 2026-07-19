@@ -79,6 +79,12 @@ fn main() -> ExitCode {
         Some("mcp") => cmd_mcp(&args[1..]),
         // The tray's adopt/spawn/replace decision (§15) — read-only JSON.
         Some("_daemon-health") => cmd_daemon_health(),
+        // Converge "exactly one live daemon" via the managed service (§15) — the
+        // tray's boot/watchdog verb. Adopt-or-reconcile; never runs the daemon
+        // inline (the service manager is the daemon's only supervisor).
+        Some("_ensure-daemon") => cmd_admin::cmd_ensure_daemon(VERSION),
+        // Stop the daemon, keep everything installed — the tray's Pause/Quit verb.
+        Some("_stop-daemon") => cmd_admin::cmd_stop_daemon(),
         // Install/refresh the managed daemon service + reconcile the tray (§16/§15).
         Some("_install-service") => cmd_install_service(),
         // Stage the running binaries + tray into the stable install path (§5) — no
@@ -323,8 +329,13 @@ fn cmd_install_service() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    if tray::ensure_tray_installed() {
-        println!("\x1b[32m✓\x1b[0m tray agent reconciled");
+    match tray::ensure_tray_installed() {
+        Ok(true) => println!("\x1b[32m✓\x1b[0m tray agent reconciled"),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("modelstat: tray agent install failed: {e}");
+            return ExitCode::FAILURE;
+        }
     }
     ExitCode::SUCCESS
 }

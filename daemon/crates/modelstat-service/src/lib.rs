@@ -221,6 +221,33 @@ pub fn stop_service(component: Component, scope: Scope) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The pid of the supervisor-managed process for a component, when the service
+/// manager reports one. `None` = not running under the manager (or the platform
+/// doesn't expose a pid). Lets a supervisor probe distinguish "the managed daemon
+/// is mid-boot (has a pid, hasn't written its lock yet)" from "nothing running".
+pub fn service_pid(component: Component, scope: Scope) -> Option<i64> {
+    let def = service_def(component, scope);
+    #[cfg(target_os = "macos")]
+    {
+        let target = format!("{}/{}", launchd_domain(def.scope), def.label);
+        return launchd_service_pid(&target);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let unit = format!("{}.service", def.unit_name);
+        let (ok, out, _e) = systemctl(def.scope, &["show", "-p", "MainPID", "--value", &unit]);
+        return match out.trim().parse::<i64>() {
+            Ok(pid) if ok && pid > 0 => Some(pid),
+            _ => None,
+        };
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = def;
+        None
+    }
+}
+
 /// Whether the service is running + a per-platform hint (§16).
 pub fn service_status(component: Component, scope: Scope) -> ServiceStatus {
     let def = service_def(component, scope);
@@ -255,21 +282,69 @@ fn launchd_domain(scope: Scope) -> String {
     }
 }
 
+/// Whether a launchd service is present in its domain (`launchctl print` succeeds).
+#[cfg(target_os = "macos")]
+fn launchd_loaded(target: &str) -> bool {
+    run("launchctl", &["print", target]).0
+}
+
+/// The pid of a launchd service's running process, parsed from `launchctl print`
+/// (`pid = <n>`), or `None` when the service is loaded but not running (or not
+/// loaded at all).
+#[cfg(target_os = "macos")]
+fn launchd_service_pid(target: &str) -> Option<i64> {
+    let (ok, out, _err) = run("launchctl", &["print", target]);
+    if !ok {
+        return None;
+    }
+    out.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("pid = ")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+    })
+}
+
+/// Unload + reload a launchd service from `plist`, surviving launchd's async
+/// teardown. `launchctl bootout` returns while the old instance is still being
+/// torn down, so a `bootstrap` issued straight after can fail transiently — the
+/// silent version of that race left machines with the plist on disk and NO
+/// service in the domain (nothing running, nothing to restart it). So: bootout,
+/// poll until the service actually leaves the domain, bootstrap with retries,
+/// then a plain `kickstart` (RunAtLoad already starts the fresh instance; `-k`
+/// would only SIGTERM it again for nothing). A bootstrap that never lands is a
+/// loud Err carrying launchctl's stderr.
+#[cfg(target_os = "macos")]
+pub(crate) fn launchd_reload(domain: &str, label: &str, plist: &std::path::Path) -> std::io::Result<()> {
+    use std::time::Duration;
+    let target = format!("{domain}/{label}");
+    run("launchctl", &["bootout", &target]); // no-op error when not loaded
+    for _ in 0..20 {
+        if !launchd_loaded(&target) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let mut last_err = String::new();
+    for attempt in 0..10 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let (ok, _out, err) = run("launchctl", &["bootstrap", domain, &plist.to_string_lossy()]);
+        if ok {
+            run("launchctl", &["kickstart", &target]);
+            return Ok(());
+        }
+        last_err = err.trim().to_string();
+    }
+    Err(std::io::Error::other(format!(
+        "launchctl bootstrap {domain} {} failed after 10 attempts: {last_err}",
+        plist.display()
+    )))
+}
+
 #[cfg(target_os = "macos")]
 fn mac_load(def: &ServiceDef, path: &std::path::Path) -> std::io::Result<()> {
-    let domain = launchd_domain(def.scope);
-    let target = format!("{domain}/{}", def.label);
-    // Idempotent: unload the previous instance, then bootstrap + kickstart.
-    run("launchctl", &["bootout", &target]);
-    let (ok, _out, err) = run("launchctl", &["bootstrap", &domain, &path.to_string_lossy()]);
-    if !ok {
-        return Err(std::io::Error::other(format!(
-            "launchctl bootstrap failed: {}",
-            err.trim()
-        )));
-    }
-    run("launchctl", &["kickstart", "-k", &target]);
-    Ok(())
+    launchd_reload(&launchd_domain(def.scope), def.label, path)
 }
 
 #[cfg(target_os = "macos")]
