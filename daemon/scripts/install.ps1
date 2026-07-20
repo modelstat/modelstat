@@ -126,6 +126,11 @@ try {
     Step 'Disabling auto-update for this build'
     & (Join-Path $binHome 'bin\modelstat.exe') autoupdate off 2>$null | Out-Null
     Ok 'auto-update off - re-enable any time with: modelstat autoupdate on'
+  } else {
+    # GA install (not a pre-release, no -NoAutoUpdate): ensure auto-update is ON. A
+    # pre-release installed earlier turns it OFF and that preference persists, so
+    # without this a tester moving to a GA build would silently stay off.
+    & (Join-Path $binHome 'bin\modelstat.exe') autoupdate on 2>$null | Out-Null
   }
 
   $fwd = @()

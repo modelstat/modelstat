@@ -172,6 +172,12 @@ if [ -n "$NO_AUTO_UPDATE" ]; then
   step "Disabling auto-update for this build"
   "$STAGED" autoupdate off >/dev/null 2>&1 || true
   ok "auto-update off — re-enable any time with: modelstat autoupdate on"
+else
+  # GA install (not a pre-release, no --no-auto-update): ensure auto-update is ON.
+  # A pre-release you installed earlier turns it OFF, and that preference persists
+  # in auto-update.json — so without this a tester moving to a GA build would
+  # silently stay off. The documented default is ON (it is how fixes arrive).
+  "$STAGED" autoupdate on >/dev/null 2>&1 || true
 fi
 
 # Test hook (scripts/e2e-install.sh): stop right after staging, before pairing.

@@ -113,6 +113,16 @@ impl Status {
         self.update = update;
     }
 
+    /// Mirror the stored auto-update preference into the status, read FRESH from
+    /// `~/.modelstat/auto-update.json` (via env override → file). The daemon calls
+    /// this right before each snapshot so a tray/CLI toggle shows up on the very
+    /// next heartbeat + `last-status.json` write. Kept OUT of `snapshot_body` (which
+    /// stays a pure serializer for the tests) and off the hot setters (it touches
+    /// the filesystem).
+    pub fn refresh_auto_update(&mut self) {
+        self.auto_update = modelstat_update::auto_update_enabled();
+    }
+
     /// The full snapshot body — the `last-status.json` mirror payload AND (minus
     /// `device_id`) the heartbeat wire body. `device_id` serializes to `null`
     /// when absent. Port of `snapshotBody`.

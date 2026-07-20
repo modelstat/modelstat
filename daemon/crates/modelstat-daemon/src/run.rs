@@ -229,6 +229,7 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     daemon.with_status(|s| s.set_phase(Phase::Offline, "Stopped"));
     post_heartbeat_now(&daemon, None).await;
     let snap = daemon.with_status(|s| {
+        s.refresh_auto_update();
         s.snapshot_body(
             Some(&daemon.device_id),
             daemon.config.version(),
@@ -314,6 +315,7 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
 /// discovery snapshot, POST it, and act on the server's release verdict.
 async fn post_heartbeat_now(daemon: &Daemon, discovery: Option<DiscoveryOutput>) {
     let snap = daemon.with_status(|s| {
+        s.refresh_auto_update();
         s.snapshot_body(
             Some(&daemon.device_id),
             daemon.config.version(),
@@ -581,6 +583,7 @@ async fn last_status_loop(daemon: Arc<Daemon>) {
     let mut last_write = Instant::now();
     loop {
         let snap = daemon.with_status(|s| {
+            s.refresh_auto_update();
             s.snapshot_body(
                 Some(&daemon.device_id),
                 daemon.config.version(),
