@@ -32,6 +32,6 @@ claude plugin install modelstat@modelstat
                       ↑ raw prompts, code & secrets never leave your machine ↑
 ```
 
-Bundles the [`@modelstat/mcp`](https://www.npmjs.com/package/@modelstat/mcp) server, so the tools also answer plain questions ("how much did Opus cost me this month?") without `/stat`.
+Connects the hosted [modelstat MCP server](https://mcp.modelstat.ai), so the tools also answer plain questions ("how much did Opus cost me this month?") without `/stat`.
 
-Works with a paired [modelstat](https://modelstat.ai/install) daemon (`npx modelstat@latest`) — or, with no daemon, the MCP connects itself via your browser on first use.
+Works with a paired [modelstat](https://modelstat.ai/install) daemon (`curl -fsSL https://install.modelstat.ai | sh`) — or, with no daemon, the MCP signs you in via your browser on first use.

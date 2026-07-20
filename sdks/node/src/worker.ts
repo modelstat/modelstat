@@ -165,8 +165,8 @@ export class Worker {
             this.warnedLocalDaemon = true;
             console.error(
               `modelstat: the local daemon at ${this.cfg.mode.url} is unreachable — ` +
-                "is it running? Start it with `npx modelstat connect`, or ship " +
-                "directly to the server with `cfg.withRemote(baseUrl, raw)`. " +
+                "is it running? Install it with `curl -fsSL https://install.modelstat.ai | sh`, " +
+                "or ship directly to the server with `cfg.withRemote(baseUrl, raw)`. " +
                 "(This hint prints once.)",
             );
           }

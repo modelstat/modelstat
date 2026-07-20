@@ -16,25 +16,26 @@ service isn't in scope here.
 
 You need:
 
-- **Node** 20.18+
-- **pnpm** 10.7+
+- **Rust** (stable) — for the daemon in `daemon/` (the shipping product)
+- **Node** 20.18+ / **pnpm** 10.7+ — only for the SDKs and the retired TS packages
 - **Swift** 5.9+ (only for the macOS tray)
 - A modelstat account to pair against — sign up at [modelstat.ai](https://modelstat.ai)
 
 ```bash
 git clone https://github.com/modelstat/modelstat.git
-cd modelstat
-pnpm install
-pnpm build
-pnpm typecheck
+
+# The daemon (what ships):
+cd modelstat/daemon
+cargo build
+cargo test
 ```
 
 Per-component:
 
 ```bash
-pnpm --filter modelstat build           # Node daemon
-pnpm --filter @modelstat/mcp build             # MCP server
-pnpm tray-mac:build                            # macOS tray
+cd daemon && cargo build                # collector + summariser binaries (Rust)
+pnpm install && pnpm tray-mac:build     # macOS tray
+pnpm --filter @modelstat/sdk build      # Node SDK
 ```
 
 Point the daemon at a local / self-hosted API:
@@ -105,8 +106,8 @@ usually be declined — the project has a deliberate simplicity bias.
 ## Pull request checklist
 
 - [ ] Linked issue or clear motivation in the PR description.
-- [ ] `pnpm typecheck` passes.
-- [ ] `pnpm lint` passes (Biome).
+- [ ] Daemon changes: `cargo test` passes in `daemon/`.
+- [ ] TS changes (SDKs / tray glue): `pnpm typecheck` and `pnpm lint` (Biome) pass.
 - [ ] No new runtime dependencies without discussion.
 - [ ] No server-only imports sneaking in.
 - [ ] Commit messages follow the project style — lowercase prefix

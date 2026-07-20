@@ -50,11 +50,11 @@ with a `[service]` tag so they're routed correctly.
 
 - Redaction patterns missing a new secret shape — that's a routine
   improvement. Open a PR adding the pattern to
-  `packages/core/src/redact.ts` + a test case.
-- The bearer token `npx modelstat@latest` writes to your local config
-  directory. It's stored unencrypted on purpose — rotate it via
-  `npx modelstat@latest` if you suspect it's been exposed. It's scoped
-  to a single device × user.
+  `daemon/crates/modelstat-redact/` + a test case.
+- The bearer token the modelstat daemon writes to `~/.modelstat`. It's
+  stored unencrypted on purpose — rotate it by re-running `modelstat`
+  (the onboarding command) if you suspect it's been exposed. It's
+  scoped to a single device × user.
 - Policies we explicitly opt-in to (e.g. the `none` redaction policy
   is meant for trusted sandboxes).
 

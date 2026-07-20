@@ -39,11 +39,8 @@ modelstat = "0.0.5"
 The daemon is the open-source `modelstat` daemon. It runs as a background service, downloads a small local model on first start, and listens on loopback for SDK traffic.
 
 ```bash
-# zero-install: starts the background service + fetches the local model
-npx modelstat@latest
-
-# …or install it globally
-npm i -g modelstat && modelstat start
+# one command: installs the daemon + background service (native binary, no Node)
+curl -fsSL https://install.modelstat.ai | sh
 
 modelstat status      # confirm it's running (and which loopback port it uses)
 ```
