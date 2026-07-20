@@ -225,7 +225,12 @@ pub fn wire_json_target(t: &JsonTarget, exe: &str) -> WireStatus {
     }
 }
 
-/// Codex uses TOML; append the `[mcp_servers.modelstat]` table if absent.
+/// Codex uses TOML; write the `[mcp_servers.modelstat]` table, REPLACING any
+/// existing one. §MIGRATION: the old npm daemon wrote this table as
+/// `command = "npx"` (`@modelstat/mcp`); a plain "append if absent" would leave
+/// that stale entry forever, so we strip any existing `[mcp_servers.modelstat]`
+/// table and append ours. A no-op (`Already`) when the existing table is already
+/// ours.
 pub fn wire_codex(home: &Path, exe: &str) -> WireStatus {
     let dir = home.join(".codex");
     if !dir.exists() {
@@ -233,16 +238,46 @@ pub fn wire_codex(home: &Path, exe: &str) -> WireStatus {
     }
     let file = dir.join("config.toml");
     let toml = std::fs::read_to_string(&file).unwrap_or_default();
-    if toml.contains("[mcp_servers.modelstat]") {
-        return WireStatus::Already;
-    }
     // TOML string escaping for the (possibly space-bearing) path.
     let esc = exe.replace('\\', "\\\\").replace('"', "\\\"");
     let block = format!("[mcp_servers.modelstat]\ncommand = \"{esc}\"\nargs = [\"mcp\"]\n");
-    let next = if toml.trim().is_empty() {
+
+    // Rebuild the file with any existing `[mcp_servers.modelstat]` table dropped —
+    // a table runs from its header to the next `[...]` header (or EOF). Track
+    // whether the dropped table was already ours so an unchanged file is a no-op.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_table = false;
+    let mut had_table = false;
+    let mut existing_is_ours = false;
+    let ours_command = format!("command = \"{esc}\"");
+    for line in toml.lines() {
+        let t = line.trim();
+        if t == "[mcp_servers.modelstat]" {
+            in_table = true;
+            had_table = true;
+            continue; // drop the header
+        }
+        if in_table {
+            if t.starts_with('[') {
+                in_table = false; // a new table begins — keep it (fall through)
+            } else {
+                if t == ours_command {
+                    existing_is_ours = true;
+                }
+                continue; // drop the old table body
+            }
+        }
+        kept.push(line);
+    }
+    if had_table && existing_is_ours {
+        return WireStatus::Already;
+    }
+    let base = kept.join("\n");
+    let base = base.trim();
+    let next = if base.is_empty() {
         block
     } else {
-        format!("{}\n\n{block}", toml.trim_end())
+        format!("{base}\n\n{block}")
     };
     if std::fs::write(&file, next).is_ok() {
         WireStatus::Configured
@@ -251,8 +286,15 @@ pub fn wire_codex(home: &Path, exe: &str) -> WireStatus {
     }
 }
 
-/// Claude Code ships a CLI; add a user-scoped server (no-op if already there).
-/// `claude.cmd` is tried on Windows. `exe` is the absolute modelstat path.
+/// Claude Code ships a CLI; register a user-scoped `modelstat` server pointing at
+/// the native binary. `claude.cmd` is tried on Windows. `exe` is the absolute
+/// modelstat path.
+///
+/// §MIGRATION: the old npm daemon registered this same name as
+/// `npx -y @modelstat/mcp`, and `claude mcp add` REFUSES to overwrite an existing
+/// server (its dominant failure is "already exists in this scope"). A plain add
+/// would therefore leave a migrated user invoking the dead npm connector forever —
+/// so when an entry already exists and isn't ours, we remove it and add fresh.
 pub fn wire_claude_code(exe: &str) -> WireStatus {
     let claude = if cfg!(windows) { "claude.cmd" } else { "claude" };
     if Command::new(claude)
@@ -265,18 +307,40 @@ pub fn wire_claude_code(exe: &str) -> WireStatus {
     {
         return WireStatus::Absent; // CLI not on PATH
     }
-    let ok = Command::new(claude)
-        .args(["mcp", "add", "modelstat", "-s", "user", "--", exe, "mcp"])
+    let add = || {
+        Command::new(claude)
+            .args(["mcp", "add", "modelstat", "-s", "user", "--", exe, "mcp"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    // A plain add both installs a fresh entry AND (by failing) tells us one already
+    // exists.
+    if add() {
+        return WireStatus::Configured;
+    }
+    // An entry exists. If it's already ours (`claude mcp get` names the native exe)
+    // we're done; otherwise it's the old `npx @modelstat/mcp` — remove it and add
+    // ours. (`get` unavailable/unrecognised → treat as stale and replace.)
+    let ours = Command::new(claude)
+        .args(["mcp", "get", "modelstat"])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains(exe))
+        .unwrap_or(false);
+    if ours {
+        return WireStatus::Already;
+    }
+    let _ = Command::new(claude)
+        .args(["mcp", "remove", "modelstat", "-s", "user"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    // The dominant failure is "already exists in this scope".
-    if ok {
+        .status();
+    if add() {
         WireStatus::Configured
     } else {
-        WireStatus::Already
+        WireStatus::Skipped
     }
 }
 
@@ -502,6 +566,34 @@ mod tests {
         assert!(toml.contains("[mcp_servers.modelstat]"), "{toml}");
         assert!(toml.contains("args = [\"mcp\"]"), "{toml}");
         // Re-run is a no-op.
+        assert_eq!(wire_codex(&home, EXE), WireStatus::Already);
+    }
+
+    #[test]
+    fn codex_toml_replaces_the_stale_npx_table() {
+        // §MIGRATION: an existing `[mcp_servers.modelstat]` from the old npm daemon
+        // (`command = "npx"`) must be REPLACED by the native entry — not left behind
+        // — while sibling tables and preamble survive.
+        let home = tmp("codex-migrate");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(
+            home.join(".codex/config.toml"),
+            "model = \"gpt\"\n\n[mcp_servers.modelstat]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelstat/mcp\"]\n\n[mcp_servers.other]\ncommand = \"foo\"\n",
+        )
+        .unwrap();
+        assert_eq!(wire_codex(&home, EXE), WireStatus::Configured);
+        let toml = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        assert!(!toml.contains("npx"), "stale npx command survived:\n{toml}");
+        assert!(!toml.contains("@modelstat/mcp"), "stale npx args survived:\n{toml}");
+        assert!(toml.contains(&format!("command = \"{EXE}\"")), "{toml}");
+        assert_eq!(
+            toml.matches("[mcp_servers.modelstat]").count(),
+            1,
+            "duplicate table:\n{toml}"
+        );
+        assert!(toml.contains("[mcp_servers.other]"), "sibling dropped:\n{toml}");
+        assert!(toml.contains("model = \"gpt\""), "preamble dropped:\n{toml}");
+        // Idempotent now that the table is ours.
         assert_eq!(wire_codex(&home, EXE), WireStatus::Already);
     }
 
