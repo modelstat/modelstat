@@ -104,6 +104,14 @@ if [ -f "$HOME_DIR/bin/modelstat.mjs" ] || [ -d "$HOME_DIR/bin/node_modules" ]; 
   rm -rf "$HOME_DIR/bin/node_modules"
   ok "removed the old npm launcher (your device pairing is untouched)"
 fi
+# The old daemon also shipped as a GLOBAL npm package (`npm i -g modelstat`), which
+# leaves a stale `modelstat` on PATH that shadows the native binary. Remove it
+# best-effort — guarded on npm being present AND the package actually being global,
+# so it is a no-op for anyone who never used the npm path.
+if command -v npm >/dev/null 2>&1 && npm ls -g --depth=0 modelstat >/dev/null 2>&1; then
+  step "Removing the old global npm package"
+  npm rm -g modelstat >/dev/null 2>&1 && ok "removed the old global 'modelstat' npm package"
+fi
 fi
 
 # ─── resolve version ────────────────────────────────────────────────

@@ -54,6 +54,17 @@ if ((Test-Path (Join-Path $HomeDir 'bin\modelstat.mjs')) -or (Test-Path (Join-Pa
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $HomeDir 'bin\node_modules')
   Ok 'removed the old npm launcher (your device pairing is untouched)'
 }
+# The old daemon also shipped as a GLOBAL npm package (npm i -g modelstat), which
+# leaves a stale `modelstat` on PATH that shadows the native binary. Remove it
+# best-effort - a no-op if npm is absent or it was never globally installed.
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+  npm ls -g --depth=0 modelstat 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    Step 'Removing the old global npm package'
+    npm rm -g modelstat 2>$null | Out-Null
+    Ok "removed the old global 'modelstat' npm package"
+  }
+}
 
 # ── resolve version ────────────────────────────────────────────────
 Step 'Resolving the latest release'
