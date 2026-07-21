@@ -162,22 +162,20 @@ impl ScanObserver for StatusObserver<'_> {
         let name = path.rsplit('/').next().unwrap_or(path).to_string();
         self.with(|s| {
             s.set_progress(index as u64 + 1, total as u64);
-            s.set_message(format!("Scanning {}/{}: {name}", index + 1, total));
+            // The PHASE too, not just the message: the previous file left it on
+            // `Uploading`, and a bare message change renders as the contradictory
+            // "uploading — File 4/71: …".
+            s.set_phase(
+                Phase::Scanning,
+                format!("File {}/{total}: {name}", index + 1),
+            );
         });
     }
     fn on_upload(&mut self, events: usize, segments: usize) {
         self.with(|s| {
-            // Cloud mode ships raw EVENTS (a batch has 0 segments); local /
-            // self-hosted ship SEGMENTS. Report whichever unit this batch actually
-            // carries, so the status never reads a misleading "Uploading 0 segments"
-            // in cloud mode while events are in flight.
-            let (n, unit) = if segments > 0 {
-                (segments, "segments")
-            } else {
-                (events, "events")
-            };
-            s.set_phase(Phase::Uploading, format!("Uploading {n} {unit}"));
             s.set_stat("segments_sending", json!(segments));
+            let line = shipped_line(s, events as u64);
+            s.set_phase(Phase::Uploading, line);
         });
     }
     fn on_uploaded(&mut self, events: usize, _segments: usize) {
@@ -187,8 +185,51 @@ impl ScanObserver for StatusObserver<'_> {
             s.bump_stat("batches_uploaded", 1);
             s.set_stat("segments_sending", json!(0));
             s.note_event_at(iso);
+            // Back to `Processing`: this batch is committed and the next one is
+            // being parsed + summarised, which is where most of a cycle's wall
+            // clock goes. Staying on `Uploading` made the tray claim an upload for
+            // minutes at a stretch, with nothing on the wire.
+            let line = shipped_line(s, 0);
+            s.set_phase(Phase::Processing, line);
         });
     }
+}
+
+/// The scan's live progress line: how many events this run has SHIPPED, and which
+/// file it is on. Cumulative on purpose — a line built from the batch in flight
+/// reads as frozen, because every full batch is exactly `BATCH_MAX_EVENTS`
+/// ("Uploading 1000 events", batch after batch, forever). `in_flight` is the batch
+/// about to POST, counted in so the number moves the instant one starts.
+///
+/// Events in every mode, never segments: a batch always carries events (cloud
+/// ships raw events and 0 segments; local / self-hosted ship both), so this can
+/// never read a misleading "0 segments".
+fn shipped_line(s: &Status, in_flight: u64) -> String {
+    let sent = s
+        .stats
+        .get("events_uploaded")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + in_flight;
+    let mut line = format!("{} events sent", thousands(sent));
+    if s.progress_total > 0 {
+        line.push_str(&format!(" · file {}/{}", s.progress_done, s.progress_total));
+    }
+    line
+}
+
+/// `12345` → `"12,345"`. The tray menu and `modelstat status` are read at a
+/// glance; a bare five-digit count is not.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The MCP-backed [`SessionInsightsFetcher`]: calls the server's unified
@@ -549,7 +590,6 @@ mod tests {
         let s = status.lock().unwrap();
         assert_eq!(s.progress_done, 1);
         assert_eq!(s.progress_total, 3);
-        assert_eq!(s.phase, Phase::Uploading);
         assert_eq!(s.stats["events_uploaded"], json!(9));
         assert_eq!(s.stats["batches_uploaded"], json!(1));
         assert_eq!(s.stats["segments_sending"], json!(0)); // reset after upload
@@ -557,24 +597,79 @@ mod tests {
     }
 
     #[test]
-    fn on_upload_message_names_events_in_cloud_mode_segments_otherwise() {
-        // Local / self-hosted ship segments; cloud ships raw events (0 segments).
-        // The status message must name whichever unit is actually in flight — never
-        // a misleading "Uploading 0 segments" while cloud events are uploading.
+    fn each_phase_reports_what_is_actually_happening() {
+        // The phase must track the work, not stick on the last thing that moved:
+        // a message-only update rendered as "uploading — File 1/3: …", and a
+        // committed batch left the tray claiming an upload through the (long)
+        // parse + summarise of the next one.
+        let status = StdMutex::new(Status::default());
+        let mut obs = StatusObserver { status: &status };
+
+        obs.on_file("/a/b/c.jsonl", 0, 3);
+        assert_eq!(status.lock().unwrap().phase, Phase::Scanning);
+        assert_eq!(
+            status.lock().unwrap().message.as_deref(),
+            Some("File 1/3: c.jsonl")
+        );
+
+        obs.on_upload(10, 4);
+        assert_eq!(status.lock().unwrap().phase, Phase::Uploading);
+
+        obs.on_uploaded(10, 4);
+        assert_eq!(status.lock().unwrap().phase, Phase::Processing);
+    }
+
+    #[test]
+    fn the_upload_line_climbs_across_batches_instead_of_repeating_the_batch_size() {
+        // The bug this replaces: every full batch is exactly BATCH_MAX_EVENTS, so a
+        // message built from the in-flight size was byte-identical forever —
+        // "Uploading 1000 events" while 11 batches had already landed.
+        let status = StdMutex::new(Status::default());
+        let mut obs = StatusObserver { status: &status };
+        obs.on_file("/a/b/c.jsonl", 2, 71);
+
+        obs.on_upload(1000, 0);
+        assert_eq!(
+            status.lock().unwrap().message.as_deref(),
+            Some("1,000 events sent · file 3/71")
+        );
+        obs.on_uploaded(1000, 0);
+
+        obs.on_upload(1000, 0); // same batch size, DIFFERENT line
+        assert_eq!(
+            status.lock().unwrap().message.as_deref(),
+            Some("2,000 events sent · file 3/71")
+        );
+    }
+
+    #[test]
+    fn the_upload_line_counts_events_in_every_mode() {
+        // Cloud ships raw events with 0 segments; local / self-hosted ship both.
+        // Counting events keeps the line honest in both — it can never read the
+        // misleading "0 segments" a segment-only counter produced in cloud mode.
         let status = StdMutex::new(Status::default());
         let mut obs = StatusObserver { status: &status };
 
         obs.on_upload(120, 3); // segment batch (local / self-hosted)
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("Uploading 3 segments")
+            Some("120 events sent")
         );
 
         obs.on_upload(120, 0); // raw event batch (cloud)
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("Uploading 120 events")
+            Some("120 events sent")
         );
+    }
+
+    #[test]
+    fn thousands_groups_from_the_right() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(17_581), "17,581");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 
     #[test]

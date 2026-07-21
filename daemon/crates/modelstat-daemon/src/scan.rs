@@ -158,6 +158,13 @@ where
     CE: FnMut(Vec<RawEvent>) -> Vec<RawEvent>,
 {
     if buffer.is_empty() && tool_buffer.is_empty() {
+        // Nothing to ship — but the files that got here ARE fully processed: they
+        // parsed clean and every event they produced was already below the
+        // `shipped_below` floor. Their cursors still have to advance, or a file
+        // that grew without yielding anything new re-parses on every cycle forever.
+        for (path, cursor) in pending_cursors.drain(..) {
+            cursors.set_cursor(&path, cursor);
+        }
         return Ok(());
     }
     // Correct each event's repo identity to the AUTHORITATIVE on-disk git remote
@@ -326,6 +333,24 @@ where
             }
         }
         tallies.files_scanned += 1;
+        // Everything below this byte offset already landed on a CONFIRMED upload,
+        // so this scan parses it but does not re-send it. Without the floor a live
+        // transcript re-ships in FULL every time the session appends a line — a
+        // 67MB/17k-event file re-summarised + re-uploaded per cycle, so the tray
+        // never leaves "Uploading <BATCH_MAX_EVENTS> events".
+        //
+        // The floor gates the SEND, not the READ: the whole file is still parsed
+        // because the parsers carry cross-line state (model attribution,
+        // tool_use ↔ tool_result pairing) that a mid-file start would lose.
+        //
+        // Taken only when the file GREW in place (`cs.size >= cur.size`) — a
+        // truncated/rewritten file invalidates every recorded offset, so it
+        // re-ships whole. The eager force scan re-uploads a processed session on
+        // purpose, so it never takes a floor.
+        let shipped_below: u64 = match (opts.force_read_all, cur.as_ref(), cs.as_ref()) {
+            (false, Some(cur), Some(cs)) if cs.size >= cur.size => cur.size,
+            _ => 0,
+        };
         // Stream this file's events through a bounded channel while the SYNC
         // streaming parser runs on a spawn-blocking thread. The parser can't await
         // the async flush, so the channel bridges them: the async side drains a
@@ -349,6 +374,12 @@ where
         let mut held = false;
         while let Some(chunk) = rx.recv().await {
             for e in chunk {
+                // Parsed for its cross-line state, but already shipped — drop it
+                // before the buffer so it costs no summarise + no upload. An event
+                // with no recorded offset can't be placed, so it always ships.
+                if e.source_byte_offset.is_some_and(|o| o < shipped_below) {
+                    continue;
+                }
                 buffer.push(e);
                 if buffer.len() >= BATCH_MAX_EVENTS && flush!().is_err() {
                     held = true;
@@ -398,6 +429,13 @@ where
             Some(ner),
         )
         .await;
+        // Drafts deliberately take NO `shipped_below` floor. A draft's
+        // status/latency/result-size are filled in-place when its `tool_result`
+        // line is paired, which can happen many lines — and scans — after the
+        // `tool_use` that created it. Flooring on the draft's own offset would
+        // strand exactly those completions as forever-pending. They re-ship
+        // instead: `tc_` ids are deterministic, so the server upserts, and drafts
+        // are a small fraction of a transcript next to its events.
         for c in r.tool_calls.drain(..) {
             if tool_buffer.len() >= BATCH_MAX_TOOL_CALLS && flush!().is_err() {
                 tallies.held = true;
@@ -543,6 +581,24 @@ mod tests {
             source_file: None,
             source_byte_offset: None,
             pricing_mode: None,
+        }
+    }
+
+    /// Stamp an event with the byte offset it was parsed from — what the real
+    /// streaming parsers record and what the `shipped_below` floor reads.
+    fn at(mut e: RawEvent, offset: u64) -> RawEvent {
+        e.source_byte_offset = Some(offset);
+        e
+    }
+
+    /// A cursor for a file whose first `size` bytes are confirmed-shipped. The
+    /// tail hash deliberately differs from `checksum`'s, so the unchanged-guard
+    /// lets the file through (it GREW) and the floor is what does the work.
+    fn confirmed_through(size: u64) -> FileCursor {
+        FileCursor {
+            size,
+            mtime: 1,
+            tail_hash: "older".into(),
         }
     }
 
@@ -1046,5 +1102,190 @@ mod tests {
         assert_eq!(uploader.uploaded[0].0, 1000);
         assert_eq!(uploader.uploaded[1].0, 100);
         assert!(cursors.get_cursor("/big.jsonl").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_grown_file_ships_only_the_events_past_its_cursor() {
+        // The re-upload treadmill this floor ends: a LIVE transcript grows by a
+        // line, so the unchanged-guard rightly lets it through — and the scan then
+        // re-parsed and re-shipped the whole file, every cycle, forever. A 67MB /
+        // 17k-event session did that on every keystroke, which is why the tray sat
+        // on "Uploading <BATCH_MAX_EVENTS> events" and never finished.
+        let resilient = healthy();
+        let mut git = NoGit;
+        let mut uploader = RecordingUploader::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        // 60 bytes confirmed-shipped; `checksum` reports the file is now 100.
+        cursors.set_cursor("/big.jsonl", confirmed_through(60));
+        let events = vec![
+            at(ev("s1", "2026-07-16T10:00:00.000Z"), 0), // landed last cycle
+            at(ev("s1", "2026-07-16T10:01:00.000Z"), 59), // landed last cycle
+            at(ev("s1", "2026-07-16T10:02:00.000Z"), 60), // the new tail
+            at(ev("s1", "2026-07-16T10:03:00.000Z"), 80),
+        ];
+        let t = run_scan_over_jobs(
+            vec![job("/big.jsonl")],
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(Some(12), false),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            &mut git,
+            None,
+            parse_with(events),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &mut uploader,
+            &mut cursors,
+            &mut obs,
+        )
+        .await;
+
+        assert!(!t.held);
+        // The file was still fully PARSED (cross-line state intact) — only the two
+        // already-confirmed events were dropped before the buffer.
+        assert_eq!(t.files_scanned, 1);
+        assert_eq!(t.events_uploaded, 2);
+        assert_eq!(uploader.uploaded.len(), 1);
+        assert_eq!(uploader.uploaded[0].0, 2);
+        // Exactly the tail, by id — never the re-shipped head.
+        assert_eq!(
+            uploader.attempts[0],
+            vec![
+                "s1:2026-07-16T10:02:00.000Z".to_string(),
+                "s1:2026-07-16T10:03:00.000Z".to_string()
+            ]
+        );
+        // Cursor advanced to the new size, so the next cycle floors at 100.
+        assert_eq!(cursors.get_cursor("/big.jsonl").unwrap().size, 100);
+    }
+
+    #[tokio::test]
+    async fn a_grown_file_with_nothing_new_still_advances_its_cursor() {
+        // Every event fell below the floor and the file has no tool drafts, so the
+        // flush has nothing to send. The cursor must advance anyway — otherwise the
+        // size no longer matches, the unchanged-guard lets the file through again,
+        // and it re-parses on every cycle for the rest of the daemon's life.
+        let resilient = healthy();
+        let mut git = NoGit;
+        let mut uploader = RecordingUploader::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        cursors.set_cursor("/quiet.jsonl", confirmed_through(60));
+        let events = vec![
+            at(ev("s1", "2026-07-16T10:00:00.000Z"), 0),
+            at(ev("s1", "2026-07-16T10:01:00.000Z"), 40),
+        ];
+        let t = run_scan_over_jobs(
+            vec![job("/quiet.jsonl")],
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(Some(12), false),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            &mut git,
+            None,
+            parse_with(events),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &mut uploader,
+            &mut cursors,
+            &mut obs,
+        )
+        .await;
+
+        assert!(!t.held);
+        assert_eq!(t.events_uploaded, 0);
+        assert!(uploader.uploaded.is_empty()); // nothing on the wire
+        assert_eq!(cursors.get_cursor("/quiet.jsonl").unwrap().size, 100);
+    }
+
+    #[tokio::test]
+    async fn a_shrunken_file_re_ships_whole_because_its_offsets_are_meaningless() {
+        // Truncated / rewritten in place: recorded offsets no longer point at the
+        // same lines, so flooring on them would silently drop real events. Only
+        // append-in-place growth (`cs.size >= cur.size`) earns a floor.
+        let resilient = healthy();
+        let mut git = NoGit;
+        let mut uploader = RecordingUploader::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        // Confirmed through 500 bytes, but `checksum` now reports only 100.
+        cursors.set_cursor("/rewritten.jsonl", confirmed_through(500));
+        let events = vec![
+            at(ev("s1", "2026-07-16T10:00:00.000Z"), 0),
+            at(ev("s1", "2026-07-16T10:01:00.000Z"), 40),
+        ];
+        let t = run_scan_over_jobs(
+            vec![job("/rewritten.jsonl")],
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(Some(12), false),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            &mut git,
+            None,
+            parse_with(events),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &mut uploader,
+            &mut cursors,
+            &mut obs,
+        )
+        .await;
+
+        assert_eq!(t.events_uploaded, 2); // both, despite offsets below 500
+    }
+
+    #[tokio::test]
+    async fn the_eager_force_scan_takes_no_floor() {
+        // `force_read_all` exists so a session the daemon already processed
+        // re-uploads on demand. A floor would make it ship nothing at all.
+        let resilient = healthy();
+        let mut git = NoGit;
+        let mut uploader = RecordingUploader::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        cursors.set_cursor("/done.jsonl", confirmed_through(100));
+        let events = vec![
+            at(ev("s1", "2026-07-16T10:00:00.000Z"), 0),
+            at(ev("s1", "2026-07-16T10:01:00.000Z"), 40),
+        ];
+        let t = run_scan_over_jobs(
+            vec![job("/done.jsonl")],
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(None, true), // force_read_all
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            &mut git,
+            None,
+            parse_with(events),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &mut uploader,
+            &mut cursors,
+            &mut obs,
+        )
+        .await;
+
+        assert_eq!(t.events_uploaded, 2);
     }
 }
