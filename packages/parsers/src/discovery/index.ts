@@ -15,6 +15,7 @@
  * scaffolded with TODOs — they're easy follow-ups once v1 ships.
  */
 import { execFile, execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, resolve } from "node:path";
@@ -358,16 +359,21 @@ async function probeIdentities(os: "macos" | "linux"): Promise<DetectedIdentity[
       const tok = oauth?.accessToken;
       if (tok) {
         // Prefer a stable account/org id; the OAuth account uuid (when the
-        // blob carries it) is best. Fall back to a hash of the refresh
+        // blob carries it) is best. Fall back to a HASH of the refresh
         // token (stable across access-token refreshes) only as a last
-        // resort — tokens DO eventually rotate, so a refreshed login may
-        // create a fresh identity the user can relabel/merge via a rule.
+        // resort — never a slice of the token itself: that would ship live
+        // secret material as an account id. Tokens DO eventually rotate, so
+        // a refreshed login may create a fresh identity the user can
+        // relabel/merge via a rule.
         const email = oauth?.account?.email_address ?? oauth?.account?.email ?? null;
         const orgName = oauth?.organization?.name ?? null;
         const stableId =
           oauth?.account?.uuid ??
           oauth?.organization?.uuid ??
-          (oauth?.refreshToken ?? tok).slice(0, 48);
+          `kc_${createHash("sha256")
+            .update(oauth?.refreshToken ?? tok)
+            .digest("hex")
+            .slice(0, 32)}`;
         ids.push({
           provider: "anthropic",
           provider_account_id: stableId,
