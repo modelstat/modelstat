@@ -19,8 +19,7 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/modelstat"><img src="https://img.shields.io/npm/v/modelstat?label=modelstat" alt="npm modelstat" /></a>
-  <a href="https://www.npmjs.com/package/@modelstat/mcp"><img src="https://img.shields.io/npm/v/@modelstat/mcp?label=%40modelstat%2Fmcp" alt="npm @modelstat/mcp" /></a>
+  <a href="https://github.com/modelstat/modelstat/releases/latest"><img src="https://img.shields.io/github/v/release/modelstat/modelstat?label=daemon" alt="latest daemon release" /></a>
   <img src="https://img.shields.io/badge/privacy-redaction_runs_on_device-000000" alt="Privacy: redaction runs on device" />
 </p>
 
@@ -34,11 +33,11 @@ One command installs the daemon, pairs this machine, and wires the modelstat MCP
 curl -fsSL https://modelstat.ai/install.sh | sh
 ```
 
-**Windows** (PowerShell): `irm https://modelstat.ai/install.ps1 | iex` — wires the MCP into your Windows tools (the local capture daemon is macOS/Linux).
+**Windows** (PowerShell): `irm https://modelstat.ai/install.ps1 | iex`
 
-Already have Node? `npx modelstat@latest` (also `bunx` / `pnpm dlx`) does the same — pairs the daemon **and** wires the MCP. Re-run any installer to upgrade.
+The installer downloads a small static binary, verifies its SHA-256 checksum, pairs this machine, and installs a background service. **No Node, no Python, no package manager** — the binaries are self-contained. Re-run it any time to upgrade (auto-update is on by default).
 
-That's it. Open your dashboard at **[modelstat.ai/dashboard](https://modelstat.ai/dashboard)**. The daemon runs on macOS + every Linux distro (Node 20+).
+That's it. Open your dashboard at **[modelstat.ai/dashboard](https://modelstat.ai/dashboard)**. The daemon runs on macOS 13+, every glibc Linux distro, and Windows 10/11. Full options (modes, flags, headless installs): [daemon/docs/INSTALL.md](daemon/docs/INSTALL.md).
 
 ---
 
@@ -54,10 +53,11 @@ That's it. Open your dashboard at **[modelstat.ai/dashboard](https://modelstat.a
 
 This is the **public source** for everything that runs on your machine:
 
-- **[`modelstat`](apps/daemon/)** — the Node daemon that watches your AI-tool log files, prices them, redacts client-side, and uploads metadata.
-- **[`@modelstat/mcp`](packages/mcp/)** — a Model Context Protocol server so Claude Desktop / Claude Code / Cursor / Cline / Continue / Zed can answer *"how much did we spend on X?"* in chat.
+- **[`modelstat` daemon](daemon/)** — the native Rust daemon: two static binaries (the collector and the summariser engine) that watch your AI-tool log files, price them, redact client-side, and upload metadata. The collector's `modelstat mcp` subcommand is also the local Model Context Protocol server, so Claude Desktop / Claude Code / Cursor / Cline / Continue / Zed can answer *"how much did we spend on X?"* in chat.
 - **[macOS menu-bar tray](apps/tray-mac/)** — native Swift status-bar app.
 - **[`@modelstat/sdk`](sdks/node/)** — the backend SDK: capture the LLM calls your own services make, redacted + compacted client-side before they leave the box.
+
+(The retired TypeScript daemon and npm packages — `apps/daemon/`, `packages/` — are still in-tree for history, but they are no longer shipped; the installer serves the Rust daemon.)
 
 **Why it's open.** The code that reads your files should be auditable. The hosted service that aggregates your team's metadata is closed-source; everything that runs on your laptop is right here — read it, fork it, build your own binaries, or pin a commit and install from source. See [LICENSE](LICENSE).
 
@@ -79,7 +79,7 @@ This is the **public source** for everything that runs on your machine:
 ```
 
 1. **Detects installed tools** — scans `~/.claude`, `~/.codex`, `~/.cursor`, `~/.aider`, `~/.config/continue`, and other tool-specific locations.
-2. **Parses local log files** — Claude Code's JSONL logs, Cursor's SQLite DB, Codex's conversation files, and so on. The [per-tool parsers](packages/parsers/src/) are the only code that opens these files.
+2. **Parses local log files** — Claude Code's JSONL logs, Cursor's SQLite DB, Codex's conversation files, and so on. The [per-tool parsers](daemon/crates/modelstat-parsers/src/) are the only code that opens these files.
 3. **Redacts on-device — in every mode** — every excerpt goes through a regex pass for secrets/PII *and* an on-device NER model **before** the uploader ever sees it. This never moves off your machine, regardless of the mode below.
 4. **Summarises — you choose where (at install)** — the redaction in step 3 always runs locally; only *where the summary is written* differs:
    - **Local** — a small ~2.7 GB LLM summarises each work-segment on **this machine** into a ≤240-char abstract. Raw turns stay on disk; only the abstract goes up. (The only mode that downloads the model.)
@@ -95,10 +95,10 @@ This is the **public source** for everything that runs on your machine:
 
 ```bash
 git clone https://github.com/modelstat/modelstat.git
-cd modelstat && pnpm install && pnpm build
+cd modelstat/daemon && cargo build --release
 ```
 
-Requirements: Node 20.18+, pnpm 10.7+, Swift 5.9+ (tray only), and an account at [modelstat.ai](https://modelstat.ai) to pair with.
+Requirements: a stable Rust toolchain, and an account at [modelstat.ai](https://modelstat.ai) to pair with. (The SDKs build with their own toolchains — Node 20.18+/pnpm 10.7+ for `sdks/node`; Swift 5.9+ for the macOS tray.)
 
 ---
 
@@ -119,18 +119,13 @@ Full index: **[modelstat.ai/integrations](https://modelstat.ai/integrations)**
 
 ## MCP — ask any AI client about your spend
 
-Once paired, any MCP-compatible client can query your spend in natural language:
-
-```jsonc
-// ~/Library/Application Support/Claude/claude_desktop_config.json (or ~/.cursor/mcp.json, etc.)
-{ "mcpServers": { "modelstat": { "command": "npx", "args": ["-y", "@modelstat/mcp"] } } }
-```
+The installer wires the local MCP server (`modelstat mcp`) into every AI tool it detects — nothing to configure. No daemon on this machine? Connect the hosted server instead: add **`https://mcp.modelstat.ai`** to any MCP-compatible client and sign in via the browser on first use.
 
 > *"How much did my team spend on Claude Code last week?"*
 > *"Which project is driving my Cursor cost?"*
 > *"Recommend a model for a code-review task — based on what worked for us before."*
 
-No in-band auth — the server reuses the token `npx modelstat@latest` already wrote locally. Details: **[mcp.modelstat.ai](https://mcp.modelstat.ai)** · source in [`packages/mcp/`](packages/mcp/).
+No in-band auth — the local server reuses the token the daemon already wrote on this machine. Details: **[mcp.modelstat.ai](https://mcp.modelstat.ai)** · source in [`daemon/crates/modelstat-mcp/`](daemon/crates/modelstat-mcp/).
 
 ---
 
@@ -138,21 +133,21 @@ No in-band auth — the server reuses the token `npx modelstat@latest` already w
 
 You can verify, from this repository alone, exactly what does and doesn't leave your machine.
 
-**The boundary.** Exactly one module talks to our server: **[`IngestClient.upload()`](packages/daemon-core/src/http/index.ts)**. It POSTs to **`/v1/ingest`** in **Local** and **Self-hosted** modes (pre-summarised abstracts) or **`/v1/ingest/raw`** in **Cloud** mode (the redacted turns the server summarises). There is no other outbound channel. The wire-format types live in **[`packages/core/src/schemas.ts`](packages/core/src/schemas.ts)** as Zod schemas — if a field isn't there, the uploader literally cannot send it.
+**The boundary.** Exactly one crate talks to our ingest endpoints: **[`modelstat-ingest`](daemon/crates/modelstat-ingest/)** (`DeviceApi::upload_batch`). It POSTs to **`/v1/ingest`** in **Local** and **Self-hosted** modes (pre-summarised abstracts) or **`/v1/ingest/raw`** in **Cloud** mode (the redacted turns the server summarises). There is no other outbound data channel. The wire-format types live in **[`daemon/crates/modelstat-wire/src/schema.rs`](daemon/crates/modelstat-wire/src/schema.rs)** — if a field isn't there, the uploader literally cannot send it.
 
 **What we receive — always:** model/provider/tool, per-class token counts, the cost we computed, scrubbed `cwd`/git metadata, filenames (paths scrubbed), redaction *counts* (never the matched text), and a provenance stamp. **Plus, depending on your mode:** a ≤240-char on-device abstract (**Local** / **Self-hosted**), or the redacted conversation turns themselves (**Cloud** — that is exactly what our servers summarise for you).
 
 **What we never receive:** your raw prompts, your code, or any API key / token / password. Redaction runs **on your machine in every mode** before anything leaves it — Cloud mode's uploaded turns are redacted turns, not raw ones, and Self-hosted mode runs the same on-device scrub before excerpts reach your org's endpoint. Text fields are size-capped by Zod; the `paranoid` policy drops entire `stdout`/`stderr`/`tool_output`/`raw_text` blobs before upload.
 
-**Defence-in-depth**, every byte crossing the boundary passes through: parser scoping → secrets regex (Anthropic/OpenAI/Google/AWS/GitHub/Slack/Stripe keys, JWTs, PEM blocks, bearer headers, DB passwords) → PII regex (emails, public IPs, URL creds, home paths) → a Shannon-entropy catcher for unknown key shapes → on-device NER → Zod length caps → policy gate → provenance stamp. All in [`packages/core/src/redact.ts`](packages/core/src/redact.ts). In **Cloud** mode the daemon is **fail-closed** on the NER pass: if that on-device model can't load, it will NOT ship raw turns with regex-only redaction — it falls back to local extractive abstracts instead (no raw egress).
+**Defence-in-depth**, every byte crossing the boundary passes through: parser scoping → secrets regex (Anthropic/OpenAI/Google/AWS/GitHub/Slack/Stripe keys, JWTs, PEM blocks, bearer headers, DB passwords) → PII regex (emails, public IPs, URL creds, home paths) → a Shannon-entropy catcher for unknown key shapes → on-device NER → wire-schema byte caps → provenance stamp. The regex + entropy floor lives in [`daemon/crates/modelstat-redact/`](daemon/crates/modelstat-redact/); the caps in [`daemon/crates/modelstat-wire/src/caps.rs`](daemon/crates/modelstat-wire/src/caps.rs). In **Cloud** mode the daemon is **fail-closed** on the NER pass: if that on-device model can't load, it will NOT ship raw turns with regex-only redaction — it falls back to local extractive abstracts instead (no raw egress).
 
-**Audit it yourself** — three files tell the whole story:
+**Audit it yourself** — three places tell the whole story:
 
-1. [`packages/core/src/schemas.ts`](packages/core/src/schemas.ts) — every type that can be uploaded.
-2. [`packages/core/src/redact.ts`](packages/core/src/redact.ts) — the redaction policies + patterns.
-3. [`packages/daemon-core/src/http/index.ts`](packages/daemon-core/src/http/index.ts) — the single `fetch()` to our server.
+1. [`daemon/crates/modelstat-wire/src/schema.rs`](daemon/crates/modelstat-wire/src/schema.rs) — every type that can be uploaded.
+2. [`daemon/crates/modelstat-redact/`](daemon/crates/modelstat-redact/) — the redaction passes + patterns.
+3. [`daemon/crates/modelstat-ingest/`](daemon/crates/modelstat-ingest/) — the single upload path to our server.
 
-`npx modelstat@latest status` prints, locally, the same token + redaction counters the server sees. Security disclosures: [SECURITY.md](SECURITY.md) · `security@modelstat.ai`.
+`modelstat status` prints, locally, the same token + redaction counters the server sees. Security disclosures: [SECURITY.md](SECURITY.md) · `security@modelstat.ai`.
 
 ---
 
@@ -160,17 +155,18 @@ You can verify, from this repository alone, exactly what does and doesn't leave 
 
 ```
 modelstat/
+├── daemon/              The shipping daemon (Rust)
+│   ├── crates/          collector CLI + daemon, summariser engine, MCP server,
+│   │                    parsers, redaction, wire schema, updater
+│   ├── scripts/         install.sh / install.ps1 (served at modelstat.ai/install.{sh,ps1})
+│   └── docs/            INSTALL.md and friends
 ├── apps/
-│   ├── daemon/          Node daemon CLI (modelstat)
-│   └── tray-mac/        macOS menu-bar app (Swift)
-├── packages/
-│   ├── daemon-core/     Shared pipeline / queue / HTTP for the daemon
-│   ├── core/            Shared enums + Zod schemas (wire format lives here)
-│   ├── mcp/             Model Context Protocol server (@modelstat/mcp)
-│   ├── parsers/         Per-tool log parsers (Claude Code / Codex / Cursor / ...)
-│   └── pricing/         Provider + model price tables
-├── sdks/                Backend SDKs (Node / Python / Rust)
-└── .github/workflows/   npm + SDK publishing
+│   ├── tray-mac/        macOS menu-bar app (Swift)
+│   └── daemon/          retired TypeScript daemon (no longer shipped)
+├── packages/            retired TypeScript packages — superseded by daemon/crates
+├── sdks/                Backend SDKs (Node / Python / Rust) — current
+├── prices/              Provider + model price tables
+└── .github/workflows/   CI + daemon release builds + SDK publishing
 ```
 
 ---
@@ -180,7 +176,7 @@ modelstat/
 See [CONTRIBUTING.md](CONTRIBUTING.md). The short version:
 
 - **Bug reports** → [GitHub Issues](https://github.com/modelstat/modelstat/issues) (email `security@modelstat.ai` if sensitive).
-- **New tool integration** → open an issue first to discuss the parser shape; parsers live in [`packages/parsers/src/`](packages/parsers/src/).
+- **New tool integration** → open an issue first to discuss the parser shape; parsers live in [`daemon/crates/modelstat-parsers/src/`](daemon/crates/modelstat-parsers/src/).
 
 ---
 

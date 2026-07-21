@@ -1,4 +1,6 @@
-# @modelstat/mcp
+# @modelstat/mcp (retired)
+
+> ⚠️ **This npm MCP server is retired.** Use the hosted server at **https://mcp.modelstat.ai** (OAuth in the browser), or install the daemon — `curl -fsSL https://modelstat.ai/install.sh | sh` — which wires its built-in `modelstat mcp` server into your AI tools automatically. This directory is kept for history only.
 
 Ask any MCP-compatible AI tool — Claude Desktop, Claude Code, Cursor, Cline, Continue, Zed — about your token spend directly in the chat. The same numbers you see on the [modelstat dashboard](https://modelstat.ai/dashboard), answered inline:
 

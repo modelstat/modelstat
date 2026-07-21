@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "modelstat": {
-      "command": "npx",
-      "args": ["-y", "@modelstat/mcp@latest"]
+      "type": "http",
+      "url": "https://mcp.modelstat.ai"
     }
   }
 }

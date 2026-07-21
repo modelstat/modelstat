@@ -42,13 +42,13 @@ readable form.
 **macOS / Linux**
 
 ```sh
-curl -fsSL https://install.modelstat.ai | sh
+curl -fsSL https://modelstat.ai/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://install.modelstat.ai/ps | iex
+irm https://modelstat.ai/install.ps1 | iex
 ```
 
 That is the whole thing. It downloads a single small static binary, verifies it,
@@ -114,7 +114,7 @@ Your data starts appearing on the dashboard within seconds.
 ### macOS
 
 ```sh
-curl -fsSL https://install.modelstat.ai | sh
+curl -fsSL https://modelstat.ai/install.sh | sh
 ```
 
 - Installs a **launchd** user agent, so the daemon starts at login.
@@ -124,7 +124,7 @@ curl -fsSL https://install.modelstat.ai | sh
 ### Linux
 
 ```sh
-curl -fsSL https://install.modelstat.ai | sh
+curl -fsSL https://modelstat.ai/install.sh | sh
 ```
 
 - Installs a **systemd `--user`** service (`modelstat.service`).
@@ -135,7 +135,7 @@ curl -fsSL https://install.modelstat.ai | sh
 ### Windows
 
 ```powershell
-irm https://install.modelstat.ai/ps | iex
+irm https://modelstat.ai/install.ps1 | iex
 ```
 
 - Installs a **Scheduled Task** named `modelstat` that runs at logon.
@@ -144,7 +144,7 @@ irm https://install.modelstat.ai/ps | iex
 Pass flags after the piped command like this:
 
 ```powershell
-& ([scriptblock]::Create((irm https://install.modelstat.ai/ps))) -Mode local
+& ([scriptblock]::Create((irm https://modelstat.ai/install.ps1))) -Mode local
 ```
 
 ### Servers & headless machines
@@ -153,7 +153,7 @@ On a machine with no browser / no interactive terminal, tell the installer
 everything up front so it never has to prompt:
 
 ```sh
-curl -fsSL https://install.modelstat.ai | sh -s -- --mode cloud --yes --no-browser
+curl -fsSL https://modelstat.ai/install.sh | sh -s -- --mode cloud --yes --no-browser
 ```
 
 - `--mode` is **required** on a fresh non-interactive install (there is no silent
@@ -207,13 +207,13 @@ summary itself is produced*.
 
 ```sh
 # Cloud (default — you can also just omit --mode when interactive)
-curl -fsSL https://install.modelstat.ai | sh -s -- --mode cloud
+curl -fsSL https://modelstat.ai/install.sh | sh -s -- --mode cloud
 
 # Local
-curl -fsSL https://install.modelstat.ai | sh -s -- --mode local
+curl -fsSL https://modelstat.ai/install.sh | sh -s -- --mode local
 
 # Self-hosted (point at your org's engine)
-curl -fsSL https://install.modelstat.ai | sh -s -- --mode self-hosted --url http://llm.acme.internal:4321
+curl -fsSL https://modelstat.ai/install.sh | sh -s -- --mode self-hosted --url http://llm.acme.internal:4321
 ```
 
 On Windows use `-Mode` / `-Url`.
@@ -284,7 +284,7 @@ engine component on a server and point your collectors at it.
 **On the engine server:**
 
 ```sh
-curl -fsSL https://install.modelstat.ai | sh -s -- --component summarizer
+curl -fsSL https://modelstat.ai/install.sh | sh -s -- --component summarizer
 ```
 
 This runs `modelstat-summarizer setup`, which:

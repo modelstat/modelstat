@@ -17,7 +17,7 @@ pub async fn cmd_upgrade() -> ExitCode {
         UpgradeOutcome::Completed(note) => println!("  ✓ {note}"),
         UpgradeOutcome::Failed(note) => {
             println!("  {note}");
-            println!("  or reinstall manually: curl -fsSL https://install.modelstat.ai | sh");
+            println!("  or reinstall manually: curl -fsSL https://modelstat.ai/install.sh | sh");
         }
         other => {
             if let Some(n) = other.note() {
