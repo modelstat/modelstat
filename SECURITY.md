@@ -28,7 +28,7 @@ within **30 days** for high-severity issues. Critical vulnerabilities
 - `@modelstat/sdk` (npm)
 - `@modelstat/mcp` (npm)
 - The `modelstat-tray` macOS app
-- `install.modelstat.ai` shell installer
+- `modelstat.ai/install.sh` shell installer
 - The Homebrew formula at `modelstat/homebrew-tap`
 
 **Out of scope** — issues affecting the hosted service itself. Those

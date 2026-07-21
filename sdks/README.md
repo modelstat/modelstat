@@ -184,7 +184,7 @@ For the Anthropic SDK, `wrap()` reads `messages.create` and the `input_tokens` /
 | **Local daemon** *(default)* | Your machine (the daemon's local model) | Redacted abstract + metadata only | Maximum privacy; you can run a daemon on/near the host |
 | **Remote** | modelstat server | Floor-redacted full turns (`raw = true`), or just the ≤320-char redacted excerpt (`raw = false`) | Serverless / can't run a local model; you accept server-side summarization |
 
-Local-daemon mode is the default: point the SDK at a [`modelstat`](https://modelstat.ai/install) daemon running on loopback (install it with `curl -fsSL https://install.modelstat.ai | sh`), and it summarizes on your machine before anything is uploaded. Remote mode skips the local model and ships to the modelstat server directly — and even with `raw = true`, the server summarizes the turns at the ingest edge and persists only the abstract (raw is never stored).
+Local-daemon mode is the default: point the SDK at a [`modelstat`](https://modelstat.ai/install) daemon running on loopback (install it with `curl -fsSL https://modelstat.ai/install.sh | sh`), and it summarizes on your machine before anything is uploaded. Remote mode skips the local model and ships to the modelstat server directly — and even with `raw = true`, the server summarizes the turns at the ingest edge and persists only the abstract (raw is never stored).
 
 ## Privacy floor (always on)
 

@@ -1,6 +1,6 @@
 # modelstat installer for Windows (feature §3).
 #
-#   irm https://install.modelstat.ai/ps | iex
+#   irm https://modelstat.ai/install.ps1 | iex
 #
 # Downloads the two static binaries (collector `modelstat` + summariser engine
 # `modelstat-summarizer`) from GitHub Releases, verifies their SHA256, stages

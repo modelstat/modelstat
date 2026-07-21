@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # modelstat installer — one command sets up everything (macOS + Linux).
 #
-#   curl -fsSL https://install.modelstat.ai | sh
+#   curl -fsSL https://modelstat.ai/install.sh | sh
 #
 # ─────────────────────────────────────────────────────────────────────
 # This is the RUST installer (feature §3): it downloads two small static
@@ -16,7 +16,7 @@
 # state: the two binaries under ~/.modelstat/bin + the daemon paired + running
 # as a launchd (macOS) / systemd (Linux) service + the MCP wired into the AI
 # tools. Every step prints what it does first. No sudo (unless you pass
-# --system). Cancel any time with Ctrl-C. (Windows: irm https://install.modelstat.ai/ps | iex)
+# --system). Cancel any time with Ctrl-C. (Windows: irm https://modelstat.ai/install.ps1 | iex)
 # ─────────────────────────────────────────────────────────────────────
 
 set -eu
@@ -62,7 +62,7 @@ say ""; say "${BRAND}${BOLD}  modelstat installer${RESET}"; say "${DIM}  https:/
 case "$(uname -s 2>/dev/null || echo unknown)" in
   Darwin) OS_PART=apple-darwin ;;
   Linux)  OS_PART=unknown-linux-gnu ;;
-  MINGW*|MSYS*|CYGWIN*|Windows*) die "Windows → run:  irm https://install.modelstat.ai/ps | iex" ;;
+  MINGW*|MSYS*|CYGWIN*|Windows*) die "Windows → run:  irm https://modelstat.ai/install.ps1 | iex" ;;
   *) die "unsupported OS" ;;
 esac
 case "$(uname -m 2>/dev/null)" in

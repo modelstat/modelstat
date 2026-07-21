@@ -30,10 +30,10 @@
 One command installs the daemon, pairs this machine, and wires the modelstat MCP into every AI tool you have (Claude Code, Claude Desktop, Cursor, Codex, …). Paste it into a terminal — or into Claude Code / Codex / Cursor and let it run.
 
 ```bash
-curl -fsSL https://install.modelstat.ai | sh
+curl -fsSL https://modelstat.ai/install.sh | sh
 ```
 
-**Windows** (PowerShell): `irm https://install.modelstat.ai/ps | iex`
+**Windows** (PowerShell): `irm https://modelstat.ai/install.ps1 | iex`
 
 The installer downloads a small static binary, verifies its SHA-256 checksum, pairs this machine, and installs a background service. **No Node, no Python, no package manager** — the binaries are self-contained. Re-run it any time to upgrade (auto-update is on by default).
 
@@ -158,7 +158,7 @@ modelstat/
 ├── daemon/              The shipping daemon (Rust)
 │   ├── crates/          collector CLI + daemon, summariser engine, MCP server,
 │   │                    parsers, redaction, wire schema, updater
-│   ├── scripts/         install.sh / install.ps1 (what install.modelstat.ai serves)
+│   ├── scripts/         install.sh / install.ps1 (served at modelstat.ai/install.{sh,ps1})
 │   └── docs/            INSTALL.md and friends
 ├── apps/
 │   ├── tray-mac/        macOS menu-bar app (Swift)

@@ -1,7 +1,7 @@
 {
   "name": "modelstat",
   "version": "0.0.0",
-  "description": "modelstat has moved to a native binary. This package migrates you to it. Install directly: curl -fsSL https://install.modelstat.ai | sh (Windows: irm https://install.modelstat.ai/ps | iex)",
+  "description": "modelstat has moved to a native binary. This package migrates you to it. Install directly: curl -fsSL https://modelstat.ai/install.sh | sh (Windows: irm https://modelstat.ai/install.ps1 | iex)",
   "bin": {
     "modelstat": "postinstall.mjs"
   },

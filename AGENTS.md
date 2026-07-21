@@ -22,7 +22,7 @@ Homebrew) and the macOS tray app (`apps/tray-mac`). The server
 
 ## Naming: daemon, not agent/companion
 
-Our local long-running process is the **daemon** (what `curl -fsSL https://install.modelstat.ai | sh` installs; the native `modelstat` binary built from `daemon/`). Never call it "agent" or "companion".
+Our local long-running process is the **daemon** (what `curl -fsSL https://modelstat.ai/install.sh | sh` installs; the native `modelstat` binary built from `daemon/`). Never call it "agent" or "companion".
 
 - **daemon** — our process / CLI / SDK side. (It was historically "companion", and earlier "agent" — both retired.) Use `daemon` for routes (`/v1/daemon/heartbeat`), env (`DAEMON_API_URL`), the launchd label (`ai.modelstat.daemon`), `packages/daemon-core`, the `daemon_version` wire field, etc.
 - **agent** — ONLY the user's AI tool (`claude_code`, `cursor`, `codex_cli`, …). Keep "agent" for: the `AGENTS` enum + the `agent` event field, the `/device/:claim/agent` machine-readable view (it's *for* AI agents/LLMs), the `User-Agent` header, this `AGENTS.md`, and "agentic".

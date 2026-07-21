@@ -44,7 +44,7 @@ The daemon is the open-source `modelstat` daemon. It runs as a background servic
 
 ```bash
 # one command: installs the daemon + background service (native binary, no Node)
-curl -fsSL https://install.modelstat.ai | sh
+curl -fsSL https://modelstat.ai/install.sh | sh
 
 modelstat status      # confirm it's running (and which loopback port it uses)
 ```

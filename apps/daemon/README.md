@@ -1,6 +1,6 @@
 # modelstat (retired TypeScript daemon)
 
-> ⚠️ **This TypeScript daemon is retired** — replaced by the native Rust daemon in [`daemon/`](../../daemon/). Install the current version with `curl -fsSL https://install.modelstat.ai | sh` (Windows: `irm https://install.modelstat.ai/ps | iex`); the installer cleanly replaces this version and keeps your device identity. This directory is kept for history only.
+> ⚠️ **This TypeScript daemon is retired** — replaced by the native Rust daemon in [`daemon/`](../../daemon/). Install the current version with `curl -fsSL https://modelstat.ai/install.sh | sh` (Windows: `irm https://modelstat.ai/install.ps1 | iex`); the installer cleanly replaces this version and keeps your device identity. This directory is kept for history only.
 
 > **Know exactly what your AI coding spend bought.** modelstat turns the session logs Claude Code, Codex, and Cursor already write into dollar-precise spend & ROI — broken down by the real work it went to, by project, and by model.
 

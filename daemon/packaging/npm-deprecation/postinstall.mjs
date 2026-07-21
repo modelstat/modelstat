@@ -8,8 +8,8 @@
 import { spawnSync } from "node:child_process";
 import { platform } from "node:os";
 
-const CURL = "curl -fsSL https://install.modelstat.ai | sh";
-const PS = "irm https://install.modelstat.ai/ps | iex";
+const CURL = "curl -fsSL https://modelstat.ai/install.sh | sh";
+const PS = "irm https://modelstat.ai/install.ps1 | iex";
 const isWin = platform() === "win32";
 
 console.log("\n  modelstat has moved off npm to a small native binary (no Node needed).");

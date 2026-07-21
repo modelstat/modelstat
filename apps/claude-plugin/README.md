@@ -34,4 +34,4 @@ claude plugin install modelstat@modelstat
 
 Connects the hosted [modelstat MCP server](https://mcp.modelstat.ai), so the tools also answer plain questions ("how much did Opus cost me this month?") without `/stat`.
 
-Works with a paired [modelstat](https://modelstat.ai/install) daemon (`curl -fsSL https://install.modelstat.ai | sh`) — or, with no daemon, the MCP signs you in via your browser on first use.
+Works with a paired [modelstat](https://modelstat.ai/install) daemon (`curl -fsSL https://modelstat.ai/install.sh | sh`) — or, with no daemon, the MCP signs you in via your browser on first use.
