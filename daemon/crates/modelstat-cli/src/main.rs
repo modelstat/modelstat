@@ -89,7 +89,7 @@ fn main() -> ExitCode {
         Some("_install-service") => cmd_install_service(),
         // Stage the running binaries + tray into the stable install path (§5) — no
         // service, no identity. The installer runs this from the extracted archive.
-        Some("_setup-runtime") => cmd_setup_runtime(),
+        Some("_setup-runtime") => cmd_setup_runtime(&args[1..]),
         // The detached self-update worker the daemon spawns on an auto-update
         // verdict (§13): download + verify + swap BOTH binaries + health-probe +
         // rollback. Runs in its own process so the service bounce it triggers
@@ -231,11 +231,17 @@ fn cmd_mcp_wire(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `modelstat _setup-runtime` (feature §5, **changed** — no npm staging) — copy
-/// the running binaries (+ macOS tray) from the extracted archive into the stable
-/// install path `~/.modelstat/bin`, so the managed service + self-update always
-/// launch a fixed path. Stages ONLY; installs no service and touches no identity.
-fn cmd_setup_runtime() -> ExitCode {
+/// `modelstat _setup-runtime [--system]` (feature §5, **changed** — no npm
+/// staging) — copy the running binaries (+ macOS tray) from the extracted archive
+/// into the stable install path `~/.modelstat/bin`, so the managed service +
+/// self-update always launch a fixed path, then put that path on the user's PATH
+/// (§3.3). Installs no service and touches no identity.
+fn cmd_setup_runtime(args: &[String]) -> ExitCode {
+    let scope = if args.iter().any(|a| a == "--system") {
+        modelstat_service::Scope::System
+    } else {
+        modelstat_service::Scope::User
+    };
     let Ok(exe) = std::env::current_exe() else {
         eprintln!("modelstat: can't resolve the running binary path");
         return ExitCode::FAILURE;
@@ -284,7 +290,45 @@ fn cmd_setup_runtime() -> ExitCode {
             }
         }
     }
+    wire_path(&bin_dir, scope);
     ExitCode::SUCCESS
+}
+
+/// Put the staged bin dir on the user's PATH (§3.3) and say exactly what changed.
+///
+/// Deliberately NOT fatal: the daemon, its service, and the MCP all launch by
+/// absolute path and work perfectly without this, so a read-only `.zshrc` must
+/// not abort an otherwise good install. It is never silent either — a failure
+/// prints in red, with the one line to add by hand.
+fn wire_path(bin_dir: &std::path::Path, scope: modelstat_service::Scope) {
+    use modelstat_service::path_env;
+    match path_env::ensure_on_path(bin_dir, scope) {
+        Ok(w) => {
+            for f in &w.files {
+                println!("\x1b[32m✓\x1b[0m PATH: updated {}", f.display());
+            }
+            if w.files.is_empty() {
+                println!("\x1b[32m✓\x1b[0m PATH: {} already wired", bin_dir.display());
+            }
+            if !w.already_active {
+                match &w.env_file {
+                    Some(env) => println!(
+                        "  open a new terminal, or run `source {}`, to use `modelstat` here",
+                        env.display()
+                    ),
+                    None => println!("  open a new terminal to use `modelstat` here"),
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "\x1b[31m✗ couldn't put {} on your PATH: {e}\x1b[0m",
+                bin_dir.display()
+            );
+            eprintln!("  add this line to your shell startup file by hand:");
+            eprintln!("    export PATH=\"{}:$PATH\"", bin_dir.display());
+        }
+    }
 }
 
 /// Copy `src` → `dst` atomically (temp + rename) with an executable mode on Unix.

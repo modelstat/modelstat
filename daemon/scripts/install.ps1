@@ -4,8 +4,9 @@
 #
 # Downloads the two static binaries (collector `modelstat` + summariser engine
 # `modelstat-summarizer`) from GitHub Releases, verifies their SHA256, stages
-# them under %USERPROFILE%\.modelstat\bin, then runs `modelstat connect` (pair +
-# service + MCP wiring). No Node.js, no npm. Every step prints what it does.
+# them under %USERPROFILE%\.modelstat\bin, adds that to your Path, then runs
+# `modelstat connect` (pair + service + MCP wiring). No Node.js, no npm. Every
+# step prints what it does.
 
 [CmdletBinding()]
 param(
@@ -113,9 +114,13 @@ try {
   Expand-Archive -Path (Join-Path $tmp $archive) -DestinationPath $tmp -Force
 
   # ── stage + hand off ─────────────────────────────────────────────
+  # _setup-runtime does both halves: it copies the binaries to the stable install
+  # path AND adds that path to your Path environment variable, so `modelstat`
+  # works by name in the next terminal. It prints every change it makes.
   Step "Installing to $HomeDir\bin"
-  if ($System) { $env:MODELSTAT_HOME = Join-Path $env:ProgramData 'modelstat' }
-  & (Join-Path $tmp 'modelstat.exe') _setup-runtime
+  $setupArgs = @()
+  if ($System) { $env:MODELSTAT_HOME = Join-Path $env:ProgramData 'modelstat'; $setupArgs += '--system' }
+  & (Join-Path $tmp 'modelstat.exe') _setup-runtime @setupArgs
   if ($LASTEXITCODE -ne 0) { Die 'staging failed' }
   $binHome = if ($env:MODELSTAT_HOME) { $env:MODELSTAT_HOME } else { $HomeDir }
   Ok "staged $binHome\bin\modelstat.exe"
