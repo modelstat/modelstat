@@ -28,7 +28,7 @@ members = [
 # as out-of-date. The release tag is `daemon-<this>`; a test build is published as
 # a GitHub PRE-RELEASE (which keeps the version a clean semver, keeps it out of
 # `releases/latest`, and makes the installer disable auto-update for it).
-version = "1.0.9"
+version = "1.0.10"
 edition = "2021"
 rust-version = "1.83"
 license = "MIT"
