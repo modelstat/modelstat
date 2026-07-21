@@ -1,18 +1,37 @@
 name: release-daemon-rs
 
-# Tag-driven release of the Rust daemon (feature §13, plan D9/§8). Pushing a
-# `daemon-<semver>` tag builds BOTH binaries (collector + engine) for all six
-# targets, bakes the prebuilt macOS tray into the mac archives, checksums +
-# (optionally) minisign-signs everything, and publishes a GitHub Release. The
-# installer + the binary self-updater consume exactly these assets.
+# Release of the Rust daemon (feature §13, plan D9/§8): builds BOTH binaries
+# (collector + engine) for all six targets, bakes the prebuilt macOS tray into the
+# mac archives, checksums + (optionally) minisign-signs everything, and publishes
+# a GitHub Release. The installer + the binary self-updater consume exactly these
+# assets.
+#
+# `daemon/Cargo.toml`'s version IS the release trigger. Merge a version bump to
+# main and this ships it end-to-end — builds, creates the `daemon-<semver>` tag,
+# and publishes GA. No manual tag push, no promote step.
+#
+# The tag is created by the publish step itself rather than pushed by an earlier
+# job ON PURPOSE: a tag pushed with the built-in GITHUB_TOKEN does NOT start a new
+# workflow run (GitHub's recursion guard), so a "tag job → release workflow" split
+# would silently never release. One workflow sidesteps that with no extra secret.
+#
+# GA vs test build is decided by the version string alone: a plain `x.y.z` is GA,
+# a semver pre-release (`1.1.0-rc.1`) publishes as a GitHub pre-release — kept out
+# of `releases/latest`, so it is never an auto-update target and the installer
+# turns auto-update off for it.
 #
 # Signing is conditional (§13 "+ signature when enabled"): macOS codesign +
 # notarize run only when the Apple secrets exist; the minisign signature is
 # produced only when MINISIGN_SECRET_KEY exists. Absent either, the release still
 # ships with SHA256SUMS — the sha256 verification the installer always enforces.
 
+# NOTE: deliberately no `paths:` filter. A path filter here would also be applied
+# to tag pushes (where "changed files" is not meaningful) and could skip a real
+# release. The cheap `gate` job below decides instead: it skips when this version
+# is already tagged, so an ordinary merge to main costs a few seconds and stops.
 on:
   push:
+    branches: [main]
     tags: ["daemon-*"]
   workflow_dispatch:
     inputs:
@@ -20,9 +39,9 @@ on:
         description: "Version to build (bare semver, e.g. 1.4.2)"
         required: true
       prerelease:
-        description: "Publish as a pre-release (out of 'latest'; installer turns auto-update off)"
+        description: "Force a pre-release (a version like 1.4.2-rc.1 does this on its own)"
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: write # create the release + upload assets
@@ -36,9 +55,73 @@ defaults:
     working-directory: daemon
 
 jobs:
+  # ---- Decide the version + whether there is anything to release ----------
+  # One place resolves the version for the whole workflow (the build and release
+  # jobs used to duplicate this). Runs on every push to main; when the version is
+  # already tagged it costs a few seconds and everything downstream skips.
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version + release decision
+        id: v
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            V="$IN_VERSION"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            V="${GITHUB_REF_NAME#daemon-}"
+          else
+            # Merge to main: the workspace manifest version IS the release.
+            V="$(sed -n 's/^version = "\(.*\)"$/\1/p' daemon/Cargo.toml | head -1)"
+          fi
+          V="${V#v}"
+
+          # Fail LOUD rather than silently skipping a release we meant to ship.
+          echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "::error::could not resolve a semver version (got '$V')"; exit 1; }
+
+          # A semver pre-release (1.1.0-rc.1) publishes as a GitHub pre-release:
+          # out of `releases/latest`, so never an auto-update target. Plain = GA.
+          # NB: a bare `A && B && PRE=true` here would abort the whole step under
+          # `set -e` whenever A is false, so this stays a real `if`.
+          case "$V" in *-*) PRE=true ;; *) PRE=false ;; esac
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_PRERELEASE" = "true" ]; then
+            PRE=true
+          fi
+
+          # Only a branch push needs the already-shipped guard: an explicit tag
+          # push or manual dispatch is someone asking for this release on purpose.
+          REL=true
+          if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "branch" ] \
+             && git ls-remote --exit-code origin "refs/tags/daemon-$V" >/dev/null 2>&1; then
+            echo "daemon-$V is already tagged — nothing to release."
+            REL=false
+          fi
+
+          { echo "version=$V"; echo "prerelease=$PRE"; echo "release=$REL"; } >> "$GITHUB_OUTPUT"
+          echo "resolved: version=$V prerelease=$PRE release=$REL"
+
   # ---- Build + package both binaries for every target ---------------------
   build:
     name: build (${{ matrix.target }})
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -52,17 +135,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-
-      - name: Resolve version
-        id: ver
-        shell: bash
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            V="${{ github.event.inputs.version }}"
-          else
-            V="${GITHUB_REF_NAME#daemon-}"
-          fi
-          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust + target
         shell: bash
@@ -142,7 +214,7 @@ jobs:
         id: pkg
         shell: bash
         run: |
-          V="${{ steps.ver.outputs.version }}"
+          V="${{ needs.gate.outputs.version }}"
           T="${{ matrix.target }}"
           NAME="modelstat-${V}-${T}"
           BIN="target/${T}/release"
@@ -180,7 +252,7 @@ jobs:
 
   # ---- Assemble SHA256SUMS, sign, publish the GitHub Release --------------
   release:
-    needs: build
+    needs: [gate, build]
     runs-on: ubuntu-latest
     # This job has NO checkout (it only needs the built artifacts), so it must not
     # inherit the workflow-level `working-directory: daemon` — that folder doesn't
@@ -189,17 +261,6 @@ jobs:
       run:
         working-directory: .
     steps:
-      - name: Resolve version
-        id: ver
-        shell: bash
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            V="${{ github.event.inputs.version }}"
-          else
-            V="${GITHUB_REF_NAME#daemon-}"
-          fi
-          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -224,16 +285,19 @@ jobs:
           minisign -S -s minisign.key -m SHA256SUMS -x SHA256SUMS.minisig
           rm -f minisign.key
 
-      # Safe-by-default: every daemon release is born a PRE-RELEASE (kept out of
-      # `releases/latest`; the installer disables auto-update for it) unless a
-      # manual workflow_dispatch explicitly sets `prerelease: false` to cut GA.
-      # No version suffix is used — the GitHub flag alone marks the pre-release.
+      # The version decides GA vs pre-release (see the header): plain x.y.z ships
+      # GA and becomes `releases/latest`, which is what the installer resolves and
+      # what the server reports to daemons as the auto-update target. A semver
+      # pre-release (1.1.0-rc.1) stays out of `latest`.
+      #
+      # This step also CREATES the `daemon-<version>` tag when it doesn't exist
+      # yet (the merge-to-main path) — that is what removes the manual tag push.
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('daemon-{0}', steps.ver.outputs.version) }}
-          name: modelstat daemon ${{ steps.ver.outputs.version }}
-          prerelease: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
+          tag_name: daemon-${{ needs.gate.outputs.version }}
+          name: modelstat daemon ${{ needs.gate.outputs.version }}
+          prerelease: ${{ needs.gate.outputs.prerelease == 'true' }}
           # SHA256SUMS.minisig exists only when the minisign key is configured;
           # don't fail the publish when it's absent. The six archives + SHA256SUMS
           # are always present (the build gates on if-no-files-found: error).
