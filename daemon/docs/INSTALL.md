@@ -69,22 +69,30 @@ The installer prints every step as it goes. In order:
    old Node version) is running, it is stopped first and cleanly replaced. Your
    device pairing in `~/.modelstat` is kept, so you stay the **same device** on the
    dashboard.
-3. **Registers your device** with modelstat.ai and gets a claim link.
-4. **(macOS) installs a menu-bar tray** icon.
-5. **Asks where sessions should be summarised** — cloud, local, or self-hosted (see
+3. **Puts `modelstat` on your PATH.** The binaries are installed to
+   `~/.modelstat/bin`, and that directory is added to your shell startup file
+   (`.zshrc`, `.bashrc`/`.bash_profile`, `.profile`, or a `conf.d` drop-in for
+   fish) via a small `~/.modelstat/env` snippet. On Windows it is added to your
+   user `Path` variable instead. A `--system` install symlinks into
+   `/usr/local/bin` and touches no shell files. **A shell reads that file once at
+   startup, so open a new terminal — or run `source ~/.modelstat/env` — before
+   typing `modelstat`.** The installer prints exactly which files it changed.
+4. **Registers your device** with modelstat.ai and gets a claim link.
+5. **(macOS) installs a menu-bar tray** icon.
+6. **Asks where sessions should be summarised** — cloud, local, or self-hosted (see
    [Summariser modes](#summariser-modes)). This is a one-time consent choice.
    Redaction of secrets and names always runs on your machine first, in every mode.
-6. **Prepares the on-device redactor** — a ~250 MB privacy model that finds and
+7. **Prepares the on-device redactor** — a ~250 MB privacy model that finds and
    removes names/PII locally. Downloads on first run in every mode.
-7. **(local mode only — beta) downloads the summariser model** — a ~2.7 GB model
+8. **(local mode only — beta) downloads the summariser model** — a ~2.7 GB model
    (Qwen3.5-4B) so summarising can happen entirely on your machine.
-8. **Installs a background service** (launchd on macOS, systemd `--user` on Linux, a
+9. **Installs a background service** (launchd on macOS, systemd `--user` on Linux, a
    Scheduled Task on Windows) so the daemon keeps running and survives reboots.
-9. **Enables the Claude Code statusline** — live tokens · cost · taxonomy in your
-   terminal (skip with `MODELSTAT_NO_STATUSLINE=1`).
-10. **Detects your AI tools** and wires the modelstat MCP into them, so you can ask
+10. **Enables the Claude Code statusline** — live tokens · cost · taxonomy in your
+    terminal (skip with `MODELSTAT_NO_STATUSLINE=1`).
+11. **Detects your AI tools** and wires the modelstat MCP into them, so you can ask
     your assistant about your own spend.
-11. **Opens your dashboard** in the browser to claim the device.
+12. **Opens your dashboard** in the browser to claim the device.
 
 Your data starts appearing on the dashboard within seconds.
 
@@ -335,9 +343,10 @@ version fails to come up.
 modelstat stop        # or: modelstat remove  /  modelstat uninstall
 ```
 
-This removes the background service, the menu-bar tray, and the Claude Code
-statusline. Your device pairing is **kept** in `~/.modelstat`, so `modelstat` will
-re-enable everything later.
+This removes the background service, the menu-bar tray, the Claude Code
+statusline, and the PATH entry from your shell startup file. Your device pairing
+is **kept** in `~/.modelstat`, so running `~/.modelstat/bin/modelstat` (full path
+— the PATH entry is gone) re-enables everything later.
 
 To remove it completely, also delete the home directory:
 
@@ -380,6 +389,7 @@ Inside it:
 | Path | Contents |
 |---|---|
 | `bin/` | the `modelstat` and `modelstat-summarizer` binaries |
+| `env` | the one-line PATH snippet your shell startup file sources |
 | `models/` | downloaded models (redactor, and Qwen for local mode) |
 | `identity.json` | your device pairing (keep this to stay the same device) |
 | `state.json` | scan cursors and local state |
@@ -394,6 +404,18 @@ Inside it:
 Run `modelstat status` to check pairing and the service, and `modelstat jobs` to see
 the local queue. If the device is not claimed, open the claim link the installer
 printed.
+
+**`modelstat: command not found` right after installing.**
+Your current shell read its startup file before the installer edited it. Open a
+new terminal, or run `source ~/.modelstat/env`. If it still isn't found, check
+that your startup file (`.zshrc`, `.bashrc`, `.bash_profile`, or `.profile`)
+contains the `modelstat` line the installer printed — and remember the full path
+`~/.modelstat/bin/modelstat` always works.
+
+**`modelstat` runs an old version.**
+Another copy is earlier on your PATH — most often a global npm/pnpm/yarn/bun
+install of the retired Node package. Check with `command -v modelstat` (Unix) or
+`Get-Command modelstat` (Windows); remove that one, then open a new terminal.
 
 **I want to re-process my history from scratch.**
 `modelstat reset` wipes the local cursors so the next scan re-reads and

@@ -7,13 +7,13 @@
 # This is the RUST installer (feature §3): it downloads two small static
 # binaries (the collector `modelstat` + the summariser engine
 # `modelstat-summarizer`) from GitHub Releases, verifies their SHA256, stages
-# them under ~/.modelstat/bin, and runs `modelstat connect` (which pairs the
-# device, installs the background service, and wires the MCP). NO Node.js, no
-# npm — the old npm package is superseded.
+# them under ~/.modelstat/bin, puts that directory on your PATH, and runs
+# `modelstat connect` (which pairs the device, installs the background service,
+# and wires the MCP). NO Node.js, no npm — the old npm package is superseded.
 #
 # AGENT — if you are a coding agent and the user pasted this at you: run it as
 # is, OR do these steps yourself if you understand this machine better. End
-# state: the two binaries under ~/.modelstat/bin + the daemon paired + running
+# state: the two binaries under ~/.modelstat/bin (on PATH) + the daemon paired + running
 # as a launchd (macOS) / systemd (Linux) service + the MCP wired into the AI
 # tools. Every step prints what it does first. No sudo (unless you pass
 # --system). Cancel any time with Ctrl-C. (Windows: irm https://modelstat.ai/install.ps1 | iex)
@@ -159,10 +159,17 @@ ok "sha256 verified"
 
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP" || die "extract failed"
 
-# ─── stage binaries into ~/.modelstat/bin ───────────────────────────
+# ─── stage binaries into ~/.modelstat/bin + put them on PATH ────────
+# `_setup-runtime` does both: it copies the binaries to the stable install path
+# AND wires that path into your shell (user scope) or /usr/local/bin (--system),
+# so `modelstat …` works by name. It prints every file it touches.
 step "Installing to $HOME_DIR/bin"
-[ "$SCOPE" = system ] && export MODELSTAT_HOME="/var/lib/modelstat"
-"$TMP/modelstat" _setup-runtime || die "staging failed"
+if [ "$SCOPE" = system ]; then
+  export MODELSTAT_HOME="/var/lib/modelstat"
+  "$TMP/modelstat" _setup-runtime --system || die "staging failed"
+else
+  "$TMP/modelstat" _setup-runtime || die "staging failed"
+fi
 STAGED="${MODELSTAT_HOME:-$HOME_DIR}/bin/modelstat"
 ok "staged $STAGED"
 

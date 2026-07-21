@@ -77,8 +77,23 @@ pub fn cmd_stop() -> ExitCode {
         _ => {}
     }
 
+    // PATH wiring (§3.3) — the same class of thing as the tray + statusline: a
+    // file we wrote OUTSIDE our own home, so teardown owns removing it. Leaving
+    // it would also strand a `. "~/.modelstat/env"` line in the user's startup
+    // file that errors on every new shell once that home is gone.
+    let bin = modelstat_service::bin_dir();
+    match modelstat_service::path_env::remove_from_path(&bin, Scope::User) {
+        Ok(removed) => {
+            for f in &removed {
+                println!("✓ PATH entry removed from {}", f.display());
+            }
+        }
+        Err(e) => println!("  (couldn't remove the PATH entry: {e})"),
+    }
+
     println!("  Your device pairing is still in {}", state_path().display());
-    println!("  Run `modelstat` again to re-enable.");
+    // Absolute, because the PATH entry above is gone in any new shell.
+    println!("  Run `{}` again to re-enable.", bin.join("modelstat").display());
     ExitCode::SUCCESS
 }
 

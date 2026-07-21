@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use modelstat_ingest::{identity_path, DeviceApi, DeviceMeError};
-use modelstat_service::{install_service, tray, uninstall_service, Component, Scope};
+use modelstat_service::{install_service, path_env, tray, uninstall_service, Component, Scope};
 use serde_json::{json, Map, Value};
 
 use crate::util::{api_base, open_browser, stdin_is_tty};
@@ -439,6 +439,18 @@ fn print_banner(b: &BannerInfo) {
     println!("    \x1b[2mmodelstat status\x1b[0m  # pairing, service + sessions · tokens · cost");
     println!("    \x1b[2mmodelstat jobs\x1b[0m    # pipeline queue + recent activity");
     println!("    \x1b[2mmodelstat mode\x1b[0m    # where sessions summarise (cloud/local/self-hosted)");
+    // The installer just put the bin dir on PATH, but a shell reads its startup
+    // file once — THIS shell still can't see it. Say so, rather than printing
+    // three commands that would answer "command not found".
+    if !path_env::on_path(&modelstat_service::bin_dir()) {
+        match path_env::source_hint() {
+            Some(env) => {
+                println!("    \x1b[33m!\x1b[0m \x1b[2mthis shell doesn't know `modelstat` yet — open a new terminal, or run:\x1b[0m");
+                println!("      \x1b[2msource {}\x1b[0m", env.display());
+            }
+            None => println!("    \x1b[33m!\x1b[0m \x1b[2mopen a new terminal for `modelstat` to be found\x1b[0m"),
+        }
+    }
     println!();
     println!("  Agent-friendly (for LLMs / MCPs):");
     println!("    \x1b[2m{}\x1b[0m", b.agent_url);

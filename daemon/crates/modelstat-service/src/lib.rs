@@ -1,7 +1,8 @@
 //! Service management (§16) + macOS tray (§15): install / uninstall / status for
 //! the collector daemon + summarizer engine, across launchd (macOS), systemd
 //! (Linux), and Windows Scheduled Task / Service — at user or system scope. Plus
-//! the legacy-launcher cleanup and the tray agent.
+//! the legacy-launcher cleanup, the tray agent, and the PATH wiring ([`path_env`])
+//! that makes the staged binaries runnable by name.
 //!
 //! The byte-exact file bodies live in [`spec`] (pure, fully tested); this module
 //! is the subprocess side (launchctl / systemctl / schtasks / sc) + the paths,
@@ -9,6 +10,7 @@
 //! `service_status` returns `{running, hint}` with the §16 per-platform hints.
 
 pub mod legacy;
+pub mod path_env;
 pub mod spec;
 pub mod tray;
 
