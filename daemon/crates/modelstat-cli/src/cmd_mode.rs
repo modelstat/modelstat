@@ -272,6 +272,12 @@ pub async fn cmd_mode(config: Arc<Config>, args: &[String]) -> ExitCode {
     } else {
         eprintln!("redactor model not ready yet — the daemon finishes it on its first scan");
     }
+    println!("preparing the embedder (downloads on first use)…");
+    if modelstat_daemon::engine::ensure_embedder_model().await {
+        println!("✓ embedder ready");
+    } else {
+        eprintln!("embedder not ready yet — segmentation splits on time gaps until it lands");
+    }
 
     // Bounce the daemon service so the running daemon reloads the new mode — only
     // when there's an installed (paired) daemon to refresh.

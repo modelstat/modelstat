@@ -272,13 +272,30 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     }
     // Every mode: pre-warm the on-device NER redactor (fail-closed on cloud/
     // self-hosted, so this keeps the first scan full-quality).
-    step(j, "Preparing the on-device redactor (downloads the ~250 MB PII model)");
+    // Size matches BERT_NER.weights_size_label (~430 MB); the old "~250 MB" here
+    // understated the download by most of a gigabyte on a slow connection.
+    step(j, "Preparing the on-device redactor (downloads the ~430 MB PII model)");
     if modelstat_daemon::engine::ensure_ner_model().await {
         ok_line(j, "on-device redactor ready");
         emit(j, "redactor_model_ready", json!({}));
     } else {
         warn_line(j, "redactor model not ready — the daemon finishes it on its first scan");
         emit(j, "redactor_model_not_ready", json!({}));
+    }
+
+    // Every mode: pre-warm the embedder too. Without it, segmentation loses ONLY
+    // its topic-change boundary (§18) — the time-gap / turn-count / duration /
+    // content-size splits still fire — so two back-to-back but unrelated tasks
+    // land in one segment unless a 15-min gap happens to separate them.
+    // Fail-open by design, which is exactly why the missing download went
+    // unnoticed: nothing breaks loudly, the segments just get coarser.
+    step(j, "Preparing the embedder (downloads the ~130 MB topic model)");
+    if modelstat_daemon::engine::ensure_embedder_model().await {
+        ok_line(j, "embedder ready");
+        emit(j, "embedder_model_ready", json!({}));
+    } else {
+        warn_line(j, "embedder not ready — segmentation splits on time gaps until it lands");
+        emit(j, "embedder_model_not_ready", json!({}));
     }
 
     // ── 5. Service install ──────────────────────────────────────────────
