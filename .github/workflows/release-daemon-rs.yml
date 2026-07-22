@@ -6,9 +6,20 @@ name: release-daemon-rs
 # a GitHub Release. The installer + the binary self-updater consume exactly these
 # assets.
 #
-# `daemon/Cargo.toml`'s version IS the release trigger. Merge a version bump to
-# main and this ships it end-to-end — builds, creates the `daemon-<semver>` tag,
-# and publishes GA. No manual tag push, no promote step.
+# ZERO-TOUCH. Merging ANY commit that touches `daemon/` ships it end-to-end —
+# no version to type, no tag to push, no promote step. The version comes from the
+# Conventional Commits since the last `daemon-*` tag, by the same rules the npm
+# half uses (.github/scripts/release-plan.mjs): `feat` -> minor, `fix`/`perf`/
+# `refactor`/`revert` -> patch, `type!:` or `BREAKING CHANGE` -> major, and
+# `chore`/`docs`/`ci`/`test` -> no release at all.
+#
+# `daemon/Cargo.toml`'s version is therefore OUTPUT, not input: the build stamps
+# the resolved version in before compiling (the binary bakes it via
+# `env!("CARGO_PKG_VERSION")`), and the release job commits it back to main so a
+# local build still reports the right number. Hand-editing it does nothing.
+#
+# The last released version is read from the TAG, never from the manifest — the
+# manifest is CI-written, so trusting it would let one bad stamp compound.
 #
 # The tag is created by the publish step itself rather than pushed by an earlier
 # job ON PURPOSE: a tag pushed with the built-in GITHUB_TOKEN does NOT start a new
@@ -71,6 +82,11 @@ jobs:
       release: ${{ steps.v.outputs.release }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history + tags: the version is derived from the Conventional
+          # Commits since the last `daemon-*` tag, and the default shallow clone
+          # has neither.
+          fetch-depth: 0
 
       - name: Resolve version + release decision
         id: v
@@ -82,13 +98,62 @@ jobs:
           IN_PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
+          LEVEL=""
           if [ "$EVENT" = "workflow_dispatch" ]; then
             V="$IN_VERSION"
           elif [ "$REF_TYPE" = "tag" ]; then
             V="${GITHUB_REF_NAME#daemon-}"
           else
-            # Merge to main: the workspace manifest version IS the release.
-            V="$(sed -n 's/^version = "\(.*\)"$/\1/p' daemon/Cargo.toml | head -1)"
+            # Merge to main: the Conventional Commits since the last daemon-* tag
+            # decide the version. Same rules as the npm planner
+            # (.github/scripts/release-plan.mjs) so both halves of the repo agree:
+            #   feat -> minor | fix/perf/refactor/revert -> patch
+            #   type!: or BREAKING CHANGE -> major (pre-1.0 clamps to minor)
+            #   chore/docs/ci/test/style/build -> nothing
+            # The last released version is read from the TAG, never from
+            # Cargo.toml — the manifest is now CI-written output, so trusting it
+            # would let a bad stamp compound.
+            LAST="$(git tag --list 'daemon-*' \
+                    | sed 's/^daemon-//' \
+                    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+                    | sort -V | tail -1 || true)"
+
+            if [ -z "$LAST" ]; then
+              # No release yet: seed from the manifest and ship it as-is.
+              V="$(sed -n 's/^version = "\(.*\)"$/\1/p' daemon/Cargo.toml | head -1)"
+              LEVEL=initial
+              echo "no daemon-* tag yet — seeding from the manifest at $V"
+            else
+              RANGE="daemon-$LAST..HEAD"
+              # Only commits that TOUCHED daemon/ count: a docs or tray-only merge
+              # must not cut a daemon release. --no-merges so a squashed PR is
+              # judged by its own subject, not the merge commit's.
+              SUBJECTS="$(git log "$RANGE" --no-merges --pretty=format:%s -- daemon/ || true)"
+              BODIES="$(git log "$RANGE" --no-merges --pretty=format:%b -- daemon/ || true)"
+
+              # Highest level wins. `grep -q` returning 1 is normal here, so each
+              # test is a real `if` (a bare `&&` chain would abort under `set -e`).
+              LVL=0
+              if printf '%s\n' "$SUBJECTS" | grep -qE '^(fix|perf|refactor|revert)(\([^)]*\))?!?:'; then LVL=1; fi
+              if printf '%s\n' "$SUBJECTS" | grep -qE '^feat(\([^)]*\))?!?:'; then LVL=2; fi
+              if printf '%s\n' "$SUBJECTS" | grep -qE '^[a-zA-Z]+(\([^)]*\))?!:'; then LVL=3; fi
+              if printf '%s\n' "$BODIES" | grep -qE '^BREAKING[ -]CHANGE'; then LVL=3; fi
+
+              # Split with parameter expansion, not a heredoc: a heredoc body
+              # inside a YAML block scalar is indentation-sensitive and breaks the
+              # moment this step is re-indented.
+              MAJ="${LAST%%.*}"; REST="${LAST#*.}"
+              MIN="${REST%%.*}"; PAT="${REST#*.}"
+              case "$LVL" in
+                3) if [ "$MAJ" -eq 0 ]; then MIN=$((MIN + 1)); PAT=0; else MAJ=$((MAJ + 1)); MIN=0; PAT=0; fi; LEVEL=major ;;
+                2) MIN=$((MIN + 1)); PAT=0; LEVEL=minor ;;
+                1) PAT=$((PAT + 1)); LEVEL=patch ;;
+                *) LEVEL=none ;;
+              esac
+              V="$MAJ.$MIN.$PAT"
+              echo "since daemon-$LAST: bump=$LEVEL -> $V"
+              printf '%s\n' "$SUBJECTS" | sed 's/^/  · /'
+            fi
           fi
           V="${V#v}"
 
@@ -108,6 +173,10 @@ jobs:
           # Only a branch push needs the already-shipped guard: an explicit tag
           # push or manual dispatch is someone asking for this release on purpose.
           REL=true
+          if [ "$LEVEL" = "none" ]; then
+            echo "no releasable commits under daemon/ since daemon-$LAST — nothing to release."
+            REL=false
+          fi
           if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "branch" ] \
              && git ls-remote --exit-code origin "refs/tags/daemon-$V" >/dev/null 2>&1; then
             echo "daemon-$V is already tagged — nothing to release."
@@ -152,6 +221,46 @@ jobs:
         with:
           workspaces: daemon
           key: release-${{ matrix.target }}
+
+      # The binary reports `concat!("daemon-", env!("CARGO_PKG_VERSION"))`, and
+      # `env!` is COMPILE-TIME — so the resolved version has to be in the manifest
+      # before cargo runs, or every build reports the PREVIOUS release's number.
+      # Runs after the toolchain + cache so `cargo update` has both.
+      #
+      # POSIX awk + a temp file, never `sed -i`: its syntax differs across the GNU,
+      # BSD, and git-bash seds this six-target matrix spans. Only the first
+      # column-0 `version =` is rewritten — that's `[workspace.package]`, which
+      # every crate inherits.
+      - name: Stamp the resolved version
+        shell: bash
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v v="$VERSION" '
+            !done && /^version = "/ { print "version = \"" v "\""; done = 1; next }
+            { print }
+          ' Cargo.toml > Cargo.toml.stamped
+          mv Cargo.toml.stamped Cargo.toml
+          grep -m1 '^version = ' Cargo.toml
+          # Re-point the lock at the stamped version so the `--locked` builds below
+          # still hold. `--workspace` touches ONLY the workspace members; every
+          # third-party pin stays exactly as committed, so `--locked` keeps its
+          # supply-chain guarantee.
+          cargo update --workspace
+
+      # One target publishes the stamped manifest so the release job can commit
+      # BYTE-EXACTLY what was built, without needing a Rust toolchain of its own.
+      # All six targets stamp identically; picking one avoids six racing uploads.
+      - name: Upload the stamped manifest
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stamped-manifest
+          path: |
+            daemon/Cargo.toml
+            daemon/Cargo.lock
+          if-no-files-found: error
 
       - name: Build both binaries (release)
         shell: bash
@@ -254,13 +363,20 @@ jobs:
   release:
     needs: [gate, build]
     runs-on: ubuntu-latest
-    # This job has NO checkout (it only needs the built artifacts), so it must not
-    # inherit the workflow-level `working-directory: daemon` — that folder doesn't
-    # exist here, and a run step would fail to even start. Pin run steps to root.
+    # Most steps here work on `artifacts/` (the downloaded build output) rather
+    # than `daemon/`, so this job does not inherit the workflow-level
+    # `working-directory: daemon`. Steps that need the manifest say so themselves.
     defaults:
       run:
         working-directory: .
     steps:
+      # Checkout FIRST: `actions/checkout` wipes the workspace, which would take
+      # the downloaded artifacts with it. Needed here (this job used to have none)
+      # so the version bump can be committed back to main below.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -285,6 +401,53 @@ jobs:
           minisign -S -s minisign.key -m SHA256SUMS -x SHA256SUMS.minisig
           rm -f minisign.key
 
+      # Record the version the build just stamped, so `daemon/Cargo.toml` on main
+      # keeps naming the last release (a local `cargo build` then reports the
+      # right number, and the seed path above has something to read). Same
+      # mechanism the npm half already uses — see the "Tag, bump main" step in
+      # release-daemon.yml.
+      #
+      # This can't re-trigger the workflow: pushes made with GITHUB_TOKEN don't
+      # start new runs, and `[skip ci]` says so a second time. Skipped entirely on
+      # a tag push or manual dispatch, which don't own main's contents.
+      - name: Commit the version bump back to main
+        id: bump
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        shell: bash
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # The build's own stamped files, not a re-derivation — so what lands on
+          # main is exactly what produced the binaries. (merge-multiple flattens
+          # the artifact, hence the bare names.)
+          cp artifacts/Cargo.toml daemon/Cargo.toml
+          cp artifacts/Cargo.lock daemon/Cargo.lock
+          grep -m1 '^version = ' daemon/Cargo.toml
+
+          if git diff --quiet -- daemon/Cargo.toml daemon/Cargo.lock; then
+            echo "manifest already at $VERSION — nothing to commit."
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git add daemon/Cargo.toml daemon/Cargo.lock
+          git commit -m "release: daemon v$VERSION [skip ci]"
+
+          # Rebase-retry: another merge can land while the six targets build.
+          pushed=0
+          for i in 1 2 3; do
+            git fetch origin main --quiet
+            if git rebase origin/main && git push origin HEAD:main; then pushed=1; break; fi
+            git rebase --abort 2>/dev/null || true
+            sleep 3
+          done
+          [ "$pushed" = 1 ] || { echo "::error::failed to push the version bump for $VERSION"; exit 1; }
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       # The version decides GA vs pre-release (see the header): plain x.y.z ships
       # GA and becomes `releases/latest`, which is what the installer resolves and
       # what the server reports to daemons as the auto-update target. A semver
@@ -292,10 +455,17 @@ jobs:
       #
       # This step also CREATES the `daemon-<version>` tag when it doesn't exist
       # yet (the merge-to-main path) — that is what removes the manual tag push.
+      #
+      # The tag points at the bump commit, so checking out `daemon-1.2.3` gives a
+      # manifest that actually reads 1.2.3. Its only difference from the built
+      # tree is that same version line, which the build stamped in anyway. Falls
+      # back to the triggering SHA when the bump step was skipped (tag push /
+      # manual dispatch).
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: daemon-${{ needs.gate.outputs.version }}
+          target_commitish: ${{ steps.bump.outputs.sha || github.sha }}
           name: modelstat daemon ${{ needs.gate.outputs.version }}
           prerelease: ${{ needs.gate.outputs.prerelease == 'true' }}
           # SHA256SUMS.minisig exists only when the minisign key is configured;
