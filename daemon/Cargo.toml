@@ -24,10 +24,19 @@ members = [
 ]
 
 [workspace.package]
-# Bumped past the TS daemon's 0.28.x line so the server never reads a Rust build
-# as out-of-date. The release tag is `daemon-<this>`; a test build is published as
-# a GitHub PRE-RELEASE (which keeps the version a clean semver, keeps it out of
-# `releases/latest`, and makes the installer disable auto-update for it).
+# CI-MANAGED — do not hand-edit; a manual change here releases nothing and is
+# overwritten by the next release. `.github/workflows/release-daemon-rs.yml`
+# derives the version from the Conventional Commits since the last `daemon-*` tag
+# (`feat` -> minor, `fix` -> patch, `type!:` -> major), stamps it here before
+# building (the binary bakes it in via `env!("CARGO_PKG_VERSION")`), and commits
+# the result back. This line therefore records the LAST RELEASE, so a local
+# `cargo build` reports a truthful version.
+#
+# To ship: merge a `fix(daemon):` / `feat(daemon):` commit. To ship a specific
+# version, run the workflow manually with a version input.
+#
+# Started past the TS daemon's 0.28.x line so the server never reads a Rust build
+# as out-of-date.
 version = "1.0.11"
 edition = "2021"
 rust-version = "1.83"
