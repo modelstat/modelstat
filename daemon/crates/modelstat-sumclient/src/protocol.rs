@@ -79,7 +79,9 @@ mod tests {
         assert_eq!(r.temperature, 0.2);
         assert_eq!(r.max_tokens, 1024);
         assert_eq!(r.top_k, Some(3));
-        assert!(r.system.starts_with("You are the modelstat session summarizer"));
+        assert!(r
+            .system
+            .starts_with("You are the modelstat session summarizer"));
     }
 
     #[test]

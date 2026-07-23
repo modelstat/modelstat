@@ -7,8 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use modelstat_daemon::lock::{
-    daemon_lock_path, is_process_alive, read_daemon_lock, terminate_process,
-    terminate_process_hard,
+    daemon_lock_path, is_process_alive, read_daemon_lock, terminate_process, terminate_process_hard,
 };
 use modelstat_daemon::processing_version::PROCESSING_VERSION;
 use modelstat_daemon::runtime::{scan_session, Daemon};
@@ -91,9 +90,15 @@ pub fn cmd_stop() -> ExitCode {
         Err(e) => println!("  (couldn't remove the PATH entry: {e})"),
     }
 
-    println!("  Your device pairing is still in {}", state_path().display());
+    println!(
+        "  Your device pairing is still in {}",
+        state_path().display()
+    );
     // Absolute, because the PATH entry above is gone in any new shell.
-    println!("  Run `{}` again to re-enable.", bin.join("modelstat").display());
+    println!(
+        "  Run `{}` again to re-enable.",
+        bin.join("modelstat").display()
+    );
     ExitCode::SUCCESS
 }
 
@@ -125,7 +130,9 @@ pub fn cmd_ensure_daemon(version: &str) -> ExitCode {
         }
         SuperviseDecision::Spawn => {
             if let Some(pid) = service_pid(Component::Daemon, Scope::User) {
-                println!("[modelstat] managed daemon (pid {pid}) is booting — leaving it to finish");
+                println!(
+                    "[modelstat] managed daemon (pid {pid}) is booting — leaving it to finish"
+                );
                 return ExitCode::SUCCESS;
             }
             reload_daemon_service()
@@ -219,7 +226,9 @@ pub async fn cmd_sync(config: Arc<Config>, args: &[String]) -> ExitCode {
     let session_ids: Vec<String> = flag_values(args, "--session");
     let file = flag_value(args, "--file");
     if session_ids.is_empty() && file.is_none() {
-        eprintln!("usage: modelstat sync --session <id> [--session <id> …] [--file <path>] [--wait]");
+        eprintln!(
+            "usage: modelstat sync --session <id> [--session <id> …] [--file <path>] [--wait]"
+        );
         eprintln!("  (the background daemon ingests everything on its own; use sync to force one session now)");
         return ExitCode::FAILURE;
     }
@@ -301,10 +310,7 @@ fn is_connection_refused(e: &reqwest::Error) -> bool {
     // reqwest wraps the OS error; a refused/reset connection (no daemon) is the
     // cold-scan trigger. Fall back on the string form (portable across OSes).
     let s = e.to_string().to_lowercase();
-    e.is_connect()
-        || s.contains("refused")
-        || s.contains("reset")
-        || s.contains("actively refused")
+    e.is_connect() || s.contains("refused") || s.contains("reset") || s.contains("actively refused")
 }
 
 fn flag_value(args: &[String], name: &str) -> Option<String> {

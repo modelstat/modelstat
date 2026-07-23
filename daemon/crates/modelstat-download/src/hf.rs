@@ -44,9 +44,18 @@ pub const BGE_SMALL: HfModel = HfModel {
     dir_name: "bge-small-en-v1.5",
     weights_size_label: "~130 MB",
     files: &[
-        HfFile { remote: "config.json", local: "config.json" },
-        HfFile { remote: "tokenizer.json", local: "tokenizer.json" },
-        HfFile { remote: "model.safetensors", local: "model.safetensors" },
+        HfFile {
+            remote: "config.json",
+            local: "config.json",
+        },
+        HfFile {
+            remote: "tokenizer.json",
+            local: "tokenizer.json",
+        },
+        HfFile {
+            remote: "model.safetensors",
+            local: "model.safetensors",
+        },
     ],
 };
 
@@ -57,9 +66,18 @@ pub const BERT_NER: HfModel = HfModel {
     dir_name: "bert-base-NER",
     weights_size_label: "~430 MB",
     files: &[
-        HfFile { remote: "config.json", local: "config.json" },
-        HfFile { remote: "onnx/tokenizer.json", local: "tokenizer.json" },
-        HfFile { remote: "model.safetensors", local: "model.safetensors" },
+        HfFile {
+            remote: "config.json",
+            local: "config.json",
+        },
+        HfFile {
+            remote: "onnx/tokenizer.json",
+            local: "tokenizer.json",
+        },
+        HfFile {
+            remote: "model.safetensors",
+            local: "model.safetensors",
+        },
     ],
 };
 
@@ -75,7 +93,10 @@ impl HfModel {
         self.files
             .iter()
             .map(|f| DownloadSpec {
-                url: format!("https://huggingface.co/{}/resolve/main/{}", self.repo, f.remote),
+                url: format!(
+                    "https://huggingface.co/{}/resolve/main/{}",
+                    self.repo, f.remote
+                ),
                 dest: dir.join(f.local),
                 expected_sha256: None,
                 size_label: if f.local == "model.safetensors" {
@@ -126,7 +147,10 @@ mod tests {
             bge[0].url,
             "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/config.json"
         );
-        assert_eq!(bge[2].dest, PathBuf::from("/m/hf/bge-small-en-v1.5/model.safetensors"));
+        assert_eq!(
+            bge[2].dest,
+            PathBuf::from("/m/hf/bge-small-en-v1.5/model.safetensors")
+        );
 
         // NER's tokenizer comes from onnx/ but lands as tokenizer.json.
         let ner = BERT_NER.specs(Path::new("/m"));
@@ -134,6 +158,9 @@ mod tests {
             ner[1].url,
             "https://huggingface.co/dslim/bert-base-NER/resolve/main/onnx/tokenizer.json"
         );
-        assert_eq!(ner[1].dest, PathBuf::from("/m/hf/bert-base-NER/tokenizer.json"));
+        assert_eq!(
+            ner[1].dest,
+            PathBuf::from("/m/hf/bert-base-NER/tokenizer.json")
+        );
     }
 }

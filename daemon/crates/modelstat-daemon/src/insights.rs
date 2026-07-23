@@ -67,7 +67,9 @@ fn encode_id(id: &str) -> String {
     let mut out = String::with_capacity(id.len());
     for b in id.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -108,7 +110,10 @@ pub fn cache_session_insights(
     let path = session_insights_path(sessions_dir, session_id);
     let mut payload = insights.clone();
     if let Some(obj) = payload.as_object_mut() {
-        obj.insert("cached_at".to_string(), Value::String(cached_at.to_string()));
+        obj.insert(
+            "cached_at".to_string(),
+            Value::String(cached_at.to_string()),
+        );
     }
     std::fs::create_dir_all(sessions_dir)?;
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
@@ -158,11 +163,12 @@ pub async fn refresh_session_insights<F: SessionInsightsFetcher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use serde_json::json;
+    use std::sync::Mutex;
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("modelstat-insights-{}-{tag}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("modelstat-insights-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }
@@ -218,7 +224,10 @@ mod tests {
             eager_calls: Mutex::new(0),
         };
         let ids = vec!["sess-1".to_string()];
-        refresh_session_insights(&fetcher, &ids, &dir, || "2026-07-16T10:00:00.000Z".to_string()).await;
+        refresh_session_insights(&fetcher, &ids, &dir, || {
+            "2026-07-16T10:00:00.000Z".to_string()
+        })
+        .await;
 
         // The cache converged to ready, and the priority signal fired exactly once.
         let read = read_cached_insights_sync(&dir, "sess-1").unwrap();
@@ -232,14 +241,21 @@ mod tests {
     async fn refresh_stops_early_when_first_reply_is_ready() {
         let dir = tmp_dir("ready");
         let fetcher = ScriptedFetcher {
-            replies: Mutex::new([json!({ "status": "ready", "segment_count": 5 })].into_iter().collect()),
+            replies: Mutex::new(
+                [json!({ "status": "ready", "segment_count": 5 })]
+                    .into_iter()
+                    .collect(),
+            ),
             eager_calls: Mutex::new(0),
         };
         let ids = vec!["s".to_string()];
         refresh_session_insights(&fetcher, &ids, &dir, || "t".to_string()).await;
         // Only the eager call ran — no polling once ready.
         assert_eq!(*fetcher.eager_calls.lock().unwrap(), 1);
-        assert_eq!(read_cached_insights_sync(&dir, "s").unwrap().status, "ready");
+        assert_eq!(
+            read_cached_insights_sync(&dir, "s").unwrap().status,
+            "ready"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

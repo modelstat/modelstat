@@ -41,7 +41,11 @@ fn default_roots(cwd: Option<&str>) -> Vec<String> {
     let mut ancestors: Vec<String> = Vec::new();
     for i in (end..=start).rev() {
         let joined = seg[..i].join("/");
-        ancestors.push(if joined.is_empty() { "/".to_string() } else { joined });
+        ancestors.push(if joined.is_empty() {
+            "/".to_string()
+        } else {
+            joined
+        });
     }
     let subdirs = ["scripts", "bin", "tools", "ci", ".github/scripts"];
     let mut roots = ancestors.clone();
@@ -127,7 +131,10 @@ async fn enrich_one_action<S, N>(
         // can zip it deterministically. Redact the ref the same way the command
         // was (same cwd); a ref masked to a `[REDACTED:…]` placeholder has no
         // stable/unique token — skip it rather than ship an unlinkable abstract.
-        let token = redact(&reference, ctx.cwd.as_deref()).text.trim().to_string();
+        let token = redact(&reference, ctx.cwd.as_deref())
+            .text
+            .trim()
+            .to_string();
         if token.is_empty()
             || token.starts_with("[REDACTED")
             || seen.contains(&token)
@@ -154,7 +161,11 @@ async fn enrich_one_action<S, N>(
         if let Some(ner) = model_redact {
             summary_text = ner_redact(ner, &summary_text).text;
         }
-        let summary: String = summary_text.trim().chars().take(MAX_SUMMARY_CHARS).collect();
+        let summary: String = summary_text
+            .trim()
+            .chars()
+            .take(MAX_SUMMARY_CHARS)
+            .collect();
         if summary.is_empty() {
             continue;
         }

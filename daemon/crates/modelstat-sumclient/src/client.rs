@@ -244,8 +244,14 @@ mod tests {
 
     #[test]
     fn errors_never_carry_bodies() {
-        assert_eq!(SumError::Http(500).to_string(), "summarizer returned HTTP 500");
-        assert_eq!(SumError::Timeout.to_string(), "summarizer request timed out");
+        assert_eq!(
+            SumError::Http(500).to_string(),
+            "summarizer returned HTTP 500"
+        );
+        assert_eq!(
+            SumError::Timeout.to_string(),
+            "summarizer request timed out"
+        );
     }
 
     #[test]

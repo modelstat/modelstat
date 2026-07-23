@@ -59,9 +59,11 @@ pub fn make_correct_events() -> impl FnMut(Vec<RawEvent>) -> Vec<RawEvent> {
 /// generic `S: Summarizer`) so the boxed future is provably `Send`; best-effort
 /// (a `None` reply just leaves the deterministic reference channels standing).
 pub fn make_extract_links(engine: &SummarizerClient) -> Box<LinkExtractor<'_>> {
-    Box::new(move |abstracts: Vec<String>| -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
-        Box::pin(async move { link_extract(engine, &abstracts).await })
-    })
+    Box::new(
+        move |abstracts: Vec<String>| -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+            Box::pin(async move { link_extract(engine, &abstracts).await })
+        },
+    )
 }
 
 /// ISO-8601 UTC now with millisecond precision + `Z`, byte-identical to JS
@@ -311,7 +313,9 @@ fn eager_target_jobs(session_ids: &[String], file: Option<&str>) -> Vec<ScanJob>
             session_ids.iter().map(String::as_str).collect();
         return all
             .into_iter()
-            .filter(|j| session_id_for_path(&j.path).is_some_and(|sid| wanted.contains(sid.as_str())))
+            .filter(|j| {
+                session_id_for_path(&j.path).is_some_and(|sid| wanted.contains(sid.as_str()))
+            })
             .collect();
     }
     order_jobs_newest_first(all).into_iter().take(1).collect()
@@ -551,7 +555,10 @@ mod tests {
             kind_for_path("/h/.codex/sessions/2026/07/16/rollout-x.jsonl"),
             ParserKind::Codex
         );
-        assert_eq!(kind_for_path("/h/.pi/agent/sessions/p/x.jsonl"), ParserKind::Pi);
+        assert_eq!(
+            kind_for_path("/h/.pi/agent/sessions/p/x.jsonl"),
+            ParserKind::Pi
+        );
         assert_eq!(
             kind_for_path("/h/.claude/projects/p/x.jsonl"),
             ParserKind::ClaudeCode
@@ -676,7 +683,10 @@ mod tests {
     fn eager_target_jobs_builds_an_adhoc_job_for_an_unknown_file() {
         // An explicit file discovery hasn't enumerated still yields a job with the
         // dir-shape parser (so a brand-new file mid-write is scannable).
-        let jobs = eager_target_jobs(&[], Some("/somewhere/.codex/sessions/2026/07/16/rollout-z.jsonl"));
+        let jobs = eager_target_jobs(
+            &[],
+            Some("/somewhere/.codex/sessions/2026/07/16/rollout-z.jsonl"),
+        );
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].kind, ParserKind::Codex);
         assert!(jobs[0].path.ends_with("rollout-z.jsonl"));

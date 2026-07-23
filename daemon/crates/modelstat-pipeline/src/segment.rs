@@ -237,7 +237,7 @@ mod tests {
     fn time_gap_splits() {
         let turns = vec![
             turn(0, 10, vec![]),
-            turn(60_000, 10, vec![]),            // +1 min → same segment
+            turn(60_000, 10, vec![]),               // +1 min → same segment
             turn(60_000 + 16 * 60_000, 10, vec![]), // +16 min → split
         ];
         // Third turn is a singleton after the split → merged into the second's
@@ -265,7 +265,9 @@ mod tests {
     fn max_turns_caps_a_segment() {
         // 150 rapid same-topic turns → split at 100.
         let emb = vec![1.0f32, 0.0];
-        let turns: Vec<TurnMeta> = (0..150).map(|i| turn(i as i64 * 1000, 1, emb.clone())).collect();
+        let turns: Vec<TurnMeta> = (0..150)
+            .map(|i| turn(i as i64 * 1000, 1, emb.clone()))
+            .collect();
         let segs = segment_turns(&turns);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].len(), 100);
@@ -276,12 +278,16 @@ mod tests {
     fn content_chars_cap_splits_long_on_topic_runs() {
         let emb = vec![1.0f32, 0.0];
         // Each turn 5000 chars: after 3 turns run_chars ≥ 12000 → split.
-        let turns: Vec<TurnMeta> =
-            (0..5).map(|i| turn(i as i64 * 1000, 5000, emb.clone())).collect();
+        let turns: Vec<TurnMeta> = (0..5)
+            .map(|i| turn(i as i64 * 1000, 5000, emb.clone()))
+            .collect();
         let segs = segment_turns(&turns);
         // run: turn0(5000) turn1(+5000=10000) turn2(+5000=15000 but the check is
         // BEFORE adding cur: at i=3 run_chars=15000≥12000 → split). Verify ≥2 segs.
-        assert!(segs.len() >= 2, "expected a content-cap split, got {segs:?}");
+        assert!(
+            segs.len() >= 2,
+            "expected a content-cap split, got {segs:?}"
+        );
     }
 
     #[test]
@@ -311,7 +317,10 @@ mod tests {
         };
         ev.tool_calls.insert("Bash".into(), 2);
         let s = turn_surface(&ev);
-        assert_eq!(s, "assistant_message claude_code claude-opus-4-8 tools:Bash files:2");
+        assert_eq!(
+            s,
+            "assistant_message claude_code claude-opus-4-8 tools:Bash files:2"
+        );
         assert!(!s.contains("secret")); // never embeds content
     }
 }

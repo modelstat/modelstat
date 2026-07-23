@@ -24,8 +24,8 @@ use crate::prompts::{
     MAX_COGNITION_TAG_CHARS, REDACT_MAX_TOKENS, REDACT_SYSTEM_PROMPT, REDACT_TEMPERATURE,
     SCRIPT_SUMMARY_OUTPUT_MAX_CHARS, SCRIPT_SUMMARY_SYSTEM_PROMPT, SCRIPT_SUMMARY_TEMPERATURE,
     SUMMARISER_MAX_TOKENS, SUMMARISER_SYSTEM_PROMPT, SUMMARISER_TEMPERATURE, SUMMARISER_TOP_K,
-    TITLER_MAX_TOKENS, TITLER_SYSTEM_PROMPT, TITLER_TEMPERATURE, TITLE_MAX_CHARS,
-    TITLER_ABSTRACT_SLICE_CHARS,
+    TITLER_ABSTRACT_SLICE_CHARS, TITLER_MAX_TOKENS, TITLER_SYSTEM_PROMPT, TITLER_TEMPERATURE,
+    TITLE_MAX_CHARS,
 };
 use crate::resilient::{ResilientSummarizer, SummarizeOutcome, Summarizer};
 
@@ -343,9 +343,7 @@ fn extract_first_json_object(s: &str) -> Option<String> {
 pub fn strip_cognition_suffix(abstract_text: &str) -> String {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r"\s*\[(?:Mood|Mind|Stance):[^\]]*\]").unwrap()
-    });
+    let re = RE.get_or_init(|| regex::Regex::new(r"\s*\[(?:Mood|Mind|Stance):[^\]]*\]").unwrap());
     re.replace_all(abstract_text, "").trim().to_string()
 }
 
@@ -595,7 +593,9 @@ mod tests {
         let fake = Fake::reply(
             "```json\n{\"emotions\":[\"Frustrated!\",\"frustrated\"],\"meta\":[\"in-flow\"],\"posture\":[]}\n```",
         );
-        let tags = cognition(&fake, "a long enough abstract about work").await.unwrap();
+        let tags = cognition(&fake, "a long enough abstract about work")
+            .await
+            .unwrap();
         // Dedup + sanitise: "Frustrated!" → "frustrated", dup dropped.
         assert_eq!(tags.emotions, vec!["frustrated"]);
         assert_eq!(tags.meta, vec!["in-flow"]);
@@ -633,8 +633,14 @@ mod tests {
         };
         let h = cognition_hints(&c);
         assert_eq!(h.len(), 2);
-        assert_eq!((h[0].root_key.as_str(), h[0].name.as_str(), h[0].confidence), ("mood", "Frustrated", 0.7));
-        assert_eq!((h[1].root_key.as_str(), h[1].name.as_str()), ("mind", "In-flow"));
+        assert_eq!(
+            (h[0].root_key.as_str(), h[0].name.as_str(), h[0].confidence),
+            ("mood", "Frustrated", 0.7)
+        );
+        assert_eq!(
+            (h[1].root_key.as_str(), h[1].name.as_str()),
+            ("mind", "In-flow")
+        );
     }
 
     #[test]
@@ -658,15 +664,23 @@ mod tests {
 
     #[test]
     fn title_sanitiser_cleans_quotes_fences_and_period() {
-        assert_eq!(sanitise_title("```\n\"Auth middleware refactor.\"\n```"), "Auth middleware refactor");
-        assert_eq!(sanitise_title("A paragraph\nwith a second line"), "A paragraph");
+        assert_eq!(
+            sanitise_title("```\n\"Auth middleware refactor.\"\n```"),
+            "Auth middleware refactor"
+        );
+        assert_eq!(
+            sanitise_title("A paragraph\nwith a second line"),
+            "A paragraph"
+        );
         assert_eq!(sanitise_title(""), "");
     }
 
     #[test]
     fn redact_backstop_prefilter_and_apply() {
         assert!(!should_deep_redact("git status"));
-        assert!(should_deep_redact("curl -H 'Authorization: Bearer abc' https://x"));
+        assert!(should_deep_redact(
+            "curl -H 'Authorization: Bearer abc' https://x"
+        ));
         let candidates = parse_redact_reply("NONE\nsk_live_abcdef123456\nprod\ntoken\n");
         // "prod" (<8) and "token" (safe word) dropped; only the long secret kept.
         assert_eq!(candidates, vec!["sk_live_abcdef123456"]);

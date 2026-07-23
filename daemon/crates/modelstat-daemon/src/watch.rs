@@ -168,12 +168,10 @@ mod tests {
         let xdg_config = home.join(".config");
         let xdg_data = home.join(".local/share");
         // Pretend only two of the candidates exist.
-        let existing: BTreeSet<PathBuf> = [
-            home.join(".claude/projects"),
-            home.join(".codex/sessions"),
-        ]
-        .into_iter()
-        .collect();
+        let existing: BTreeSet<PathBuf> =
+            [home.join(".claude/projects"), home.join(".codex/sessions")]
+                .into_iter()
+                .collect();
         let dirs = resolve_watch_dirs_in(&home, &xdg_config, &xdg_data, false, |p| {
             existing.contains(p)
         });
@@ -189,8 +187,20 @@ mod tests {
     fn darwin_adds_app_support_dirs() {
         let home = PathBuf::from("/Users/dev");
         // Everything "exists" so we can see the full candidate set.
-        let linux = resolve_watch_dirs_in(&home, &home.join(".config"), &home.join(".local/share"), false, |_| true);
-        let mac = resolve_watch_dirs_in(&home, &home.join(".config"), &home.join(".local/share"), true, |_| true);
+        let linux = resolve_watch_dirs_in(
+            &home,
+            &home.join(".config"),
+            &home.join(".local/share"),
+            false,
+            |_| true,
+        );
+        let mac = resolve_watch_dirs_in(
+            &home,
+            &home.join(".config"),
+            &home.join(".local/share"),
+            true,
+            |_| true,
+        );
         assert!(mac.len() > linux.len());
         assert!(mac
             .iter()

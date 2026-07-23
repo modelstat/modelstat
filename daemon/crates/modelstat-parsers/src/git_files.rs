@@ -35,8 +35,16 @@ pub fn parse_numstat(stdout: &str) -> Vec<FileChange> {
     for line in stdout.split('\n') {
         let Some(c) = re.captures(line) else { continue };
         let path = c[3].to_string();
-        let added = if &c[1] == "-" { 0 } else { c[1].parse().unwrap_or(0) };
-        let deleted = if &c[2] == "-" { 0 } else { c[2].parse().unwrap_or(0) };
+        let added = if &c[1] == "-" {
+            0
+        } else {
+            c[1].parse().unwrap_or(0)
+        };
+        let deleted = if &c[2] == "-" {
+            0
+        } else {
+            c[2].parse().unwrap_or(0)
+        };
         match by_path.get_mut(&path) {
             Some(e) => {
                 e.lines_added += added;
@@ -55,7 +63,10 @@ pub fn parse_numstat(stdout: &str) -> Vec<FileChange> {
             }
         }
     }
-    order.into_iter().filter_map(|k| by_path.remove(&k)).collect()
+    order
+        .into_iter()
+        .filter_map(|k| by_path.remove(&k))
+        .collect()
 }
 
 /// Aggregate the files changed by commits authored in [`since`, `until`] in the

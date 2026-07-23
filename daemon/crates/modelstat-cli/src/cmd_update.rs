@@ -47,7 +47,10 @@ pub fn cmd_autoupdate(args: &[String]) -> ExitCode {
             return ExitCode::SUCCESS;
         }
     }
-    println!("auto-update: {}", if auto_update_enabled() { "on" } else { "off" });
+    println!(
+        "auto-update: {}",
+        if auto_update_enabled() { "on" } else { "off" }
+    );
     if auto_update_pinned_by_env() {
         println!("  (pinned by MODELSTAT_AUTO_UPDATE env — the stored toggle is ignored)");
     }

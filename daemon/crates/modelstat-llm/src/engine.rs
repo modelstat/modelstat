@@ -96,7 +96,11 @@ impl Engine {
         match self.state() {
             EngineState::Loaded => {
                 let (tx, rx) = oneshot::channel();
-                if self.job_tx.send(Job::Complete { params, resp: tx }).is_err() {
+                if self
+                    .job_tx
+                    .send(Job::Complete { params, resp: tx })
+                    .is_err()
+                {
                     return CompleteOutcome::Failed("engine worker is gone".into());
                 }
                 match rx.await {
@@ -282,7 +286,10 @@ mod tests {
         let (dir, model) = present_model();
         let engine = Engine::new(MockBackend::ready(), config(model, 0));
         // First request triggers a background load and reports Loading.
-        assert!(matches!(engine.complete(params()).await, CompleteOutcome::Loading));
+        assert!(matches!(
+            engine.complete(params()).await,
+            CompleteOutcome::Loading
+        ));
         wait_loaded(&engine).await;
         match engine.complete(params()).await {
             CompleteOutcome::Ready(t) => {
@@ -298,7 +305,10 @@ mod tests {
     async fn load_failure_is_reported_and_retries() {
         let (dir, model) = present_model();
         let engine = Engine::new(MockBackend::failing_load(), config(model, 0));
-        assert!(matches!(engine.complete(params()).await, CompleteOutcome::Loading));
+        assert!(matches!(
+            engine.complete(params()).await,
+            CompleteOutcome::Loading
+        ));
         // Wait for the load attempt to fail.
         for _ in 0..200 {
             if matches!(engine.state(), EngineState::Failed(_)) {
@@ -308,7 +318,10 @@ mod tests {
         }
         assert!(matches!(engine.state(), EngineState::Failed(_)));
         // A subsequent request re-triggers the load (self-heal) → Loading again.
-        assert!(matches!(engine.complete(params()).await, CompleteOutcome::Loading));
+        assert!(matches!(
+            engine.complete(params()).await,
+            CompleteOutcome::Loading
+        ));
         engine.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

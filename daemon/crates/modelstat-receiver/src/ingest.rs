@@ -162,8 +162,11 @@ where
         }
         match uploader.upload(&shipped).await {
             Ok(_accepted) => {
-                let ids: Vec<String> =
-                    batch.events.iter().map(|e| e.source_event_id.clone()).collect();
+                let ids: Vec<String> = batch
+                    .events
+                    .iter()
+                    .map(|e| e.source_event_id.clone())
+                    .collect();
                 store.mark_sent(&ids, Some(&batch.batch_id)).await?;
                 result.batches += 1;
                 result.events += batch.events.len();
@@ -202,7 +205,10 @@ mod tests {
             if self.held {
                 return None;
             }
-            let session = events.first().map(|e| e.session_id.clone()).unwrap_or_default();
+            let session = events
+                .first()
+                .map(|e| e.session_id.clone())
+                .unwrap_or_default();
             Some(vec![Segment {
                 segment_id: format!("seg-{session}"),
                 session_id: session,
@@ -300,9 +306,16 @@ mod tests {
 
         let mut up = FakeUploader::default();
         // now (10s) ≥ debounce so the session ships.
-        let r = drain_local_queue(&q, &FakePipeline { held: false }, &mut up, "dev1", "9.9.9", 2_000_000_000_000)
-            .await
-            .unwrap();
+        let r = drain_local_queue(
+            &q,
+            &FakePipeline { held: false },
+            &mut up,
+            "dev1",
+            "9.9.9",
+            2_000_000_000_000,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.batches, 1);
         assert_eq!(r.events, 1);
         assert!(!r.held);
@@ -325,9 +338,16 @@ mod tests {
             hold: true,
             ..Default::default()
         };
-        let r = drain_local_queue(&q, &FakePipeline { held: false }, &mut up, "dev1", "9.9.9", 2_000_000_000_000)
-            .await
-            .unwrap();
+        let r = drain_local_queue(
+            &q,
+            &FakePipeline { held: false },
+            &mut up,
+            "dev1",
+            "9.9.9",
+            2_000_000_000_000,
+        )
+        .await
+        .unwrap();
         assert!(r.held);
         assert_eq!(r.batches, 0);
         // Never-drop: still queued for the next tick.
@@ -341,9 +361,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let q = FileQueueStore::new(&path);
         let mut up = FakeUploader::default();
-        let r = drain_local_queue(&q, &FakePipeline { held: false }, &mut up, "dev1", "9.9.9", 2_000_000_000_000)
-            .await
-            .unwrap();
+        let r = drain_local_queue(
+            &q,
+            &FakePipeline { held: false },
+            &mut up,
+            "dev1",
+            "9.9.9",
+            2_000_000_000_000,
+        )
+        .await
+        .unwrap();
         assert_eq!(r, DrainResult::default());
         assert!(up.uploaded.is_empty());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

@@ -126,7 +126,11 @@ fn render_taxonomy(insights: &SessionInsights, max: usize) -> String {
         .iter()
         .take(max)
         .map(|n| {
-            let emoji = n.emoji.as_deref().map(|e| format!("{e} ")).unwrap_or_default();
+            let emoji = n
+                .emoji
+                .as_deref()
+                .map(|e| format!("{e} "))
+                .unwrap_or_default();
             format!("{emoji}{}", n.name)
         })
         .collect();
@@ -148,7 +152,10 @@ pub fn render_statusline(input: &StatuslineInput, insights: Option<&SessionInsig
     // 1. Tokens — instant, from Claude Code's context window.
     let tok = context_tokens(input.context_window.as_ref());
     if tok > 0.0 {
-        parts.push(format!("{CYAN}{}{RESET}{DIM} tok{RESET}", format_tokens(tok)));
+        parts.push(format!(
+            "{CYAN}{}{RESET}{DIM} tok{RESET}",
+            format_tokens(tok)
+        ));
     }
 
     // 2. modelstat layer — effective $ + taxonomy from the local cache.
@@ -249,7 +256,10 @@ mod tests {
     #[test]
     fn format_cost_subcent_4dp_else_2dp_junk_none() {
         assert_eq!(format_cost(Some(&json!("0.42"))).as_deref(), Some("$0.42"));
-        assert_eq!(format_cost(Some(&json!(0.0031))).as_deref(), Some("$0.0031"));
+        assert_eq!(
+            format_cost(Some(&json!(0.0031))).as_deref(),
+            Some("$0.0031")
+        );
         assert_eq!(format_cost(Some(&json!("0"))), None);
         assert_eq!(format_cost(Some(&json!(null))), None);
         assert_eq!(format_cost(None), None);
@@ -305,7 +315,8 @@ mod tests {
 
     #[test]
     fn not_ingested_contributes_nothing_beyond_tokens() {
-        let ins = insights(json!({ "status": "not_ingested", "cost_usd": "0", "taxonomy_nodes": [] }));
+        let ins =
+            insights(json!({ "status": "not_ingested", "cost_usd": "0", "taxonomy_nodes": [] }));
         let line = strip(&render_statusline(&cw_input(), Some(&ins)));
         assert!(line.contains("12k tok"), "{line}");
         assert!(!line.contains("analyzing"), "{line}");

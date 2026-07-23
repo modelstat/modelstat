@@ -52,7 +52,11 @@ impl ProgressSink for TtyProgress {
 
     fn start(&self, _label: &str, size_label: Option<&str>, _total: Option<u64>) {
         let size = size_label.map(|s| format!(" ({s})")).unwrap_or_default();
-        let _ = writeln!(std::io::stderr(), "[modelstat] downloading {}{size}…", self.label);
+        let _ = writeln!(
+            std::io::stderr(),
+            "[modelstat] downloading {}{size}…",
+            self.label
+        );
     }
 
     fn progress(&self, downloaded: u64, total: Option<u64>, elapsed: Duration) {

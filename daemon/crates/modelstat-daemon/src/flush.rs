@@ -98,10 +98,18 @@ where
         let wire_calls = attach_segment_ids_by_map(&drafts, &HashMap::new());
         let mut by_session: BTreeMap<String, (Vec<RawEvent>, Vec<_>)> = BTreeMap::new();
         for e in cloud_events {
-            by_session.entry(e.session_id.clone()).or_default().0.push(e);
+            by_session
+                .entry(e.session_id.clone())
+                .or_default()
+                .0
+                .push(e);
         }
         for c in wire_calls {
-            by_session.entry(c.session_id.clone()).or_default().1.push(c);
+            by_session
+                .entry(c.session_id.clone())
+                .or_default()
+                .1
+                .push(c);
         }
         let out = by_session
             .into_iter()
@@ -167,8 +175,7 @@ where
     }
     // Auxiliary + best-effort: a titler/detector hiccup never sinks a batch.
     let session_titles = build_session_titles(&title_input, resilient.engine()).await;
-    let session_metadata =
-        build_session_metadata(&title_input, &events, git, extract_links).await;
+    let session_metadata = build_session_metadata(&title_input, &events, git, extract_links).await;
 
     // Deep-redact the SHIPPED tool commands before attribution: L2 (NER, always
     // on-device) + L3 (LLM backstop, LOCAL mode only — §21.13, never crosses the
@@ -182,8 +189,7 @@ where
     // Attribute each buffered call to the segment covering its source event,
     // resolved against every segment seen this run for the call's session.
     let mut call_seg_by_event: HashMap<String, String> = HashMap::new();
-    let sessions_in_calls: BTreeSet<&str> =
-        drafts.iter().map(|c| c.session_id.as_str()).collect();
+    let sessions_in_calls: BTreeSet<&str> = drafts.iter().map(|c| c.session_id.as_str()).collect();
     for sid in &sessions_in_calls {
         if let Some(segs) = run_segments_by_session.get(*sid) {
             for seg in segs {
@@ -329,8 +335,17 @@ mod tests {
         let mut acc = BTreeMap::new();
         let events = vec![ev("s1", "2026-07-16T10:00:00.000Z", "hello")];
         let out = build_flush_batches(
-            "dev1", "9.9.9", "local", events, Vec::new(), &resilient, &NoEmbedder,
-            &UnavailableNer, None, None, &mut acc,
+            "dev1",
+            "9.9.9",
+            "local",
+            events,
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            None,
+            None,
+            &mut acc,
         )
         .await;
         assert!(matches!(out, FlushOutcome::Held));
@@ -349,8 +364,17 @@ mod tests {
         let mut acc = BTreeMap::new();
         let events = vec![ev("s1", "2026-07-16T10:00:00.000Z", "secret stuff")];
         let out = build_flush_batches(
-            "dev1", "9.9.9", "cloud", events, Vec::new(), &resilient, &NoEmbedder,
-            &UnavailableNer, None, None, &mut acc,
+            "dev1",
+            "9.9.9",
+            "cloud",
+            events,
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            None,
+            None,
+            &mut acc,
         )
         .await;
         assert!(matches!(out, FlushOutcome::Held));
@@ -367,8 +391,17 @@ mod tests {
         );
         let mut acc = BTreeMap::new();
         let out = build_flush_batches(
-            "dev1", "9.9.9", "local", Vec::new(), Vec::new(), &resilient, &NoEmbedder,
-            &UnavailableNer, None, None, &mut acc,
+            "dev1",
+            "9.9.9",
+            "local",
+            Vec::new(),
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            None,
+            None,
+            &mut acc,
         )
         .await;
         assert!(matches!(out, FlushOutcome::Ready(b) if b.is_empty()));

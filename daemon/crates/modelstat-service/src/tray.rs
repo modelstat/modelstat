@@ -43,7 +43,11 @@ fn os_home() -> PathBuf {
 
 /// The tray launchd agent plist (§15): RunAtLoad, KeepAlive on non-clean exit,
 /// ThrottleInterval 10, PATH without any node dir. Pure — testable.
-pub fn tray_plist_contents(tray_binary: &std::path::Path, out_log: &std::path::Path, err_log: &std::path::Path) -> String {
+pub fn tray_plist_contents(
+    tray_binary: &std::path::Path,
+    out_log: &std::path::Path,
+    err_log: &std::path::Path,
+) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

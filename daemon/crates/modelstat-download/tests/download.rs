@@ -31,7 +31,10 @@ async fn serve(State(fake): State<Fake>, headers: HeaderMap) -> axum::response::
     let full = body();
     if fake.supports_range {
         if let Some(r) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
-            if let Some(start) = r.strip_prefix("bytes=").and_then(|s| s.trim_end_matches('-').parse::<usize>().ok()) {
+            if let Some(start) = r
+                .strip_prefix("bytes=")
+                .and_then(|s| s.trim_end_matches('-').parse::<usize>().ok())
+            {
                 let slice = full[start.min(full.len())..].to_vec();
                 return (StatusCode::PARTIAL_CONTENT, slice).into_response();
             }
@@ -91,7 +94,10 @@ async fn checksum_mismatch_is_an_error_and_deletes_partial() {
     };
     let client = reqwest::Client::new();
     let err = download(&client, &spec, &SilentSink).await.unwrap_err();
-    assert!(matches!(err, DownloadError::ChecksumMismatch { .. }), "got {err}");
+    assert!(
+        matches!(err, DownloadError::ChecksumMismatch { .. }),
+        "got {err}"
+    );
     assert!(!dest.exists());
     let _ = std::fs::remove_file(&dest);
 }

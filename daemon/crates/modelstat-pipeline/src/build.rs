@@ -47,7 +47,15 @@ use crate::segment::{parse_ts_ms, segment_turns, turn_meta, turn_surface};
 /// (matched case-insensitively). A generic linguistic cue set — NOT domain vocab.
 /// FROZEN (§18): a change shifts the behavior signal and needs a version bump.
 const FRUSTRATION_MARKERS: [&str; 9] = [
-    "frustrat", "annoy", "stuck", "confus", "irritat", "block", "stress", "angr", "overwhelm",
+    "frustrat",
+    "annoy",
+    "stuck",
+    "confus",
+    "irritat",
+    "block",
+    "stress",
+    "angr",
+    "overwhelm",
 ];
 
 /// The result of building one session's segments.
@@ -168,8 +176,10 @@ pub async fn build_session_titles<S: Summarizer>(
         ));
         let facts = facts_parts.join("; ");
 
-        let prompt =
-            build_title_user_prompt(&sample_abstracts(&abstracts, TITLER_MAX_ABSTRACTS), Some(&facts));
+        let prompt = build_title_user_prompt(
+            &sample_abstracts(&abstracts, TITLER_MAX_ABSTRACTS),
+            Some(&facts),
+        );
         let mut session_title = title(engine, &prompt)
             .await
             .map(|raw| sanitise_title(&raw))
@@ -260,7 +270,10 @@ where
     // Cognition (best-effort) → its `[Mood: …] [Mind: …] [Stance: …]` suffix rides
     // inside the abstract text (no wire field). None on failure/trivial abstract.
     let cog: Option<CognitionTags> = cognition(resilient.engine(), &redacted_text).await;
-    let suffix = cog.as_ref().map(format_cognition_suffix).unwrap_or_default();
+    let suffix = cog
+        .as_ref()
+        .map(format_cognition_suffix)
+        .unwrap_or_default();
     let abstract_with_cognition = if suffix.is_empty() {
         redacted_text.clone()
     } else {
@@ -313,8 +326,7 @@ where
     // User-intent distillation — from the developer's OWN messages, best-effort.
     let user_intent = summarise_user_intent(slice, resilient.engine(), ner).await;
 
-    let source_event_ids: Vec<String> =
-        slice.iter().map(|e| e.source_event_id.clone()).collect();
+    let source_event_ids: Vec<String> = slice.iter().map(|e| e.source_event_id.clone()).collect();
     let id = segment_id(session_id, started_at_ms, ended_at_ms, &source_event_ids);
     let seg = Segment {
         segment_id: id,
@@ -440,14 +452,14 @@ where
         return None;
     }
     // The ask is usually first; later messages add direction/corrections.
-    let sample: Vec<String> = if user_excerpts.len() <= USER_INTENT_SAMPLE_HEAD + USER_INTENT_SAMPLE_TAIL
-    {
-        user_excerpts
-    } else {
-        let head = &user_excerpts[..USER_INTENT_SAMPLE_HEAD];
-        let tail = &user_excerpts[user_excerpts.len() - USER_INTENT_SAMPLE_TAIL..];
-        head.iter().chain(tail).cloned().collect()
-    };
+    let sample: Vec<String> =
+        if user_excerpts.len() <= USER_INTENT_SAMPLE_HEAD + USER_INTENT_SAMPLE_TAIL {
+            user_excerpts
+        } else {
+            let head = &user_excerpts[..USER_INTENT_SAMPLE_HEAD];
+            let tail = &user_excerpts[user_excerpts.len() - USER_INTENT_SAMPLE_TAIL..];
+            head.iter().chain(tail).cloned().collect()
+        };
     let req = CompleteRequest {
         system: SUMMARISER_SYSTEM_PROMPT.to_string(),
         user: build_user_intent_user_prompt(&sample),
@@ -717,8 +729,18 @@ mod tests {
     #[tokio::test]
     async fn builds_one_segment_from_a_healthy_session() {
         let events = vec![
-            ev("e1", "2026-06-01T10:00:00.000Z", "user_message", Some("fix the auth bug")),
-            ev("e2", "2026-06-01T10:00:30.000Z", "assistant_message", Some("done, patched middleware")),
+            ev(
+                "e1",
+                "2026-06-01T10:00:00.000Z",
+                "user_message",
+                Some("fix the auth bug"),
+            ),
+            ev(
+                "e2",
+                "2026-06-01T10:00:30.000Z",
+                "assistant_message",
+                Some("done, patched middleware"),
+            ),
         ];
         let r = resilient(Fake::reply("Fixed a null deref in the auth middleware"));
         match build_for_one_session(&events, &r, &NoEmbedder, &UnavailableNer).await {
@@ -732,8 +754,14 @@ mod tests {
                 assert_eq!(s.tokens.input, 20);
                 assert_eq!(s.tokens.output, 10);
                 // deterministic tags: agents, providers, models (+temporal ×2).
-                assert!(s.tags.iter().any(|t| t.root_key == "agents" && t.name == "claude_code"));
-                assert!(s.tags.iter().any(|t| t.root_key == "providers" && t.name == "anthropic"));
+                assert!(s
+                    .tags
+                    .iter()
+                    .any(|t| t.root_key == "agents" && t.name == "claude_code"));
+                assert!(s
+                    .tags
+                    .iter()
+                    .any(|t| t.root_key == "providers" && t.name == "anthropic"));
                 assert!(s.tags.iter().any(|t| t.root_key == "models"));
                 assert!(s.tags.iter().any(|t| t.root_key == "time_of_day"));
                 assert!(s.tags.iter().any(|t| t.root_key == "cadence"));
@@ -807,8 +835,14 @@ mod tests {
             panic!("expected Ready");
         };
         let s = &segs[0];
-        assert!(s.tags.iter().any(|t| t.root_key == "projects" && t.name == "acme/web"));
-        assert!(s.tags.iter().any(|t| t.root_key == "environments" && t.name == "Prod"));
+        assert!(s
+            .tags
+            .iter()
+            .any(|t| t.root_key == "projects" && t.name == "acme/web"));
+        assert!(s
+            .tags
+            .iter()
+            .any(|t| t.root_key == "environments" && t.name == "Prod"));
         // top-2-level dir dedups to a single "core/rust" component.
         let comps: Vec<&str> = s
             .tags
@@ -818,7 +852,11 @@ mod tests {
             .collect();
         assert_eq!(comps, vec!["core/rust"]);
         // tool mix: Bash share 0.75, Read share 0.25.
-        let bash = s.tags.iter().find(|t| t.root_key == "tool_calls" && t.name == "Bash").unwrap();
+        let bash = s
+            .tags
+            .iter()
+            .find(|t| t.root_key == "tool_calls" && t.name == "Bash")
+            .unwrap();
         assert!((bash.confidence - 0.75).abs() < 1e-9);
     }
 
@@ -826,9 +864,24 @@ mod tests {
     async fn corrections_and_frustration_are_counted() {
         // user → assistant → user (a re-prompt right after the assistant) → 1 correction.
         let events = vec![
-            ev("e1", "2026-06-01T10:00:00.000Z", "user_message", Some("try X")),
-            ev("e2", "2026-06-01T10:00:05.000Z", "assistant_message", Some("did X")),
-            ev("e3", "2026-06-01T10:00:10.000Z", "user_message", Some("no, do Y")),
+            ev(
+                "e1",
+                "2026-06-01T10:00:00.000Z",
+                "user_message",
+                Some("try X"),
+            ),
+            ev(
+                "e2",
+                "2026-06-01T10:00:05.000Z",
+                "assistant_message",
+                Some("did X"),
+            ),
+            ev(
+                "e3",
+                "2026-06-01T10:00:10.000Z",
+                "user_message",
+                Some("no, do Y"),
+            ),
         ];
         let r = resilient(Fake::reply("Iterated on X then Y"));
         let BuildOutcome::Ready(segs) =
@@ -856,7 +909,10 @@ mod tests {
         else {
             panic!("expected Ready");
         };
-        assert_eq!(segs[0].abstract_embedding.as_ref().unwrap().len(), EMBED_DIM);
+        assert_eq!(
+            segs[0].abstract_embedding.as_ref().unwrap().len(),
+            EMBED_DIM
+        );
     }
 
     #[test]
@@ -896,7 +952,10 @@ mod tests {
         let a = mk(vec!["src/app/x.ts", "src/app/y.ts", "docs/readme.md"]);
         let refs: Vec<&RawEvent> = vec![&a];
         // src/app dedups to one; docs/readme.md → "docs/readme.md".
-        assert_eq!(components_from_slice(&refs), vec!["src/app", "docs/readme.md"]);
+        assert_eq!(
+            components_from_slice(&refs),
+            vec!["src/app", "docs/readme.md"]
+        );
     }
 
     #[test]
@@ -950,7 +1009,12 @@ mod tests {
     #[tokio::test]
     async fn titles_from_a_healthy_titler() {
         let segs = vec![
-            seg("s1", "2026-06-01T10:00:00Z", "Refactored the auth middleware", Some("acme/web")),
+            seg(
+                "s1",
+                "2026-06-01T10:00:00Z",
+                "Refactored the auth middleware",
+                Some("acme/web"),
+            ),
             seg("s1", "2026-06-01T10:05:00Z", "Added retry logic", None),
         ];
         let engine = Fake::reply("Auth Middleware Refactor");

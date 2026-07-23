@@ -11,7 +11,9 @@ use std::io::BufReader;
 use std::sync::OnceLock;
 
 use modelstat_redact::redact;
-use modelstat_wire::{source_event_id, tc_fallback_id, EventSource, GitContext, RawEvent, TokenUsage};
+use modelstat_wire::{
+    source_event_id, tc_fallback_id, EventSource, GitContext, RawEvent, TokenUsage,
+};
 use regex::Regex;
 use serde_json::Value;
 
@@ -59,7 +61,9 @@ pub fn derive_session_id_from_pi_path(path: &str) -> Option<String> {
         Regex::new(r"_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
             .unwrap()
     });
-    re.captures(path).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
+    re.captures(path)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 /// Join every `text` block's text (thinking/toolCall blocks dropped).
@@ -349,8 +353,7 @@ fn parse_inner(
         if role == "toolResult" {
             if let Some(ref_id) = message.get("toolCallId").and_then(Value::as_str) {
                 if let Some(idx) = pending_by_call_id.remove(ref_id) {
-                    let is_error =
-                        message.get("isError").and_then(Value::as_bool) == Some(true);
+                    let is_error = message.get("isError").and_then(Value::as_bool) == Some(true);
                     let result = message.get("content").cloned().unwrap_or(Value::Null);
                     let draft = &mut tool_calls[idx];
                     draft.ended_at = Some(ml_timestamp.to_string());

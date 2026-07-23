@@ -137,7 +137,8 @@ async fn stage_release(
         size_label: None,
         label: format!("modelstat {}", bare_version(version)),
     };
-    download(&client, &spec, &TtyProgress::new("update")).await
+    download(&client, &spec, &TtyProgress::new("update"))
+        .await
         .map_err(|e| format!("download failed: {e}"))?;
     extract_pair(&archive, staging).map_err(|e| format!("extract failed: {e}"))
 }
@@ -245,17 +246,24 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
 
     // Stop the local engine so the swap doesn't race two processes onto the model
     // (best-effort — never block the upgrade on it).
-    let _ = modelstat_service::stop_service(modelstat_service::Component::Summarizer, modelstat_service::Scope::User);
+    let _ = modelstat_service::stop_service(
+        modelstat_service::Component::Summarizer,
+        modelstat_service::Scope::User,
+    );
 
     if let Err(e) = swap_pair(&bin_dir, collector.as_deref(), engine.as_deref()) {
         rollback_pair(&bin_dir);
         clear_upgrade_marker();
-        return UpgradeOutcome::Failed(format!("auto-update swap failed ({e}); rolled back to the previous build"));
+        return UpgradeOutcome::Failed(format!(
+            "auto-update swap failed ({e}); rolled back to the previous build"
+        ));
     }
 
     // Rewrite both service files + bounce them onto the new binaries.
     let live = bin_dir.join(exe(COLLECTOR_BIN));
-    let _ = std::process::Command::new(&live).arg("_install-service").status();
+    let _ = std::process::Command::new(&live)
+        .arg("_install-service")
+        .status();
 
     match health_probe(&bin_dir, target).await {
         Ok(()) => {
@@ -263,7 +271,10 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
             // Marker is cleared by the freshly-booted daemon (it holds the lock ⇒
             // the update landed); clear here too for the manual-CLI path.
             clear_upgrade_marker();
-            UpgradeOutcome::Completed(format!("updated to {} — the service is running the new build", bare_version(target)))
+            UpgradeOutcome::Completed(format!(
+                "updated to {} — the service is running the new build",
+                bare_version(target)
+            ))
         }
         Err(e) => {
             rollback_pair(&bin_dir);
@@ -271,7 +282,9 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
                 .arg("_install-service")
                 .status();
             clear_upgrade_marker();
-            UpgradeOutcome::Failed(format!("auto-update health probe failed ({e}); rolled back to the previous build"))
+            UpgradeOutcome::Failed(format!(
+                "auto-update health probe failed ({e}); rolled back to the previous build"
+            ))
         }
     }
 }
@@ -402,8 +415,14 @@ mod tests {
         std::fs::write(&staged_e, b"ENGINE_NEW").unwrap();
 
         swap_pair(&bin, Some(&staged_c), Some(&staged_e)).unwrap();
-        assert_eq!(std::fs::read(bin.join(exe(COLLECTOR_BIN))).unwrap(), b"COLLECTOR_NEW");
-        assert_eq!(std::fs::read(bin.join(exe(ENGINE_BIN))).unwrap(), b"ENGINE_NEW");
+        assert_eq!(
+            std::fs::read(bin.join(exe(COLLECTOR_BIN))).unwrap(),
+            b"COLLECTOR_NEW"
+        );
+        assert_eq!(
+            std::fs::read(bin.join(exe(ENGINE_BIN))).unwrap(),
+            b"ENGINE_NEW"
+        );
         // Both old builds are preserved as the rollback pair.
         assert_eq!(
             std::fs::read(bin.join(format!("{}.prev", exe(COLLECTOR_BIN)))).unwrap(),
@@ -416,15 +435,23 @@ mod tests {
 
         // Health probe "fails" on the new build → roll the whole pair back.
         rollback_pair(&bin);
-        assert_eq!(std::fs::read(bin.join(exe(COLLECTOR_BIN))).unwrap(), b"COLLECTOR_OLD");
-        assert_eq!(std::fs::read(bin.join(exe(ENGINE_BIN))).unwrap(), b"ENGINE_OLD");
+        assert_eq!(
+            std::fs::read(bin.join(exe(COLLECTOR_BIN))).unwrap(),
+            b"COLLECTOR_OLD"
+        );
+        assert_eq!(
+            std::fs::read(bin.join(exe(ENGINE_BIN))).unwrap(),
+            b"ENGINE_OLD"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn maybe_auto_update_decision_matrix() {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut handled = HashSet::new();
         let now = 1_000_000_000_000;
         // Scope MODELSTAT_HOME so the marker/prefs don't touch the real home.
@@ -440,7 +467,10 @@ mod tests {
             verdict: Some("ok".into()),
             ..Default::default()
         };
-        assert_eq!(maybe_auto_update(&ok, &mut handled, now), AutoUpdateStep::Skip);
+        assert_eq!(
+            maybe_auto_update(&ok, &mut handled, now),
+            AutoUpdateStep::Skip
+        );
 
         // update_available + auto-update on ⇒ Proceed, then deduped ⇒ Skip.
         let avail = DaemonRelease {

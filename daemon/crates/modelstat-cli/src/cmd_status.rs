@@ -169,11 +169,16 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
     // ── human form (TS cmdStatus tail) ──────────────────────────────────
     println!("paired:  {}", if paired { "yes" } else { "no" });
     if paired {
-        println!("  user:    {}", user_email.as_deref().unwrap_or("(unknown)"));
+        println!(
+            "  user:    {}",
+            user_email.as_deref().unwrap_or("(unknown)")
+        );
         println!("  device:  {}", config.device_id().unwrap_or_default());
         println!(
             "  uuid:    {}",
-            config.device_uuid().unwrap_or_else(|| "(not self-registered)".into())
+            config
+                .device_uuid()
+                .unwrap_or_else(|| "(not self-registered)".into())
         );
     }
     println!(
@@ -206,12 +211,20 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
     println!(
         "auto-update: {}{}",
         if auto_update_enabled() { "on" } else { "off" },
-        if auto_update_pinned_by_env() { " (pinned by env)" } else { "" }
+        if auto_update_pinned_by_env() {
+            " (pinned by env)"
+        } else {
+            ""
+        }
     );
     if let Some(upd) = local.as_ref().and_then(|l| l.get("update")) {
         let verdict = upd.get("verdict").and_then(Value::as_str).unwrap_or("ok");
         if verdict != "ok" {
-            let what = if verdict == "upgrade_required" { "REQUIRED" } else { "available" };
+            let what = if verdict == "upgrade_required" {
+                "REQUIRED"
+            } else {
+                "available"
+            };
             let latest = upd.get("latest").and_then(Value::as_str).unwrap_or("?");
             println!("update:  {what} — latest {latest} (run `modelstat upgrade`)");
         }

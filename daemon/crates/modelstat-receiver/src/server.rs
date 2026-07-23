@@ -151,13 +151,17 @@ async fn control_scan(State(st): State<AppState>, body: Bytes) -> Response {
     let req: ControlScanRequest = match serde_json::from_slice(raw) {
         Ok(r) => r,
         Err(_) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid json" }))).into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid json" })),
+            )
+                .into_response()
         }
     };
     // Keep only non-empty session ids.
-    let session_ids = req.session_ids.map(|v| {
-        v.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>()
-    });
+    let session_ids = req
+        .session_ids
+        .map(|v| v.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>());
     let mut file = None;
     if let Some(f) = req.file {
         if !is_allowed_transcript_file(&f) {
@@ -258,7 +262,11 @@ pub async fn start_local_ingest_receiver(
     on_control_scan: Option<ControlScanHandler>,
 ) -> Option<LocalIngestReceiver> {
     let control = on_control_scan.map(|h| Arc::new(ControlRunner::new(h)));
-    let app = build_router(AppState { queue, control }, MAX_BODY_BYTES, CONTROL_MAX_BODY_BYTES);
+    let app = build_router(
+        AppState { queue, control },
+        MAX_BODY_BYTES,
+        CONTROL_MAX_BODY_BYTES,
+    );
     let addr = format!("127.0.0.1:{port}");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
@@ -322,7 +330,9 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json = if bytes.is_empty() {
             serde_json::Value::Null
         } else {
@@ -340,7 +350,10 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_ok() {
-        let st = AppState { queue: temp_queue("hz"), control: None };
+        let st = AppState {
+            queue: temp_queue("hz"),
+            control: None,
+        };
         let (status, body) = send(app(st), "GET", "/healthz", Vec::new()).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["ok"], json!(true));
@@ -349,8 +362,12 @@ mod tests {
     #[tokio::test]
     async fn ingest_enqueues_a_valid_batch() {
         let queue = temp_queue("ing");
-        let st = AppState { queue: queue.clone(), control: None };
-        let body = serde_json::to_vec(&json!({ "events": [ok_event("e1"), ok_event("e2")] })).unwrap();
+        let st = AppState {
+            queue: queue.clone(),
+            control: None,
+        };
+        let body =
+            serde_json::to_vec(&json!({ "events": [ok_event("e1"), ok_event("e2")] })).unwrap();
         let (status, resp) = send(app(st), "POST", "/v1/ingest", body).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp["accepted"], json!(2));
@@ -361,7 +378,10 @@ mod tests {
     #[tokio::test]
     async fn ingest_raw_uses_the_same_handler() {
         let queue = temp_queue("raw");
-        let st = AppState { queue: queue.clone(), control: None };
+        let st = AppState {
+            queue: queue.clone(),
+            control: None,
+        };
         let body = serde_json::to_vec(&json!({ "events": [ok_event("e1")] })).unwrap();
         let (status, _) = send(app(st), "POST", "/v1/ingest/raw", body).await;
         assert_eq!(status, StatusCode::OK);
@@ -370,7 +390,10 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_rejects_an_invalid_batch() {
-        let st = AppState { queue: temp_queue("bad"), control: None };
+        let st = AppState {
+            queue: temp_queue("bad"),
+            control: None,
+        };
         let body = serde_json::to_vec(&json!({ "events": [] })).unwrap();
         let (status, resp) = send(app(st), "POST", "/v1/ingest", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -380,7 +403,10 @@ mod tests {
     #[tokio::test]
     async fn oversized_body_is_rejected_413() {
         // Tiny cap so we exercise the limit without a 16MB allocation.
-        let st = AppState { queue: temp_queue("big"), control: None };
+        let st = AppState {
+            queue: temp_queue("big"),
+            control: None,
+        };
         let router = build_router(st, 100, CONTROL_MAX_BODY_BYTES);
         let body = vec![b'x'; 500]; // > the 100-byte cap
         let (status, _) = send(router, "POST", "/v1/ingest", body).await;
@@ -389,7 +415,10 @@ mod tests {
 
     #[tokio::test]
     async fn control_scan_is_503_without_a_handler() {
-        let st = AppState { queue: temp_queue("noctl"), control: None };
+        let st = AppState {
+            queue: temp_queue("noctl"),
+            control: None,
+        };
         let (status, _) = send(app(st), "POST", "/v1/control/scan", Vec::new()).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -430,7 +459,10 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_path_is_404() {
-        let st = AppState { queue: temp_queue("nf"), control: None };
+        let st = AppState {
+            queue: temp_queue("nf"),
+            control: None,
+        };
         let (status, _) = send(app(st), "GET", "/nope", Vec::new()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
@@ -439,7 +471,10 @@ mod tests {
     fn allowlist_permits_under_root_and_defeats_traversal() {
         let roots = vec![PathBuf::from("/home/dev/.claude/projects")];
         // Inside the root → allowed.
-        assert!(is_allowed_under("/home/dev/.claude/projects/p/a.jsonl", &roots));
+        assert!(is_allowed_under(
+            "/home/dev/.claude/projects/p/a.jsonl",
+            &roots
+        ));
         // The root itself → allowed.
         assert!(is_allowed_under("/home/dev/.claude/projects", &roots));
         // `..` traversal that escapes → rejected.
@@ -448,7 +483,10 @@ mod tests {
             &roots
         ));
         // A sibling that shares a string prefix but not a path prefix → rejected.
-        assert!(!is_allowed_under("/home/dev/.claude/projects-evil/x", &roots));
+        assert!(!is_allowed_under(
+            "/home/dev/.claude/projects-evil/x",
+            &roots
+        ));
         // Outside entirely → rejected.
         assert!(!is_allowed_under("/etc/passwd", &roots));
     }

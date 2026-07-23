@@ -48,20 +48,28 @@ fn main() -> ExitCode {
         // Pairing + service + usage snapshot; `--json` is the tray's frozen poll
         // API. Strictly side-effect-free (§5) — hence the device probe rides the
         // shared DeviceApi but never recovers identity.
-        Some("status") => block_on(|api| async move { cmd_status::cmd_status(&api, &args[1..]).await }),
+        Some("status") => {
+            block_on(|api| async move { cmd_status::cmd_status(&api, &args[1..]).await })
+        }
         Some("jobs") => block_on(|api| async move { cmd_status::cmd_jobs(&api, &args[1..]).await }),
         // Show/change the summarizer mode (§9); interactive set = the consent gate.
-        Some("mode") => block_on_config(|config| async move { cmd_mode::cmd_mode(config, &args[1..]).await }),
+        Some("mode") => {
+            block_on_config(|config| async move { cmd_mode::cmd_mode(config, &args[1..]).await })
+        }
         // Wipe cursors + stamp the processing version so the next scan re-reads all.
         Some("reset") => cmd_admin::cmd_reset(),
         // Tear down the managed service(s) + tray + statusline; identity preserved.
         Some("stop") | Some("remove") | Some("uninstall") => cmd_admin::cmd_stop(),
         // Warm-daemon-first force-scan of a session; cold in-process fallback.
-        Some("sync") => block_on_config(|config| async move { cmd_admin::cmd_sync(config, &args[1..]).await }),
+        Some("sync") => {
+            block_on_config(|config| async move { cmd_admin::cmd_sync(config, &args[1..]).await })
+        }
         // Read-only local discovery printout (POSTs nothing).
         Some("discover") => cmd_admin::cmd_discover(),
         // Foreground watcher (dev convenience) — runs until Ctrl-C.
-        Some("watch") => block_on_config(|config| async move { cmd_admin::cmd_watch(config).await }),
+        Some("watch") => {
+            block_on_config(|config| async move { cmd_admin::cmd_watch(config).await })
+        }
         // Self-update now (§13), and the auto-update preference toggle.
         Some("upgrade") => block_on_config(|_c| async move { cmd_update::cmd_upgrade().await }),
         Some("autoupdate") => cmd_update::cmd_autoupdate(&args[1..]),
@@ -365,7 +373,10 @@ fn cmd_install_service() -> ExitCode {
     use modelstat_service::{install_service, tray, Component, Scope};
     match install_service(Component::Daemon, Scope::User) {
         Ok(r) => {
-            println!("\x1b[32m✓\x1b[0m daemon service installed: {}", r.path.display());
+            println!(
+                "\x1b[32m✓\x1b[0m daemon service installed: {}",
+                r.path.display()
+            );
             println!("  logs: {}", r.logs.display());
         }
         Err(e) => {

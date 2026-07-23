@@ -133,7 +133,10 @@ mod tests {
             vec!["scripts/build.py", "ci/run.sh"]
         );
         // A leading path-to-an-executable (i==0 && contains '/').
-        assert_eq!(detect_script_refs("/usr/local/bin/tool arg"), vec!["/usr/local/bin/tool"]);
+        assert_eq!(
+            detect_script_refs("/usr/local/bin/tool arg"),
+            vec!["/usr/local/bin/tool"]
+        );
         // Flags and URLs are skipped.
         assert!(detect_script_refs("curl https://example.com/x.sh").is_empty());
     }

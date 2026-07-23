@@ -53,7 +53,8 @@ fn find_repo_root(start_cwd: &str) -> Option<String> {
 pub fn parse_remote(url: &str) -> (Option<String>, Option<String>) {
     // git@github.com:org/repo(.git)?  OR  ([host]:)org/repo
     static SSH: OnceLock<Regex> = OnceLock::new();
-    let ssh = SSH.get_or_init(|| Regex::new(r"^(?:git@)?([^:]+):([^/]+)/([^.]+?)(?:\.git)?$").unwrap());
+    let ssh =
+        SSH.get_or_init(|| Regex::new(r"^(?:git@)?([^:]+):([^/]+)/([^.]+?)(?:\.git)?$").unwrap());
     if let Some(c) = ssh.captures(url) {
         let host = c.get(1).map(|m| m.as_str().to_string());
         let slug = Some(format!("{}/{}", &c[2], &c[3]));
@@ -73,7 +74,9 @@ pub fn parse_remote(url: &str) -> (Option<String>, Option<String>) {
 
 /// Minimal URL split for the http(s) remote case: `(host, pathname)`.
 fn split_url(url: &str) -> Option<(String, String)> {
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
@@ -188,7 +191,10 @@ mod tests {
             Some("acme/myrepo")
         );
         // Single segment after `projects` → no match (claude_basic case).
-        assert_eq!(guess_repo_slug_from_path(Some("/Users/dev/projects/myrepo")), None);
+        assert_eq!(
+            guess_repo_slug_from_path(Some("/Users/dev/projects/myrepo")),
+            None
+        );
         // Worktree noise collapses to the org.
         assert_eq!(
             guess_repo_slug_from_path(Some("/home/x/src/acme/.claude")).as_deref(),
@@ -199,10 +205,7 @@ mod tests {
 
     #[test]
     fn main_repo_path_strips_worktree() {
-        assert_eq!(
-            main_repo_path("/repo/.claude/worktrees/abc"),
-            "/repo"
-        );
+        assert_eq!(main_repo_path("/repo/.claude/worktrees/abc"), "/repo");
         assert_eq!(main_repo_path("/repo/src"), "/repo/src");
     }
 
@@ -242,14 +245,22 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
-        let _ = run(&["config", "remote.origin.url", "git@github.com:acme/myrepo.git"]);
+        let _ = run(&[
+            "config",
+            "remote.origin.url",
+            "git@github.com:acme/myrepo.git",
+        ]);
         let mut resolver = GitResolver::new();
         let ctx = resolver.resolve(Some(&path)).unwrap();
         assert_eq!(ctx.remote_slug.as_deref(), Some("acme/myrepo"));
         assert_eq!(ctx.remote_host.as_deref(), Some("github.com"));
         // Second call is served from cache.
         assert_eq!(
-            resolver.resolve(Some(&path)).unwrap().remote_slug.as_deref(),
+            resolver
+                .resolve(Some(&path))
+                .unwrap()
+                .remote_slug
+                .as_deref(),
             Some("acme/myrepo")
         );
         let _ = std::fs::remove_dir_all(&dir);

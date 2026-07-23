@@ -52,7 +52,9 @@ pub use codex::{parse_codex_rollout, parse_codex_rollout_streaming};
 pub use cursor::parse_cursor_tracking_db;
 pub use pi::{parse_pi_session, parse_pi_session_streaming};
 
-pub use discovery::{discover, DetectedIdentity, DetectedInstallation, DiscoveryOptions, DiscoveryOutput};
+pub use discovery::{
+    discover, DetectedIdentity, DetectedInstallation, DiscoveryOptions, DiscoveryOutput,
+};
 
 // The session-metadata surface the M4 pass consumes (feature §7.4): the pure
 // reference core + the git-enrichment seam + the two git-history read shapes.

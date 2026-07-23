@@ -262,11 +262,17 @@ mod tests {
         with_env(
             &[
                 ("MODELSTAT_SUMMARIZER_MODE", Some("self-hosted")),
-                ("MODELSTAT_SUMMARIZER_URL", Some("https://engine.acme.internal:4321")),
+                (
+                    "MODELSTAT_SUMMARIZER_URL",
+                    Some("https://engine.acme.internal:4321"),
+                ),
             ],
             || {
                 let config = Config::load("daemon-test");
-                assert_eq!(engine_base_url(&config), "https://engine.acme.internal:4321");
+                assert_eq!(
+                    engine_base_url(&config),
+                    "https://engine.acme.internal:4321"
+                );
             },
         );
     }
@@ -295,7 +301,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("modelstat-eng-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("summarizer.json"), br#"{"port":4399,"bind":"127.0.0.1"}"#).unwrap();
+        std::fs::write(
+            dir.join("summarizer.json"),
+            br#"{"port":4399,"bind":"127.0.0.1"}"#,
+        )
+        .unwrap();
         with_env(&[("MODELSTAT_HOME", Some(dir.to_str().unwrap()))], || {
             assert_eq!(engine_port(), 4399);
         });

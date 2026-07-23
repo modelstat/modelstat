@@ -98,7 +98,10 @@ fn age_ms(iso: &str, now_ms: i64) -> Option<i64> {
 /// `daemonHealth`.
 pub fn daemon_health(now_ms: i64, my_daemon_version: Option<&str>) -> DaemonHealth {
     let lock = read_daemon_lock(&daemon_lock_path());
-    let owner_alive = lock.as_ref().map(|l| is_process_alive(l.pid)).unwrap_or(false);
+    let owner_alive = lock
+        .as_ref()
+        .map(|l| is_process_alive(l.pid))
+        .unwrap_or(false);
     let lock_age_ms = lock.as_ref().and_then(|l| age_ms(&l.started_at, now_ms));
     let status_age_ms = read_status_written_at().and_then(|w| age_ms(&w, now_ms));
 
@@ -158,12 +161,28 @@ mod tests {
     #[test]
     fn no_lock_or_dead_owner_spawns() {
         assert_eq!(
-            decide_supervision(None, false, None, None, None, STATUS_FRESH_MS, BOOT_GRACE_MS),
+            decide_supervision(
+                None,
+                false,
+                None,
+                None,
+                None,
+                STATUS_FRESH_MS,
+                BOOT_GRACE_MS
+            ),
             SuperviseDecision::Spawn
         );
         let l = lock("9.9.9");
         assert_eq!(
-            decide_supervision(Some(&l), false, Some(1000), Some(1000), None, STATUS_FRESH_MS, BOOT_GRACE_MS),
+            decide_supervision(
+                Some(&l),
+                false,
+                Some(1000),
+                Some(1000),
+                None,
+                STATUS_FRESH_MS,
+                BOOT_GRACE_MS
+            ),
             SuperviseDecision::Spawn
         );
     }
@@ -172,7 +191,15 @@ mod tests {
     fn live_owner_with_fresh_heartbeat_is_adopted() {
         let l = lock("9.9.9");
         assert_eq!(
-            decide_supervision(Some(&l), true, Some(500_000), Some(5_000), None, STATUS_FRESH_MS, BOOT_GRACE_MS),
+            decide_supervision(
+                Some(&l),
+                true,
+                Some(500_000),
+                Some(5_000),
+                None,
+                STATUS_FRESH_MS,
+                BOOT_GRACE_MS
+            ),
             SuperviseDecision::Adopt
         );
     }
@@ -182,7 +209,15 @@ mod tests {
         let l = lock("9.9.9");
         // No status yet, but the lock is young → grace adopt.
         assert_eq!(
-            decide_supervision(Some(&l), true, Some(10_000), None, None, STATUS_FRESH_MS, BOOT_GRACE_MS),
+            decide_supervision(
+                Some(&l),
+                true,
+                Some(10_000),
+                None,
+                None,
+                STATUS_FRESH_MS,
+                BOOT_GRACE_MS
+            ),
             SuperviseDecision::Adopt
         );
     }
@@ -191,7 +226,15 @@ mod tests {
     fn wedged_owner_stale_heartbeat_past_grace_is_replaced() {
         let l = lock("9.9.9");
         assert_eq!(
-            decide_supervision(Some(&l), true, Some(500_000), Some(500_000), None, STATUS_FRESH_MS, BOOT_GRACE_MS),
+            decide_supervision(
+                Some(&l),
+                true,
+                Some(500_000),
+                Some(500_000),
+                None,
+                STATUS_FRESH_MS,
+                BOOT_GRACE_MS
+            ),
             SuperviseDecision::Replace
         );
     }
@@ -202,8 +245,13 @@ mod tests {
         // Fresh heartbeat, but the probing CLI is a newer version → replace.
         assert_eq!(
             decide_supervision(
-                Some(&l), true, Some(1_000), Some(1_000), Some("9.9.9"),
-                STATUS_FRESH_MS, BOOT_GRACE_MS
+                Some(&l),
+                true,
+                Some(1_000),
+                Some(1_000),
+                Some("9.9.9"),
+                STATUS_FRESH_MS,
+                BOOT_GRACE_MS
             ),
             SuperviseDecision::Replace
         );
@@ -211,8 +259,13 @@ mod tests {
         let u = lock("unknown");
         assert_eq!(
             decide_supervision(
-                Some(&u), true, Some(1_000), Some(1_000), Some("9.9.9"),
-                STATUS_FRESH_MS, BOOT_GRACE_MS
+                Some(&u),
+                true,
+                Some(1_000),
+                Some(1_000),
+                Some("9.9.9"),
+                STATUS_FRESH_MS,
+                BOOT_GRACE_MS
             ),
             SuperviseDecision::Adopt
         );

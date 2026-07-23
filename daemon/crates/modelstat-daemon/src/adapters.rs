@@ -51,7 +51,8 @@ impl BatchUploader for DeviceApi {
 impl BackfillDigest for DeviceApi {
     async fn fetch_days(&mut self) -> Option<BackfillDays> {
         let base = self.config().api_url();
-        self.authed_json_get::<BackfillDays>(&backfill_url(&base, None)).await
+        self.authed_json_get::<BackfillDays>(&backfill_url(&base, None))
+            .await
     }
 
     async fn fetch_day_sessions(&mut self, day: &str) -> Option<BackfillDaySessions> {
@@ -173,7 +174,10 @@ mod tests {
             raw_s3_key: None,
         });
         assert_eq!(upload_outcome(commit), Ok(7));
-        assert_eq!(upload_outcome(UploadResult::Hold("offline".into())), Err(Hold));
+        assert_eq!(
+            upload_outcome(UploadResult::Hold("offline".into())),
+            Err(Hold)
+        );
     }
 
     #[test]

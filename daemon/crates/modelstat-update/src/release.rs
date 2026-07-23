@@ -79,7 +79,9 @@ fn archive_ext() -> &'static str {
 /// Strip a `daemon-` tag prefix (and a stray leading `v`) to the bare semver —
 /// the heartbeat may report either `daemon-1.2.3` or `1.2.3`.
 pub fn bare_version(v: &str) -> &str {
-    v.strip_prefix("daemon-").unwrap_or(v).trim_start_matches('v')
+    v.strip_prefix("daemon-")
+        .unwrap_or(v)
+        .trim_start_matches('v')
 }
 
 /// The download URL for a version's archive on THIS platform (plan D9):
@@ -142,9 +144,10 @@ mod tests {
 
     #[test]
     fn release_deserializes_and_ignores_min() {
-        let r: DaemonRelease =
-            serde_json::from_str(r#"{"verdict":"update_available","min":"1.0.0","latest":"1.4.2"}"#)
-                .unwrap();
+        let r: DaemonRelease = serde_json::from_str(
+            r#"{"verdict":"update_available","min":"1.0.0","latest":"1.4.2"}"#,
+        )
+        .unwrap();
         assert_eq!(r.verdict(), ReleaseVerdict::UpdateAvailable);
         assert_eq!(r.latest.as_deref(), Some("1.4.2"));
         // Absent fields default cleanly.

@@ -50,8 +50,11 @@ pub trait QueueStore {
     async fn put(&self, item: QueueItem) -> std::io::Result<()>;
     async fn has(&self, source_event_id: &str) -> bool;
     async fn list_unsent_by_session(&self) -> BTreeMap<String, Vec<QueueItem>>;
-    async fn mark_sent(&self, source_event_ids: &[String], batch_id: Option<&str>)
-        -> std::io::Result<()>;
+    async fn mark_sent(
+        &self,
+        source_event_ids: &[String],
+        batch_id: Option<&str>,
+    ) -> std::io::Result<()>;
     async fn count_unsent(&self) -> usize;
 }
 
@@ -217,8 +220,12 @@ impl QueueStore for FileQueueStore {
     async fn list_unsent_by_session(&self) -> BTreeMap<String, Vec<QueueItem>> {
         let mut inner = self.inner.lock().unwrap();
         self.ensure_loaded(&mut inner);
-        let mut unsent: Vec<QueueItem> =
-            inner.items.values().filter(|i| !i.synced).cloned().collect();
+        let mut unsent: Vec<QueueItem> = inner
+            .items
+            .values()
+            .filter(|i| !i.synced)
+            .cloned()
+            .collect();
         // (session_id asc, then last_event_ts_ms asc) so each session's turns are
         // in chronological order — matches the TS sort.
         unsent.sort_by(|a, b| {
@@ -335,7 +342,10 @@ mod tests {
         q.put(item("c", "s1", 10)).await.unwrap();
 
         let grouped = q.list_unsent_by_session().await;
-        assert_eq!(grouped.keys().cloned().collect::<Vec<_>>(), vec!["s1", "s2"]);
+        assert_eq!(
+            grouped.keys().cloned().collect::<Vec<_>>(),
+            vec!["s1", "s2"]
+        );
         // s1's items in chronological order (ts 10 before 20).
         let s1: Vec<&str> = grouped["s1"]
             .iter()
@@ -344,7 +354,9 @@ mod tests {
         assert_eq!(s1, vec!["c", "a"]);
 
         // Marking s1's items sent removes them from the unsent view.
-        q.mark_sent(&["a".into(), "c".into()], Some("batch1")).await.unwrap();
+        q.mark_sent(&["a".into(), "c".into()], Some("batch1"))
+            .await
+            .unwrap();
         assert_eq!(q.count_unsent().await, 1);
         let grouped = q.list_unsent_by_session().await;
         assert_eq!(grouped.keys().cloned().collect::<Vec<_>>(), vec!["s2"]);
@@ -356,7 +368,10 @@ mod tests {
         let now = 10_000_000_000i64;
         let mut items = serde_json::Map::new();
         let mut add = |it: QueueItem| {
-            items.insert(it.source_event_id.clone(), serde_json::to_value(&it).unwrap());
+            items.insert(
+                it.source_event_id.clone(),
+                serde_json::to_value(&it).unwrap(),
+            );
         };
         // synced + older than a day → dropped.
         let mut old = item("old", "s", now - SENT_TTL_MS - 1);

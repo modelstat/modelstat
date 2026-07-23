@@ -538,8 +538,13 @@ mod tests {
     }
     impl BatchUploader for RecordingUploader {
         async fn upload(&mut self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold> {
-            self.attempts
-                .push(batch.events.iter().map(|e| e.source_event_id.clone()).collect());
+            self.attempts.push(
+                batch
+                    .events
+                    .iter()
+                    .map(|e| e.source_event_id.clone())
+                    .collect(),
+            );
             if self.hold {
                 return Err(Hold);
             }
