@@ -58,7 +58,19 @@ else
 fi
 say()  { printf "%b\n" "$*"; }
 step() { printf "\n%b▸ %b%s%b\n" "$BRAND" "$BOLD" "$1" "$RESET"; }
-ok()   { printf "%b✓%b %s\n" "$BRAND" "$RESET" "$1"; REMOVED=$((REMOVED + 1)); }
+# A dry run must never render as a past-tense success. It used to print the same
+# "✓ removed X" line as a real run, so a `--dry-run` transcript was read as proof
+# the machine had been cleaned when nothing had been touched. Under --dry-run the
+# marker and tense both change; the counter still advances so the summary can say
+# how much a real run would remove.
+ok()   {
+  # The negation leads, before the message, because the messages themselves are
+  # past tense ("removed X") and no grammatical prefix reads unambiguously across
+  # all of them. Skimming a line must never leave the impression it happened.
+  if [ -n "$DRY" ]; then printf "%b→ (dry run — not done) %s%b\n" "$DIM" "$1" "$RESET"
+  else printf "%b✓%b %s\n" "$BRAND" "$RESET" "$1"; fi
+  REMOVED=$((REMOVED + 1))
+}
 skip() { printf "%b·%b %s\n" "$DIM" "$RESET" "$1"; }
 warn() { printf "%b! %s%b\n" "$YEL" "$1" "$RESET"; }
 die()  { printf "%b✗ %s%b\n" "$RED" "$1" "$RESET" >&2; exit 1; }
@@ -103,7 +115,10 @@ rm_path() {
 # rather than lost in the scroll.
 sweep() {
   [ -e "$1" ] || [ -L "$1" ] || return 0
-  if [ -n "$DRY" ]; then printf "%b    would delete: %s%b\n" "$DIM" "$1" "$RESET"; ok "$2"; return 0; fi
+  # One line per path under --dry-run: the "would delete" line already says it,
+  # so the extra ok() only doubled the output (and, before ok() learned about
+  # --dry-run, printed a ✓ that read as a completed deletion).
+  if [ -n "$DRY" ]; then printf "%b    would delete: %s%b\n" "$DIM" "$1" "$RESET"; REMOVED=$((REMOVED + 1)); return 0; fi
   if rm -rf "$1" 2>/dev/null; then ok "$2"
   else warn "needs elevation: $1"; NEEDS_SUDO="$NEEDS_SUDO $1"; fi
 }
@@ -304,7 +319,12 @@ json_prune() {
 step "Background services"
 SVC_HIT=""
 if [ "$OS" = Darwin ]; then
-  for label in ai.modelstat.daemon ai.modelstat.summarizer ai.modelstat.tray; do
+  # `ai.modelstat.agent` is the pre-rename label. An install from that era keeps
+  # it forever — the plist is written once at install and every later upgrade
+  # only swaps the binary — so a machine can report a current daemon version
+  # while still being supervised under the old label. Miss it and the uninstall
+  # reports "no services installed" on a machine whose daemon is running.
+  for label in ai.modelstat.daemon ai.modelstat.agent ai.modelstat.summarizer ai.modelstat.tray; do
     plist="$HOME/Library/LaunchAgents/$label.plist"
     if [ -f "$plist" ]; then
       run launchctl bootout "gui/$(id -u)/$label"
@@ -356,7 +376,11 @@ fi
 step "Running processes"
 PROC_HIT=""
 if command -v pgrep >/dev/null 2>&1; then
-  for pat in 'modelstat\.mjs' '\.modelstat/bin/modelstat' 'modelstat-summarizer' 'ModelstatTray'; do
+  # `modelstat agent` is the pre-rename subcommand, launched from a global npm
+  # bin (`/opt/homebrew/bin/modelstat`, not `~/.modelstat/bin`), so neither of
+  # the two path-shaped patterns matches it. Anchored on the space so it can
+  # only match our own two-word invocation.
+  for pat in 'modelstat\.mjs' '\.modelstat/bin/modelstat' 'modelstat agent' 'modelstat-summarizer' 'ModelstatTray'; do
     if pgrep -f "$pat" >/dev/null 2>&1; then
       run pkill -TERM -f "$pat"
       ok "stopped processes matching $pat"
@@ -673,14 +697,22 @@ fi
 
 if [ "$REMOVED" = 0 ]; then
   say "${BRAND}${BOLD}  Nothing found — this machine is already clean.${RESET}"
+elif [ -n "$DRY" ]; then
+  say "${BRAND}${BOLD}  Dry run — NOTHING was changed. A real run would remove $REMOVED item(s).${RESET}"
+  say "${DIM}  Re-run without --dry-run to actually remove them.${RESET}"
 else
   say "${BRAND}${BOLD}  Done — modelstat is gone ($REMOVED item(s) removed).${RESET}"
 fi
 say ""
-say "${DIM}  Open a NEW terminal, then confirm:${RESET}"
-say "${DIM}    command -v modelstat     # expect no output${RESET}"
-say "${DIM}    ls ~/.modelstat          # expect: No such file or directory${RESET}"
-say ""
+# Only after a real run: telling someone to "confirm it's gone" at the end of a
+# dry run is what made a --dry-run transcript look like a completed uninstall.
+if [ -z "$DRY" ]; then
+  say "${DIM}  Open a NEW terminal, then confirm:${RESET}"
+  say "${DIM}    command -v modelstat     # expect no output${RESET}"
+  say "${DIM}    ls ~/.modelstat          # expect: No such file or directory${RESET}"
+  say "${DIM}    pgrep -fl modelstat | grep -v mcp   # expect no output${RESET}"
+  say ""
+fi
 say "${DIM}  Your account and history on modelstat.ai are server-side and untouched —${RESET}"
 say "${DIM}  delete those from the dashboard if you want them gone too.${RESET}"
 say ""
