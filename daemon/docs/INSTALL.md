@@ -31,6 +31,8 @@ readable form.
 - [Run your own summariser engine](#run-your-own-summariser-engine-self-hosted)
 - [Updating](#updating)
 - [Uninstalling](#uninstalling)
+  - [Keep your pairing](#keep-your-pairing-stop-the-service-leave-the-data)
+  - [Remove everything](#remove-everything)
 - [Data & privacy](#data--privacy)
 - [Where things live on disk](#where-things-live-on-disk)
 - [Troubleshooting & FAQ](#troubleshooting--faq)
@@ -339,6 +341,8 @@ version fails to come up.
 
 ## Uninstalling
 
+### Keep your pairing (stop the service, leave the data)
+
 ```sh
 modelstat stop        # or: modelstat remove  /  modelstat uninstall
 ```
@@ -348,18 +352,64 @@ statusline, and the PATH entry from your shell startup file. Your device pairing
 is **kept** in `~/.modelstat`, so running `~/.modelstat/bin/modelstat` (full path
 — the PATH entry is gone) re-enables everything later.
 
-To remove it completely, also delete the home directory:
+To reclaim disk without fully uninstalling, delete just the models:
+`rm -rf ~/.modelstat/models/`.
+
+### Remove everything
 
 ```sh
-rm -rf ~/.modelstat          # macOS / Linux
+curl -fsSL https://modelstat.ai/uninstall.sh | sh
 ```
 
 ```powershell
-Remove-Item -Recurse -Force "$env:USERPROFILE\.modelstat"   # Windows
+irm https://modelstat.ai/uninstall.ps1 | iex
 ```
 
-To reclaim disk without fully uninstalling, delete just the models:
-`rm -rf ~/.modelstat/models/`.
+Total removal. Afterwards the machine is indistinguishable from one that never
+installed modelstat. It covers **both eras in one pass** — the native Rust
+install and the retired npm/Node one — because a machine that upgraded through
+the npm era can still be carrying a global `modelstat` that shadows the native
+binary on PATH, plus an `npx @modelstat/mcp` entry in every AI tool.
+
+It removes:
+
+| | |
+|---|---|
+| Services | all three launchd agents / both systemd units, per-user and system scope, plus Windows scheduled tasks and services |
+| Processes | anything of ours still running, including the tray |
+| Binaries | `~/.modelstat/bin`, the `/usr/local/bin` symlinks, the Homebrew formula and tap |
+| Packages | `modelstat`, `@modelstat/daemon`, `@modelstat/mcp` across npm, pnpm, yarn, bun and volta — and, because those tools cannot always find their own packages (see below), a direct sweep of every global root on disk |
+| Launchers | every `modelstat` / `modelstat-summarizer` command, including under Node versions that are not active right now |
+| Caches | npx and pnpm-dlx copies |
+| Wiring | MCP entries in 13 config locations plus Codex TOML and the `claude` CLI; the Claude Code statusline and plugin registration |
+| PATH | our block in every shell startup file, the fish drop-in, and Windows Path entries |
+| Data | `~/.modelstat` and `/var/lib/modelstat` in full — identity, models, logs |
+
+**Nothing is preserved, including your device identity.** Installing again
+registers the machine as a **brand-new device** on the dashboard. There is no
+flag to keep the old pairing — use `modelstat stop` above if that is what you
+want.
+
+It leaves alone: Node.js and your package managers, other MCP servers in the
+same config files, a statusline of your own (restored if we had composed over
+it), and Claude Code's session history in `~/.claude/projects/` — those
+directories are named after *your* repo paths, so some contain the word
+"modelstat" without being ours.
+
+Pass `--dry-run` (`-DryRun` on Windows) to print every change without making
+one. Config edits are written atomically and leave no `.bak` files behind. A
+system-wide install needs `sudo` / an elevated PowerShell; the script names
+exactly what is left if you are not elevated.
+
+> **Why it does not just ask the package manager.** pnpm resolves `-g` against
+> the *current* store version, so a package installed by an older pnpm
+> (`~/Library/pnpm/global/5`) is invisible to a newer one that resolves to
+> `global/v11`: `pnpm ls -g` reports "No global packages found" and
+> `pnpm remove -g` silently does nothing — while the command is still on PATH
+> and working. nvm, fnm and volta have the same shape, one global root per Node
+> version. So the uninstaller asks every manager *and* sweeps the roots on disk,
+> and it removes launcher shims separately from packages, because removing a
+> package does not always remove its launcher.
 
 ---
 

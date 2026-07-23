@@ -7,6 +7,8 @@ its own home at cutover (M9). See feature §3/§13/§22 and plan §8/D9.
 |---|---|---|
 | [`../scripts/install.sh`](../scripts/install.sh) | served at `modelstat.ai/install.sh` (core-repo Caddyfile rule, 302 → this file on GitHub) | `curl \| sh` — download + verify + stage + `connect` |
 | [`../scripts/install.ps1`](../scripts/install.ps1) | served at `modelstat.ai/install.ps1` (core-repo Caddyfile rule, 302 → this file on GitHub) | `irm \| iex` Windows installer |
+| [`../scripts/uninstall.sh`](../scripts/uninstall.sh) | served at `modelstat.ai/uninstall.sh` (core-repo Caddyfile rule, 302 → this file on GitHub) | `curl \| sh` — TOTAL removal: both the native install and the retired npm/Node one (services, globals, launchers, MCP, statusline, plugin, PATH, `~/.modelstat`) |
+| [`../scripts/uninstall.ps1`](../scripts/uninstall.ps1) | served at `modelstat.ai/uninstall.ps1` (core-repo Caddyfile rule, 302 → this file on GitHub) | `irm \| iex` Windows equivalent |
 | [`../../.github/workflows/release-daemon-rs.yml`](../../.github/workflows/release-daemon-rs.yml) | already in place | tag `daemon-<semver>` → build 6 targets → checksum/sign → GitHub Release |
 | [`homebrew/modelstat.rb`](homebrew/modelstat.rb) | tap repo `modelstat/homebrew-tap` → `Formula/modelstat.rb` | binary formula (installs both binaries) |
 | [`homebrew/bump-formula.yml`](homebrew/bump-formula.yml) | tap repo → `.github/workflows/bump-formula.yml` | the missing `agent-released` listener that bumps the formula per release |
@@ -30,5 +32,7 @@ its own home at cutover (M9). See feature §3/§13/§22 and plan §8/D9.
 - **Live e2e**: `curl \| sh` / `irm \| iex` on fresh VMs and the
   staging→staging self-update swap+rollback (plan §5 M7 AC) need a real published
   release to download — run once the first tag ships.
-- **Serving + Caddyfile**: pointing `modelstat.ai/install.sh` (+ `/install.ps1`) at these
-  scripts is a core-repo ops step (plan §8).
+- **Serving + Caddyfile**: pointing `modelstat.ai/install.sh` (+ `/install.ps1`,
+  `/uninstall.sh`, `/uninstall.ps1`) at these scripts is a core-repo ops step
+  (plan §8). Until those rules land, the uninstaller is reachable at its raw
+  GitHub URL — see [`../scripts/uninstall.sh`](../scripts/uninstall.sh).
