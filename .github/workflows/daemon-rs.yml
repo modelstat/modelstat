@@ -162,26 +162,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon
-      - name: shellcheck install.sh (errors only)
+      - name: shellcheck the shipped shell scripts (errors only)
         if: matrix.os == 'ubuntu-latest'
-        run: shellcheck -S error scripts/install.sh
+        run: shellcheck -S error scripts/install.sh scripts/uninstall.sh
+      # uninstall.sh is `sh`, not bash — check it under dash too, since that is
+      # what /bin/sh is on Debian/Ubuntu and a bashism would only fail there.
+      - name: dash-parse uninstall.sh
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y dash >/dev/null && dash -n scripts/uninstall.sh && echo "uninstall.sh parses under dash"
       - name: installer-logic lane (verify · stage · idempotent · tamper-reject)
         run: bash scripts/e2e-install.sh
 
-  # ---- Windows installer lint (install.ps1) -------------------------------
+  # ---- Windows script lint (install.ps1 + uninstall.ps1) ------------------
   installer-windows:
     name: installer (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Parse + lint install.ps1
+      - name: Parse + lint the PowerShell scripts
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # AST parse — fails on a malformed script.
-          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path scripts/install.ps1), [ref]$null, [ref]$null) | Out-Null
-          Write-Host "install.ps1 parses"
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $errs = Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Error
-          if ($errs) { $errs | Format-Table -AutoSize; throw "PSScriptAnalyzer found errors in install.ps1" }
-          Write-Host "install.ps1: no analyzer errors"
+          foreach ($s in @('scripts/install.ps1', 'scripts/uninstall.ps1')) {
+            # AST parse — fails on a malformed script.
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $s), [ref]$null, [ref]$null) | Out-Null
+            Write-Host "$s parses"
+            $errs = Invoke-ScriptAnalyzer -Path $s -Severity Error
+            if ($errs) { $errs | Format-Table -AutoSize; throw "PSScriptAnalyzer found errors in $s" }
+            Write-Host "$s : no analyzer errors"
+          }
