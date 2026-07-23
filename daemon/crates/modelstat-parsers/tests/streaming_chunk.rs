@@ -12,10 +12,7 @@ use modelstat_wire::RawEvent;
 
 #[test]
 fn streaming_flushes_at_the_chunk_boundary_and_matches_collect() {
-    let dir = std::env::temp_dir().join(format!(
-        "modelstat-stream-chunk-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("modelstat-stream-chunk-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("big.jsonl");
@@ -58,8 +55,14 @@ fn streaming_flushes_at_the_chunk_boundary_and_matches_collect() {
         "a chunk exceeded PARSER_EVENT_CHUNK={PARSER_EVENT_CHUNK}: {chunk_sizes:?}"
     );
     // Equivalence STILL holds at scale + streaming never accumulates in-memory.
-    assert!(res.events.is_empty(), "streaming must not accumulate events");
-    assert_eq!(streamed, collected.events, "streamed events must equal collected");
+    assert!(
+        res.events.is_empty(),
+        "streaming must not accumulate events"
+    );
+    assert_eq!(
+        streamed, collected.events,
+        "streamed events must equal collected"
+    );
     assert_eq!(res.tool_calls, collected.tool_calls);
     assert_eq!(res.stats, collected.stats);
 

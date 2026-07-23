@@ -296,7 +296,11 @@ pub fn wire_codex(home: &Path, exe: &str) -> WireStatus {
 /// would therefore leave a migrated user invoking the dead npm connector forever —
 /// so when an entry already exists and isn't ours, we remove it and add fresh.
 pub fn wire_claude_code(exe: &str) -> WireStatus {
-    let claude = if cfg!(windows) { "claude.cmd" } else { "claude" };
+    let claude = if cfg!(windows) {
+        "claude.cmd"
+    } else {
+        "claude"
+    };
     if Command::new(claude)
         .arg("--version")
         .stdout(std::process::Stdio::null())
@@ -584,15 +588,24 @@ mod tests {
         assert_eq!(wire_codex(&home, EXE), WireStatus::Configured);
         let toml = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
         assert!(!toml.contains("npx"), "stale npx command survived:\n{toml}");
-        assert!(!toml.contains("@modelstat/mcp"), "stale npx args survived:\n{toml}");
+        assert!(
+            !toml.contains("@modelstat/mcp"),
+            "stale npx args survived:\n{toml}"
+        );
         assert!(toml.contains(&format!("command = \"{EXE}\"")), "{toml}");
         assert_eq!(
             toml.matches("[mcp_servers.modelstat]").count(),
             1,
             "duplicate table:\n{toml}"
         );
-        assert!(toml.contains("[mcp_servers.other]"), "sibling dropped:\n{toml}");
-        assert!(toml.contains("model = \"gpt\""), "preamble dropped:\n{toml}");
+        assert!(
+            toml.contains("[mcp_servers.other]"),
+            "sibling dropped:\n{toml}"
+        );
+        assert!(
+            toml.contains("model = \"gpt\""),
+            "preamble dropped:\n{toml}"
+        );
         // Idempotent now that the table is ours.
         assert_eq!(wire_codex(&home, EXE), WireStatus::Already);
     }

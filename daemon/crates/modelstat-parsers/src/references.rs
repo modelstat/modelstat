@@ -156,38 +156,62 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
 // forge URLs mirrors the JS `/…/gi` flag.
 fn github_pr() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
-    re(&C, r"(?i)https?://github\.com/([0-9A-Za-z_.\-]+)/([0-9A-Za-z_.\-]+)/pull/([0-9]+)")
+    re(
+        &C,
+        r"(?i)https?://github\.com/([0-9A-Za-z_.\-]+)/([0-9A-Za-z_.\-]+)/pull/([0-9]+)",
+    )
 }
 fn gitlab_mr() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
-    re(&C, r"(?i)https?://gitlab\.com/([0-9A-Za-z_./\-]+?)/-/merge_requests/([0-9]+)")
+    re(
+        &C,
+        r"(?i)https?://gitlab\.com/([0-9A-Za-z_./\-]+?)/-/merge_requests/([0-9]+)",
+    )
 }
 fn bitbucket_pr() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
-    re(&C, r"(?i)https?://bitbucket\.org/([0-9A-Za-z_.\-]+)/([0-9A-Za-z_.\-]+)/pull-requests/([0-9]+)")
+    re(
+        &C,
+        r"(?i)https?://bitbucket\.org/([0-9A-Za-z_.\-]+)/([0-9A-Za-z_.\-]+)/pull-requests/([0-9]+)",
+    )
 }
 fn github_issue() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
-    re(&C, r"(?i)https?://github\.com/([0-9A-Za-z_.\-]+)/([0-9A-Za-z_.\-]+)/issues/([0-9]+)")
+    re(
+        &C,
+        r"(?i)https?://github\.com/([0-9A-Za-z_.\-]+)/([0-9A-Za-z_.\-]+)/issues/([0-9]+)",
+    )
 }
 fn gitlab_issue() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
-    re(&C, r"(?i)https?://gitlab\.com/([0-9A-Za-z_./\-]+?)/-/issues/([0-9]+)")
+    re(
+        &C,
+        r"(?i)https?://gitlab\.com/([0-9A-Za-z_./\-]+?)/-/issues/([0-9]+)",
+    )
 }
 fn linear_issue() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
-    re(&C, r"(?i)https?://linear\.app/[0-9A-Za-z_.\-]+/issue/([A-Z][A-Z0-9]*-[0-9]+)")
+    re(
+        &C,
+        r"(?i)https?://linear\.app/[0-9A-Za-z_.\-]+/issue/([A-Z][A-Z0-9]*-[0-9]+)",
+    )
 }
 fn jira_issue() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
-    re(&C, r"(?i)https?://[0-9A-Za-z_.\-]+/browse/([A-Z][A-Z0-9]+-[0-9]+)")
+    re(
+        &C,
+        r"(?i)https?://[0-9A-Za-z_.\-]+/browse/([A-Z][A-Z0-9]+-[0-9]+)",
+    )
 }
 /// `org/repo#123` — the GitHub shorthand, anchored on a boundary. No `i` flag.
 fn slug_hash() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
     // `\[` — Rust reads a bare `[` inside a class as a nested-class opener (JS
     // treats it as a literal), so it must be escaped.
-    re(&C, r"(?:^|[\s(\[{<])([0-9A-Za-z_.\-]+/[0-9A-Za-z_.\-]+)#([0-9]+)(?-u:\b)")
+    re(
+        &C,
+        r"(?:^|[\s(\[{<])([0-9A-Za-z_.\-]+/[0-9A-Za-z_.\-]+)#([0-9]+)(?-u:\b)",
+    )
 }
 /// A bare `TEAM-123` ticket key. Uppercase-anchored, no `i` flag.
 fn bare_ticket() -> &'static Regex {
@@ -197,7 +221,10 @@ fn bare_ticket() -> &'static Regex {
 /// PR-cue lookbehind for the shorthand (`\b(pr|pull-request|…|merged)\s*$`).
 fn pr_cue() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
-    re(&C, r"(?i)(?-u:\b)(pr|pull[ -]?request|merge[ -]?request|mr|merged)\s*$")
+    re(
+        &C,
+        r"(?i)(?-u:\b)(pr|pull[ -]?request|merge[ -]?request|mr|merged)\s*$",
+    )
 }
 
 fn repo_from(host: Option<String>, slug: &str, source: &str) -> RepoRef {
@@ -231,7 +258,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merged_at: None,
             reverted: None,
         });
-        out.repos.push(repo_from(Some("github.com".into()), &slug, source));
+        out.repos
+            .push(repo_from(Some("github.com".into()), &slug, source));
     }
     for c in gitlab_mr().captures_iter(text) {
         out.pull_requests.push(PullRequestRef {
@@ -245,7 +273,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merged_at: None,
             reverted: None,
         });
-        out.repos.push(repo_from(Some("gitlab.com".into()), &c[1], source));
+        out.repos
+            .push(repo_from(Some("gitlab.com".into()), &c[1], source));
     }
     for c in bitbucket_pr().captures_iter(text) {
         let slug = format!("{}/{}", &c[1], &c[2]);
@@ -260,7 +289,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merged_at: None,
             reverted: None,
         });
-        out.repos.push(repo_from(Some("bitbucket.org".into()), &slug, source));
+        out.repos
+            .push(repo_from(Some("bitbucket.org".into()), &slug, source));
     }
 
     for c in github_issue().captures_iter(text) {
@@ -273,7 +303,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             source: source.into(),
             confidence: 0.95,
         });
-        out.repos.push(repo_from(Some("github.com".into()), &slug, source));
+        out.repos
+            .push(repo_from(Some("github.com".into()), &slug, source));
     }
     for c in gitlab_issue().captures_iter(text) {
         out.issues.push(IssueRef {
@@ -284,7 +315,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             source: source.into(),
             confidence: 0.95,
         });
-        out.repos.push(repo_from(Some("gitlab.com".into()), &c[1], source));
+        out.repos
+            .push(repo_from(Some("gitlab.com".into()), &c[1], source));
     }
     for c in linear_issue().captures_iter(text) {
         out.issues.push(IssueRef {
@@ -335,7 +367,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
                 merged_at: None,
                 reverted: None,
             });
-            out.repos.push(repo_from(Some("github.com".into()), &slug, source));
+            out.repos
+                .push(repo_from(Some("github.com".into()), &slug, source));
         } else {
             out.issues.push(IssueRef {
                 provider: "github".into(),
@@ -416,7 +449,11 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
     let mut prs: std::collections::HashMap<String, PullRequestRef> =
         std::collections::HashMap::new();
     for p in parts.pull_requests {
-        let key = format!("{}#{}", p.slug.clone().unwrap_or_default().to_lowercase(), p.number);
+        let key = format!(
+            "{}#{}",
+            p.slug.clone().unwrap_or_default().to_lowercase(),
+            p.number
+        );
         match prs.get_mut(&key) {
             Some(existing) => {
                 let (win, lose) = if score(&existing.source, existing.confidence)
@@ -487,14 +524,22 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
             }
         }
     }
-    let mut deduped_issues: Vec<IssueRef> =
-        issue_order.iter().filter_map(|k| issues.remove(k)).collect();
+    let mut deduped_issues: Vec<IssueRef> = issue_order
+        .iter()
+        .filter_map(|k| issues.remove(k))
+        .collect();
 
     // Reconcile the ambiguous `org/repo#N` shorthand: drop a phantom GitHub issue
     // when a real PR for the same (slug, number) exists.
     let pr_keys: std::collections::HashSet<String> = pull_requests
         .iter()
-        .map(|p| format!("{}#{}", p.slug.clone().unwrap_or_default().to_lowercase(), p.number))
+        .map(|p| {
+            format!(
+                "{}#{}",
+                p.slug.clone().unwrap_or_default().to_lowercase(),
+                p.number
+            )
+        })
         .collect();
     deduped_issues.retain(|i| {
         !(i.provider == "github"
@@ -504,7 +549,11 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
                 i.key
             )))
     });
-    let issues: Vec<IssueRef> = deduped_issues.into_iter().filter(valid_issue).take(100).collect();
+    let issues: Vec<IssueRef> = deduped_issues
+        .into_iter()
+        .filter(valid_issue)
+        .take(100)
+        .collect();
 
     (repos, pull_requests, issues)
 }
@@ -613,7 +662,11 @@ pub fn dedupe_files(files: Vec<FileRef>) -> Vec<FileRef> {
     let mut order: Vec<String> = Vec::new();
     let mut by_key: std::collections::HashMap<String, FileRef> = std::collections::HashMap::new();
     for f in files {
-        let key = format!("{}:{}", f.slug.clone().unwrap_or_default().to_lowercase(), f.path);
+        let key = format!(
+            "{}:{}",
+            f.slug.clone().unwrap_or_default().to_lowercase(),
+            f.path
+        );
         match by_key.get_mut(&key) {
             Some(e) => {
                 if e.slug.is_none() {
@@ -655,7 +708,8 @@ mod tests {
 
     #[test]
     fn github_pr_url_yields_pr_and_repo() {
-        let refs = detect_event_references("see https://github.com/acme/api/pull/42 please").unwrap();
+        let refs =
+            detect_event_references("see https://github.com/acme/api/pull/42 please").unwrap();
         assert_eq!(refs["pull_requests"][0]["number"], 42);
         assert_eq!(refs["pull_requests"][0]["slug"], "acme/api");
         assert_eq!(refs["repos"][0]["slug"], "acme/api");

@@ -19,7 +19,7 @@ use modelstat_ingest::{identity_path, DeviceApi, DeviceMeError};
 use modelstat_service::{install_service, path_env, tray, uninstall_service, Component, Scope};
 use serde_json::{json, Map, Value};
 
-use crate::util::{api_base, open_browser, stdin_is_tty};
+use crate::util::{api_base, has_terminal, open_browser};
 
 /// Parsed `connect` flags (feature §5).
 pub struct ConnectOpts {
@@ -100,7 +100,10 @@ fn emit(json: bool, event: &str, fields: Value) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    println!("{}", serde_json::to_string(&connect_line(event, ts, fields)).unwrap());
+    println!(
+        "{}",
+        serde_json::to_string(&connect_line(event, ts, fields)).unwrap()
+    );
 }
 
 fn now_bak_suffix() -> String {
@@ -114,7 +117,11 @@ fn now_bak_suffix() -> String {
 pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     let config = api.config().clone();
     let j = opts.json;
-    let scope = if opts.system { Scope::System } else { Scope::User };
+    let scope = if opts.system {
+        Scope::System
+    } else {
+        Scope::User
+    };
     // "Fresh install" for the consent gate = no identity on disk yet (a re-run
     // reuses the already-consented mode). Captured BEFORE step 1 registers.
     let fresh_install = !identity_path().exists();
@@ -129,14 +136,20 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
         if crate::cmd_self_register(api).await != ExitCode::SUCCESS {
             return ExitCode::FAILURE;
         }
-    } else if config.device_uuid().is_none() || config.bearer().is_none() || config.device_id().is_none() {
+    } else if config.device_uuid().is_none()
+        || config.bearer().is_none()
+        || config.device_id().is_none()
+    {
         step(j, "Registering this device with modelstat.ai");
         if crate::cmd_self_register(api).await != ExitCode::SUCCESS {
             return ExitCode::FAILURE;
         }
     } else {
         step(j, "Re-using existing device identity");
-        ok_line(j, &format!("device {}", config.device_id().unwrap_or_default()));
+        ok_line(
+            j,
+            &format!("device {}", config.device_id().unwrap_or_default()),
+        );
         ok_line(j, &format!("identity file {}", identity_path().display()));
     }
 
@@ -155,15 +168,12 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
                 }
             }
             Err(DeviceMeError::Unauthorized) => {
-                let re = !j
-                    && !opts.yes
-                    && stdin_is_tty()
-                    && {
-                        use std::io::Write;
-                        print!("Re-register this device? [Y/n] ");
-                        let _ = std::io::stdout().flush();
-                        !crate::util::prompt_line("").eq_ignore_ascii_case("n")
-                    };
+                let re = !j && !opts.yes && has_terminal() && {
+                    use std::io::Write;
+                    print!("Re-register this device? [Y/n] ");
+                    let _ = std::io::stdout().flush();
+                    !crate::util::prompt_line("").eq_ignore_ascii_case("n")
+                };
                 if re || opts.yes {
                     let _ = api.recover_identity().await;
                 }
@@ -202,7 +212,7 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
         j,
         "Choosing where sessions get summarised (redaction stays on your machine)",
     );
-    let non_interactive = opts.json || opts.yes || !stdin_is_tty();
+    let non_interactive = opts.json || opts.yes || !has_terminal();
     if opts.mode.is_none() && fresh_install && non_interactive {
         // Consent must be explicit at least once (§3.3).
         eprintln!(
@@ -215,7 +225,7 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let interactive_mode = !opts.yes && !opts.json && stdin_is_tty();
+    let interactive_mode = !opts.yes && !opts.json && has_terminal();
     let mode = match crate::cmd_mode::resolve_and_persist_mode(
         &config,
         opts.mode.as_deref(),
@@ -235,7 +245,10 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     if config.summarizer_mode_is_env_overridden() {
         warn_line(
             j,
-            &format!("MODELSTAT_SUMMARIZER_MODE is set — using \"{}\"", config.summarizer_mode()),
+            &format!(
+                "MODELSTAT_SUMMARIZER_MODE is set — using \"{}\"",
+                config.summarizer_mode()
+            ),
         );
     }
     let mut mode_fields = Map::new();
@@ -257,12 +270,27 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
                 model_ready = true;
                 ok_line(j, "local summariser engine installed");
                 emit(j, "summariser_model_ready", json!({}));
-                emit(j, "summarizer_service_installed", json!({ "path": svc.path.display().to_string() }));
+                emit(
+                    j,
+                    "summarizer_service_installed",
+                    json!({ "path": svc.path.display().to_string() }),
+                );
             }
             Err(e) => {
-                warn_line(j, &format!("couldn't install the local engine ({e}) — it lazy-loads later"));
-                emit(j, "summariser_model_failed", json!({ "error": e.to_string() }));
-                emit(j, "summarizer_service_failed", json!({ "error": e.to_string() }));
+                warn_line(
+                    j,
+                    &format!("couldn't install the local engine ({e}) — it lazy-loads later"),
+                );
+                emit(
+                    j,
+                    "summariser_model_failed",
+                    json!({ "error": e.to_string() }),
+                );
+                emit(
+                    j,
+                    "summarizer_service_failed",
+                    json!({ "error": e.to_string() }),
+                );
             }
         }
     } else {
@@ -272,17 +300,26 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     }
     // Every mode: pre-warm the on-device NER redactor (fail-closed on cloud/
     // self-hosted, so this keeps the first scan full-quality).
-    step(j, "Preparing the on-device redactor (downloads the ~250 MB PII model)");
+    step(
+        j,
+        "Preparing the on-device redactor (downloads the ~250 MB PII model)",
+    );
     if modelstat_daemon::engine::ensure_ner_model().await {
         ok_line(j, "on-device redactor ready");
         emit(j, "redactor_model_ready", json!({}));
     } else {
-        warn_line(j, "redactor model not ready — the daemon finishes it on its first scan");
+        warn_line(
+            j,
+            "redactor model not ready — the daemon finishes it on its first scan",
+        );
         emit(j, "redactor_model_not_ready", json!({}));
     }
 
     // ── 5. Service install ──────────────────────────────────────────────
-    step(j, "Installing/refreshing background service so the daemon survives reboots");
+    step(
+        j,
+        "Installing/refreshing background service so the daemon survives reboots",
+    );
     let mut service_ok = false;
     match install_service(Component::Daemon, scope) {
         Ok(svc) => {
@@ -295,8 +332,15 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
             );
         }
         Err(e) => {
-            warn_line(j, &format!("service install failed ({e}) — run `modelstat start` manually"));
-            emit(j, "service_install_failed", json!({ "error": e.to_string() }));
+            warn_line(
+                j,
+                &format!("service install failed ({e}) — run `modelstat start` manually"),
+            );
+            emit(
+                j,
+                "service_install_failed",
+                json!({ "error": e.to_string() }),
+            );
         }
     }
 
@@ -310,13 +354,21 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
             match tray::install_tray_autostart() {
                 Ok(Some(path)) => {
                     ok_line(j, "menu-bar tray ready");
-                    emit(j, "tray_installed", json!({ "path": path.display().to_string() }));
+                    emit(
+                        j,
+                        "tray_installed",
+                        json!({ "path": path.display().to_string() }),
+                    );
                     emit(j, "tray_autostart_installed", json!({ "ok": true }));
                 }
                 Ok(None) => emit(j, "tray_autostart_installed", json!({ "ok": false })),
                 Err(e) => {
                     warn_line(j, &format!("tray autostart install failed: {e}"));
-                    emit(j, "tray_autostart_installed", json!({ "ok": false, "error": e.to_string() }));
+                    emit(
+                        j,
+                        "tray_autostart_installed",
+                        json!({ "ok": false, "error": e.to_string() }),
+                    );
                 }
             }
         } else {
@@ -327,7 +379,10 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
 
     // ── 6. Claude Code statusline ───────────────────────────────────────
     if !env_flag("MODELSTAT_NO_STATUSLINE") {
-        step(j, "Enabling the Claude Code statusline (live tokens · $ · taxonomy)");
+        step(
+            j,
+            "Enabling the Claude Code statusline (live tokens · $ · taxonomy)",
+        );
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
@@ -350,8 +405,15 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     step(j, "Detecting installed AI tools and signed-in accounts");
     let discovered = discover_counts();
     if let Some((installs, identities)) = discovered {
-        ok_line(j, &format!("{installs} installations, {identities} identities"));
-        emit(j, "discovered", json!({ "installations": installs, "identities": identities }));
+        ok_line(
+            j,
+            &format!("{installs} installations, {identities} identities"),
+        );
+        emit(
+            j,
+            "discovered",
+            json!({ "installations": installs, "identities": identities }),
+        );
     } else {
         emit(j, "discovery_failed", json!({ "error": "discovery error" }));
     }
@@ -359,7 +421,11 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     // ── 8. MCP wiring (EMBEDDED — no npx, §5.8) ─────────────────────────
     let mut mcp_wired = false;
     if std::env::var_os("MODELSTAT_NO_WIRE").is_some() {
-        emit(j, "mcp_wire_skipped", json!({ "reason": "MODELSTAT_NO_WIRE" }));
+        emit(
+            j,
+            "mcp_wire_skipped",
+            json!({ "reason": "MODELSTAT_NO_WIRE" }),
+        );
     } else {
         step(j, "Wiring the modelstat MCP into your AI tools");
         use modelstat_mcp::wire::{run_wire, Plat, WireStatus};
@@ -369,13 +435,20 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
             .unwrap_or_else(|| "modelstat".into());
         let home = modelstat_ingest::modelstat_home();
         let results = run_wire(&home, Plat::current(), &exe, true);
-        let n = results.iter().filter(|r| r.status == WireStatus::Configured).count();
+        let n = results
+            .iter()
+            .filter(|r| r.status == WireStatus::Configured)
+            .count();
         mcp_wired = n > 0 || results.iter().any(|r| r.status == WireStatus::Already);
         if mcp_wired {
             ok_line(j, "MCP wired into your AI tools");
             emit(j, "mcp_wired", json!({}));
         } else {
-            emit(j, "mcp_wire_failed", json!({ "error": "no tools configured" }));
+            emit(
+                j,
+                "mcp_wire_failed",
+                json!({ "error": "no tools configured" }),
+            );
         }
     }
 
@@ -394,7 +467,11 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
         let opened = open_browser(&claim_url);
         emit(j, "browser_open_attempted", json!({ "opened": opened }));
     }
-    emit(j, "done", json!({ "claim_url": claim_url, "agent_url": agent_url, "mcp_wired": mcp_wired }));
+    emit(
+        j,
+        "done",
+        json!({ "claim_url": claim_url, "agent_url": agent_url, "mcp_wired": mcp_wired }),
+    );
 
     // Service-install failure in human mode → foreground fallback is the daemon's
     // job (`modelstat start`); connect itself has finished onboarding.
@@ -419,26 +496,40 @@ fn print_banner(b: &BannerInfo) {
     println!("{line}");
     println!("  ✓ Device registered — streaming your AI usage to modelstat.");
     println!();
-    let (col, word) = if b.service_ok { ("32", "installed") } else { ("33", "foreground") };
+    let (col, word) = if b.service_ok {
+        ("32", "installed")
+    } else {
+        ("33", "foreground")
+    };
     println!("    service : \x1b[{col}m{word}\x1b[0m");
     if let Some((installs, identities)) = b.discovered {
         println!("    detected: \x1b[32m{installs} installs · {identities} accounts\x1b[0m");
     }
     if cfg!(target_os = "macos") {
-        let (col, word) = if tray_installed { ("32", "menu-bar icon ready") } else { ("2", "not installed") };
+        let (col, word) = if tray_installed {
+            ("32", "menu-bar icon ready")
+        } else {
+            ("2", "not installed")
+        };
         println!("    tray    : \x1b[{col}m{word}\x1b[0m");
     }
     println!();
     println!(
         "{}",
-        if b.claimed { "  Open your dashboard:" } else { "  Open your dashboard (no sign-up needed):" }
+        if b.claimed {
+            "  Open your dashboard:"
+        } else {
+            "  Open your dashboard (no sign-up needed):"
+        }
     );
     println!("    \x1b[1;36m{}\x1b[0m", b.claim_url);
     println!();
     println!("  Live numbers from this terminal:");
     println!("    \x1b[2mmodelstat status\x1b[0m  # pairing, service + sessions · tokens · cost");
     println!("    \x1b[2mmodelstat jobs\x1b[0m    # pipeline queue + recent activity");
-    println!("    \x1b[2mmodelstat mode\x1b[0m    # where sessions summarise (cloud/local/self-hosted)");
+    println!(
+        "    \x1b[2mmodelstat mode\x1b[0m    # where sessions summarise (cloud/local/self-hosted)"
+    );
     // The installer just put the bin dir on PATH, but a shell reads its startup
     // file once — THIS shell still can't see it. Say so, rather than printing
     // three commands that would answer "command not found".
@@ -476,7 +567,11 @@ fn discover_counts() -> Option<(usize, usize)> {
 /// `MODELSTAT_NO_STATUSLINE` truthiness (`1|true|yes`) — TS `envFlag`.
 fn env_flag(name: &str) -> bool {
     matches!(
-        std::env::var(name).unwrap_or_default().trim().to_lowercase().as_str(),
+        std::env::var(name)
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+            .as_str(),
         "1" | "true" | "yes"
     )
 }

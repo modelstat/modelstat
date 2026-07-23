@@ -113,9 +113,7 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
 
 /// Discover every scan job under the real `$HOME`.
 pub fn discover_jobs() -> Vec<ScanJob> {
-    home_dir()
-        .map(|h| discover_jobs_in(&h))
-        .unwrap_or_default()
+    home_dir().map(|h| discover_jobs_in(&h)).unwrap_or_default()
 }
 
 /// Parse one job (collect mode) with the right parser.
@@ -168,8 +166,7 @@ mod tests {
 
     #[test]
     fn walks_the_three_roots_and_tags_the_parser() {
-        let home =
-            std::env::temp_dir().join(format!("modelstat-jobs-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("modelstat-jobs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let mk = |rel: &str| {
             let p = home.join(rel);

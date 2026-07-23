@@ -21,10 +21,10 @@ pub use batch::{
     enrich_tool_call_redaction, prepare_cloud_raw_events, ulid,
 };
 pub use build::{build_for_one_session, build_session_titles, BuildOutcome};
-pub use session_metadata::{build_session_metadata, LinkExtractor};
 pub use embed::{embed_turns, l2_normalize, mean_pool, Embedder, NoEmbedder, EMBED_DIM};
 pub use passes::{CognitionTags, THINKING_HEADROOM_TOKENS};
 pub use resilient::{
     preflight, PreflightReport, ResilientSummarizer, SummarizeOutcome, Summarizer, DEFAULT_COOLDOWN,
 };
 pub use segment::{cosine_distance, segment_turns, turn_meta, turn_surface, TurnMeta};
+pub use session_metadata::{build_session_metadata, LinkExtractor};

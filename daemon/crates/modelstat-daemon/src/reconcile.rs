@@ -247,8 +247,11 @@ where
     let cutoff_day = utc_day_from_ms(now_ms - RESHIP_SETTLE_MS);
 
     // 4. Drill only into days the server is short on AND old enough to have settled.
-    let server_day_map: BTreeMap<String, i64> =
-        server_days.days.into_iter().map(|d| (d.day, d.events)).collect();
+    let server_day_map: BTreeMap<String, i64> = server_days
+        .days
+        .into_iter()
+        .map(|d| (d.day, d.events))
+        .collect();
     let mut reship = store.reship_state();
     let mut seen_keys: BTreeSet<String> = BTreeSet::new();
     let mut files_to_reship: BTreeSet<String> = BTreeSet::new();
@@ -476,7 +479,10 @@ mod tests {
         // Cursor cleared so the next scan re-ships the file.
         assert!(!store.cursor.contains_key("/a.jsonl"));
         // A backoff record was written for the re-shipped (day,session).
-        assert_eq!(store.reship_state().get("2026-07-10\0s1").unwrap().attempts, 1);
+        assert_eq!(
+            store.reship_state().get("2026-07-10\0s1").unwrap().attempts,
+            1
+        );
     }
 
     #[tokio::test]
@@ -624,7 +630,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(parse_calls, 0); // cache hit — no re-parse
-        // local_events counts only the surviving /a.jsonl (7), NOT the GC'd 999.
+                                    // local_events counts only the surviving /a.jsonl (7), NOT the GC'd 999.
         assert_eq!(out.local_events, 7);
         assert!(!store.reconcile_cache().contains_key("/gone.jsonl"));
         assert!(!store.cursor.contains_key("/gone.jsonl")); // cursor pruned

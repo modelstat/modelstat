@@ -141,7 +141,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            assert_eq!(ino_before.ino(), after.ino(), "truncate must keep the inode");
+            assert_eq!(
+                ino_before.ino(),
+                after.ino(),
+                "truncate must keep the inode"
+            );
         }
         let _ = ino_before;
 
@@ -173,7 +177,13 @@ mod tests {
 
     #[test]
     fn old_log_name_swaps_the_suffix() {
-        assert_eq!(old_log_path(Path::new("/l/out.log")), PathBuf::from("/l/out.old.log"));
-        assert_eq!(old_log_path(Path::new("/l/err.log")), PathBuf::from("/l/err.old.log"));
+        assert_eq!(
+            old_log_path(Path::new("/l/out.log")),
+            PathBuf::from("/l/out.old.log")
+        );
+        assert_eq!(
+            old_log_path(Path::new("/l/err.log")),
+            PathBuf::from("/l/err.old.log")
+        );
     }
 }

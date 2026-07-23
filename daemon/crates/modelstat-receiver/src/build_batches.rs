@@ -57,7 +57,11 @@ pub struct BuildBatchesOpts {
 }
 
 impl BuildBatchesOpts {
-    pub fn new(device_id: impl Into<String>, daemon_version: impl Into<String>, now_ms: i64) -> Self {
+    pub fn new(
+        device_id: impl Into<String>,
+        daemon_version: impl Into<String>,
+        now_ms: i64,
+    ) -> Self {
         BuildBatchesOpts {
             device_id: device_id.into(),
             daemon_version: daemon_version.into(),
@@ -284,7 +288,12 @@ mod tests {
         let path = tmp_path("quiet");
         let q = seed(&path, vec![item("e1", "s1", 0), item("e2", "s1", 0)]).await;
         // now (10s) − lastTs (0) ≥ debounce (7s) → quiet → ships.
-        let out = build_batches(&q, &FakePipeline { held: false }, &BuildBatchesOpts::new("dev1", "9.9.9", 10_000)).await;
+        let out = build_batches(
+            &q,
+            &FakePipeline { held: false },
+            &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+        )
+        .await;
         match out {
             DrainBatches::Ready(b) => {
                 assert_eq!(b.len(), 1);
@@ -302,7 +311,12 @@ mod tests {
         let path = tmp_path("debounce");
         // lastTs 9500, now 10000 → 500ms < 7s debounce, and 1 item < force threshold.
         let q = seed(&path, vec![item("e1", "s1", 9_500)]).await;
-        let out = build_batches(&q, &FakePipeline { held: false }, &BuildBatchesOpts::new("dev1", "9.9.9", 10_000)).await;
+        let out = build_batches(
+            &q,
+            &FakePipeline { held: false },
+            &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+        )
+        .await;
         match out {
             DrainBatches::Ready(b) => assert!(b.is_empty()), // held back by debounce
             DrainBatches::Held => panic!("debounce is not a hold"),
@@ -356,7 +370,12 @@ mod tests {
     async fn a_held_pipeline_holds_the_whole_pass() {
         let path = tmp_path("held");
         let q = seed(&path, vec![item("e1", "s1", 0)]).await;
-        let out = build_batches(&q, &FakePipeline { held: true }, &BuildBatchesOpts::new("dev1", "9.9.9", 10_000)).await;
+        let out = build_batches(
+            &q,
+            &FakePipeline { held: true },
+            &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+        )
+        .await;
         assert!(matches!(out, DrainBatches::Held));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -368,7 +387,12 @@ mod tests {
         // One tool call whose source_event_id matches the event → gets the segment.
         it.tool_calls = Some(vec![draft("e1")]);
         let q = seed(&path, vec![it]).await;
-        let out = build_batches(&q, &FakePipeline { held: false }, &BuildBatchesOpts::new("dev1", "9.9.9", 10_000)).await;
+        let out = build_batches(
+            &q,
+            &FakePipeline { held: false },
+            &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+        )
+        .await;
         match out {
             DrainBatches::Ready(b) => {
                 assert_eq!(b[0].tool_calls.len(), 1);

@@ -24,9 +24,7 @@ use crate::git::guess_repo_slug_from_path;
 use crate::line_reader::OffsetLines;
 use crate::references::detect_event_references;
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
-use crate::tool_hash::{
-    hash_args, json_bytes, split_observed_tool_name, tool_identity,
-};
+use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
 use crate::util::{collapse_ws, slice_utf16, strip_code};
 use modelstat_wire::tc_fallback_id;
@@ -38,12 +36,17 @@ pub fn derive_session_id_from_filename(path: &str) -> Option<String> {
         Regex::new(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
             .unwrap()
     });
-    re.captures(path).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
+    re.captures(path)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 /// Claude encodes `/` as `-`. Not a perfect inverse; good enough for display.
 pub fn decode_encoded_dir(encoded: &str) -> String {
-    let stripped = encoded.strip_prefix('-').map(|s| format!("/{s}")).unwrap_or_else(|| encoded.to_string());
+    let stripped = encoded
+        .strip_prefix('-')
+        .map(|s| format!("/{s}"))
+        .unwrap_or_else(|| encoded.to_string());
     stripped.replace('-', "/")
 }
 
@@ -201,35 +204,34 @@ fn parse_inner(
 
     // Dedupe id for the line about to be emitted, or None to drop it (a resume
     // copy whose ancestor transcript is still on disk).
-    let dedupe_id_for =
-        |session_id: &Option<String>,
-         line_uuid: &str,
-         byte_offset: u64,
-         ancestors: &mut AncestorCache|
-         -> Option<String> {
-            let is_resume_copy = match (&filename_session_id, session_id) {
-                (Some(f), Some(s)) => s != f,
-                _ => false,
-            };
-            if !is_resume_copy {
-                return Some(source_event_id(
-                    &ctx.device_id,
-                    &EventSource::File {
-                        file: &ctx.source_file,
-                        byte_offset,
-                    },
-                ));
-            }
-            let sid = session_id.as_deref().unwrap_or("");
-            if ancestors.exists(sid) {
-                None // drop
-            } else {
-                Some(source_event_id(
-                    &ctx.device_id,
-                    &EventSource::LineUuid { line_uuid },
-                ))
-            }
+    let dedupe_id_for = |session_id: &Option<String>,
+                         line_uuid: &str,
+                         byte_offset: u64,
+                         ancestors: &mut AncestorCache|
+     -> Option<String> {
+        let is_resume_copy = match (&filename_session_id, session_id) {
+            (Some(f), Some(s)) => s != f,
+            _ => false,
         };
+        if !is_resume_copy {
+            return Some(source_event_id(
+                &ctx.device_id,
+                &EventSource::File {
+                    file: &ctx.source_file,
+                    byte_offset,
+                },
+            ));
+        }
+        let sid = session_id.as_deref().unwrap_or("");
+        if ancestors.exists(sid) {
+            None // drop
+        } else {
+            Some(source_event_id(
+                &ctx.device_id,
+                &EventSource::LineUuid { line_uuid },
+            ))
+        }
+    };
 
     while let Some((line, offset)) = lines.next_line()? {
         raw_lines += 1;
@@ -266,7 +268,10 @@ fn parse_inner(
         if kind == "assistant" {
             let message = obj.get("message").cloned().unwrap_or(Value::Null);
             let usage = message.get("usage").cloned().unwrap_or(Value::Null);
-            let model = message.get("model").and_then(Value::as_str).map(str::to_string);
+            let model = message
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             if let Some(m) = &model {
                 if m != "<synthetic>" {
                     last_model = Some(m.clone());
@@ -350,7 +355,11 @@ fn parse_inner(
 
             sink.push(RawEvent {
                 source_event_id: event_id,
-                ts: obj.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string(),
+                ts: obj
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 kind: "assistant_message".to_string(),
                 agent: "claude_code".to_string(),
                 provider: "anthropic".to_string(),
@@ -423,7 +432,11 @@ fn parse_inner(
             let refs = detect_event_references(&collect_ref_text(&content));
             sink.push(RawEvent {
                 source_event_id: event_id,
-                ts: obj.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string(),
+                ts: obj
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 kind: "user_message".to_string(),
                 agent: "claude_code".to_string(),
                 provider: "anthropic".to_string(),
@@ -450,7 +463,11 @@ fn parse_inner(
         } else if kind == "tool_use" {
             // Top-level `type:'tool_use'` line — a per-call draft only (never an
             // event), anchored to this line's own byte offset.
-            let observed = obj.get("name").and_then(Value::as_str).map(str::trim).unwrap_or("");
+            let observed = obj
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
             let ts = obj.get("timestamp").and_then(Value::as_str);
             let sid = obj
                 .get("sessionId")

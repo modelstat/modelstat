@@ -331,7 +331,10 @@ mod tests {
     #[test]
     fn golden_cases() {
         let cases = [
-            ("kubectl rollout restart deploy/payments-api -n prod", "kubectl"),
+            (
+                "kubectl rollout restart deploy/payments-api -n prod",
+                "kubectl",
+            ),
             ("cd x && git push", "git"),
             ("./deploy.sh --now", "deploy.sh"),
             ("sudo systemctl restart nginx", "systemctl"),

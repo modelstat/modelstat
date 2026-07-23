@@ -55,7 +55,9 @@ async fn complete(State(engine): State<Arc<Engine>>, body: Json<CompleteRequest>
         top_k: req.top_k,
     };
     match engine.complete(params).await {
-        CompleteOutcome::Ready(text) => (StatusCode::OK, Json(CompleteResponse { text })).into_response(),
+        CompleteOutcome::Ready(text) => {
+            (StatusCode::OK, Json(CompleteResponse { text })).into_response()
+        }
         CompleteOutcome::Loading => (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, RETRY_AFTER_SECS)],
@@ -152,13 +154,13 @@ mod tests {
     async fn oversized_body_is_rejected() {
         let base = spawn(MockBackend::ready()).await;
         let big = "x".repeat(2 * 1024 * 1024); // 2 MB > the 1 MB cap
-        // The body-limit layer refuses the upload. Depending on timing the client
-        // either reads the 413 response cleanly, or — if the server sends 413 and
-        // closes the connection before we finish writing all 2 MB — reqwest
-        // surfaces the reset as a transport error instead. BOTH mean the oversized
-        // body was rejected (never accepted + processed), which is what this test
-        // guards. Asserting *only* 413 made it flaky (~1/3) on the RST race; a 200
-        // or a timeout would still (correctly) fail here.
+                                               // The body-limit layer refuses the upload. Depending on timing the client
+                                               // either reads the 413 response cleanly, or — if the server sends 413 and
+                                               // closes the connection before we finish writing all 2 MB — reqwest
+                                               // surfaces the reset as a transport error instead. BOTH mean the oversized
+                                               // body was rejected (never accepted + processed), which is what this test
+                                               // guards. Asserting *only* 413 made it flaky (~1/3) on the RST race; a 200
+                                               // or a timeout would still (correctly) fail here.
         match reqwest::Client::new()
             .post(format!("{base}/v1/complete"))
             .header("content-type", "application/json")

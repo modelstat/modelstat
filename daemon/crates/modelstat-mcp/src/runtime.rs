@@ -213,7 +213,9 @@ impl McpBackend for HttpBackend {
             .send()
             .await;
         match r {
-            Ok(resp) if resp.status().is_success() => log("eager: daemon force-scanned the session"),
+            Ok(resp) if resp.status().is_success() => {
+                log("eager: daemon force-scanned the session")
+            }
             Ok(_) => log("eager: daemon returned non-2xx — proceeding"),
             Err(_) => log("eager: no local daemon on the control port — proceeding"),
         }
@@ -232,7 +234,11 @@ pub async fn run_bridge(version: &'static str) {
     let backend = HttpBackend::new(&config);
     log(&format!(
         "ready (auth={})",
-        if backend.has_auth() { "present" } else { "none" }
+        if backend.has_auth() {
+            "present"
+        } else {
+            "none"
+        }
     ));
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();

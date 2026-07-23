@@ -26,13 +26,21 @@ async fn main() {
     // ── Embedder ──────────────────────────────────────────────────────────
     let embed_ok = async {
         println!("\n▸ BGE embedder: download + run…");
-        let dir = download_hf_model(&client, &BGE_SMALL, &models_dir, &TtyProgress::new("bge-small"))
-            .await
-            .map_err(|e| format!("download: {e}"))?;
+        let dir = download_hf_model(
+            &client,
+            &BGE_SMALL,
+            &models_dir,
+            &TtyProgress::new("bge-small"),
+        )
+        .await
+        .map_err(|e| format!("download: {e}"))?;
         let embedder = CandleEmbedder::load(&dir).map_err(|e| format!("load: {e}"))?;
         let v = embedder.embed("Fixed the retry logic in the ingest uploader.");
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        println!("  dim = {} (expect 384), L2 norm = {norm:.4} (expect ~1.0)", v.len());
+        println!(
+            "  dim = {} (expect 384), L2 norm = {norm:.4} (expect ~1.0)",
+            v.len()
+        );
         println!("  first values: {:?}", &v[..v.len().min(5)]);
         if v.len() != 384 || (norm - 1.0).abs() > 0.05 {
             return Err(format!("output wrong: dim={}, norm={norm}", v.len()));
@@ -44,9 +52,14 @@ async fn main() {
     // ── NER redactor ──────────────────────────────────────────────────────
     let ner_ok = async {
         println!("\n▸ BERT-NER redactor: download + run…");
-        let dir = download_hf_model(&client, &BERT_NER, &models_dir, &TtyProgress::new("bert-NER"))
-            .await
-            .map_err(|e| format!("download: {e}"))?;
+        let dir = download_hf_model(
+            &client,
+            &BERT_NER,
+            &models_dir,
+            &TtyProgress::new("bert-NER"),
+        )
+        .await
+        .map_err(|e| format!("download: {e}"))?;
         let ner = CandleNer::load(&dir).map_err(|e| format!("load: {e}"))?;
         let sample = "Escalate the incident to Katherine Johnson at Globex Corporation.";
         let red = ner_redact(&ner, sample);

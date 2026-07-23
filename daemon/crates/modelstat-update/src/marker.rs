@@ -39,7 +39,10 @@ pub fn write_upgrade_marker(
 ) -> std::io::Result<()> {
     let dir = modelstat_home();
     std::fs::create_dir_all(&dir)?;
-    let tmp = dir.join(format!("upgrade-in-progress.json.{}.tmp", std::process::id()));
+    let tmp = dir.join(format!(
+        "upgrade-in-progress.json.{}.tmp",
+        std::process::id()
+    ));
     let body = serde_json::to_string(&Marker {
         pid: std::process::id(),
         worker_pid,
@@ -122,7 +125,9 @@ mod tests {
 
     #[test]
     fn marker_honors_ttl_and_worker_liveness() {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (tmp, prev) = scoped_home();
         let now = 1_000_000_000_000;
 

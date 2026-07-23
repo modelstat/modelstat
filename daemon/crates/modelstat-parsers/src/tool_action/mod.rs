@@ -75,11 +75,7 @@ pub fn extract_tool_action(call: &ToolActionInput) -> ToolAction {
 
     if let Some(cmd) = &command {
         executable = Some(extract_executable(cmd));
-        let args = cmd
-            .split_whitespace()
-            .skip(1)
-            .collect::<Vec<_>>()
-            .join(" ");
+        let args = cmd.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
         let ps = clamp_chars(&param_shape(&args), MAX_FIELD_CHARS);
         param_shape_out = if ps.is_empty() { None } else { Some(ps) };
         let red = clamp_chars(&redact(cmd, call.cwd).text, MAX_FIELD_CHARS);

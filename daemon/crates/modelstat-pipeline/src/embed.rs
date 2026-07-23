@@ -116,7 +116,8 @@ mod candle_bge {
         /// artifact — the caller keeps the fail-open [`super::NoEmbedder`] then.
         pub fn load(model_dir: &Path) -> Result<Self, String> {
             let device = Device::Cpu;
-            let cfg_bytes = std::fs::read(model_dir.join("config.json")).map_err(|e| e.to_string())?;
+            let cfg_bytes =
+                std::fs::read(model_dir.join("config.json")).map_err(|e| e.to_string())?;
             let config: Config = serde_json::from_slice(&cfg_bytes).map_err(|e| e.to_string())?;
             let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
                 .map_err(|e| e.to_string())?;
@@ -135,7 +136,10 @@ mod candle_bge {
         }
 
         fn try_embed(&self, text: &str) -> Result<Vec<f32>, String> {
-            let enc = self.tokenizer.encode(text, true).map_err(|e| e.to_string())?;
+            let enc = self
+                .tokenizer
+                .encode(text, true)
+                .map_err(|e| e.to_string())?;
             let ids: Vec<u32> = enc.get_ids().to_vec();
             if ids.is_empty() {
                 return Ok(Vec::new());

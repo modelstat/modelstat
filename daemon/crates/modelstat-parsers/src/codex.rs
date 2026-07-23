@@ -16,7 +16,9 @@ use std::fs::File;
 use std::io::BufReader;
 use std::sync::OnceLock;
 
-use modelstat_wire::{source_event_id, tc_fallback_id, EventSource, GitContext, RawEvent, TokenUsage};
+use modelstat_wire::{
+    source_event_id, tc_fallback_id, EventSource, GitContext, RawEvent, TokenUsage,
+};
 use regex::Regex;
 use serde_json::Value;
 
@@ -58,7 +60,9 @@ pub fn derive_session_id_from_rollout_path(path: &str) -> Option<String> {
     let re = RE.get_or_init(|| {
         Regex::new(r"rollout-[0-9T-]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$").unwrap()
     });
-    re.captures(path).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
+    re.captures(path)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 struct Extracted {
@@ -244,10 +248,11 @@ fn parse_inner(
         let kind = obj.get("type").and_then(Value::as_str).unwrap_or("");
 
         if kind == "session_meta" {
-            let id = obj
-                .get("id")
-                .and_then(Value::as_str)
-                .or_else(|| obj.get("payload").and_then(|p| p.get("id")).and_then(Value::as_str));
+            let id = obj.get("id").and_then(Value::as_str).or_else(|| {
+                obj.get("payload")
+                    .and_then(|p| p.get("id"))
+                    .and_then(Value::as_str)
+            });
             if let Some(id) = id {
                 if Some(id) != session_id.as_deref() {
                     session_id = Some(id.to_string());
@@ -258,18 +263,18 @@ fn parse_inner(
             continue;
         }
         if kind == "turn_context" {
-            if let Some(c) = obj
-                .get("cwd")
-                .and_then(Value::as_str)
-                .or_else(|| obj.get("payload").and_then(|p| p.get("cwd")).and_then(Value::as_str))
-            {
+            if let Some(c) = obj.get("cwd").and_then(Value::as_str).or_else(|| {
+                obj.get("payload")
+                    .and_then(|p| p.get("cwd"))
+                    .and_then(Value::as_str)
+            }) {
                 cwd = Some(c.to_string());
             }
-            if let Some(m) = obj
-                .get("model")
-                .and_then(Value::as_str)
-                .or_else(|| obj.get("payload").and_then(|p| p.get("model")).and_then(Value::as_str))
-            {
+            if let Some(m) = obj.get("model").and_then(Value::as_str).or_else(|| {
+                obj.get("payload")
+                    .and_then(|p| p.get("model"))
+                    .and_then(Value::as_str)
+            }) {
                 model = Some(m.to_string());
             }
             continue;
@@ -281,7 +286,10 @@ fn parse_inner(
                 .and_then(|p| p.get("type"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let line_ts = obj.get("timestamp").and_then(Value::as_str).map(str::to_string);
+            let line_ts = obj
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .map(str::to_string);
 
             if is_tool_call_payload(pt) && session_id.is_some() {
                 let p = payload.unwrap();
@@ -373,8 +381,11 @@ fn parse_inner(
                             .clone()
                             .or_else(|| last_ts.clone())
                             .unwrap_or_else(|| tool_calls[idx].started_at.clone());
-                        let result_bytes =
-                            json_bytes(p.get("output").or_else(|| p.get("result")).unwrap_or(&Value::Null));
+                        let result_bytes = json_bytes(
+                            p.get("output")
+                                .or_else(|| p.get("result"))
+                                .unwrap_or(&Value::Null),
+                        );
                         let is_err = output_indicates_error(p);
                         let draft = &mut tool_calls[idx];
                         draft.ended_at = Some(ended);
@@ -425,9 +436,15 @@ fn parse_inner(
                 }
                 let p = payload.unwrap();
                 let input_tokens = p.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-                let cached = p.get("cached_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let cached = p
+                    .get("cached_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 let output_tokens = p.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
-                let reasoning = p.get("reasoning_output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let reasoning = p
+                    .get("reasoning_output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 let slug = guess_repo_slug_from_path(cwd.as_deref());
                 let git = slug.as_ref().map(|s| GitContext {
                     remote_url: None,

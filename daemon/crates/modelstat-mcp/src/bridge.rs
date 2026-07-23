@@ -63,7 +63,11 @@ const WIDGET_HTML: &str = include_str!("widget.html");
 /// Dispatch one JSON-RPC request against the backend, returning the response
 /// value — or `None` for a notification (no `id`, no reply). Pure over the
 /// backend. Port of the SDK request handlers in `index.ts`.
-pub async fn handle_request<B: McpBackend>(req: &Value, backend: &B, version: &str) -> Option<Value> {
+pub async fn handle_request<B: McpBackend>(
+    req: &Value,
+    backend: &B,
+    version: &str,
+) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let id = req.get("id").cloned();
     let params = req.get("params").cloned().unwrap_or(Value::Null);
@@ -101,7 +105,10 @@ pub async fn handle_request<B: McpBackend>(req: &Value, backend: &B, version: &s
         "prompts/list" => Ok(json!({ "prompts": backend.list_prompts().await })),
         "prompts/get" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             match backend.get_prompt(name, args).await {
                 Ok(v) => Ok(v),
                 Err(e) => Err((-32603, format!("prompt {name} failed ({})", e.status))),
@@ -124,7 +131,10 @@ pub async fn handle_request<B: McpBackend>(req: &Value, backend: &B, version: &s
 /// becomes an `isError` result, not a JSON-RPC error).
 async fn handle_tool_call<B: McpBackend>(params: &Value, backend: &B) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     if !backend.has_auth() {
         return error_result(
@@ -138,7 +148,11 @@ async fn handle_tool_call<B: McpBackend>(params: &Value, backend: &B) -> Value {
         let ids: Vec<String> = args
             .get("session_ids")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         if !ids.is_empty() {
             backend.eager_scan(ids).await;
@@ -248,7 +262,10 @@ mod tests {
             .unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 8);
-        let si = tools.iter().find(|t| t["name"] == "session_insights").unwrap();
+        let si = tools
+            .iter()
+            .find(|t| t["name"] == "session_insights")
+            .unwrap();
         assert_eq!(si["_meta"]["ui"]["resourceUri"], WIDGET_URI);
     }
 
@@ -269,9 +286,16 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_without_auth_returns_a_connect_prompt() {
-        let b = Fake { authed: false, ..Default::default() };
+        let b = Fake {
+            authed: false,
+            ..Default::default()
+        };
         let resp = handle_request(
-            &req(4, "tools/call", json!({ "name": "overview", "arguments": {} })),
+            &req(
+                4,
+                "tools/call",
+                json!({ "name": "overview", "arguments": {} }),
+            ),
             &b,
             "9.9.9",
         )
@@ -288,11 +312,17 @@ mod tests {
     async fn tool_call_forwards_and_passes_the_result_through() {
         let b = Fake {
             authed: true,
-            call_result: Some(Ok(json!({ "content": [{ "type": "text", "text": "$42" }] }))),
+            call_result: Some(Ok(
+                json!({ "content": [{ "type": "text", "text": "$42" }] }),
+            )),
             ..Default::default()
         };
         let resp = handle_request(
-            &req(5, "tools/call", json!({ "name": "overview", "arguments": {} })),
+            &req(
+                5,
+                "tools/call",
+                json!({ "name": "overview", "arguments": {} }),
+            ),
             &b,
             "9.9.9",
         )
@@ -305,25 +335,38 @@ mod tests {
     async fn a_401_maps_to_a_repair_message() {
         let b = Fake {
             authed: true,
-            call_result: Some(Err(ApiError { status: 401, body: None })),
+            call_result: Some(Err(ApiError {
+                status: 401,
+                body: None,
+            })),
             ..Default::default()
         };
         let resp = handle_request(
-            &req(6, "tools/call", json!({ "name": "overview", "arguments": {} })),
+            &req(
+                6,
+                "tools/call",
+                json!({ "name": "overview", "arguments": {} }),
+            ),
             &b,
             "9.9.9",
         )
         .await
         .unwrap();
         assert_eq!(resp["result"]["isError"], true);
-        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("401"));
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("401"));
     }
 
     #[tokio::test]
     async fn a_404_maps_to_a_stale_catalog_message() {
         let b = Fake {
             authed: true,
-            call_result: Some(Err(ApiError { status: 404, body: None })),
+            call_result: Some(Err(ApiError {
+                status: 404,
+                body: None,
+            })),
             ..Default::default()
         };
         let resp = handle_request(
@@ -356,7 +399,10 @@ mod tests {
             "9.9.9",
         )
         .await;
-        assert_eq!(*b.eager_ids.borrow(), vec!["s1".to_string(), "s2".to_string()]);
+        assert_eq!(
+            *b.eager_ids.borrow(),
+            vec!["s1".to_string(), "s2".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -385,7 +431,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(resp["result"]["contents"][0]["mimeType"], "text/html;profile=mcp-app");
-        assert!(resp["result"]["contents"][0]["text"].as_str().unwrap().contains("modelstat"));
+        assert_eq!(
+            resp["result"]["contents"][0]["mimeType"],
+            "text/html;profile=mcp-app"
+        );
+        assert!(resp["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("modelstat"));
     }
 }

@@ -3,7 +3,7 @@
 //! from `apps/daemon/src/cli.ts` (`tryOpenBrowser`, `textPrompt`,
 //! `readLocalStatus`).
 
-use std::io::{IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 use modelstat_ingest::{home_path, Config};
 use serde_json::Value;
@@ -51,23 +51,67 @@ pub fn api_base(config: &Config) -> String {
     config.api_url().trim_end_matches('/').to_string()
 }
 
-/// Read one line from stdin after writing `prompt` to stdout. Returns the
-/// trimmed line, or the empty string on EOF / a closed (non-interactive) stdin.
-/// Port of the readline half of TS `textPrompt`.
+/// The controlling terminal, when this process has one.
+///
+/// The documented install path is `curl -fsSL …/install.sh | sh`, which puts the
+/// *script* on stdin — so stdin is a pipe even though the person is sitting at a
+/// real terminal. Gating prompts on `stdin.is_terminal()` therefore made the
+/// advertised one-liner unable to ever answer the summariser-mode consent
+/// question: it always took the non-interactive branch and aborted the install.
+///
+/// `/dev/tty` is that person's terminal regardless of how stdin is wired, which
+/// is the standard way a piped installer stays interactive. It genuinely fails
+/// to open when there is no terminal at all — CI, a launchd/systemd unit, a
+/// detached daemon — so the consent gate still refuses to guess in exactly the
+/// cases it must.
+#[cfg(unix)]
+fn controlling_tty() -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()
+}
+
+/// Windows has no `/dev/tty`; prompts there stay gated on stdin.
+#[cfg(not(unix))]
+fn controlling_tty() -> Option<std::fs::File> {
+    None
+}
+
+/// Read one line from the user after writing `prompt`. Prefers stdin when it is
+/// a terminal, else falls back to the controlling terminal (see
+/// [`controlling_tty`]). Returns the trimmed line, or the empty string on EOF /
+/// no terminal at all. Port of the readline half of TS `textPrompt`.
 pub fn prompt_line(prompt: &str) -> String {
-    print!("{prompt}");
-    let _ = std::io::stdout().flush();
+    let trim = |line: String| line.trim_end_matches(['\n', '\r']).trim().to_string();
+    if std::io::stdin().is_terminal() {
+        print!("{prompt}");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        return match std::io::stdin().read_line(&mut line) {
+            Ok(0) | Err(_) => String::new(),
+            Ok(_) => trim(line),
+        };
+    }
+    // Write the prompt to the same terminal we read from — under `curl | sh`
+    // stdout is usually still the terminal, but not when the caller redirects it.
+    let Some(mut tty) = controlling_tty() else {
+        return String::new();
+    };
+    let _ = write!(tty, "{prompt}");
+    let _ = tty.flush();
     let mut line = String::new();
-    match std::io::stdin().read_line(&mut line) {
+    match std::io::BufReader::new(tty).read_line(&mut line) {
         Ok(0) | Err(_) => String::new(),
-        Ok(_) => line.trim_end_matches(['\n', '\r']).trim().to_string(),
+        Ok(_) => trim(line),
     }
 }
 
-/// A prompt with a default: empty input (or a non-interactive stdin) yields
+/// A prompt with a default: empty input (or no terminal at all) yields
 /// `default`. TS `textPrompt(prompt, def)`.
 pub fn text_prompt(prompt: &str, default: &str) -> String {
-    if !std::io::stdin().is_terminal() {
+    if !has_terminal() {
         return default.to_string();
     }
     let v = prompt_line(prompt);
@@ -78,7 +122,37 @@ pub fn text_prompt(prompt: &str, default: &str) -> String {
     }
 }
 
-/// True when stdin is an interactive TTY (mode prompts are gated on it).
-pub fn stdin_is_tty() -> bool {
-    std::io::stdin().is_terminal()
+/// True when there is an interactive terminal to prompt on — stdin itself, or
+/// the controlling terminal when stdin is a pipe (`curl … | sh`). Mode prompts
+/// are gated on this.
+pub fn has_terminal() -> bool {
+    std::io::stdin().is_terminal() || controlling_tty().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Widening the check to `/dev/tty` must never *narrow* it: anything that
+    /// counted as interactive before (stdin itself a TTY) still must.
+    #[test]
+    fn a_tty_stdin_always_counts_as_interactive() {
+        assert!(!std::io::stdin().is_terminal() || has_terminal());
+    }
+
+    /// The safety half of the `/dev/tty` fallback, asserted where it matters.
+    /// A headless runner has no controlling terminal, so the summariser-mode
+    /// consent gate must still take the non-interactive branch and refuse to
+    /// guess — the fallback buys `curl … | sh` a prompt, never CI a silent
+    /// default. Only meaningful without a terminal, hence the CI guard: run
+    /// from a developer's shell this process *does* have one.
+    #[test]
+    fn headless_stays_non_interactive() {
+        if std::env::var("CI").map(|v| v.is_empty()).unwrap_or(true) {
+            return;
+        }
+        assert!(!has_terminal(), "CI must not look interactive");
+        assert_eq!(prompt_line("ignored: "), "");
+        assert_eq!(text_prompt("ignored: ", "fallback"), "fallback");
+    }
 }

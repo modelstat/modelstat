@@ -40,7 +40,10 @@ async fn healthz() -> impl IntoResponse {
     }))
 }
 
-async fn complete(State(st): State<Arc<FakeState>>, _body: Json<Value>) -> axum::response::Response {
+async fn complete(
+    State(st): State<Arc<FakeState>>,
+    _body: Json<Value>,
+) -> axum::response::Response {
     let n = st.calls.fetch_add(1, Ordering::SeqCst);
     let ok = || (StatusCode::OK, Json(json!({ "text": "summary text" }))).into_response();
     let loading = || {
@@ -54,7 +57,9 @@ async fn complete(State(st): State<Arc<FakeState>>, _body: Json<Value>) -> axum:
     match st.mode {
         Mode::Healthy => ok(),
         Mode::Garbage => (StatusCode::OK, "not json {{{").into_response(),
-        Mode::Always400 => (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad" }))).into_response(),
+        Mode::Always400 => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad" }))).into_response()
+        }
         Mode::Always503 => loading(),
         Mode::FailThenOk(k) => {
             if n < k {

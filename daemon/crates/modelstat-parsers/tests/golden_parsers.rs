@@ -95,8 +95,7 @@ fn parser_golden_parity() {
         let stats: ParseStats = serde_json::from_value(g["stats"].clone()).unwrap();
         assert_eq!(res.stats, stats, "claude_basic stats");
         // script contexts (local-only; compared via an ad-hoc struct).
-        let want_sc: Vec<ScriptCtx> =
-            serde_json::from_value(g["scriptContexts"].clone()).unwrap();
+        let want_sc: Vec<ScriptCtx> = serde_json::from_value(g["scriptContexts"].clone()).unwrap();
         let got_sc: Vec<ScriptCtx> = res
             .script_contexts
             .iter()
@@ -121,8 +120,9 @@ fn parser_golden_parity() {
 
     // 3. Claude resume copy — the ancestor-sessioned line dropped, native kept.
     {
-        let file =
-            format!("{BASE}/claude-resume/projects/myproj/44444444-4444-4444-4444-444444444444.jsonl");
+        let file = format!(
+            "{BASE}/claude-resume/projects/myproj/44444444-4444-4444-4444-444444444444.jsonl"
+        );
         let res = parse_claude_code_jsonl(&ctx(&file)).unwrap();
         let g = golden("claude_resume_copy.json");
         assert_eq!(res.events, events_of(&g), "claude_resume_copy events");
@@ -196,17 +196,23 @@ fn parser_golden_parity() {
 
 /// Assert a parser's streaming mode yields the same events (via the sink), tool
 /// calls, and stats as its collect mode.
-fn assert_stream_matches<F>(
-    collected: modelstat_parsers::ParseResult,
-    stream: F,
-    label: &str,
-) where
+fn assert_stream_matches<F>(collected: modelstat_parsers::ParseResult, stream: F, label: &str)
+where
     F: FnOnce(&mut dyn FnMut(Vec<RawEvent>)) -> modelstat_parsers::ParseResult,
 {
     let mut streamed_events: Vec<RawEvent> = Vec::new();
     let res = stream(&mut |chunk| streamed_events.extend(chunk));
-    assert!(res.events.is_empty(), "{label}: streaming mode must not accumulate events");
-    assert_eq!(streamed_events, collected.events, "{label}: streamed events differ");
-    assert_eq!(res.tool_calls, collected.tool_calls, "{label}: streamed tool_calls differ");
+    assert!(
+        res.events.is_empty(),
+        "{label}: streaming mode must not accumulate events"
+    );
+    assert_eq!(
+        streamed_events, collected.events,
+        "{label}: streamed events differ"
+    );
+    assert_eq!(
+        res.tool_calls, collected.tool_calls,
+        "{label}: streamed tool_calls differ"
+    );
     assert_eq!(res.stats, collected.stats, "{label}: streamed stats differ");
 }

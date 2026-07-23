@@ -315,7 +315,7 @@ mod tests {
         let wire = attach_segment_ids(&calls, &segs);
         assert_eq!(wire[0].segment_id.as_deref(), Some("seg_A")); // e1 is covered
         assert_eq!(wire[1].segment_id, None); // e_uncovered → null
-        // Every other field carries over unchanged.
+                                              // Every other field carries over unchanged.
         assert_eq!(wire[0].external_call_id, "c1");
         assert_eq!(wire[0].name, "bash");
     }
@@ -326,9 +326,15 @@ mod tests {
         // (not the current segment list) keeps it attributed.
         let calls = vec![draft("c1", "e_earlier", None)];
         let mut map = HashMap::new();
-        map.insert("e_earlier".to_string(), "seg_from_earlier_batch".to_string());
+        map.insert(
+            "e_earlier".to_string(),
+            "seg_from_earlier_batch".to_string(),
+        );
         let wire = attach_segment_ids_by_map(&calls, &map);
-        assert_eq!(wire[0].segment_id.as_deref(), Some("seg_from_earlier_batch"));
+        assert_eq!(
+            wire[0].segment_id.as_deref(),
+            Some("seg_from_earlier_batch")
+        );
     }
 
     #[test]
@@ -338,7 +344,12 @@ mod tests {
         assert!(prepare_cloud_raw_events(&events, &mut drafts, &UnavailableNer).is_none());
         // Fail-closed must NOT have mutated the drafts.
         assert_eq!(
-            drafts[0].action.as_ref().unwrap().command_redacted.as_deref(),
+            drafts[0]
+                .action
+                .as_ref()
+                .unwrap()
+                .command_redacted
+                .as_deref(),
             Some("ssh prod")
         );
     }
@@ -361,7 +372,12 @@ mod tests {
         assert_eq!(out[2].content_excerpt, None);
         // The shipped command got the NER pass.
         assert_eq!(
-            drafts[0].action.as_ref().unwrap().command_redacted.as_deref(),
+            drafts[0]
+                .action
+                .as_ref()
+                .unwrap()
+                .command_redacted
+                .as_deref(),
             Some("mail [REDACTED:PER]")
         );
     }
@@ -391,7 +407,10 @@ mod tests {
             .command_redacted
             .as_deref()
             .unwrap();
-        assert!(cmd.contains("[REDACTED:llm]"), "L3 must redact the named secret: {cmd}");
+        assert!(
+            cmd.contains("[REDACTED:llm]"),
+            "L3 must redact the named secret: {cmd}"
+        );
         assert!(!cmd.contains("sk_live_abcdef123456"));
     }
 }

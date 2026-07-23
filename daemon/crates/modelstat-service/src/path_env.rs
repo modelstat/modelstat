@@ -105,7 +105,11 @@ pub fn rc_path(shell: Shell, os: Os, home: &Path) -> PathBuf {
             Os::Macos => home.join(".bash_profile"),
             _ => home.join(".bashrc"),
         },
-        Shell::Fish => home.join(".config").join("fish").join("conf.d").join("modelstat.fish"),
+        Shell::Fish => home
+            .join(".config")
+            .join("fish")
+            .join("conf.d")
+            .join("modelstat.fish"),
         Shell::Posix => home.join(".profile"),
     }
 }
@@ -250,12 +254,20 @@ pub fn ensure_on_path(bin_dir: &Path, scope: Scope) -> io::Result<PathWiring> {
 
     if os == Os::Windows {
         let files = windows_set_path(bin_dir, scope)?;
-        return Ok(PathWiring { files, env_file: None, already_active });
+        return Ok(PathWiring {
+            files,
+            env_file: None,
+            already_active,
+        });
     }
     if scope == Scope::System {
         let files = link_into_system_bin(bin_dir)?;
         // The links land in a directory that is already on every PATH.
-        return Ok(PathWiring { files, env_file: None, already_active: true });
+        return Ok(PathWiring {
+            files,
+            env_file: None,
+            already_active: true,
+        });
     }
 
     let home = os_home();
@@ -270,7 +282,11 @@ pub fn ensure_on_path(bin_dir: &Path, scope: Scope) -> io::Result<PathWiring> {
         if read_or_empty(&rc) != body {
             std::fs::write(&rc, body)?;
         }
-        return Ok(PathWiring { files: vec![rc], env_file: None, already_active });
+        return Ok(PathWiring {
+            files: vec![rc],
+            env_file: None,
+            already_active,
+        });
     }
 
     let env = env_file();
@@ -287,7 +303,11 @@ pub fn ensure_on_path(bin_dir: &Path, scope: Scope) -> io::Result<PathWiring> {
         std::fs::write(&rc, updated)?;
         files.push(rc);
     }
-    Ok(PathWiring { files, env_file: Some(env), already_active })
+    Ok(PathWiring {
+        files,
+        env_file: Some(env),
+        already_active,
+    })
 }
 
 /// Undo [`ensure_on_path`] — called by `uninstall`. Returns what it removed.
@@ -303,7 +323,10 @@ pub fn remove_from_path(bin_dir: &Path, scope: Scope) -> io::Result<Vec<PathBuf>
     if scope == Scope::System {
         for name in BINARIES {
             let link = Path::new(SYSTEM_BIN_DIR).join(name);
-            if std::fs::read_link(&link).map(|t| t == bin_dir.join(name)).unwrap_or(false) {
+            if std::fs::read_link(&link)
+                .map(|t| t == bin_dir.join(name))
+                .unwrap_or(false)
+            {
                 std::fs::remove_file(&link)?;
                 removed.push(link);
             }
@@ -321,7 +344,11 @@ pub fn remove_from_path(bin_dir: &Path, scope: Scope) -> io::Result<Vec<PathBuf>
             continue;
         }
         // The fish drop-in is entirely ours — delete the file, don't edit it.
-        if rc.file_name().map(|n| n == "modelstat.fish").unwrap_or(false) {
+        if rc
+            .file_name()
+            .map(|n| n == "modelstat.fish")
+            .unwrap_or(false)
+        {
             if read_or_empty(&rc).contains(MARKER) {
                 std::fs::remove_file(&rc)?;
                 removed.push(rc);
@@ -360,7 +387,10 @@ fn link_into_system_bin(bin_dir: &Path) -> io::Result<Vec<PathBuf>> {
             Ok(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
-                    format!("{} exists and is not a symlink — refusing to replace it", link.display()),
+                    format!(
+                        "{} exists and is not a symlink — refusing to replace it",
+                        link.display()
+                    ),
                 ))
             }
             Err(_) => {}
@@ -472,7 +502,10 @@ mod tests {
     fn shell_comes_from_the_shell_var_basename() {
         assert_eq!(Shell::from_shell_var(Some("/bin/zsh")), Shell::Zsh);
         assert_eq!(Shell::from_shell_var(Some("/bin/bash")), Shell::Bash);
-        assert_eq!(Shell::from_shell_var(Some("/usr/local/bin/fish")), Shell::Fish);
+        assert_eq!(
+            Shell::from_shell_var(Some("/usr/local/bin/fish")),
+            Shell::Fish
+        );
         assert_eq!(Shell::from_shell_var(Some("/bin/dash")), Shell::Posix);
         assert_eq!(Shell::from_shell_var(None), Shell::Posix);
     }

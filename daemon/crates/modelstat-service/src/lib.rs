@@ -316,7 +316,11 @@ fn launchd_service_pid(target: &str) -> Option<i64> {
 /// would only SIGTERM it again for nothing). A bootstrap that never lands is a
 /// loud Err carrying launchctl's stderr.
 #[cfg(target_os = "macos")]
-pub(crate) fn launchd_reload(domain: &str, label: &str, plist: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn launchd_reload(
+    domain: &str,
+    label: &str,
+    plist: &std::path::Path,
+) -> std::io::Result<()> {
     use std::time::Duration;
     let target = format!("{domain}/{label}");
     run("launchctl", &["bootout", &target]); // no-op error when not loaded
@@ -331,7 +335,10 @@ pub(crate) fn launchd_reload(domain: &str, label: &str, plist: &std::path::Path)
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(500));
         }
-        let (ok, _out, err) = run("launchctl", &["bootstrap", domain, &plist.to_string_lossy()]);
+        let (ok, _out, err) = run(
+            "launchctl",
+            &["bootstrap", domain, &plist.to_string_lossy()],
+        );
         if ok {
             run("launchctl", &["kickstart", &target]);
             return Ok(());
@@ -361,7 +368,12 @@ fn mac_status(def: &ServiceDef) -> ServiceStatus {
     let (ok, _o, _e) = run("launchctl", &["print", &target]);
     ServiceStatus {
         running: ok,
-        hint: if ok { "launchd managed" } else { "not installed" }.to_string(),
+        hint: if ok {
+            "launchd managed"
+        } else {
+            "not installed"
+        }
+        .to_string(),
     }
 }
 
@@ -405,7 +417,12 @@ fn linux_status(def: &ServiceDef) -> ServiceStatus {
     let active = out.trim() == "active";
     ServiceStatus {
         running: active,
-        hint: if active { "systemd managed" } else { "not running" }.to_string(),
+        hint: if active {
+            "systemd managed"
+        } else {
+            "not running"
+        }
+        .to_string(),
     }
 }
 
@@ -460,7 +477,14 @@ fn windows_load(def: &ServiceDef, xml_path: &std::path::Path) -> std::io::Result
             }
             run(
                 "sc",
-                &["failure", def.unit_name, "reset=", "0", "actions=", "restart/10000"],
+                &[
+                    "failure",
+                    def.unit_name,
+                    "reset=",
+                    "0",
+                    "actions=",
+                    "restart/10000",
+                ],
             );
             run("sc", &["start", def.unit_name]);
             Ok(())
@@ -490,7 +514,12 @@ fn windows_status(def: &ServiceDef) -> ServiceStatus {
             let running = ok && out.contains("Running");
             ServiceStatus {
                 running,
-                hint: if ok { "scheduled task" } else { "not installed" }.to_string(),
+                hint: if ok {
+                    "scheduled task"
+                } else {
+                    "not installed"
+                }
+                .to_string(),
             }
         }
         Scope::System => {
@@ -498,7 +527,12 @@ fn windows_status(def: &ServiceDef) -> ServiceStatus {
             let running = ok && out.contains("RUNNING");
             ServiceStatus {
                 running,
-                hint: if ok { "windows service" } else { "not installed" }.to_string(),
+                hint: if ok {
+                    "windows service"
+                } else {
+                    "not installed"
+                }
+                .to_string(),
             }
         }
     }
@@ -517,7 +551,9 @@ mod tests {
         {
             assert!(user.to_string_lossy().contains("LaunchAgents"));
             assert!(system.to_string_lossy().contains("LaunchDaemons"));
-            assert!(user.to_string_lossy().ends_with("ai.modelstat.daemon.plist"));
+            assert!(user
+                .to_string_lossy()
+                .ends_with("ai.modelstat.daemon.plist"));
         }
         #[cfg(target_os = "linux")]
         {

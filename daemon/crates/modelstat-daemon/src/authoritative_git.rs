@@ -200,7 +200,10 @@ mod tests {
         let events = vec![ev(Some("/tmp/scratch"), Some("wip"))];
         let out = resolve_authoritative_git(&events, |_| None, |_| None);
         // Unchanged: the parser's guessed slug survives.
-        assert_eq!(out[0].git.as_ref().unwrap().remote_slug.as_deref(), Some("guessed/subdir"));
+        assert_eq!(
+            out[0].git.as_ref().unwrap().remote_slug.as_deref(),
+            Some("guessed/subdir")
+        );
     }
 
     #[test]

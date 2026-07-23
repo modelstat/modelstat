@@ -170,10 +170,7 @@ mod tests {
     #[test]
     fn static_catalog_has_the_eight_named_tools_with_schemas() {
         let tools = static_tools();
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
             vec![
@@ -193,8 +190,14 @@ mod tests {
         }
         // explore exposes the metric enum + a limit cap of 500.
         let explore = &tools[1];
-        assert_eq!(explore["inputSchema"]["properties"]["metric"]["default"], "cost");
-        assert_eq!(explore["inputSchema"]["properties"]["limit"]["maximum"], 500);
+        assert_eq!(
+            explore["inputSchema"]["properties"]["metric"]["default"],
+            "cost"
+        );
+        assert_eq!(
+            explore["inputSchema"]["properties"]["limit"]["maximum"],
+            500
+        );
         // Range props are merged into overview.
         assert!(tools[0]["inputSchema"]["properties"]["range"]["enum"]
             .as_array()
@@ -216,7 +219,10 @@ mod tests {
                 t["name"]
             );
         }
-        let si = tagged.iter().find(|t| t["name"] == "session_insights").unwrap();
+        let si = tagged
+            .iter()
+            .find(|t| t["name"] == "session_insights")
+            .unwrap();
         assert_eq!(si["_meta"]["ui"]["resourceUri"], WIDGET_URI);
     }
 }

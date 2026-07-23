@@ -43,7 +43,10 @@ pub enum DownloadError {
     Transport(String),
     Io(std::io::Error),
     /// The finished file's sha256 didn't match the pinned digest.
-    ChecksumMismatch { expected: String, actual: String },
+    ChecksumMismatch {
+        expected: String,
+        actual: String,
+    },
 }
 
 impl std::fmt::Display for DownloadError {
@@ -85,7 +88,10 @@ pub async fn download(
     let partial = partial_path(&spec.dest);
 
     // Resume from any prior `.partial`.
-    let mut existing = tokio::fs::metadata(&partial).await.map(|m| m.len()).unwrap_or(0);
+    let mut existing = tokio::fs::metadata(&partial)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
     let mut req = client.get(&spec.url);
     if existing > 0 {
         req = req.header(reqwest::header::RANGE, format!("bytes={existing}-"));

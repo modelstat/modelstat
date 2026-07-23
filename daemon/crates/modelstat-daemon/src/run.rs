@@ -181,8 +181,11 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     tokio::time::sleep(Duration::from_millis(LOCK_RECHECK_MS)).await;
     {
         let current = read_daemon_lock(&lock_path);
-        if check_lock_ownership(std::process::id() as i64, current.as_ref(), is_process_alive)
-            == OwnershipCheck::Lost
+        if check_lock_ownership(
+            std::process::id() as i64,
+            current.as_ref(),
+            is_process_alive,
+        ) == OwnershipCheck::Lost
         {
             println!("[modelstat] another daemon took the lock during boot — standing down");
             heartbeat_task.abort();
@@ -202,7 +205,11 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     // ── Filesystem watcher + 5-min backstop + reconcile timers ──────────────
     let _watcher = spawn_watcher(runner.clone(), quiescing.clone());
     tokio::spawn(backstop_loop(runner.clone(), quiescing.clone()));
-    tokio::spawn(reconcile_loop(daemon.clone(), runner.clone(), quiescing.clone()));
+    tokio::spawn(reconcile_loop(
+        daemon.clone(),
+        runner.clone(),
+        quiescing.clone(),
+    ));
 
     // ── Park until a signal, then drain, THEN go offline ────────────────────
     let code = wait_for_shutdown().await;
@@ -253,7 +260,10 @@ async fn preflight(daemon: &Daemon) {
         return;
     }
     let label = if daemon.mode == "self-hosted" {
-        format!("self-hosted summarizer at {}", daemon.config.self_hosted_url())
+        format!(
+            "self-hosted summarizer at {}",
+            daemon.config.self_hosted_url()
+        )
     } else {
         "local summarizer (Qwen3.5-4B)".to_string()
     };
@@ -622,11 +632,7 @@ fn spawn_watcher(
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| {
         if let Ok(ev) = res {
             // Only transcript writes matter (the scan re-discovers the file set).
-            if ev
-                .paths
-                .iter()
-                .any(|p| crate::watch::is_transcript_file(p))
-            {
+            if ev.paths.iter().any(|p| crate::watch::is_transcript_file(p)) {
                 let _ = tx.send(());
             }
         }
@@ -665,10 +671,8 @@ async fn wait_for_shutdown() -> u8 {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigint =
-            signal(SignalKind::interrupt()).expect("install SIGINT handler");
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
         tokio::select! {
             _ = sigint.recv() => 130,
             _ = sigterm.recv() => 143,

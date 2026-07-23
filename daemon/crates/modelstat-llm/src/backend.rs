@@ -139,7 +139,11 @@ impl Backend for MockBackend {
             return Err("mock inference failure".to_string());
         }
         // Echo a `<think>` block to prove the engine strips it, then the reply.
-        Ok(format!("<think>reasoning about {}</think>{}", params.user.len(), self.reply))
+        Ok(format!(
+            "<think>reasoning about {}</think>{}",
+            params.user.len(),
+            self.reply
+        ))
     }
     fn unload(&mut self) {
         self.loaded = false;

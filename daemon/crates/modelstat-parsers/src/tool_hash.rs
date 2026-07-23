@@ -70,7 +70,9 @@ pub fn json_bytes(value: &Value) -> u64 {
     match value {
         Value::Null => 0,
         Value::String(s) if s.is_empty() => 0,
-        _ => serde_json::to_string(value).map(|j| j.len() as u64).unwrap_or(0),
+        _ => serde_json::to_string(value)
+            .map(|j| j.len() as u64)
+            .unwrap_or(0),
     }
 }
 
@@ -240,7 +242,10 @@ mod tests {
     fn normalize_matches_golden() {
         assert_eq!(normalize_tool_name("  Bash  "), "Bash");
         assert_eq!(normalize_tool_name("café"), "café");
-        assert_eq!(normalize_tool_name("subscribe_a1b2c3d4e5f6"), "subscribe_<dyn>");
+        assert_eq!(
+            normalize_tool_name("subscribe_a1b2c3d4e5f6"),
+            "subscribe_<dyn>"
+        );
         assert_eq!(
             normalize_tool_name("job-550e8400-e29b-41d4-a716-446655440000"),
             "job-<dyn>"
@@ -304,6 +309,9 @@ mod tests {
     #[test]
     fn tool_identity_forms() {
         assert_eq!(tool_identity("builtin", "Bash"), "Bash");
-        assert_eq!(tool_identity("mcp:github", "create_pr"), "mcp:github/create_pr");
+        assert_eq!(
+            tool_identity("mcp:github", "create_pr"),
+            "mcp:github/create_pr"
+        );
     }
 }

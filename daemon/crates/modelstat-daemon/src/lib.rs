@@ -19,20 +19,18 @@ pub mod rotate;
 pub mod run;
 pub mod runtime;
 pub mod scan;
+pub mod single_flight;
 pub mod status;
 pub mod statusline;
 pub mod supervise;
-pub mod single_flight;
 pub mod watch;
 
 pub use authoritative_git::resolve_authoritative_git;
-pub use discover_jobs::{
-    discover_jobs, order_jobs_newest_first, parse_job, ParserKind, ScanJob,
-};
+pub use discover_jobs::{discover_jobs, order_jobs_newest_first, parse_job, ParserKind, ScanJob};
 pub use flush::{build_flush_batches, with_non_null_tokens, FlushOutcome, PreparedBatch};
 pub use reconcile::{
-    reconcile_backfill, BackfillDays, BackfillDaySessions, ReconcileOutcome, ReconcileStore,
-    BackfillDigest,
+    reconcile_backfill, BackfillDaySessions, BackfillDays, BackfillDigest, ReconcileOutcome,
+    ReconcileStore,
 };
 pub use scan::{
     run_scan_over_jobs, BatchUploader, CursorStore, Hold, RunScanOptions, ScanObserver,

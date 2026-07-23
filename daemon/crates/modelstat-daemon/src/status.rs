@@ -166,7 +166,10 @@ pub fn heartbeat_wire_body(snapshot: &Value) -> Value {
 pub fn write_last_status(path: &Path, snapshot: &Value, written_at: &str) -> std::io::Result<()> {
     let mut body = snapshot.clone();
     if let Some(obj) = body.as_object_mut() {
-        obj.insert("written_at".to_string(), Value::String(written_at.to_string()));
+        obj.insert(
+            "written_at".to_string(),
+            Value::String(written_at.to_string()),
+        );
     }
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {

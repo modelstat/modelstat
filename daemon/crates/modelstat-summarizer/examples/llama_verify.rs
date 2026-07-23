@@ -28,7 +28,13 @@ async fn main() {
         spec.size_label.as_deref().unwrap_or("~2.7 GB"),
         models_dir.display()
     );
-    if let Err(e) = download(&reqwest::Client::new(), &spec, &TtyProgress::new("Qwen3.5-4B")).await {
+    if let Err(e) = download(
+        &reqwest::Client::new(),
+        &spec,
+        &TtyProgress::new("Qwen3.5-4B"),
+    )
+    .await
+    {
         eprintln!("✗ download failed: {e}");
         std::process::exit(1);
     }
@@ -59,7 +65,10 @@ async fn main() {
     match backend.generate(&params) {
         Ok(raw) => {
             let clean = strip_think(&raw);
-            println!("\n=== raw output (first 300 chars) ===\n{}", raw.chars().take(300).collect::<String>());
+            println!(
+                "\n=== raw output (first 300 chars) ===\n{}",
+                raw.chars().take(300).collect::<String>()
+            );
             println!("\n=== summary (<think> stripped) ===\n{clean}");
             if clean.trim().is_empty() {
                 eprintln!("\n✗ engine produced no answer after stripping <think>");

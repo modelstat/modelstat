@@ -81,7 +81,11 @@ fn read_settings(path: &Path) -> Result<Map<String, Value>, String> {
 /// Atomically write settings (pretty-printed, trailing newline) via tmp+rename so
 /// a crash mid-write can't truncate the config. Backs the previous file up to
 /// `<path>.modelstat.bak` the first time we touch it.
-fn write_settings(path: &Path, settings: &Map<String, Value>, had_file: bool) -> Result<(), String> {
+fn write_settings(
+    path: &Path,
+    settings: &Map<String, Value>,
+    had_file: bool,
+) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -157,7 +161,9 @@ pub fn install_statusline(exe_path: &str) -> InstallResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoveResult {
     /// Removed ours (`restored` = a stashed foreign statusLine was put back).
-    Removed { restored: bool },
+    Removed {
+        restored: bool,
+    },
     /// Nothing of ours to remove.
     Absent,
     Error(String),
@@ -256,7 +262,10 @@ mod tests {
         assert_eq!(r, InstallResult::Installed { preserved: true });
         let v = read(&p);
         assert_eq!(v["statusLine"]["command"], CMD);
-        assert_eq!(v["_modelstatPrevStatusLine"]["command"], "other-tool render");
+        assert_eq!(
+            v["_modelstatPrevStatusLine"]["command"],
+            "other-tool render"
+        );
         // An unrelated key survives; a .bak of the original was written.
         assert_eq!(v["model"], "opus");
         assert!(p.with_extension("json.modelstat.bak").exists());
@@ -290,7 +299,10 @@ mod tests {
     fn malformed_json_errors_without_overwriting() {
         let p = tmp("malformed");
         std::fs::write(&p, "{ this is not json").unwrap();
-        assert!(matches!(install_statusline_at(&p, CMD), InstallResult::Error(_)));
+        assert!(matches!(
+            install_statusline_at(&p, CMD),
+            InstallResult::Error(_)
+        ));
         // The bad file is left exactly as-is (we never overwrite what we can't parse).
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "{ this is not json");
     }
@@ -299,6 +311,9 @@ mod tests {
     fn a_json_array_is_rejected_as_not_an_object() {
         let p = tmp("array");
         std::fs::write(&p, "[1,2,3]").unwrap();
-        assert!(matches!(install_statusline_at(&p, CMD), InstallResult::Error(_)));
+        assert!(matches!(
+            install_statusline_at(&p, CMD),
+            InstallResult::Error(_)
+        ));
     }
 }

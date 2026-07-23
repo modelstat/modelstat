@@ -124,7 +124,9 @@ pub fn ner_redact<M: NerModel>(model: &M, text: &str) -> NerRedaction {
 
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
     let bump = |type_: &str, n: u64, counts: &mut BTreeMap<String, u64>| {
-        *counts.entry(format!("pf_{}", type_.to_lowercase())).or_insert(0) += n;
+        *counts
+            .entry(format!("pf_{}", type_.to_lowercase()))
+            .or_insert(0) += n;
     };
 
     let have_offsets = !spans.is_empty()
@@ -221,7 +223,9 @@ fn word_boundary_replace(text: &str, surface: &str, marker: &str) -> (String, u6
 /// target must come back scrubbed. Never panics — a dead model answers `false`.
 pub fn ner_active<M: NerModel>(model: &M) -> bool {
     let sentinel = "Escalate the incident to Katherine Johnson at Globex Corporation.";
-    !ner_redact(model, sentinel).text.contains("Katherine Johnson")
+    !ner_redact(model, sentinel)
+        .text
+        .contains("Katherine Johnson")
 }
 
 // ── candle BERT-NER runtime (feature `candle`) ───────────────────────────────
@@ -284,7 +288,10 @@ mod candle_ner {
         }
 
         fn try_classify(&self, text: &str) -> Result<Vec<NerToken>, String> {
-            let enc = self.tokenizer.encode(text, true).map_err(|e| e.to_string())?;
+            let enc = self
+                .tokenizer
+                .encode(text, true)
+                .map_err(|e| e.to_string())?;
             let ids: Vec<u32> = enc.get_ids().to_vec();
             if ids.is_empty() {
                 return Ok(Vec::new());
@@ -298,7 +305,10 @@ mod candle_ner {
                 .forward(&input_ids, &token_type_ids, None)
                 .and_then(|h| h.squeeze(0)) // [seq, hidden]
                 .map_err(|e| e.to_string())?;
-            let logits = self.classifier.forward(&hidden).map_err(|e| e.to_string())?; // [seq, labels]
+            let logits = self
+                .classifier
+                .forward(&hidden)
+                .map_err(|e| e.to_string())?; // [seq, labels]
             let label_ids: Vec<u32> = logits
                 .argmax(D::Minus1)
                 .and_then(|a| a.to_vec1::<u32>())
@@ -345,7 +355,9 @@ mod candle_ner {
             .ok_or_else(|| "config.json missing id2label".to_string())?;
         let mut out = HashMap::new();
         for (k, v) in map {
-            let id: usize = k.parse().map_err(|_| "non-numeric id2label key".to_string())?;
+            let id: usize = k
+                .parse()
+                .map_err(|_| "non-numeric id2label key".to_string())?;
             let label = v.as_str().unwrap_or("O").to_string();
             out.insert(id, label);
         }
@@ -424,12 +436,18 @@ mod tests {
             }
         }
         let out = ner_redact(&NoOffsets, "Mark reviewed the Marketing plan for Mark");
-        assert_eq!(out.text, "[REDACTED:PER] reviewed the Marketing plan for [REDACTED:PER]");
+        assert_eq!(
+            out.text,
+            "[REDACTED:PER] reviewed the Marketing plan for [REDACTED:PER]"
+        );
         assert_eq!(out.counts.get("pf_per"), Some(&2));
     }
 
     #[test]
     fn reconstruct_surface_handles_wordpieces() {
-        assert_eq!(reconstruct_surface(&["Kath", "##erine", "Johnson"]), "Katherine Johnson");
+        assert_eq!(
+            reconstruct_surface(&["Kath", "##erine", "Johnson"]),
+            "Katherine Johnson"
+        );
     }
 }

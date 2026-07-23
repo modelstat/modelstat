@@ -414,7 +414,12 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
     if os == Os::Macos {
         if let Some(out) = run_command(
             "security",
-            &["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            &[
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ],
             None,
             Duration::from_millis(3_000),
         ) {
@@ -483,8 +488,12 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
         }
     }
     for candidate in &claude_configs {
-        let Some(obj) = read_json(candidate) else { continue };
-        let Some(acct) = obj.get("oauthAccount") else { continue };
+        let Some(obj) = read_json(candidate) else {
+            continue;
+        };
+        let Some(acct) = obj.get("oauthAccount") else {
+            continue;
+        };
         let stable_id = acct
             .get("accountUuid")
             .and_then(|v| v.as_str())
@@ -519,18 +528,31 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
         format!("{home}/.codex/auth.json"),
         format!("{home}/.config/codex/auth.json"),
     ] {
-        let Some(obj) = read_json(&candidate) else { continue };
+        let Some(obj) = read_json(&candidate) else {
+            continue;
+        };
         let tokens = obj.get("tokens");
-        let jwt = tokens.and_then(|t| t.get("id_token")).and_then(|v| v.as_str());
+        let jwt = tokens
+            .and_then(|t| t.get("id_token"))
+            .and_then(|v| v.as_str());
         let mut email = None;
         let mut sub = None;
         let mut name = None;
         let mut org = None;
         if let Some(jwt) = jwt {
             if let Some(claims) = decode_jwt_claims(jwt) {
-                email = claims.get("email").and_then(|v| v.as_str()).map(str::to_string);
-                sub = claims.get("sub").and_then(|v| v.as_str()).map(str::to_string);
-                name = claims.get("name").and_then(|v| v.as_str()).map(str::to_string);
+                email = claims
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                sub = claims
+                    .get("sub")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                name = claims
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 if let Some(oai) = claims.get("https://api.openai.com/auth") {
                     org = oai
                         .get("organization_id")
@@ -564,11 +586,17 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
         format!("{home}/.gemini/oauth_creds.json"),
         format!("{home}/.config/gemini/oauth_creds.json"),
     ] {
-        let Some(obj) = read_json(&candidate) else { continue };
+        let Some(obj) = read_json(&candidate) else {
+            continue;
+        };
         let email = obj
             .get("email")
             .and_then(|v| v.as_str())
-            .or_else(|| obj.get("token").and_then(|t| t.get("email")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                obj.get("token")
+                    .and_then(|t| t.get("email"))
+                    .and_then(|v| v.as_str())
+            })
             .map(str::to_string);
         if let Some(email) = email {
             ids.push(DetectedIdentity {
@@ -589,7 +617,9 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
         format!("{home}/Library/Application Support/Cursor/User/globalStorage/storage.json"),
         format!("{home}/.config/Cursor/User/globalStorage/storage.json"),
     ] {
-        let Some(obj) = read_json(&candidate) else { continue };
+        let Some(obj) = read_json(&candidate) else {
+            continue;
+        };
         let Some(map) = obj.as_object() else { continue };
         for (k, v) in map {
             if k.starts_with("cursorAuth") {
@@ -779,7 +809,11 @@ mod tests {
                 i.binary_path.clone().unwrap_or_default(),
                 i.data_dir.clone().unwrap_or_default()
             );
-            assert!(install_keys.insert(k), "duplicate install key: {:?}", i.agent);
+            assert!(
+                install_keys.insert(k),
+                "duplicate install key: {:?}",
+                i.agent
+            );
         }
         let mut id_keys = std::collections::HashSet::new();
         for i in &out.identities {

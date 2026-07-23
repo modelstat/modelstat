@@ -18,9 +18,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use modelstat_download::TtyProgress;
-use modelstat_llm::{Backend, Engine, EngineConfig};
 #[cfg(not(feature = "llama"))]
 use modelstat_llm::UnavailableBackend;
+use modelstat_llm::{Backend, Engine, EngineConfig};
 use modelstat_sumclient::SummarizerClient;
 
 /// The `summarizer-<semver>` banner string (§2).
@@ -78,7 +78,8 @@ fn arg_scope(args: &[String]) -> modelstat_service::Scope {
 
 /// `modelstat-summarizer stop` — halt the engine service without removing it.
 fn cmd_stop(args: &[String]) -> ExitCode {
-    match modelstat_service::stop_service(modelstat_service::Component::Summarizer, arg_scope(args)) {
+    match modelstat_service::stop_service(modelstat_service::Component::Summarizer, arg_scope(args))
+    {
         Ok(()) => {
             println!("✓ summariser engine stopped");
             ExitCode::SUCCESS
@@ -93,7 +94,10 @@ fn cmd_stop(args: &[String]) -> ExitCode {
 /// `modelstat-summarizer uninstall` — stop + remove the engine service. Model
 /// files stay on disk (a re-`setup` reuses them).
 fn cmd_uninstall(args: &[String]) -> ExitCode {
-    match modelstat_service::uninstall_service(modelstat_service::Component::Summarizer, arg_scope(args)) {
+    match modelstat_service::uninstall_service(
+        modelstat_service::Component::Summarizer,
+        arg_scope(args),
+    ) {
         Ok(()) => {
             println!("✓ summariser engine service removed (model files kept)");
             ExitCode::SUCCESS
@@ -140,8 +144,8 @@ fn make_backend(_models_dir: &std::path::Path) -> impl Backend {
 async fn serve() -> ExitCode {
     let home = home_dir();
     let models = models_dir(&home);
-    let cfg = EngineConfig::load(&config_path(&home))
-        .unwrap_or_else(|_| EngineConfig::defaults(&models));
+    let cfg =
+        EngineConfig::load(&config_path(&home)).unwrap_or_else(|_| EngineConfig::defaults(&models));
     let engine = Arc::new(Engine::new(make_backend(&models), cfg.clone()));
 
     let addr = format!("{}:{}", cfg.bind, cfg.port);
@@ -183,7 +187,10 @@ async fn setup(args: &[String]) -> ExitCode {
     let home = home_dir();
     let models = models_dir(&home);
     if let Err(e) = std::fs::create_dir_all(&models) {
-        eprintln!("modelstat-summarizer: cannot create {}: {e}", models.display());
+        eprintln!(
+            "modelstat-summarizer: cannot create {}: {e}",
+            models.display()
+        );
         return ExitCode::FAILURE;
     }
     let cfg_path = config_path(&home);
@@ -214,7 +221,10 @@ async fn setup(args: &[String]) -> ExitCode {
     }
 
     if let Err(e) = cfg.save(&cfg_path) {
-        eprintln!("modelstat-summarizer: cannot write {}: {e}", cfg_path.display());
+        eprintln!(
+            "modelstat-summarizer: cannot write {}: {e}",
+            cfg_path.display()
+        );
         return ExitCode::FAILURE;
     }
     eprintln!("▸ wrote {}", cfg_path.display());
@@ -253,7 +263,10 @@ async fn setup(args: &[String]) -> ExitCode {
 
     println!();
     println!("Collectors point at this engine with:");
-    println!("  modelstat mode self-hosted --url http://{}:{}", cfg.bind, cfg.port);
+    println!(
+        "  modelstat mode self-hosted --url http://{}:{}",
+        cfg.bind, cfg.port
+    );
     ExitCode::SUCCESS
 }
 
@@ -304,7 +317,11 @@ async fn status() -> ExitCode {
     println!("  model: {}", cfg.model_path.display());
     println!(
         "  model present: {}",
-        if cfg.model_path.exists() { "yes" } else { "no (lazy)" }
+        if cfg.model_path.exists() {
+            "yes"
+        } else {
+            "no (lazy)"
+        }
     );
 
     let client = SummarizerClient::new(format!("http://{}:{}", cfg.bind, cfg.port));

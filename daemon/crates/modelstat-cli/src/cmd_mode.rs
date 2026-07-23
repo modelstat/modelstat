@@ -17,7 +17,7 @@ use modelstat_ingest::Config;
 use modelstat_service::{install_service, stop_service, uninstall_service, Component, Scope};
 use serde_json::{json, Map, Value};
 
-use crate::util::{stdin_is_tty, text_prompt};
+use crate::util::{has_terminal, text_prompt};
 
 /// Plain-language copy for each mode (spec §3.3). Self-hosted is rewritten from
 /// the TS "your own AI endpoint (URL + model)" to "your org's own summarizer" —
@@ -93,9 +93,7 @@ pub(crate) async fn resolve_and_persist_mode(
 ) -> Result<String, String> {
     let mode = match requested {
         Some(r) if !r.is_empty() => parse_summarizer_mode(Some(r))
-            .ok_or_else(|| {
-                format!("unknown mode \"{r}\" — expected cloud, local, or self-hosted")
-            })?
+            .ok_or_else(|| format!("unknown mode \"{r}\" — expected cloud, local, or self-hosted"))?
             .to_string(),
         _ if interactive => prompt_for_mode(&config.summarizer_mode()),
         // Non-interactive with nothing requested: keep the existing choice.
@@ -161,7 +159,9 @@ async fn reconcile_local_engine(mode: &str) {
         pre_download_engine_model();
         match install_service(Component::Summarizer, Scope::User) {
             Ok(_) => println!("✓ local summariser engine service armed"),
-            Err(e) => eprintln!("  couldn't arm the local engine service ({e}) — run `modelstat` to retry"),
+            Err(e) => eprintln!(
+                "  couldn't arm the local engine service ({e}) — run `modelstat` to retry"
+            ),
         }
     } else {
         // cloud / self-hosted: stop + remove the local engine (model files kept).
@@ -179,7 +179,9 @@ pub(crate) fn pre_download_engine_model() {
     println!("preparing local summariser model (downloads on first use)…");
     // `--loopback`: config + model only, no prompts, no service — the collector
     // arms the loopback engine service itself (§10.3 "driven inline").
-    let _ = std::process::Command::new(engine).args(["setup", "--loopback"]).status();
+    let _ = std::process::Command::new(engine)
+        .args(["setup", "--loopback"])
+        .status();
 }
 
 /// The engine binary next to this collector (install layout), else on PATH.
@@ -234,7 +236,10 @@ pub async fn cmd_mode(config: Arc<Config>, args: &[String]) -> ExitCode {
         }
         if mode == "self-hosted" {
             let url = config.self_hosted_url();
-            println!("  endpoint: {}", if url.is_empty() { "(unset)" } else { &url });
+            println!(
+                "  endpoint: {}",
+                if url.is_empty() { "(unset)" } else { &url }
+            );
         }
         if config.summarizer_mode_is_env_overridden() {
             println!("  note: MODELSTAT_SUMMARIZER_MODE is set and overrides the stored value.");
@@ -244,8 +249,15 @@ pub async fn cmd_mode(config: Arc<Config>, args: &[String]) -> ExitCode {
     }
 
     // ── set mode ────────────────────────────────────────────────────────
-    let interactive = !as_json && stdin_is_tty();
-    let mode = match resolve_and_persist_mode(&config, requested.as_deref(), flag_val("--url").as_deref(), interactive).await {
+    let interactive = !as_json && has_terminal();
+    let mode = match resolve_and_persist_mode(
+        &config,
+        requested.as_deref(),
+        flag_val("--url").as_deref(),
+        interactive,
+    )
+    .await
+    {
         Ok(m) => m,
         Err(e) => {
             eprintln!("couldn't set mode: {e}");

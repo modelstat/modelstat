@@ -107,7 +107,12 @@ pub fn outcome_from_commits(commits: &[GitCommit], pr_number: u64) -> PrOutcome 
 /// `cwd` isn't a git repo or git fails. Bounded to recent history + a 4s timeout.
 pub fn check_pull_request_outcome(cwd: &str, pr_number: u64) -> Option<PrOutcome> {
     let stdout = run_git(
-        &["log", "-n", "1000", &format!("--format={}", git_log_format())],
+        &[
+            "log",
+            "-n",
+            "1000",
+            &format!("--format={}", git_log_format()),
+        ],
         cwd,
         Duration::from_millis(4_000),
     )?;
