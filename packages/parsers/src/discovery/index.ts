@@ -336,6 +336,52 @@ async function probeIdentities(os: "macos" | "linux"): Promise<DetectedIdentity[
   const ids: DetectedIdentity[] = [];
   const fs = await import("node:fs");
 
+  // Claude Code (desktop app + recent CLI) — the OAuth account lives in
+  // ~/.claude.json's `oauthAccount`, not only the "Claude Code-credentials"
+  // keychain item the older CLI used (absent for desktop-app users, the most
+  // common case). Plain file we already read, so no keychain-ACL / launchd
+  // permission issues. Probed FIRST so the keychain hit below can adopt this
+  // account when its own blob is anonymous.
+  const claudeConfigs = [`${homedir()}/.claude.json`];
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    claudeConfigs.unshift(`${process.env.CLAUDE_CONFIG_DIR}/.claude.json`);
+  }
+  interface ClaudeOauthAccount {
+    accountUuid?: string;
+    emailAddress?: string;
+    organizationUuid?: string;
+    organizationName?: string;
+    displayName?: string;
+    billingType?: string;
+  }
+  let jsonAcct: ClaudeOauthAccount | null = null;
+  for (const candidate of claudeConfigs) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const data = await fs.promises.readFile(candidate, "utf8");
+      const obj = JSON.parse(data) as { oauthAccount?: ClaudeOauthAccount };
+      const acct = obj.oauthAccount;
+      const stableId = acct?.accountUuid ?? acct?.organizationUuid;
+      if (acct && stableId) {
+        jsonAcct = acct;
+        ids.push({
+          provider: "anthropic",
+          provider_account_id: stableId,
+          provider_account_label:
+            acct.emailAddress ?? acct.organizationName ?? acct.displayName ?? "Claude account",
+          account_email: acct.emailAddress ?? null,
+          account_org: acct.organizationName ?? acct.billingType ?? null,
+          display_name: acct.displayName ?? null,
+          owner_scope: "unassigned",
+          detection_source: "claude_json_oauth",
+        });
+        break;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
   // Claude Code — credentials live in macOS Keychain at "Claude Code-credentials"
   if (os === "macos") {
     try {
@@ -358,18 +404,31 @@ async function probeIdentities(os: "macos" | "linux"): Promise<DetectedIdentity[
       const oauth = body.claudeAiOauth;
       const tok = oauth?.accessToken;
       if (tok) {
-        // Prefer a stable account/org id; the OAuth account uuid (when the
-        // blob carries it) is best. Fall back to a HASH of the refresh
-        // token (stable across access-token refreshes) only as a last
-        // resort — never a slice of the token itself: that would ship live
-        // secret material as an account id. Tokens DO eventually rotate, so
-        // a refreshed login may create a fresh identity the user can
-        // relabel/merge via a rule.
-        const email = oauth?.account?.email_address ?? oauth?.account?.email ?? null;
-        const orgName = oauth?.organization?.name ?? null;
+        // Identity for the keychain credentials, best first:
+        // 1. The blob's own account/org uuid + email/org (newer CLI blobs).
+        // 2. ADOPT the ~/.claude.json `oauthAccount` — the login flow writes the
+        //    keychain tokens and that file TOGETHER, so an anonymous blob (older
+        //    CLI: tokens + subscriptionType only) belongs to that same login.
+        //    Same uuid → dedupeIdentities collapses this into ONE account
+        //    instead of a useless second "max" row. (We never call provider
+        //    APIs with the token to enrich — Anthropic's terms restrict Claude
+        //    OAuth tokens to Claude Code itself.)
+        // 3. Last resort (no .claude.json account at all): a HASH of the
+        //    refresh token (stable across access-token refreshes) — never a
+        //    slice of the token itself: that would ship live secret material
+        //    as an account id. The plan (subscriptionType) becomes the org
+        //    qualifier so the row at least reads "Claude account · max".
+        const email =
+          oauth?.account?.email_address ??
+          oauth?.account?.email ??
+          jsonAcct?.emailAddress ??
+          null;
+        const orgName = oauth?.organization?.name ?? jsonAcct?.organizationName ?? null;
         const stableId =
           oauth?.account?.uuid ??
           oauth?.organization?.uuid ??
+          jsonAcct?.accountUuid ??
+          jsonAcct?.organizationUuid ??
           `kc_${createHash("sha256")
             .update(oauth?.refreshToken ?? tok)
             .digest("hex")
@@ -377,62 +436,16 @@ async function probeIdentities(os: "macos" | "linux"): Promise<DetectedIdentity[
         ids.push({
           provider: "anthropic",
           provider_account_id: stableId,
-          provider_account_label:
-            email ?? orgName ?? oauth?.subscriptionType ?? "Claude account",
+          provider_account_label: email ?? orgName ?? "Claude account",
           account_email: email,
           account_org: orgName ?? oauth?.subscriptionType ?? null,
-          display_name: null,
+          display_name: jsonAcct?.displayName ?? null,
           owner_scope: "unassigned",
           detection_source: "claude_keychain",
         });
       }
     } catch {
       /* no keychain entry → no identity */
-    }
-  }
-
-  // Claude Code (desktop app + recent CLI) — the OAuth account lives in
-  // ~/.claude.json's `oauthAccount`, not only the "Claude Code-credentials"
-  // keychain item the older CLI used (absent for desktop-app users, the most
-  // common case). Plain file we already read, so no keychain-ACL / launchd
-  // permission issues; dedupeIdentities collapses this with the keychain hit
-  // when both exist (same accountUuid).
-  const claudeConfigs = [`${homedir()}/.claude.json`];
-  if (process.env.CLAUDE_CONFIG_DIR) {
-    claudeConfigs.unshift(`${process.env.CLAUDE_CONFIG_DIR}/.claude.json`);
-  }
-  for (const candidate of claudeConfigs) {
-    if (!existsSync(candidate)) continue;
-    try {
-      const data = await fs.promises.readFile(candidate, "utf8");
-      const obj = JSON.parse(data) as {
-        oauthAccount?: {
-          accountUuid?: string;
-          emailAddress?: string;
-          organizationUuid?: string;
-          organizationName?: string;
-          displayName?: string;
-          billingType?: string;
-        };
-      };
-      const acct = obj.oauthAccount;
-      const stableId = acct?.accountUuid ?? acct?.organizationUuid;
-      if (acct && stableId) {
-        ids.push({
-          provider: "anthropic",
-          provider_account_id: stableId,
-          provider_account_label:
-            acct.emailAddress ?? acct.organizationName ?? acct.displayName ?? "Claude account",
-          account_email: acct.emailAddress ?? null,
-          account_org: acct.organizationName ?? acct.billingType ?? null,
-          display_name: acct.displayName ?? null,
-          owner_scope: "unassigned",
-          detection_source: "claude_json_oauth",
-        });
-        break;
-      }
-    } catch {
-      /* ignore */
     }
   }
 
@@ -587,7 +600,18 @@ function dedupeIdentities(list: DetectedIdentity[]): DetectedIdentity[] {
   const seen = new Map<string, DetectedIdentity>();
   for (const i of list) {
     const k = `${i.provider}|${i.provider_account_id}`;
-    if (!seen.has(k)) seen.set(k, i);
+    const prev = seen.get(k);
+    if (!prev) {
+      seen.set(k, i);
+    } else {
+      // Same account seen by several probes (e.g. .claude.json + keychain):
+      // keep the first entry but fill any identity field it was missing, so
+      // probe order never costs us an email/org/name we did detect.
+      prev.provider_account_label = prev.provider_account_label ?? i.provider_account_label;
+      prev.account_email = prev.account_email ?? i.account_email;
+      prev.account_org = prev.account_org ?? i.account_org;
+      prev.display_name = prev.display_name ?? i.display_name;
+    }
   }
   return Array.from(seen.values());
 }
