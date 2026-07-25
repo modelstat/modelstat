@@ -406,81 +406,23 @@ fn read_json(path: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// The `oauthAccount` fields from `~/.claude.json` a keychain hit can adopt.
+#[derive(Default, Clone)]
+struct ClaudeJsonAccount {
+    stable_id: Option<String>,
+    email: Option<String>,
+    org: Option<String>,
+    display: Option<String>,
+}
+
 fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
     let mut ids: Vec<DetectedIdentity> = Vec::new();
     let home = home_dir().unwrap_or_default();
 
-    // Claude Code — macOS Keychain "Claude Code-credentials".
-    if os == Os::Macos {
-        if let Some(out) = run_command(
-            "security",
-            &[
-                "find-generic-password",
-                "-s",
-                "Claude Code-credentials",
-                "-w",
-            ],
-            None,
-            Duration::from_millis(3_000),
-        ) {
-            if let Ok(body) = serde_json::from_str::<serde_json::Value>(out.trim()) {
-                if let Some(oauth) = body.get("claudeAiOauth") {
-                    if let Some(tok) = oauth.get("accessToken").and_then(|v| v.as_str()) {
-                        let email = oauth
-                            .get("account")
-                            .and_then(|a| a.get("email_address").or_else(|| a.get("email")))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        let org_name = oauth
-                            .get("organization")
-                            .and_then(|o| o.get("name"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        let sub_type = oauth
-                            .get("subscriptionType")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        let stable_id = oauth
-                            .get("account")
-                            .and_then(|a| a.get("uuid"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                            .or_else(|| {
-                                oauth
-                                    .get("organization")
-                                    .and_then(|o| o.get("uuid"))
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string)
-                            })
-                            .unwrap_or_else(|| {
-                                let refresh = oauth
-                                    .get("refreshToken")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(tok);
-                                refresh.chars().take(48).collect()
-                            });
-                        let label = email
-                            .clone()
-                            .or_else(|| org_name.clone())
-                            .or_else(|| sub_type.clone())
-                            .or_else(|| Some("Claude account".to_string()));
-                        ids.push(DetectedIdentity {
-                            provider: "anthropic".into(),
-                            provider_account_id: stable_id,
-                            provider_account_label: label,
-                            account_email: email,
-                            account_org: org_name.or(sub_type),
-                            display_name: None,
-                            owner_scope: "unassigned".into(),
-                            detection_source: "claude_keychain".into(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
     // Claude Code — ~/.claude.json `oauthAccount` (desktop-app + recent CLI).
+    // Probed FIRST so the keychain hit below can adopt this account when its
+    // own blob is anonymous.
+    let mut json_acct = ClaudeJsonAccount::default();
     let mut claude_configs = vec![format!("{home}/.claude.json")];
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         if !dir.is_empty() {
@@ -509,6 +451,12 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
                 .or_else(|| org.clone())
                 .or_else(|| display.clone())
                 .or_else(|| Some("Claude account".to_string()));
+            json_acct = ClaudeJsonAccount {
+                stable_id: Some(stable_id.to_string()),
+                email: email.clone(),
+                org: org.clone(),
+                display: display.clone(),
+            };
             ids.push(DetectedIdentity {
                 provider: "anthropic".into(),
                 provider_account_id: stable_id.to_string(),
@@ -520,6 +468,94 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
                 detection_source: "claude_json_oauth".into(),
             });
             break;
+        }
+    }
+
+    // Claude Code — macOS Keychain "Claude Code-credentials".
+    if os == Os::Macos {
+        if let Some(out) = run_command(
+            "security",
+            &[
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ],
+            None,
+            Duration::from_millis(3_000),
+        ) {
+            if let Ok(body) = serde_json::from_str::<serde_json::Value>(out.trim()) {
+                if let Some(oauth) = body.get("claudeAiOauth") {
+                    if let Some(tok) = oauth.get("accessToken").and_then(|v| v.as_str()) {
+                        // Identity for the keychain credentials, best first:
+                        // 1. the blob's own account/org (newer CLI blobs);
+                        // 2. ADOPT the ~/.claude.json `oauthAccount` — the login
+                        //    flow writes the keychain tokens and that file
+                        //    TOGETHER, so an anonymous blob (tokens + plan only)
+                        //    belongs to that same login; same id → the dedupe
+                        //    below collapses both probes into ONE account
+                        //    instead of a useless plan-named row. (Never enrich
+                        //    via provider APIs: Anthropic's terms restrict
+                        //    Claude OAuth tokens to Claude Code itself.)
+                        // 3. last resort: a sha256 HASH of the refresh token —
+                        //    stable across access-token refreshes, and never a
+                        //    slice of the token itself (that would ship live
+                        //    secret material as an account id).
+                        let email = oauth
+                            .get("account")
+                            .and_then(|a| a.get("email_address").or_else(|| a.get("email")))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or_else(|| json_acct.email.clone());
+                        let org_name = oauth
+                            .get("organization")
+                            .and_then(|o| o.get("name"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or_else(|| json_acct.org.clone());
+                        let sub_type = oauth
+                            .get("subscriptionType")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        let stable_id = oauth
+                            .get("account")
+                            .and_then(|a| a.get("uuid"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                oauth
+                                    .get("organization")
+                                    .and_then(|o| o.get("uuid"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                            })
+                            .or_else(|| json_acct.stable_id.clone())
+                            .unwrap_or_else(|| {
+                                use sha2::{Digest, Sha256};
+                                let refresh = oauth
+                                    .get("refreshToken")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(tok);
+                                let hex = format!("{:x}", Sha256::digest(refresh.as_bytes()));
+                                format!("kc_{}", &hex[..32])
+                            });
+                        let label = email
+                            .clone()
+                            .or_else(|| org_name.clone())
+                            .or_else(|| Some("Claude account".to_string()));
+                        ids.push(DetectedIdentity {
+                            provider: "anthropic".into(),
+                            provider_account_id: stable_id,
+                            provider_account_label: label,
+                            account_email: email,
+                            account_org: org_name.or(sub_type),
+                            display_name: json_acct.display.clone(),
+                            owner_scope: "unassigned".into(),
+                            detection_source: "claude_keychain".into(),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -723,9 +759,30 @@ fn dedupe_identities(list: Vec<DetectedIdentity>) -> Vec<DetectedIdentity> {
     let mut seen: HashMap<String, DetectedIdentity> = HashMap::new();
     for i in list {
         let k = format!("{}|{}", i.provider, i.provider_account_id);
-        if let std::collections::hash_map::Entry::Vacant(slot) = seen.entry(k.clone()) {
-            order.push(k);
-            slot.insert(i);
+        match seen.entry(k.clone()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                order.push(k);
+                slot.insert(i);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                // Same account seen by several probes (e.g. .claude.json +
+                // keychain): keep the first entry but fill any identity field
+                // it was missing, so probe order never costs a detected
+                // email/org/name.
+                let prev = slot.get_mut();
+                if prev.provider_account_label.is_none() {
+                    prev.provider_account_label = i.provider_account_label;
+                }
+                if prev.account_email.is_none() {
+                    prev.account_email = i.account_email;
+                }
+                if prev.account_org.is_none() {
+                    prev.account_org = i.account_org;
+                }
+                if prev.display_name.is_none() {
+                    prev.display_name = i.display_name;
+                }
+            }
         }
     }
     order.into_iter().filter_map(|k| seen.remove(&k)).collect()
@@ -837,5 +894,38 @@ mod tests {
         let out = dedupe_identities(vec![mk("first"), mk("second")]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].provider_account_label.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn dedupe_identities_fills_missing_fields_from_later_probes() {
+        // .claude.json probe knows the email; the keychain probe of the SAME
+        // account knows the org — the merged row keeps both (first entry wins
+        // per field, gaps fill from later duplicates).
+        let first = DetectedIdentity {
+            provider: "anthropic".into(),
+            provider_account_id: "acc_1".into(),
+            provider_account_label: Some("a@x.com".into()),
+            account_email: Some("a@x.com".into()),
+            account_org: None,
+            display_name: None,
+            owner_scope: "unassigned".into(),
+            detection_source: "claude_json_oauth".into(),
+        };
+        let second = DetectedIdentity {
+            provider: "anthropic".into(),
+            provider_account_id: "acc_1".into(),
+            provider_account_label: Some("other".into()),
+            account_email: None,
+            account_org: Some("goldsky".into()),
+            display_name: Some("Aram".into()),
+            owner_scope: "unassigned".into(),
+            detection_source: "claude_keychain".into(),
+        };
+        let out = dedupe_identities(vec![first, second]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].provider_account_label.as_deref(), Some("a@x.com"));
+        assert_eq!(out[0].account_email.as_deref(), Some("a@x.com"));
+        assert_eq!(out[0].account_org.as_deref(), Some("goldsky"));
+        assert_eq!(out[0].display_name.as_deref(), Some("Aram"));
     }
 }
