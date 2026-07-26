@@ -273,7 +273,7 @@ impl SessionInsightsFetcher for McpInsightsFetcher {
 fn kind_for_path(path: &str) -> ParserKind {
     if path.contains("/.codex/sessions/") {
         ParserKind::Codex
-    } else if path.contains("/.pi/agent/sessions/") {
+    } else if path.contains("/.pi/agent/sessions/") || path.contains("/.omp/agent/sessions/") {
         ParserKind::Pi
     } else {
         ParserKind::ClaudeCode
@@ -285,7 +285,7 @@ fn kind_for_path(path: &str) -> ParserKind {
 /// when none match (so it never collides with a real id). Port of
 /// `sessionIdForPath`.
 fn session_id_for_path(path: &str) -> Option<String> {
-    if path.contains("/.pi/agent/sessions/") {
+    if path.contains("/.pi/agent/sessions/") || path.contains("/.omp/agent/sessions/") {
         return modelstat_parsers::pi::derive_session_id_from_pi_path(path);
     }
     modelstat_parsers::claude_code::derive_session_id_from_filename(path)

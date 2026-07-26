@@ -136,11 +136,16 @@ fn sources() -> &'static [SourceSpec] {
         },
         SourceSpec {
             agent: "pi",
-            macos: &["~/.pi/agent"],
-            linux: &["$XDG_CONFIG_HOME/pi/agent", "~/.pi/agent"],
-            windows: &["~/.pi/agent"],
-            data_dir_env: &["PI_HOME"],
-            binaries: &["pi"],
+            macos: &["~/.pi/agent", "~/.omp/agent"],
+            linux: &[
+                "$XDG_CONFIG_HOME/pi/agent",
+                "~/.pi/agent",
+                "$XDG_CONFIG_HOME/omp/agent",
+                "~/.omp/agent",
+            ],
+            windows: &["~/.pi/agent", "~/.omp/agent"],
+            data_dir_env: &["PI_HOME", "OMP_HOME"],
+            binaries: &["pi", "omp"],
         },
         SourceSpec {
             agent: "openclaw",

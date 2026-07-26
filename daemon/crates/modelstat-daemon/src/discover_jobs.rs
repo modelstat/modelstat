@@ -94,15 +94,21 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
         }
     }
 
-    // pi — ~/.pi/agent/sessions/<p>/*.jsonl
-    for proj in child_paths(&home.join(".pi/agent/sessions")) {
-        if proj.is_dir() {
-            for f in child_paths(&proj) {
-                if is_jsonl(&f) {
-                    jobs.push(ScanJob {
-                        path: f.to_string_lossy().into_owned(),
-                        kind: ParserKind::Pi,
-                    });
+    // pi / omp (Oh My Pi) — <home>/.{pi,omp}/agent/sessions/<p>/*.jsonl. OMP is Pi
+    // with its home relocated to ~/.omp; identical JSONL format + parser. One level
+    // deep by design: top-level <TS>_<uuid>.jsonl are the session transcripts,
+    // while nested <TS>_<uuid>/ dirs (subagent + tool logs) are skipped so a
+    // subagent's tokens aren't double-counted against its parent.
+    for root in [".pi/agent/sessions", ".omp/agent/sessions"] {
+        for proj in child_paths(&home.join(root)) {
+            if proj.is_dir() {
+                for f in child_paths(&proj) {
+                    if is_jsonl(&f) {
+                        jobs.push(ScanJob {
+                            path: f.to_string_lossy().into_owned(),
+                            kind: ParserKind::Pi,
+                        });
+                    }
                 }
             }
         }
@@ -165,7 +171,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn walks_the_three_roots_and_tags_the_parser() {
+    fn walks_the_transcript_roots_and_tags_the_parser() {
         let home = std::env::temp_dir().join(format!("modelstat-jobs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let mk = |rel: &str| {
@@ -178,9 +184,10 @@ mod tests {
         mk(".codex/sessions/2026/07/16/rollout-abc.jsonl");
         mk(".codex/sessions/2026/07/16/other.jsonl"); // ignored (not rollout-)
         mk(".pi/agent/sessions/p/b.jsonl");
+        mk(".omp/agent/sessions/p/c.jsonl");
 
         let jobs = discover_jobs_in(&home);
-        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs.len(), 4);
         assert!(jobs
             .iter()
             .any(|j| j.kind == ParserKind::ClaudeCode && j.path.ends_with("a.jsonl")));
@@ -190,6 +197,9 @@ mod tests {
         assert!(jobs
             .iter()
             .any(|j| j.kind == ParserKind::Pi && j.path.ends_with("b.jsonl")));
+        assert!(jobs
+            .iter()
+            .any(|j| j.kind == ParserKind::Pi && j.path.ends_with("c.jsonl")));
 
         let _ = std::fs::remove_dir_all(&home);
     }
