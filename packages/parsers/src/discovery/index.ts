@@ -127,11 +127,16 @@ const SOURCES: SourceSpec[] = [
   {
     agent: "pi",
     dataDirs: {
-      macos: ["~/.pi/agent"],
-      linux: ["$XDG_CONFIG_HOME/pi/agent", "~/.pi/agent"],
+      macos: ["~/.pi/agent", "~/.omp/agent"],
+      linux: [
+        "$XDG_CONFIG_HOME/pi/agent",
+        "~/.pi/agent",
+        "$XDG_CONFIG_HOME/omp/agent",
+        "~/.omp/agent",
+      ],
     },
-    dataDirEnv: ["PI_HOME"],
-    binaries: ["pi"],
+    dataDirEnv: ["PI_HOME", "OMP_HOME"],
+    binaries: ["pi", "omp"],
     fileSignatures: [{ filenameGlob: "sessions/**/*.jsonl", firstLineHasKey: "cwd" }],
   },
   {

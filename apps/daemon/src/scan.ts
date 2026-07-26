@@ -116,7 +116,7 @@ export interface ScanJob {
 }
 
 /**
- * Walk the known Claude Code + Codex transcript roots and return one
+ * Walk the known Claude Code, Codex, and Pi/OMP transcript roots and return one
  * {@link ScanJob} per `.jsonl`. Shared by the incremental {@link scanAll} and the
  * self-healing reconcile, so both reason over the exact same file set.
  */
@@ -176,29 +176,36 @@ export async function discoverJobs(deviceId: string): Promise<ScanJob[]> {
     console.warn("codex scan skipped:", (e as Error).message);
   }
 
-  // pi — ~/.pi/agent/sessions/<encoded-cwd>/<TS>_<uuid>.jsonl
-  try {
-    const base = join(homedir(), ".pi/agent/sessions");
-    const projects = await readdir(base).catch(() => []);
-    for (const p of projects) {
-      const dir = join(base, p);
-      const ds = await stat(dir).catch(() => null);
-      if (!ds?.isDirectory()) continue;
-      const files = await readdir(dir);
-      for (const f of files) {
-        if (!f.endsWith(".jsonl")) continue;
-        const full = join(dir, f);
-        jobs.push({
-          path: full,
-          parse: async (sink) => {
-            const r = await parsePiSession({ deviceId, sourceFile: full, onEvents: sink });
-            return { toolCalls: r.toolCalls ?? [], scriptContexts: r.scriptContexts ?? [] };
-          },
-        });
+  // pi / omp (Oh My Pi) — <home>/.{pi,omp}/agent/sessions/<encoded-cwd>/<TS>_<uuid>.jsonl.
+  // OMP is Pi with its home relocated to ~/.omp; identical JSONL transcript
+  // format + parser. One level deep by design: the top-level <TS>_<uuid>.jsonl
+  // are the session transcripts, while nested <TS>_<uuid>/ dirs hold subagent
+  // and tool logs — skipped here so a subagent's tokens aren't double-counted
+  // against its parent session.
+  for (const root of [".pi/agent/sessions", ".omp/agent/sessions"]) {
+    try {
+      const base = join(homedir(), root);
+      const projects = await readdir(base).catch(() => []);
+      for (const p of projects) {
+        const dir = join(base, p);
+        const ds = await stat(dir).catch(() => null);
+        if (!ds?.isDirectory()) continue;
+        const files = await readdir(dir);
+        for (const f of files) {
+          if (!f.endsWith(".jsonl")) continue;
+          const full = join(dir, f);
+          jobs.push({
+            path: full,
+            parse: async (sink) => {
+              const r = await parsePiSession({ deviceId, sourceFile: full, onEvents: sink });
+              return { toolCalls: r.toolCalls ?? [], scriptContexts: r.scriptContexts ?? [] };
+            },
+          });
+        }
       }
+    } catch (e) {
+      console.warn(`${root} scan skipped:`, (e as Error).message);
     }
-  } catch (e) {
-    console.warn("pi scan skipped:", (e as Error).message);
   }
 
   return jobs;
@@ -336,7 +343,8 @@ export async function scanSession(
  * `<uuid>.jsonl` or Codex's `rollout-…-<uuid>.jsonl`. Null when neither shape
  * matches (so it's never confused with a real id). */
 function sessionIdForPath(path: string): string | null {
-  if (path.includes("/.pi/agent/sessions/")) return deriveSessionIdFromPiPath(path);
+  if (path.includes("/.pi/agent/sessions/") || path.includes("/.omp/agent/sessions/"))
+    return deriveSessionIdFromPiPath(path);
   return deriveSessionIdFromFilename(path) ?? deriveSessionIdFromRolloutPath(path);
 }
 
@@ -347,7 +355,8 @@ function parserForFile(full: string): (ctx: ParserContext) => Promise<ParseResul
   if (full.includes("/.codex/sessions/") && /rollout-.*\.jsonl$/.test(full)) {
     return parseCodexRollout;
   }
-  if (full.includes("/.pi/agent/sessions/")) return parsePiSession;
+  if (full.includes("/.pi/agent/sessions/") || full.includes("/.omp/agent/sessions/"))
+    return parsePiSession;
   return parseClaudeCodeJsonl;
 }
 
