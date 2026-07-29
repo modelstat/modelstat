@@ -198,9 +198,11 @@ fn with_result_meta(mut result: Value) -> Value {
     result
 }
 
-/// Log one line to stderr (stdout is the protocol channel).
+/// Log one line to stderr (stdout is the protocol channel). Keeps the `mcp:`
+/// marker in the message: this bridge's stderr is whatever the MCP client points
+/// it at, often shared with other servers' output.
 pub fn log(line: &str) {
-    eprintln!("modelstat-mcp: {line}");
+    modelstat_log::log_info!("mcp: {line}");
 }
 
 #[cfg(test)]

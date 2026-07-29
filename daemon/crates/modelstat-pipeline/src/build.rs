@@ -240,8 +240,8 @@ where
     // which downstream rejects. Fail at the source so the logs name the cause.
     let excerpts = sample_and_redact_excerpts(slice);
     if excerpts.is_empty() {
-        eprintln!(
-            "modelstat: ⚠ slice skipped in session {session_id} ({} turns) — parser produced 0 content excerpts (would summarise metadata-only); check the {} parser",
+        modelstat_log::log_warn!(
+            "slice skipped in session {session_id} ({} turns) — parser produced 0 content excerpts (would summarise metadata-only); check the {} parser",
             slice.len(),
             first.agent
         );

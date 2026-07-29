@@ -117,7 +117,7 @@ async fn ingest(State(st): State<AppState>, body: Bytes) -> Response {
             )
                 .into_response(),
             Err(e) => {
-                eprintln!("modelstat: local ingest enqueue failed: {e}");
+                modelstat_log::log_error!("local ingest enqueue failed: {e}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "enqueue failed" })),
@@ -271,8 +271,8 @@ pub async fn start_local_ingest_receiver(
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!(
-                "modelstat: local ingest receiver disabled — SDK local_daemon mode \
+            modelstat_log::log_error!(
+                "local ingest receiver disabled — SDK local_daemon mode \
                  unavailable: {e} on {addr}"
             );
             return None;

@@ -88,8 +88,8 @@ where
             // FAIL-CLOSED + no-degrade: the on-device NER redactor is unavailable,
             // so turns can't be scrubbed before leaving the box. HOLD + retry (the
             // TS shipped local extractive; the rewrite never degrades).
-            eprintln!(
-                "modelstat: cloud NER/PII redactor unavailable — holding this flush \
+            modelstat_log::log_warn!(
+                "cloud NER/PII redactor unavailable — holding this flush \
                  (no raw egress, no degrade); retrying once the model is ready"
             );
             return FlushOutcome::Held;

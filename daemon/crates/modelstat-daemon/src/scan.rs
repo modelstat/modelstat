@@ -405,11 +405,11 @@ where
         let mut r = match parse_handle.await {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                eprintln!("modelstat: parse failed for {}: {e}", job.path);
+                modelstat_log::log_error!("parse failed for {}: {e}", job.path);
                 continue;
             }
             Err(join) => {
-                eprintln!("modelstat: parse task panicked for {}: {join}", job.path);
+                modelstat_log::log_error!("parse task panicked for {}: {join}", job.path);
                 continue;
             }
         };

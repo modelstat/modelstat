@@ -93,8 +93,8 @@ pub fn rotate_runaway_logs() {
         let path = dir.join(name);
         match rotate_log_file(&path, LOG_MAX_BYTES, LOG_TAIL_KEEP_BYTES) {
             Ok(Some(r)) => {
-                eprintln!(
-                    "[modelstat] rotated {name}: was {} MB (> {} MB cap), tail kept in {}",
+                modelstat_log::log_warn!(
+                    "rotated {name}: was {} MB (> {} MB cap), tail kept in {}",
                     r.was_bytes / 1024 / 1024,
                     LOG_MAX_BYTES / 1024 / 1024,
                     r.old_log.display()

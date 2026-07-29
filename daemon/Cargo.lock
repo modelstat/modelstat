@@ -1726,6 +1726,7 @@ version = "1.1.0"
 dependencies = [
  "modelstat-daemon",
  "modelstat-ingest",
+ "modelstat-log",
  "modelstat-mcp",
  "modelstat-parsers",
  "modelstat-redact",
@@ -1748,6 +1749,7 @@ dependencies = [
  "libc",
  "modelstat-download",
  "modelstat-ingest",
+ "modelstat-log",
  "modelstat-mcp",
  "modelstat-parsers",
  "modelstat-pipeline",
@@ -1770,6 +1772,7 @@ version = "1.1.0"
 dependencies = [
  "axum 0.7.9",
  "futures-util",
+ "modelstat-log",
  "reqwest",
  "serde",
  "sha2",
@@ -1783,6 +1786,7 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "hostname",
+ "modelstat-log",
  "modelstat-wire",
  "regex",
  "reqwest",
@@ -1807,10 +1811,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "modelstat-log"
+version = "1.1.0"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "modelstat-mcp"
 version = "1.1.0"
 dependencies = [
  "modelstat-ingest",
+ "modelstat-log",
  "modelstat-wire",
  "reqwest",
  "serde",
@@ -1844,6 +1856,7 @@ dependencies = [
  "chrono",
  "getrandom 0.3.4",
  "modelstat-download",
+ "modelstat-log",
  "modelstat-parsers",
  "modelstat-redact",
  "modelstat-sumclient",
@@ -1864,6 +1877,7 @@ dependencies = [
  "axum 0.7.9",
  "chrono",
  "modelstat-ingest",
+ "modelstat-log",
  "modelstat-parsers",
  "modelstat-pipeline",
  "modelstat-wire",
@@ -1899,6 +1913,7 @@ name = "modelstat-sumclient"
 version = "1.1.0"
 dependencies = [
  "axum 0.7.9",
+ "modelstat-log",
  "reqwest",
  "serde",
  "serde_json",
@@ -1913,6 +1928,7 @@ dependencies = [
  "modelstat-download",
  "modelstat-ingest",
  "modelstat-llm",
+ "modelstat-log",
  "modelstat-service",
  "modelstat-sumclient",
  "modelstat-update",

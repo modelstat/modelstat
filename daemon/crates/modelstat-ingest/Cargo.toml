@@ -13,6 +13,7 @@ repository.workspace = true
 # probes, identity/state stores, Config) lives here rather than in
 # modelstat-daemon (which depends on this crate). See daemon/PARITY.md.
 [dependencies]
+modelstat-log.workspace = true
 modelstat-wire.workspace = true
 serde.workspace = true
 serde_json.workspace = true

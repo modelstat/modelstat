@@ -14,7 +14,7 @@ fn upload_outcome(result: UploadResult) -> Result<u64, Hold> {
     match result {
         UploadResult::Commit(resp) => Ok(resp.accepted),
         UploadResult::Hold(reason) => {
-            eprintln!("modelstat: SDK drain upload held — {reason}");
+            modelstat_log::log_warn!("SDK drain upload held — {reason}");
             Err(Hold)
         }
     }

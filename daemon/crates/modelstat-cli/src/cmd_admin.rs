@@ -30,7 +30,7 @@ pub fn cmd_reset() -> ExitCode {
         return ExitCode::FAILURE;
     }
     println!(
-        "[modelstat] cursors reset — the daemon's next scan cycle will re-read every JSONL from the start and re-summarise every session at processing version v{PROCESSING_VERSION}."
+        "cursors reset — the daemon's next scan cycle will re-read every JSONL from the start and re-summarise every session at processing version v{PROCESSING_VERSION}."
     );
     println!("  If the daemon is running, kick it now with: modelstat stop && modelstat start");
     ExitCode::SUCCESS
@@ -125,13 +125,13 @@ pub fn cmd_ensure_daemon(version: &str) -> ExitCode {
     match health.decision {
         SuperviseDecision::Adopt => {
             let pid = health.lock.as_ref().map(|l| l.pid).unwrap_or(0);
-            println!("[modelstat] daemon healthy (pid {pid}) — nothing to do");
+            modelstat_log::log_info!("daemon healthy (pid {pid}) — nothing to do");
             ExitCode::SUCCESS
         }
         SuperviseDecision::Spawn => {
             if let Some(pid) = service_pid(Component::Daemon, Scope::User) {
-                println!(
-                    "[modelstat] managed daemon (pid {pid}) is booting — leaving it to finish"
+                modelstat_log::log_info!(
+                    "managed daemon (pid {pid}) is booting — leaving it to finish"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -139,9 +139,10 @@ pub fn cmd_ensure_daemon(version: &str) -> ExitCode {
         }
         SuperviseDecision::Replace => {
             if let Some(lock) = &health.lock {
-                eprintln!(
-                    "[modelstat] daemon pid {} stopped updating its status (age {:?}ms) — replacing it",
-                    lock.pid, health.status_age_ms
+                modelstat_log::log_warn!(
+                    "daemon pid {} stopped updating its status (age {:?}ms) — replacing it",
+                    lock.pid,
+                    health.status_age_ms
                 );
                 terminate_owner(lock.pid);
             }
@@ -159,7 +160,7 @@ fn terminate_owner(pid: i64) {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    eprintln!("[modelstat] daemon pid {pid} ignored SIGTERM for 10s — SIGKILL");
+    modelstat_log::log_warn!("daemon pid {pid} ignored SIGTERM for 10s — SIGKILL");
     terminate_process_hard(pid);
     std::thread::sleep(Duration::from_millis(500));
 }
@@ -168,11 +169,11 @@ fn terminate_owner(pid: i64) {
 fn reload_daemon_service() -> ExitCode {
     match install_service(Component::Daemon, Scope::User) {
         Ok(r) => {
-            println!("[modelstat] daemon service reloaded ({})", r.path.display());
+            modelstat_log::log_info!("daemon service reloaded ({})", r.path.display());
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("modelstat: couldn't reload the daemon service: {e}");
+            modelstat_log::log_error!("couldn't reload the daemon service: {e}");
             ExitCode::FAILURE
         }
     }
@@ -184,7 +185,7 @@ fn reload_daemon_service() -> ExitCode {
 /// Pause/Quit verb.
 pub fn cmd_stop_daemon() -> ExitCode {
     if let Err(e) = stop_service(Component::Daemon, Scope::User) {
-        eprintln!("modelstat: couldn't stop the daemon service: {e}");
+        modelstat_log::log_error!("couldn't stop the daemon service: {e}");
         return ExitCode::FAILURE;
     }
     // An owner running outside the service manager (a dev's terminal daemon, an
@@ -194,7 +195,7 @@ pub fn cmd_stop_daemon() -> ExitCode {
             terminate_process(lock.pid);
         }
     }
-    println!("✓ daemon stopped (service stays installed — `modelstat _ensure-daemon` or the next login restarts it)");
+    modelstat_log::log_info!("daemon stopped (service stays installed — `modelstat _ensure-daemon` or the next login restarts it)");
     ExitCode::SUCCESS
 }
 
@@ -296,8 +297,11 @@ pub async fn cmd_sync(config: Arc<Config>, args: &[String]) -> ExitCode {
 /// `watch` — foreground watcher (dev convenience): an initial scan, then re-scan
 /// whenever a transcript changes, plus a 5-min backstop. Runs until Ctrl-C.
 pub async fn cmd_watch(config: Arc<Config>) -> ExitCode {
+    // A foreground daemon is still a daemon: same timestamped log shape.
+    modelstat_log::init_service();
+
     let Some(device_id) = config.device_id() else {
-        eprintln!("not paired — run `modelstat` first");
+        modelstat_log::log_error!("not paired — run `modelstat` first");
         return ExitCode::FAILURE;
     };
     let machine_id = modelstat_ingest::intended_device_uuid();
