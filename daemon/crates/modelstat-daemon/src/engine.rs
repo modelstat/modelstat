@@ -78,7 +78,7 @@ pub fn engine_base_url(config: &Config) -> String {
 }
 
 /// The base on-device model dir (`MODELSTAT_MODELS_DIR` override, else
-/// `~/.modelstat/models`) — one cache for `connect` + the daemon so the ~250 MB
+/// `~/.modelstat/models`) — one cache for `connect` + the daemon so the ~560 MB
 /// NER + BGE weights download once and survive upgrades (§9.5). The `hf/<name>`
 /// cache subdir is owned by `modelstat-download` (`HfModel::dir`); callers pass
 /// this BASE so the downloader and the loaders below agree on `<base>/hf/<name>`
@@ -152,7 +152,9 @@ impl Embedder for DaemonEmbedder {
 /// Build the embedder for this process. Loads the candle BGE model from the
 /// shared cache when built `--features candle` and its weights are present;
 /// otherwise (or on a load failure) uses [`NoEmbedder`]. Embeddings are
-/// best-effort, so an absent model is a quiet info line, not a hold.
+/// best-effort — segmentation keeps its four size/time boundaries and the server
+/// recomputes the abstract embedding it needs — so an absent model is a warning,
+/// not a hold. It should never happen: `connect`/`mode` download it.
 pub fn build_embedder() -> DaemonEmbedder {
     #[cfg(feature = "candle")]
     {
@@ -164,8 +166,9 @@ pub fn build_embedder() -> DaemonEmbedder {
             }
             Err(err) => {
                 modelstat_log::log_warn!(
-                    "embedder: BGE model not loadable at {} ({err}) — \
-                     segmentation uses the time-gap heuristic until `connect` downloads it",
+                    "embedder: BGE model not loadable at {} ({err}) — segmentation loses its \
+                     topic-shift boundary and splits on size/time only; re-run `modelstat connect` \
+                     to download it",
                     dir.display()
                 );
             }
@@ -214,7 +217,7 @@ pub fn build_ner() -> DaemonNer {
                 modelstat_log::log_warn!(
                     "NER (redaction layer 2): model not loadable at {} ({err}) — \
                      redaction floor (layer 1) still applies; cloud/self-hosted flushes HOLD \
-                     (fail-closed) until `connect` downloads it",
+                     (fail-closed); re-run `modelstat connect` to download it",
                     dir.display()
                 );
             }

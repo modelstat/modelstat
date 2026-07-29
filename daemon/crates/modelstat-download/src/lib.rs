@@ -1,11 +1,13 @@
 //! `modelstat-download` — the shared model-artifact downloader (feature §11).
 //!
 //! One resume-safe downloader for every model file: the engine's Qwen GGUF
-//! (~2.7 GB) and the collector's NER (~250 MB) + embedder (~50–130 MB) models.
+//! (~2.7 GB) and the collector's NER (~430 MB) + embedder (~130 MB) models.
 //! Resume-safe (`.partial` + `Range` + atomic rename), sha256-verified when a
 //! digest is pinned, with a throttled progress meter (single redrawing TTY line
-//! / a periodic non-TTY line). Download failures never fail an install — the
-//! caller lazy-downloads on first use and self-heals (§9.4/§9.5).
+//! / a periodic non-TTY line). Download failures never fail an install, but note
+//! that NOTHING re-attempts them on its own: `connect` / `mode` are the only
+//! callers, and the daemon reads the cache without ever fetching. A model that
+//! fails here stays missing until the user re-runs `connect`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
