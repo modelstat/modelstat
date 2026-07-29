@@ -1,0 +1,14 @@
+[package]
+name = "modelstat-log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "One-line timestamped stderr logging for modelstat's supervised processes."
+
+# The bottom of the crate graph on purpose: every crate that logs depends on
+# this one, so it must depend on nothing of ours (and only on chrono, which the
+# workspace already builds).
+[dependencies]
+chrono.workspace = true

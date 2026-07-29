@@ -10,6 +10,7 @@ repository.workspace = true
 # (over the summarizer protocol), and the resilient hold-and-retry wrapper. NER +
 # embeddings run here via candle (added behind traits). No llama.cpp (plan D4).
 [dependencies]
+modelstat-log.workspace = true
 modelstat-wire.workspace = true
 modelstat-redact.workspace = true
 modelstat-sumclient.workspace = true

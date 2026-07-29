@@ -338,8 +338,8 @@ where
     for f in &files_to_reship {
         store.clear_cursor(f);
     }
-    eprintln!(
-        "modelstat self-heal: server short {sessions_short} session(s) across {days_checked} \
+    modelstat_log::log_warn!(
+        "self-heal: server short {sessions_short} session(s) across {days_checked} \
          day(s) ({sessions_deferred} deferred by grace band); re-shipping {} file(s) from local logs",
         files_to_reship.len()
     );

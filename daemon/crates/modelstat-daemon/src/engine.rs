@@ -69,8 +69,8 @@ pub fn engine_base_url(config: &Config) -> String {
         // Misconfigured self-hosted (no URL) → point at loopback so the resilient
         // client reports "unreachable" loudly and holds, rather than panicking on
         // an empty base URL. `modelstat mode self-hosted --url …` is the fix.
-        eprintln!(
-            "[modelstat] self-hosted mode has no engine URL — set one with \
+        modelstat_log::log_error!(
+            "self-hosted mode has no engine URL — set one with \
              `modelstat mode self-hosted --url <URL>`; summaries will hold until then"
         );
     }
@@ -159,12 +159,12 @@ pub fn build_embedder() -> DaemonEmbedder {
         let dir = model_dir("MODELSTAT_EMBED_MODEL_DIR", "bge-small-en-v1.5");
         match modelstat_pipeline::embed::CandleEmbedder::load(&dir) {
             Ok(e) => {
-                eprintln!("[modelstat] embedder: candle BGE-small (384-dim) loaded");
+                modelstat_log::log_info!("embedder: candle BGE-small (384-dim) loaded");
                 return DaemonEmbedder::Candle(e);
             }
             Err(err) => {
-                eprintln!(
-                    "[modelstat] embedder: BGE model not loadable at {} ({err}) — \
+                modelstat_log::log_warn!(
+                    "embedder: BGE model not loadable at {} ({err}) — \
                      segmentation uses the time-gap heuristic until `connect` downloads it",
                     dir.display()
                 );
@@ -207,12 +207,12 @@ pub fn build_ner() -> DaemonNer {
         let dir = model_dir("MODELSTAT_NER_MODEL_DIR", "bert-base-NER");
         match modelstat_redact::ner::CandleNer::load(&dir) {
             Ok(n) => {
-                eprintln!("[modelstat] NER (redaction layer 2): candle BERT-NER loaded");
+                modelstat_log::log_info!("NER (redaction layer 2): candle BERT-NER loaded");
                 return DaemonNer::Candle(n);
             }
             Err(err) => {
-                eprintln!(
-                    "[modelstat] NER (redaction layer 2): model not loadable at {} ({err}) — \
+                modelstat_log::log_warn!(
+                    "NER (redaction layer 2): model not loadable at {} ({err}) — \
                      redaction floor (layer 1) still applies; cloud/self-hosted flushes HOLD \
                      (fail-closed) until `connect` downloads it",
                     dir.display()

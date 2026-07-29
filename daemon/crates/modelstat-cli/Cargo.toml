@@ -15,6 +15,7 @@ path = "src/main.rs"
 # deliberately no `modelstat-llm` dependency here, direct or transitive, and CI
 # asserts it via `cargo tree`. Do not add one.
 [dependencies]
+modelstat-log.workspace = true
 modelstat-wire.workspace = true
 modelstat-redact.workspace = true
 modelstat-daemon.workspace = true

@@ -68,7 +68,7 @@ async fn complete(State(engine): State<Arc<Engine>>, body: Json<CompleteRequest>
             .into_response(),
         CompleteOutcome::Failed(cause) => {
             // Fail loud in the engine's own logs; status-only to the client.
-            eprintln!("modelstat-summarizer: inference failed: {cause}");
+            modelstat_log::log_error!("summarizer: inference failed: {cause}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(EngineError {

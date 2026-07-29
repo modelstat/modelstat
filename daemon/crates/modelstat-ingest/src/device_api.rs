@@ -327,8 +327,8 @@ impl DeviceApi {
                     // 200 text/html = the SPA served a removed/undeployed route.
                     // Not transient (retrying won't help) - report loudly and
                     // return None without a parse crash (feature §17, §21.12).
-                    eprintln!(
-                        "[modelstat] device request to {} returned the dashboard (200 text/html) - route may be undeployed or misconfigured",
+                    modelstat_log::log_error!(
+                        "device request to {} returned the dashboard (200 text/html) - route may be undeployed or misconfigured",
                         url
                     );
                     return None;
@@ -347,8 +347,8 @@ impl DeviceApi {
                 // would panic a byte-slice (matches the `.chars().take(..)` upload path).
                 let text = res.text().await.unwrap_or_default();
                 let snippet: String = text.chars().take(300).collect();
-                eprintln!(
-                    "[modelstat] device request rejected {} {}: {}",
+                modelstat_log::log_error!(
+                    "device request rejected {} {}: {}",
                     url,
                     code.as_u16(),
                     snippet
@@ -443,7 +443,7 @@ impl DeviceApi {
                 Err(e) => {
                     // Network blip — surface the real cause chain, back off + retry.
                     let detail = describe_error(&e);
-                    eprintln!("[modelstat] ingest fetch failed (attempt {attempt}): {detail}");
+                    modelstat_log::log_warn!("ingest fetch failed (attempt {attempt}): {detail}");
                     last_fetch_error = Some(detail);
                     tokio::time::sleep(jitter(ingest_backoff(attempt))).await;
                     continue;
@@ -495,8 +495,8 @@ impl DeviceApi {
                     } else {
                         None
                     };
-                    eprintln!(
-                        "[modelstat] ingest backoff status={status} delay_ms={} attempt={attempt}{}",
+                    modelstat_log::log_warn!(
+                        "ingest backoff status={status} delay_ms={} attempt={attempt}{}",
                         delay.as_millis(),
                         body.map(|b| format!(" body={b}")).unwrap_or_default()
                     );

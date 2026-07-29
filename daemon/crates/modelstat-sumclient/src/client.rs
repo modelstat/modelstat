@@ -154,7 +154,7 @@ impl SummarizerClient {
             health.protocol, health.version, PROTOCOL_VERSION, own_version
         );
         if !self.skew_warned.swap(true, Ordering::Relaxed) {
-            eprintln!("modelstat: ⚠ {msg}");
+            modelstat_log::log_warn!("{msg}");
         }
         Some(msg)
     }

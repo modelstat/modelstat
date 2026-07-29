@@ -28,7 +28,18 @@ const VERSION: &str = concat!("daemon-", env!("CARGO_PKG_VERSION"));
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
+    let cmd = args.first().map(String::as_str);
+
+    // The `_`-prefixed verbs are machine-invoked, never typed: the tray runs
+    // `_ensure-daemon` every 30s and pipes its output straight into
+    // `~/.modelstat/logs/out.log`, and the updater runs `_install-service` from a
+    // detached worker. Their output is only ever read as a log — so timestamp it.
+    // (`_daemon-health`'s JSON goes to stdout and is untouched; logging is stderr.)
+    if cmd.is_some_and(|c| c.starts_with('_')) {
+        modelstat_log::init_service();
+    }
+
+    match cmd {
         Some("--version") | Some("-v") | Some("version") => {
             println!("{VERSION}");
             ExitCode::SUCCESS
@@ -183,13 +194,18 @@ fn cmd_mcp(args: &[String]) -> ExitCode {
     if args.first().map(String::as_str) == Some("wire") {
         return cmd_mcp_wire(&args[1..]);
     }
+    // The stdio bridge runs for as long as its MCP client does, and its stderr is
+    // a log file (or a client's log pane) read after the fact — timestamped.
+    // `mcp wire` above is an interactive command and deliberately stays plain.
+    modelstat_log::init_service();
+
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("modelstat-mcp: fatal: {e}");
+            modelstat_log::log_error!("mcp: fatal: {e}");
             return ExitCode::FAILURE;
         }
     };

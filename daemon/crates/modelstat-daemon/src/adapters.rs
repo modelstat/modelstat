@@ -25,7 +25,7 @@ fn upload_outcome(result: UploadResult) -> Result<u64, Hold> {
     match result {
         UploadResult::Commit(resp) => Ok(resp.accepted),
         UploadResult::Hold(reason) => {
-            eprintln!("modelstat: batch upload held — {reason}");
+            modelstat_log::log_warn!("batch upload held — {reason}");
             Err(Hold)
         }
     }

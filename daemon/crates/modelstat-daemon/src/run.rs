@@ -66,9 +66,17 @@ fn ingest_port() -> u16 {
 /// → 143) or a lost lock race (→ 0). Returns the process exit code. Port of
 /// `runDaemon`.
 pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
+    // Timestamped logging from the first line: this process runs for days under a
+    // supervisor, and its stderr is a log file someone reads long after the fact.
+    // Unconditional — running `modelstat start` by hand in a terminal is running
+    // the daemon, and must log identically to the supervised one.
+    modelstat_log::init_service();
+
     // ── Enrollment guard ────────────────────────────────────────────────────
     let (Some(_bearer), Some(device_id)) = (config.bearer(), config.device_id()) else {
-        eprintln!("modelstat: not enrolled — run `modelstat` (or `modelstat self-register`) first");
+        modelstat_log::log_error!(
+            "not enrolled — run `modelstat` (or `modelstat self-register`) first"
+        );
         return ExitCode::from(1);
     };
 
@@ -84,18 +92,19 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     );
     match acquire {
         Ok(AcquireResult::AlreadyRunning { owner, age_sec }) => {
-            println!(
-                "modelstat daemon is already running — PID {}, started {} ago, daemon {}.",
+            modelstat_log::log_info!(
+                "daemon is already running — PID {}, started {} ago, daemon {}.\n\
+                 \x20 → to stop it:          kill {}\n\
+                 \x20 → to force-replace it: modelstat start --force",
                 owner.pid,
                 format_age(age_sec),
-                owner.daemon_version
+                owner.daemon_version,
+                owner.pid
             );
-            println!("  → to stop it:          kill {}", owner.pid);
-            println!("  → to force-replace it: modelstat start --force");
             return ExitCode::SUCCESS;
         }
         Err(e) => {
-            eprintln!("modelstat: could not acquire the daemon lock: {e}");
+            modelstat_log::log_error!("could not acquire the daemon lock: {e}");
             return ExitCode::from(1);
         }
         Ok(AcquireResult::Acquired) => {}
@@ -161,10 +170,11 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
         let mut state = daemon.state.lock().await;
         let pv = reconcile_processing_version(&mut *state);
         if pv.changed {
-            println!(
-                "[modelstat] processing pipeline v{} → v{} — wiped file cursors so every session \
+            modelstat_log::log_info!(
+                "processing pipeline v{} → v{} — wiped file cursors so every session \
                  is re-processed by the new pipeline",
-                pv.from, pv.to
+                pv.from,
+                pv.to
             );
             let _ = save_state(&state);
         }
@@ -187,7 +197,7 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
             is_process_alive,
         ) == OwnershipCheck::Lost
         {
-            println!("[modelstat] another daemon took the lock during boot — standing down");
+            modelstat_log::log_info!("another daemon took the lock during boot — standing down");
             heartbeat_task.abort();
             mirror_task.abort();
             if let Some(r) = &receiver {
@@ -227,7 +237,7 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     tokio::select! {
         _ = runner.idle() => {}
         _ = wait_for_shutdown() => {
-            eprintln!("[modelstat] second signal — exiting without draining the in-flight scan");
+            modelstat_log::log_warn!("second signal — exiting without draining the in-flight scan");
         }
     }
     // NOW offline is true: stop the broadcasters, say it once, and leave.
@@ -271,10 +281,10 @@ async fn preflight(daemon: &Daemon) {
     // status instead of hanging boot on the resilient wrapper's retries.
     let report = modelstat_pipeline::preflight(&label, daemon.resilient.engine()).await;
     if report.available {
-        println!("[modelstat] summariser preflight ok: {}", report.message);
+        modelstat_log::log_info!("summariser preflight ok: {}", report.message);
         daemon.with_status(|s| s.set_message(format!("summariser ready: {label}")));
     } else {
-        eprintln!("[modelstat] ⚠ summariser unavailable — {}", report.message);
+        modelstat_log::log_warn!("summariser unavailable — {}", report.message);
         daemon.with_status(|s| {
             s.set_message(format!(
                 "summariser unavailable ({label}) — summaries held, retrying"
@@ -386,11 +396,11 @@ fn handle_release(daemon: &Daemon, release: Option<Value>) {
     };
     match step {
         AutoUpdateStep::Skip => {}
-        AutoUpdateStep::Nudge(note) => println!("[modelstat] {note}"),
+        AutoUpdateStep::Nudge(note) => modelstat_log::log_info!("{note}"),
         AutoUpdateStep::Proceed { target } => {
             let t = target.unwrap_or_default();
             let label = if t.is_empty() { "latest" } else { &t };
-            println!("[modelstat] auto-updating to {label} — downloading + swapping both binaries; the service restarts on the new build");
+            modelstat_log::log_info!("auto-updating to {label} — downloading + swapping both binaries; the service restarts on the new build");
             spawn_detached_update(&t);
         }
     }
@@ -623,7 +633,9 @@ fn spawn_watcher(
 
     let dirs = crate::watch::resolve_watch_dirs();
     if dirs.is_empty() {
-        eprintln!("[modelstat] no AI-tool data dirs to watch (a fresh machine) — relying on the 5-min backstop scan");
+        modelstat_log::log_info!(
+            "no AI-tool data dirs to watch (a fresh machine) — relying on the 5-min backstop scan"
+        );
         return None;
     }
     // notify's callback runs on its own thread; bridge events to async via an
@@ -639,7 +651,9 @@ fn spawn_watcher(
     }) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("[modelstat] filesystem watcher unavailable ({e}) — relying on the 5-min backstop scan");
+            modelstat_log::log_warn!(
+                "filesystem watcher unavailable ({e}) — relying on the 5-min backstop scan"
+            );
             return None;
         }
     };
@@ -660,7 +674,7 @@ fn spawn_watcher(
             }
         }
     });
-    eprintln!("[modelstat] watching {watched} AI-tool data directories");
+    modelstat_log::log_info!("watching {watched} AI-tool data directories");
     Some(watcher)
 }
 

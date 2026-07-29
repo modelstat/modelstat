@@ -52,11 +52,7 @@ impl ProgressSink for TtyProgress {
 
     fn start(&self, _label: &str, size_label: Option<&str>, _total: Option<u64>) {
         let size = size_label.map(|s| format!(" ({s})")).unwrap_or_default();
-        let _ = writeln!(
-            std::io::stderr(),
-            "[modelstat] downloading {}{size}…",
-            self.label
-        );
+        modelstat_log::log_info!("downloading {}{size}…", self.label);
     }
 
     fn progress(&self, downloaded: u64, total: Option<u64>, elapsed: Duration) {
@@ -72,7 +68,7 @@ impl ProgressSink for TtyProgress {
                     0
                 };
                 format!(
-                    "[modelstat]   {:.0} / {:.0} MB ({:.0}%) · {:.1} MB/s · ETA {}s · {:.0}s",
+                    "{:.0} / {:.0} MB ({:.0}%) · {:.1} MB/s · ETA {}s · {:.0}s",
                     mb(downloaded),
                     mb(t),
                     pct,
@@ -81,28 +77,26 @@ impl ProgressSink for TtyProgress {
                     secs,
                 )
             }
-            _ => format!(
-                "[modelstat]   {:.0} MB · {:.1} MB/s · {:.0}s",
-                mb(downloaded),
-                rate,
-                secs
-            ),
+            _ => format!("{:.0} MB · {:.1} MB/s · {:.0}s", mb(downloaded), rate, secs),
         };
-        let mut err = std::io::stderr();
+        // The TTY path is a redraw, not a log line — it rewrites one line in place
+        // and must stay raw bytes (a timestamp on a line that's about to be
+        // overwritten 5× a second is noise). Off a TTY it's a real log line.
         if self.tty {
-            let _ = write!(err, "\r{line}\x1b[K");
+            let mut err = std::io::stderr();
+            let _ = write!(err, "\r  {line}\x1b[K");
+            let _ = err.flush();
         } else {
-            let _ = writeln!(err, "{line}");
+            modelstat_log::log_info!("  {line}");
         }
-        let _ = err.flush();
     }
 
     fn done(&self, path: &Path) {
-        let mut err = std::io::stderr();
         if self.tty {
+            let mut err = std::io::stderr();
             let _ = write!(err, "\r\x1b[K"); // clear the redraw line
+            let _ = err.flush();
         }
-        let _ = writeln!(err, "[modelstat] ✓ {} → {}", self.label, path.display());
-        let _ = err.flush();
+        modelstat_log::log_info!("✓ {} → {}", self.label, path.display());
     }
 }

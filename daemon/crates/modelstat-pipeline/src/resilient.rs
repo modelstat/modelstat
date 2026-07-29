@@ -132,7 +132,9 @@ impl<S: Summarizer> ResilientSummarizer<S> {
         let mut s = self.state.lock().unwrap();
         if s.unavailable_since.is_none() {
             // Loud, exactly once on the transition to down (§9.4 / §21.12).
-            eprintln!("modelstat: ⚠ summariser unavailable — summaries HELD, retrying ({reason})");
+            modelstat_log::log_warn!(
+                "summariser unavailable — summaries HELD, retrying ({reason})"
+            );
         }
         s.unavailable_since = Some(Instant::now());
     }
@@ -140,7 +142,7 @@ impl<S: Summarizer> ResilientSummarizer<S> {
     fn mark_available(&self) {
         let mut s = self.state.lock().unwrap();
         if s.unavailable_since.is_some() {
-            eprintln!("modelstat: ✓ summariser recovered — flushing held sessions");
+            modelstat_log::log_info!("summariser recovered — flushing held sessions");
         }
         s.unavailable_since = None;
     }

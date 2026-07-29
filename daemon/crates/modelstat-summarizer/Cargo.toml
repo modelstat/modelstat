@@ -15,6 +15,7 @@ path = "src/main.rs"
 # edge here — and nowhere in the collector's tree — is the whole point of the
 # two-binary split (feature §1, plan D4).
 [dependencies]
+modelstat-log.workspace = true
 modelstat-llm.workspace = true
 modelstat-sumclient.workspace = true
 modelstat-download.workspace = true

@@ -6,6 +6,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/modelstat-log",
   "crates/modelstat-wire",
   "crates/modelstat-redact",
   "crates/modelstat-parsers",
@@ -68,6 +69,7 @@ hostname = "0.4"
 # Internal crates (path deps). The graph here IS the contract: modelstat-cli
 # (the collector binary) must have no path — direct or transitive — to
 # modelstat-llm. CI asserts it (see .github/workflows/daemon-rs.yml).
+modelstat-log = { path = "crates/modelstat-log" }
 modelstat-wire = { path = "crates/modelstat-wire" }
 modelstat-redact = { path = "crates/modelstat-redact" }
 modelstat-parsers = { path = "crates/modelstat-parsers" }

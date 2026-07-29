@@ -104,7 +104,7 @@ pub async fn watch_forever(daemon: std::sync::Arc<crate::runtime::Daemon>) {
         .map(|d| d.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    println!("watching: {joined}");
+    modelstat_log::log_info!("watching: {joined}");
     crate::runtime::run_scan_cycle(daemon.clone(), "startup".to_string()).await;
 
     // notify's callback runs on its own thread; bridge to async via a channel.
@@ -118,7 +118,7 @@ pub async fn watch_forever(daemon: std::sync::Arc<crate::runtime::Daemon>) {
     }) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("watcher error: {e}");
+            modelstat_log::log_error!("filesystem watcher failed to start: {e}");
             return;
         }
     };

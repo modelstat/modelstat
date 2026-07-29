@@ -10,6 +10,7 @@ repository.workspace = true
 # engine fetches the Qwen GGUF, the collector fetches the NER + embedder models.
 # Pure Rust (reqwest/rustls) — no llama.cpp, so the collector links it freely.
 [dependencies]
+modelstat-log.workspace = true
 serde.workspace = true
 sha2.workspace = true
 reqwest = { workspace = true, features = ["stream"] }

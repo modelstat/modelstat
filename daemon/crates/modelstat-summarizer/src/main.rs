@@ -142,6 +142,10 @@ fn make_backend(_models_dir: &std::path::Path) -> impl Backend {
 }
 
 async fn serve() -> ExitCode {
+    // Supervised, long-running, stderr → `summarizer-err.log`. Timestamps from
+    // the first line (see `modelstat_log`).
+    modelstat_log::init_service();
+
     let home = home_dir();
     let models = models_dir(&home);
     let cfg =
@@ -152,19 +156,19 @@ async fn serve() -> ExitCode {
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("modelstat-summarizer: cannot bind {addr}: {e}");
+            modelstat_log::log_error!("summarizer: cannot bind {addr}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    eprintln!(
-        "modelstat-summarizer {CLI_VERSION} — protocol v1 on http://{addr} (backend: {})",
+    modelstat_log::log_info!(
+        "summarizer {CLI_VERSION} — protocol v1 on http://{addr} (backend: {})",
         engine.backend_name()
     );
 
     let app = server::router(engine.clone());
     let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
     if let Err(e) = serve.await {
-        eprintln!("modelstat-summarizer: server error: {e}");
+        modelstat_log::log_error!("summarizer: server error: {e}");
         engine.shutdown().await;
         return ExitCode::FAILURE;
     }
@@ -351,7 +355,7 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
-    eprintln!("modelstat-summarizer: shutting down (draining ≤8s)…");
+    modelstat_log::log_info!("summarizer: shutting down (draining ≤8s)…");
 }
 
 fn home_dir() -> PathBuf {
