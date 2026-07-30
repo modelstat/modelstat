@@ -285,13 +285,13 @@ pub async fn cmd_mode(config: Arc<Config>, args: &[String]) -> ExitCode {
     if modelstat_daemon::engine::ensure_ner_model().await {
         println!("✓ on-device redactor ready");
     } else {
-        eprintln!("redactor model not ready — re-run `modelstat connect` to finish the download");
+        eprintln!("redactor model not ready — the daemon keeps retrying in the background");
     }
     println!("preparing the on-device embedder (~130 MB, downloads once)…");
     if modelstat_daemon::engine::ensure_embedder_model().await {
         println!("✓ on-device embedder ready");
     } else {
-        eprintln!("embedder model not ready — re-run `modelstat connect` to finish the download");
+        eprintln!("embedder model not ready — the daemon keeps retrying in the background");
     }
 
     // Bounce the daemon service so the running daemon reloads the new mode — only

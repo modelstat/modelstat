@@ -310,7 +310,7 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     } else {
         warn_line(
             j,
-            "redactor model not ready — re-run `modelstat connect` to finish the download",
+            "redactor model not ready — the daemon keeps retrying in the background",
         );
         emit(j, "redactor_model_not_ready", json!({}));
     }
@@ -329,7 +329,7 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     } else {
         warn_line(
             j,
-            "embedder model not ready — re-run `modelstat connect` to finish the download",
+            "embedder model not ready — the daemon keeps retrying in the background",
         );
         emit(j, "embedder_model_not_ready", json!({}));
     }

@@ -78,6 +78,47 @@ fn summarizer_obj(config: &Config) -> Value {
     Value::Object(m)
 }
 
+/// The `models` sub-object — one entry per on-device model, `{present, size,
+/// path}`.
+///
+/// Pure `stat`s, no model is loaded. This exists because a missing model used to
+/// be visible ONLY as a warning buried in `err.log`: the BGE weights went
+/// un-downloaded on every install for as long as the Rust daemon existed, and
+/// nothing a user or support could run would say so.
+fn models_obj() -> Value {
+    let dir = modelstat_daemon::engine::models_cache_dir();
+    let mut m = Map::new();
+    for entry in &modelstat_daemon::engine::ON_DEVICE_MODELS {
+        m.insert(
+            entry.key.to_string(),
+            json!({
+                "present": entry.model.is_present(&dir),
+                "size": entry.model.weights_size_label,
+                "path": entry.model.dir(&dir).display().to_string(),
+            }),
+        );
+    }
+    Value::Object(m)
+}
+
+/// The human `models:` line — one per model, so "why are my summaries bad?" is
+/// answerable without opening a log file.
+fn print_models() {
+    let dir = modelstat_daemon::engine::models_cache_dir();
+    for entry in &modelstat_daemon::engine::ON_DEVICE_MODELS {
+        let size = entry.model.weights_size_label;
+        if entry.model.is_present(&dir) {
+            println!("  \x1b[32m✓\x1b[0m {} ({size})", entry.label);
+        } else {
+            println!(
+                "  \x1b[33m✗\x1b[0m {} ({size}) — missing; the daemon retries the download in \
+                 the background (see the logs)",
+                entry.label
+            );
+        }
+    }
+}
+
 pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
     let config = api.config().clone();
     let as_json = args.iter().any(|a| a == "--json");
@@ -158,6 +199,7 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
             "pairing": pairing,
             "auto_update": { "enabled": auto_update_enabled(), "pinned_by_env": auto_update_pinned_by_env() },
             "summarizer": summarizer_obj(&config),
+            "models": models_obj(),
             "api": config.api_url(),
             "logs": logs_dir().display().to_string(),
             "state": state_path().display().to_string(),
@@ -208,6 +250,8 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
         ""
     };
     println!("summariser: {mode}{sm_endpoint}{sm_env} — change with `modelstat mode`");
+    println!("on-device models:");
+    print_models();
     println!(
         "auto-update: {}{}",
         if auto_update_enabled() { "on" } else { "off" },

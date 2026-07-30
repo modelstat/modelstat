@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{download, DownloadError, DownloadSpec, ProgressSink};
+use crate::{download_with_retry, DownloadError, DownloadSpec, ProgressSink, RetryPolicy};
 
 /// One file of a model bundle: where it lives in the HF repo vs. what candle
 /// expects it named on disk.
@@ -87,6 +87,17 @@ impl HfModel {
         models_dir.join("hf").join(self.dir_name)
     }
 
+    /// Whether every file this model needs is on disk.
+    ///
+    /// A cheap `stat` per file — no weights are read, nothing is mmapped — so
+    /// `status` and the daemon's self-heal check can call it freely. It answers
+    /// "downloaded?", NOT "loadable?": corrupt bytes still look present here and
+    /// only fail at load, which is the loader's job to report.
+    pub fn is_present(&self, models_dir: &Path) -> bool {
+        let dir = self.dir(models_dir);
+        self.files.iter().all(|f| dir.join(f.local).exists())
+    }
+
     /// One [`DownloadSpec`] per file. sha256 is pinned per release (M7) — None here.
     pub fn specs(&self, models_dir: &Path) -> Vec<DownloadSpec> {
         let dir = self.dir(models_dir);
@@ -113,14 +124,19 @@ impl HfModel {
 /// Download every file of `model` into its cache dir, returning the dir. Any file
 /// failing aborts (the model isn't usable half-downloaded) — the caller treats
 /// that as "model not yet available".
+///
+/// `policy` governs each file individually: a file that lands is never re-fetched
+/// (the `dest.exists()` short-circuit), so a whole-model retry only re-attempts
+/// what is actually still missing.
 pub async fn download_hf_model(
     client: &reqwest::Client,
     model: &HfModel,
     models_dir: &Path,
     sink: &dyn ProgressSink,
+    policy: &RetryPolicy,
 ) -> Result<PathBuf, DownloadError> {
     for spec in model.specs(models_dir) {
-        download(client, &spec, sink).await?;
+        download_with_retry(client, &spec, sink, policy).await?;
     }
     Ok(model.dir(models_dir))
 }
@@ -131,8 +147,9 @@ pub async fn ensure_hf_model(
     model: &HfModel,
     models_dir: &Path,
     sink: &dyn ProgressSink,
+    policy: &RetryPolicy,
 ) -> Result<PathBuf, DownloadError> {
-    download_hf_model(&reqwest::Client::new(), model, models_dir, sink).await
+    download_hf_model(&reqwest::Client::new(), model, models_dir, sink, policy).await
 }
 
 #[cfg(test)]
