@@ -49,11 +49,39 @@ function functionCallOutput(callId: string, output: string): object {
   return responseItem({ type: "function_call_output", call_id: callId, output }, TS_OUT);
 }
 
-function tokenCount(timestamp = "2026-06-08T15:50:00.000Z"): object {
+/** A `token_count` line in codex's real shape: counters under `info.last_token_usage`. */
+function tokenCount(
+  timestamp = "2026-06-08T15:50:00.000Z",
+  last: Record<string, number> = {
+    input_tokens: 100,
+    cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
+    output_tokens: 50,
+    reasoning_output_tokens: 0,
+    total_tokens: 150,
+  },
+): object {
   return {
     timestamp,
     type: "event_msg",
-    payload: { type: "token_count", input_tokens: 100, output_tokens: 50 },
+    payload: {
+      type: "token_count",
+      info: {
+        // Deliberately different from `last` so a parser reading the cumulative
+        // total instead of the per-call delta fails loudly here.
+        total_token_usage: {
+          input_tokens: 9000,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 4000,
+          reasoning_output_tokens: 0,
+          total_tokens: 13000,
+        },
+        last_token_usage: last,
+        model_context_window: 272000,
+      },
+      rate_limits: null,
+    },
   };
 }
 
@@ -302,17 +330,14 @@ test("token_count buckets are stored DISJOINT (no reasoning/cache double-count)"
   const file = writeRollout([
     sessionMeta(),
     turnContext("o3"),
-    {
-      timestamp: "2026-06-08T15:50:00.000Z",
-      type: "event_msg",
-      payload: {
-        type: "token_count",
-        input_tokens: 100, // INCLUSIVE of the 40 cached
-        cached_input_tokens: 40,
-        output_tokens: 1000, // INCLUSIVE of the 600 reasoning
-        reasoning_output_tokens: 600,
-      },
-    },
+    tokenCount("2026-06-08T15:50:00.000Z", {
+      input_tokens: 100, // INCLUSIVE of the 40 cached
+      cached_input_tokens: 40,
+      cache_write_input_tokens: 0,
+      output_tokens: 1000, // INCLUSIVE of the 600 reasoning
+      reasoning_output_tokens: 600,
+      total_tokens: 1100,
+    }),
   ]);
   const { events } = await parseCodexRollout({ deviceId: "dev_1", sourceFile: file });
   const e = events.find((x) => x.tokens);
@@ -325,4 +350,57 @@ test("token_count buckets are stored DISJOINT (no reasoning/cache double-count)"
   // Total is preserved — the disjoint buckets re-add to OpenAI's inclusive totals.
   assert.equal(t.input + t.cache_read, 100, "input + cache_read == input_tokens");
   assert.equal(t.output + t.reasoning, 1000, "output + reasoning == output_tokens");
+});
+
+test("token counters are read from info.last_token_usage, not the cumulative total", async () => {
+  // The regression that made EVERY codex event land with 0 tokens: the parser read
+  // `payload.input_tokens`, but codex nests counters under
+  // `payload.info.last_token_usage`. `tokenCount`'s `total_token_usage` is set to
+  // a different, much larger value, so reading the wrong one is visible here.
+  const file = writeRollout([sessionMeta(), turnContext("gpt-5.6-sol"), tokenCount()]);
+  const { events } = await parseCodexRollout({ deviceId: "dev_1", sourceFile: file });
+  const e = events.find((x) => x.tokens);
+  assert.ok(e?.tokens, "a nested token_count still emits a usage event");
+  assert.equal(e.model, "gpt-5.6-sol");
+  assert.equal(e.tokens.input, 100, "per-call delta, not the 9000 cumulative total");
+  assert.equal(e.tokens.output, 50, "per-call delta, not the 4000 cumulative total");
+});
+
+test("a rate-limits-only token_count emits NO event (no phantom zero-token turn)", async () => {
+  const file = writeRollout([
+    sessionMeta(),
+    turnContext("gpt-5.6-sol"),
+    {
+      timestamp: "2026-06-08T15:50:00.000Z",
+      type: "event_msg",
+      payload: { type: "token_count", rate_limits: { primary_used_percent: 12.5 } },
+    },
+  ]);
+  const { events } = await parseCodexRollout({ deviceId: "dev_1", sourceFile: file });
+  assert.equal(
+    events.filter((e) => e.tokens).length,
+    0,
+    "no usage in the line → no usage event, rather than one reporting 0 tokens",
+  );
+});
+
+test("a token_count whose counters moved THROWS instead of recording zeros", async () => {
+  // Fail loud on upstream schema drift: silently zeroing under-reports real spend.
+  const file = writeRollout([
+    sessionMeta(),
+    turnContext("gpt-5.6-sol"),
+    {
+      timestamp: "2026-06-08T15:50:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: { last_token_usage: { prompt_tokens: 100, completion_tokens: 50 } },
+      },
+    },
+  ]);
+  await assert.rejects(
+    () => parseCodexRollout({ deviceId: "dev_1", sourceFile: file }),
+    /schema drift/,
+    "an unreadable counter must stop the parse, not default to 0",
+  );
 });

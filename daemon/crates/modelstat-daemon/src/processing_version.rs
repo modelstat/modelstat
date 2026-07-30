@@ -13,13 +13,24 @@
 
 use modelstat_ingest::RuntimeState;
 
-/// Current local processing-pipeline version. The Rust rewrite ships **16** — the
-/// cutover value that absorbs the runtime/model swaps the TS never had (the candle
-/// BGE embedder + BERT-NER, and the prompt-fed non-determinism of a different
-/// engine) in one bump, so every historical session re-scans once at cutover.
-/// (The TS chain ended at v15; see that file for the v1–v15 history.) Bump when
-/// the pipeline produces materially different segments for the same input.
-pub const PROCESSING_VERSION: i64 = 16;
+/// Current local processing-pipeline version. Bump when the pipeline produces
+/// materially different output for the same input.
+///
+/// v16 — the Rust rewrite's cutover value, absorbing the runtime/model swaps the
+///       TS never had (the candle BGE embedder + BERT-NER, and the prompt-fed
+///       non-determinism of a different engine) in one bump, so every historical
+///       session re-scanned once at cutover. (The TS chain ended at v15; see that
+///       file for the v1–v15 history.)
+/// v17 — codex token accounting fix. Every codex event ever uploaded carries
+///       0 tokens: the parser read `payload.input_tokens` but codex nests the
+///       counters under `payload.info.last_token_usage`, and an `unwrap_or(0)`
+///       turned the miss into a zero. Re-scanning is the ONLY way to recover
+///       those numbers — the true counts exist solely in the rollout JSONL on
+///       each device, never having reached the server (the log of record faithfully
+///       stores the zeros we sent). A re-scan also re-prices every event against
+///       the current rate card, which fixes the historical $0.00 costs from the
+///       models that had no rate row (core migration 0073).
+pub const PROCESSING_VERSION: i64 = 17;
 
 /// The state a reconcile reads + mutates: the stored marker plus the cursors it
 /// wipes on a bump. Abstracted so the decision is unit-testable without touching
@@ -123,7 +134,9 @@ mod tests {
         assert!(r.changed);
         assert_eq!(r.from, 9);
         assert!(s.wiped);
-        assert_eq!(s.version, Some(16));
+        // The assertion is "reconcile stamps the CURRENT version", not any
+        // particular integer — hardcoding it made every legitimate bump red.
+        assert_eq!(s.version, Some(PROCESSING_VERSION));
     }
 
     #[test]

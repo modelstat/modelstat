@@ -6,6 +6,10 @@
 //! assistant event. Token accounting stores DISJOINT buckets (input excl. cache,
 //! output excl. reasoning) — the double-billing fix (feature §7.1).
 //!
+//! Token counters live at `payload.info.last_token_usage` — see
+//! [`codex_last_token_usage`] for why that exact path, and why a missing counter
+//! is a hard error rather than a zero.
+//!
 //! PARITY: the TS event_msg path falls back to `new Date().toISOString()` when a
 //! line has no timestamp. That is non-deterministic and non-replayable, so the
 //! Rust port falls back to the last-seen line timestamp instead (deterministic);
@@ -52,6 +56,70 @@ fn is_shell_tool_name(name: &str) -> bool {
         name,
         "shell" | "local_shell_call" | "exec_command" | "run_terminal_cmd"
     )
+}
+
+fn schema_drift(detail: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "codex token_count schema drift: {detail}. Refusing to record zero tokens — \
+             a silently-zeroed count under-reports real spend. Update the parser."
+        ),
+    )
+}
+
+/// The token counters for ONE api call, read strictly from
+/// `payload.info.last_token_usage`.
+///
+/// Codex nests token accounting two levels down — upstream is
+/// `TokenCountEvent { info: Option<TokenUsageInfo>, rate_limits }` over
+/// `TokenUsageInfo { total_token_usage, last_token_usage, model_context_window }`.
+/// We read `last_token_usage` (the delta for THIS call) and NOT
+/// `total_token_usage` (a running session total): every `token_count` line
+/// becomes its own event and readers SUM them, so summing a cumulative counter
+/// would grow quadratically with turn count.
+///
+/// `Ok(None)` — `info` absent or null. Legitimate: codex also emits
+/// `token_count` carrying only `rate_limits`. There is no usage to record, so
+/// the caller emits NO event (a zero-token assistant turn is a phantom turn).
+///
+/// `Err` — `info` is present but the usage object or any of its four counters is
+/// missing or non-numeric. `TokenUsageInfo::last_token_usage` is not optional
+/// upstream, so this can only mean the format changed under us. That is a HARD
+/// failure by design: the daemon holds its cursor and retries, which is loud and
+/// recoverable, whereas defaulting to 0 is silent and permanently wrong. This is
+/// exactly the bug that made every codex event land with 0 tokens.
+fn codex_last_token_usage(p: &Value) -> std::io::Result<Option<TokenUsage>> {
+    let info = match p.get("info") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(v) => v,
+    };
+    let last = info
+        .get("last_token_usage")
+        .ok_or_else(|| schema_drift("payload.info.last_token_usage is missing"))?;
+    let field = |name: &str| -> std::io::Result<u64> {
+        last.get(name).and_then(Value::as_u64).ok_or_else(|| {
+            schema_drift(&format!(
+                "payload.info.last_token_usage.{name} is missing or not a number"
+            ))
+        })
+    };
+    let input_tokens = field("input_tokens")?;
+    let cached = field("cached_input_tokens")?;
+    let output_tokens = field("output_tokens")?;
+    let reasoning = field("reasoning_output_tokens")?;
+    Ok(Some(TokenUsage {
+        // Codex counts cached input INSIDE `input_tokens` and reasoning INSIDE
+        // `output_tokens` (upstream's `non_cached_input()` subtracts the former).
+        // Our buckets are DISJOINT, so split them out rather than double-bill.
+        input: input_tokens.saturating_sub(cached),
+        output: output_tokens.saturating_sub(reasoning),
+        // Codex discards cache-write counts before they reach the rollout JSONL
+        // (openai/codex#32479), so 0 is the true value here, not a default.
+        cache_creation: 0,
+        cache_read: cached,
+        reasoning,
+    }))
 }
 
 /// `rollout-<TS>-<UUID>.jsonl` → the session uuid.
@@ -435,16 +503,13 @@ fn parse_inner(
                     continue;
                 }
                 let p = payload.unwrap();
-                let input_tokens = p.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-                let cached = p
-                    .get("cached_input_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let output_tokens = p.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
-                let reasoning = p
-                    .get("reasoning_output_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                // No usage on this line (rate-limits-only `token_count`): emit
+                // nothing. The pending tool-call aggregate stays pending and
+                // rides the next assistant event, and `turn_index` does not move.
+                let Some(tokens) = codex_last_token_usage(p)? else {
+                    skipped += 1;
+                    continue;
+                };
                 let slug = guess_repo_slug_from_path(cwd.as_deref());
                 let git = slug.as_ref().map(|s| GitContext {
                     remote_url: None,
@@ -474,13 +539,7 @@ fn parse_inner(
                     parent_event_id: None,
                     cwd: cwd.clone(),
                     git,
-                    tokens: Some(TokenUsage {
-                        input: input_tokens.saturating_sub(cached),
-                        output: output_tokens.saturating_sub(reasoning),
-                        cache_creation: 0,
-                        cache_read: cached,
-                        reasoning,
-                    }),
+                    tokens: Some(tokens),
                     duration_ms: None,
                     tool_calls: std::mem::take(&mut pending_aggregate),
                     files_touched: Vec::new(),
@@ -546,4 +605,80 @@ fn parse_inner(
             skipped,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reads_the_per_call_delta_not_the_cumulative_total() {
+        // The regression that made EVERY codex event land with 0 tokens: counters
+        // were read from the payload root, but codex nests them under
+        // `info.last_token_usage`. `total_token_usage` is deliberately larger here,
+        // so reading the wrong one is visible instead of merely plausible.
+        let p = json!({
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 9000, "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0, "output_tokens": 4000,
+                    "reasoning_output_tokens": 0, "total_tokens": 13000
+                },
+                "last_token_usage": {
+                    "input_tokens": 100, "cached_input_tokens": 40,
+                    "cache_write_input_tokens": 0, "output_tokens": 1000,
+                    "reasoning_output_tokens": 600, "total_tokens": 1100
+                },
+                "model_context_window": 272_000
+            },
+            "rate_limits": null
+        });
+        let t = codex_last_token_usage(&p).unwrap().expect("usage present");
+        // Disjoint buckets: cached is carved out of input, reasoning out of output.
+        assert_eq!(t.input, 60, "input excludes the 40 cached");
+        assert_eq!(t.output, 400, "output excludes the 600 reasoning");
+        assert_eq!(t.cache_read, 40);
+        assert_eq!(t.reasoning, 600);
+        assert_eq!(t.cache_creation, 0);
+        // Totals are preserved against codex's inclusive counters.
+        assert_eq!(t.input + t.cache_read, 100);
+        assert_eq!(t.output + t.reasoning, 1000);
+    }
+
+    #[test]
+    fn rate_limits_only_token_count_reports_no_usage() {
+        // Codex emits `token_count` carrying only `rate_limits`. That is not a
+        // zero-token turn — it is no turn at all, so the caller emits no event.
+        let p = json!({ "type": "token_count", "rate_limits": { "primary_used_percent": 12.5 } });
+        assert!(codex_last_token_usage(&p).unwrap().is_none());
+        let explicit_null = json!({ "type": "token_count", "info": null });
+        assert!(codex_last_token_usage(&explicit_null).unwrap().is_none());
+    }
+
+    #[test]
+    fn moved_counters_error_instead_of_recording_zeros() {
+        // Fail loud on upstream schema drift: silently zeroing under-reports spend.
+        let renamed = json!({
+            "type": "token_count",
+            "info": { "last_token_usage": { "prompt_tokens": 100, "completion_tokens": 50 } }
+        });
+        let err = codex_last_token_usage(&renamed).expect_err("must not default to 0");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("input_tokens"), "{err}");
+
+        let usage_gone = json!({ "type": "token_count", "info": { "model_context_window": 1 } });
+        let err = codex_last_token_usage(&usage_gone).expect_err("must not default to 0");
+        assert!(err.to_string().contains("last_token_usage"), "{err}");
+
+        let not_a_number = json!({
+            "type": "token_count",
+            "info": { "last_token_usage": {
+                "input_tokens": "100", "cached_input_tokens": 0,
+                "output_tokens": 50, "reasoning_output_tokens": 0
+            }}
+        });
+        assert!(codex_last_token_usage(&not_a_number).is_err());
+    }
 }
