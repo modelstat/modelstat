@@ -107,8 +107,15 @@ async function codexFixtures(): Promise<void> {
     { timestamp: "2026-06-08T15:49:39.854Z", type: "response_item", payload: { type: "function_call", name: "update_plan", arguments: JSON.stringify({ plan: [{ step: "do it", status: "pending" }] }), call_id: "call_1" } },
     { timestamp: "2026-06-08T15:49:40.072Z", type: "response_item", payload: { type: "function_call_output", call_id: "call_1", output: "Plan updated" } },
     // Disjoint token buckets (the double-billing fix §7.1): input−cached,
-    // output−reasoning, cache_read=cached, reasoning=reasoning.
-    { timestamp: "2026-06-08T15:50:00.000Z", type: "event_msg", payload: { type: "token_count", input_tokens: 100, cached_input_tokens: 30, output_tokens: 50, reasoning_output_tokens: 20 } },
+    // output−reasoning, cache_read=cached, reasoning=reasoning. Counters live at
+    // payload.info.last_token_usage — the per-call delta. `total_token_usage` is
+    // the cumulative session total and is deliberately DIFFERENT here so a parser
+    // that reads the wrong one fails this fixture instead of silently summing
+    // cumulative counters.
+    { timestamp: "2026-06-08T15:50:00.000Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 900, cached_input_tokens: 300, cache_write_input_tokens: 0, output_tokens: 400, reasoning_output_tokens: 150, total_tokens: 1300 }, last_token_usage: { input_tokens: 100, cached_input_tokens: 30, cache_write_input_tokens: 0, output_tokens: 50, reasoning_output_tokens: 20, total_tokens: 150 }, model_context_window: 272000 }, rate_limits: null } },
+    // Rate-limits-only token_count (`info` absent): no usage to record, so this
+    // emits NO event rather than a phantom zero-token turn.
+    { timestamp: "2026-06-08T15:50:01.000Z", type: "event_msg", payload: { type: "token_count", rate_limits: { primary_used_percent: 12.5 } } },
   ];
   const file = writeLines(join(BASE, "codex", `rollout-2026-06-08T15-49-00-${CODEX_SID}.jsonl`), lines);
   const res = await parseCodexRollout({ deviceId: "dev_1", sourceFile: file });

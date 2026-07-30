@@ -89,7 +89,19 @@ function codexLines(turns: number): string {
       JSON.stringify({
         type: "event_msg",
         timestamp: ts,
-        payload: { type: "token_count", input_tokens: 10 + i, output_tokens: 5 },
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: {
+              input_tokens: 10 + i,
+              cached_input_tokens: 0,
+              cache_write_input_tokens: 0,
+              output_tokens: 5,
+              reasoning_output_tokens: 0,
+              total_tokens: 15 + i,
+            },
+          },
+        },
       }),
     );
   }

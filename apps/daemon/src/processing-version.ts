@@ -127,8 +127,18 @@
  *      for a repository (e.g. the subdirectory `accounting/controllers`).
  *      Re-scan so historical segments re-tag to their real owner/repo — only
  *      the daemon can, from the repos on disk.
+ * v16 — reserved: the Rust daemon's cutover value (candle BGE embedder +
+ *      BERT-NER, different summariser engine). Never shipped on this chain; kept
+ *      as a hole so the two daemons' version numbers mean the same thing.
+ * v17 — codex token accounting fix. Every codex event ever uploaded carries
+ *      0 tokens: the parser read `payload.input_tokens` but codex nests the
+ *      counters under `payload.info.last_token_usage`, and a `?? 0` turned the
+ *      miss into a zero. Re-scan to recover them — the true counts exist solely
+ *      in the rollout JSONL on each device and never reached the server. The
+ *      re-scan also re-prices every event against the current rate card, fixing
+ *      the historical $0.00 costs for models that had no rate row.
  */
-export const PROCESSING_VERSION = 15;
+export const PROCESSING_VERSION = 17;
 
 export interface ProcessingState {
   processingVersion: number | null;

@@ -8,8 +8,13 @@
  *   { type: "response_item", role: "user"|"assistant", ... }
  *   { type: "event_msg", payload: { type: "user_message"|"agent_message"|"token_count", ... } }
  *
- * Token accounting lives inside event_msg with payload.type === "token_count":
- *   { input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens, model_context_window }
+ * Token accounting lives inside event_msg with payload.type === "token_count",
+ * NESTED two levels down — see `lastTokenUsage` for why this exact path, why we
+ * read the per-call delta and never the cumulative total, and why a missing
+ * counter is a thrown error rather than a zero:
+ *   { info: { total_token_usage: {...}, last_token_usage: { input_tokens,
+ *     cached_input_tokens, cache_write_input_tokens, output_tokens,
+ *     reasoning_output_tokens, total_tokens }, model_context_window }, rate_limits }
  *
  * Tool activity lives in response_item lines (payload.type):
  *   function_call          { name, arguments: <JSON string>, call_id }
@@ -45,14 +50,93 @@ import {
   type ToolCallDraft,
 } from "../types.js";
 
-interface CodexTokenCount {
-  type: "token_count";
+interface CodexTokenUsage {
   input_tokens?: number;
   cached_input_tokens?: number;
+  cache_write_input_tokens?: number;
   output_tokens?: number;
   reasoning_output_tokens?: number;
   total_tokens?: number;
-  model_context_window?: number;
+}
+
+interface CodexTokenCount {
+  type: "token_count";
+  /** Absent on a rate-limits-only `token_count` — then there is no usage at all. */
+  info?: {
+    /** Cumulative session running total. NEVER read this: see `lastTokenUsage`. */
+    total_token_usage?: CodexTokenUsage;
+    last_token_usage?: CodexTokenUsage;
+    model_context_window?: number | null;
+  } | null;
+  rate_limits?: unknown;
+}
+
+function schemaDrift(detail: string): Error {
+  return new Error(
+    `codex token_count schema drift: ${detail}. Refusing to record zero tokens — ` +
+      `a silently-zeroed count under-reports real spend. Update the parser.`,
+  );
+}
+
+/**
+ * The token counters for ONE api call, read strictly from
+ * `payload.info.last_token_usage`.
+ *
+ * Codex nests token accounting two levels down — upstream is
+ * `TokenCountEvent { info: Option<TokenUsageInfo>, rate_limits }` over
+ * `TokenUsageInfo { total_token_usage, last_token_usage, model_context_window }`.
+ * We read `last_token_usage` (the delta for THIS call) and NOT
+ * `total_token_usage` (a running session total): every `token_count` line becomes
+ * its own event and readers SUM them, so summing a cumulative counter would grow
+ * quadratically with turn count.
+ *
+ * `null` — `info` absent or null. Legitimate: codex also emits `token_count`
+ * carrying only `rate_limits`. There is no usage to record, so the caller emits
+ * NO event (a zero-token assistant turn is a phantom turn).
+ *
+ * Throws — `info` is present but the usage object or any of its four counters is
+ * missing or non-numeric. `TokenUsageInfo.last_token_usage` is not optional
+ * upstream, so this can only mean the format changed under us. That is a HARD
+ * failure by design: a scan that throws leaves the file's cursor un-advanced and
+ * retries, which is loud and recoverable, whereas defaulting to 0 is silent and
+ * permanently wrong. This is exactly the bug that made every codex event land
+ * with 0 tokens.
+ */
+function lastTokenUsage(tk: CodexTokenCount): RawEvent["tokens"] | null {
+  const info = tk.info;
+  if (info === undefined || info === null) return null;
+  const last = info.last_token_usage;
+  if (last === undefined || last === null) {
+    throw schemaDrift("payload.info.last_token_usage is missing");
+  }
+  const field = (name: keyof CodexTokenUsage): number => {
+    const v = last[name];
+    if (typeof v !== "number" || !Number.isFinite(v)) {
+      throw schemaDrift(`payload.info.last_token_usage.${name} is missing or not a number`);
+    }
+    return v;
+  };
+  const inputTokens = field("input_tokens");
+  const cached = field("cached_input_tokens");
+  const outputTokens = field("output_tokens");
+  const reasoning = field("reasoning_output_tokens");
+  return {
+    // Codex counts cached input INSIDE `input_tokens` and reasoning INSIDE
+    // `output_tokens` (upstream's `non_cached_input()` subtracts the former).
+    // Store the buckets DISJOINT (input excl. cache, output excl. reasoning) so
+    // the pricer bills input + cache_read + output + reasoning as non-overlapping
+    // line items — otherwise cached AND reasoning tokens are paid for twice (up
+    // to ~2× on a reasoning-heavy turn). Matches the Claude parser, whose
+    // provider already reports these buckets disjoint. Total is preserved: each
+    // subset is re-added as its own bucket.
+    input: Math.max(0, inputTokens - cached),
+    output: Math.max(0, outputTokens - reasoning),
+    // Codex discards cache-write counts before they reach the rollout JSONL
+    // (openai/codex#32479), so 0 is the true value here, not a default.
+    cache_creation: 0,
+    cache_read: cached,
+    reasoning,
+  };
 }
 
 interface CodexEventMsg {
@@ -422,6 +506,14 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
           skipped += 1;
           continue;
         }
+        // No usage on this line (rate-limits-only `token_count`): emit nothing.
+        // The pending tool-call aggregate stays pending and rides the next
+        // assistant event, and `turnIndex` does not move.
+        const tokens = lastTokenUsage(tk);
+        if (tokens === null) {
+          skipped += 1;
+          continue;
+        }
         const slug = guessRepoSlugFromPath(cwd);
         await emit({
           source_event_id: sourceEventId(ctx.deviceId, ctx.sourceFile, offsetAtLineStart),
@@ -442,22 +534,7 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
                 branch: null,
               }
             : null,
-          tokens: {
-            // OpenAI's `input_tokens` / `output_tokens` are INCLUSIVE totals:
-            // `cached_input_tokens` is a subset of input, `reasoning_output_tokens`
-            // a subset of output. Store the buckets DISJOINT (input excl. cache,
-            // output excl. reasoning) so the pricer bills input + cache_read +
-            // output + reasoning as non-overlapping line items — otherwise cached
-            // AND reasoning tokens are paid for twice (up to ~2× on a reasoning-heavy
-            // turn). Matches the Claude parser, whose provider already reports these
-            // buckets disjoint. Total is preserved: each subset is re-added as its
-            // own bucket, so input+output+cache_read+reasoning == the original sum.
-            input: Math.max(0, (tk.input_tokens ?? 0) - (tk.cached_input_tokens ?? 0)),
-            output: Math.max(0, (tk.output_tokens ?? 0) - (tk.reasoning_output_tokens ?? 0)),
-            cache_creation: 0,
-            cache_read: tk.cached_input_tokens ?? 0,
-            reasoning: tk.reasoning_output_tokens ?? 0,
-          },
+          tokens,
           duration_ms: null,
           tool_calls: pendingToolAggregate,
           files_touched: [],
