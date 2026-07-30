@@ -301,13 +301,12 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMsg, sender, sendResponse) => 
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const events = await db().events.where("ts").above(today.toISOString()).toArray();
-      const byAgent = new Map<string, { tokens: number; cost: number; model: string | null }>();
+      const byAgent = new Map<string, { tokens: number; model: string | null }>();
       for (const e of events) {
         const agent = e.agent;
-        const prev = byAgent.get(agent) ?? { tokens: 0, cost: 0, model: null };
+        const prev = byAgent.get(agent) ?? { tokens: 0, model: null };
         byAgent.set(agent, {
           tokens: prev.tokens + e.input_tokens + e.output_tokens + e.reasoning_tokens,
-          cost: prev.cost + (e.cost_usd ?? 0),
           model: e.model ?? prev.model,
         });
       }
@@ -359,7 +358,6 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMsg, sender, sendResponse) => 
           model: s.model,
           conversation_id: s.conversation_id,
           tokens: s.tokens_input + s.tokens_output + s.tokens_reasoning,
-          cost: s.cost_usd,
           messages: s.message_count,
           updated_at: s.updated_at,
         })),

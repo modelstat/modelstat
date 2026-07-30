@@ -55,7 +55,6 @@ export type StoredEvent = {
   tokenizer_accuracy: "exact" | "estimated";
   duration_ms: number | null;
   host: string;
-  cost_usd: number | null;
   summary: string | null;
   category: string | null;
   synced: 0 | 1;
@@ -76,7 +75,6 @@ export type SessionRollup = {
   tokens_cache_creation: number;
   tokens_cache_read: number;
   tokens_reasoning: number;
-  cost_usd: number;
   summary: string | null;
   category: string | null;
   updated_at: string;
