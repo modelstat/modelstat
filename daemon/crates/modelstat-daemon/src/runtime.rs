@@ -30,7 +30,9 @@ use crate::authoritative_git::resolve_authoritative_git;
 use crate::discover_jobs::{
     discover_jobs, order_jobs_newest_first, parse_job_streaming, ParserKind, ScanJob,
 };
-use crate::engine::{build_embedder, build_ner, engine_base_url, DaemonEmbedder, DaemonNer};
+use crate::engine::{
+    build_embedder, build_ner, engine_base_url, DaemonEmbedder, DaemonNer, Swappable,
+};
 use crate::insights::{refresh_session_insights, SessionInsightsFetcher};
 use crate::scan::{
     run_scan_over_jobs, CursorStore, RunScanOptions, ScanObserver, ScanTallies, MAX_FILES_PER_SCAN,
@@ -93,8 +95,11 @@ pub struct Daemon {
     pub config: Arc<Config>,
     pub api: Arc<DeviceApi>,
     pub resilient: Arc<ResilientSummarizer<SummarizerClient>>,
-    pub embedder: Arc<DaemonEmbedder>,
-    pub ner: Arc<DaemonNer>,
+    /// Swappable: the boot-time self-heal replaces these in place when a missing
+    /// model finishes downloading, so a blip during `connect` costs minutes of
+    /// degraded quality instead of lasting until the next restart.
+    pub embedder: Arc<Swappable<DaemonEmbedder>>,
+    pub ner: Arc<Swappable<DaemonNer>>,
     /// Cursors + segments-sent + reconcile caches. An **async** mutex because a
     /// scan holds it across awaits (advancing cursors as batches commit);
     /// reconcile + processing-version take it too, so those serialise against a
@@ -125,8 +130,8 @@ impl Daemon {
         Arc::new(Daemon {
             api: Arc::new(DeviceApi::new(config.clone())),
             resilient: Arc::new(ResilientSummarizer::new(engine)),
-            embedder: Arc::new(build_embedder()),
-            ner: Arc::new(build_ner()),
+            embedder: Arc::new(Swappable::new(build_embedder())),
+            ner: Arc::new(Swappable::new(build_ner())),
             state: Arc::new(TokioMutex::new(load_state())),
             status: Arc::new(StdMutex::new(Status::default())),
             queue: Arc::new(FileQueueStore::new(home_path("queue.json"))),
@@ -360,6 +365,11 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         })
     };
 
+    // Snapshot the model handles for this scan: a mid-scan self-heal swap must
+    // not change which embedder half a session was built with.
+    let embedder = daemon.embedder.get();
+    let ner = daemon.ner.get();
+
     let mut guard = daemon.state.lock().await;
     let tallies = run_scan_over_jobs(
         ordered,
@@ -368,8 +378,8 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         &daemon.mode,
         opts,
         &daemon.resilient,
-        &*daemon.embedder,
-        &*daemon.ner,
+        &*embedder,
+        &*ner,
         &mut git,
         Some(&*extractor),
         parse,

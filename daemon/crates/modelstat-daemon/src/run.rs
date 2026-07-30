@@ -146,6 +146,14 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     // the entire (possibly hours-long) startup backfill.
     let mirror_task = tokio::spawn(last_status_loop(daemon.clone()));
 
+    // ── On-device model self-heal (background) ──────────────────────────────
+    // `connect` pre-warms the NER + BGE weights, but it gets ONE shot: a network
+    // blip there used to leave a model missing forever, with nothing to notice or
+    // fix it. This retries until it lands and swaps the real model in without a
+    // restart. Backgrounded — a ~560 MB download must never gate ingestion, and
+    // on the overwhelmingly common path (models present) it costs two `stat`s.
+    let heal_task = tokio::spawn(heal_models(daemon.clone()));
+
     // ── Preflight the summariser (never throws, never stops the daemon) ──────
     preflight(&daemon).await;
 
@@ -200,6 +208,9 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
             modelstat_log::log_info!("another daemon took the lock during boot — standing down");
             heartbeat_task.abort();
             mirror_task.abort();
+            // The winner runs its own heal; two processes downloading into the
+            // same cache dir would race on the `.partial` files.
+            heal_task.abort();
             if let Some(r) = &receiver {
                 r.abort();
             }
@@ -240,9 +251,11 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
             modelstat_log::log_warn!("second signal — exiting without draining the in-flight scan");
         }
     }
-    // NOW offline is true: stop the broadcasters, say it once, and leave.
+    // NOW offline is true: stop the broadcasters, say it once, and leave. The
+    // heal's partial download survives on disk — the next boot resumes it.
     heartbeat_task.abort();
     mirror_task.abort();
+    heal_task.abort();
     daemon.with_status(|s| s.set_phase(Phase::Offline, "Stopped"));
     post_heartbeat_now(&daemon, None).await;
     let snap = daemon.with_status(|s| {
@@ -256,6 +269,26 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     let _ = write_last_status(&home_path("last-status.json"), &snap, &now_iso());
     remove_lock_if_owned(&lock_path, std::process::id() as i64);
     ExitCode::from(code)
+}
+
+/// Download any missing on-device model, then swap the real one in for the
+/// fail-safe placeholder the daemon booted with.
+///
+/// Only the models that actually landed are rebuilt: a `heal` that fetched BGE
+/// must not touch a NER handle that is already the real thing (rebuilding it
+/// would re-mmap ~430 MB for nothing).
+async fn heal_models(daemon: Arc<Daemon>) {
+    for entry in crate::engine::heal_missing_models().await {
+        // Exhaustive by design — a new ModelSlot variant fails to compile here
+        // until it is given a loader.
+        match entry.slot {
+            crate::engine::ModelSlot::Ner => daemon.ner.set(crate::engine::build_ner()),
+            crate::engine::ModelSlot::Embedder => {
+                daemon.embedder.set(crate::engine::build_embedder())
+            }
+        }
+        modelstat_log::log_info!("{} loaded — no restart needed", entry.label);
+    }
 }
 
 /// Boot preflight (feature §9.4): cloud → a plain server-side label; local /
@@ -457,7 +490,9 @@ async fn drain_loop(daemon: Arc<Daemon>) {
             skip -= 1;
             continue;
         }
-        let pipeline = EnginePipeline::new(&daemon.resilient, &*daemon.embedder, &*daemon.ner);
+        let embedder = daemon.embedder.get();
+        let ner = daemon.ner.get();
+        let pipeline = EnginePipeline::new(&daemon.resilient, &*embedder, &*ner);
         let mut uploader = (*daemon.api).clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let outcome = drain_local_queue(

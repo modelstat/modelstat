@@ -1,11 +1,24 @@
 //! `modelstat-download` — the shared model-artifact downloader (feature §11).
 //!
 //! One resume-safe downloader for every model file: the engine's Qwen GGUF
-//! (~2.7 GB) and the collector's NER (~250 MB) + embedder (~50–130 MB) models.
+//! (~2.7 GB) and the collector's NER (~430 MB) + embedder (~130 MB) models.
 //! Resume-safe (`.partial` + `Range` + atomic rename), sha256-verified when a
 //! digest is pinned, with a throttled progress meter (single redrawing TTY line
-//! / a periodic non-TTY line). Download failures never fail an install — the
-//! caller lazy-downloads on first use and self-heals (§9.4/§9.5).
+//! / a periodic non-TTY line).
+//!
+//! # Retry
+//!
+//! [`download`] makes exactly one attempt. [`download_with_retry`] — and the
+//! `RetryPolicy` every [`hf`] entry point takes — re-attempts on anything
+//! transient (dropped connection, timeout, 408/429/5xx) with exponential backoff,
+//! and gives up immediately on anything permanent (a 404 URL, a checksum
+//! mismatch), since retrying those forever would only hide a real bug.
+//!
+//! Because every attempt resumes from the `.partial` via `Range`, a retry
+//! continues from where the last one stopped instead of restarting the transfer.
+//! That is what makes an unbounded [`RetryPolicy::forever`] safe for the daemon's
+//! background self-heal: a machine offline for a day resumes mid-file when it
+//! comes back.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -17,6 +30,7 @@ use tokio::io::AsyncWriteExt;
 pub mod hf;
 mod progress;
 pub use hf::{download_hf_model, ensure_hf_model, HfModel, BERT_NER, BGE_SMALL};
+
 pub use progress::{ProgressSink, SilentSink, TtyProgress};
 
 /// What to download and where.
@@ -71,9 +85,124 @@ impl From<std::io::Error> for DownloadError {
     }
 }
 
+impl DownloadError {
+    /// Whether re-attempting could plausibly succeed.
+    ///
+    /// Transient: transport faults (reset, DNS, timeout), 408/429, and every 5xx
+    /// — the network or the far side, both of which come back. Local I/O counts
+    /// too: a full disk or a locked file clears once someone frees it, and the
+    /// alternative is a daemon that gives up permanently on a temporary state.
+    ///
+    /// Permanent: any other 4xx (a 404 means the URL is wrong — retrying it for a
+    /// week just hides the bug) and a checksum mismatch (the bytes are wrong, and
+    /// a pinned digest doesn't fix itself).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            DownloadError::Transport(_) | DownloadError::Io(_) => true,
+            DownloadError::Http(code) => *code == 408 || *code == 429 || *code >= 500,
+            DownloadError::ChecksumMismatch { .. } => false,
+        }
+    }
+}
+
+/// How hard to try. Backoff doubles from `initial` up to `max`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// `None` = keep going until it succeeds or fails permanently.
+    pub max_attempts: Option<u32>,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl RetryPolicy {
+    /// For a human waiting at a terminal: ~4 tries over ~30s, then report and let
+    /// them get on with it. Never leave someone staring at a frozen `connect`.
+    pub fn interactive() -> Self {
+        Self {
+            max_attempts: Some(4),
+            initial_backoff: Duration::from_secs(2),
+            max_backoff: Duration::from_secs(16),
+        }
+    }
+
+    /// For a background task with nobody waiting: never stop. Backoff settles at
+    /// 5 minutes, so an offline machine costs one cheap failed connect per 5 min
+    /// and resumes the moment the network returns.
+    pub fn forever() -> Self {
+        Self {
+            max_attempts: None,
+            initial_backoff: Duration::from_secs(5),
+            max_backoff: Duration::from_secs(5 * 60),
+        }
+    }
+
+    /// The delay before attempt `attempt` (0-based; `backoff(0)` precedes the
+    /// second attempt). Doubles, clamped to `max_backoff`.
+    pub fn backoff(&self, attempt: u32) -> Duration {
+        let factor = 1u64.checked_shl(attempt.min(32)).unwrap_or(u64::MAX);
+        self.initial_backoff
+            .saturating_mul(factor.min(u32::MAX as u64) as u32)
+            .min(self.max_backoff)
+    }
+
+    /// Whether another attempt is allowed after `attempts_made` have failed.
+    pub fn should_retry(&self, attempts_made: u32) -> bool {
+        match self.max_attempts {
+            None => true,
+            Some(max) => attempts_made < max,
+        }
+    }
+}
+
+/// [`download`], re-attempted per `policy` while the failure is transient.
+///
+/// Every attempt resumes from the `.partial`, so a retry continues the transfer
+/// rather than restarting it. Each failure is logged loudly with the attempt
+/// number and the wait before the next one — a stalled download must be visible
+/// in the log, never a silent gap.
+pub async fn download_with_retry(
+    client: &reqwest::Client,
+    spec: &DownloadSpec,
+    sink: &dyn ProgressSink,
+    policy: &RetryPolicy,
+) -> Result<PathBuf, DownloadError> {
+    let mut attempts = 0u32;
+    loop {
+        match download(client, spec, sink).await {
+            Ok(path) => return Ok(path),
+            Err(e) => {
+                attempts += 1;
+                if !e.is_transient() {
+                    modelstat_log::log_error!(
+                        "download of {} failed permanently: {e} — this will not resolve on its own",
+                        spec.label
+                    );
+                    return Err(e);
+                }
+                if !policy.should_retry(attempts) {
+                    modelstat_log::log_error!(
+                        "download of {} gave up after {attempts} attempts: {e}",
+                        spec.label
+                    );
+                    return Err(e);
+                }
+                let wait = policy.backoff(attempts - 1);
+                modelstat_log::log_warn!(
+                    "download of {} failed (attempt {attempts}): {e} — retrying in {}s, resuming where it stopped",
+                    spec.label,
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+            }
+        }
+    }
+}
+
 /// Download `spec` to its destination, reporting progress to `sink`. Resumes a
 /// prior `.partial` when the server supports `Range`; verifies sha256 when
 /// pinned; renames atomically on success. Returns the final path.
+///
+/// ONE attempt — see [`download_with_retry`] when the download has to land.
 pub async fn download(
     client: &reqwest::Client,
     spec: &DownloadSpec,
@@ -189,4 +318,71 @@ async fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
         hex.push_str(&format!("{b:02x}"));
     }
     Ok(hex)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    /// The classification that decides whether the daemon keeps trying for days
+    /// or gives up and tells a human. Getting either side wrong is bad: a
+    /// transient marked permanent strands the model forever (the bug this whole
+    /// change exists to kill); a permanent marked transient hides a broken URL
+    /// behind an infinite quiet loop.
+    #[test]
+    fn transient_covers_what_comes_back_and_nothing_else() {
+        assert!(DownloadError::Transport("connection reset".into()).is_transient());
+        assert!(DownloadError::Io(std::io::Error::other("disk full")).is_transient());
+        for code in [408, 429, 500, 502, 503, 504, 599] {
+            assert!(
+                DownloadError::Http(code).is_transient(),
+                "HTTP {code} should retry"
+            );
+        }
+        for code in [400, 401, 403, 404, 410, 451] {
+            assert!(
+                !DownloadError::Http(code).is_transient(),
+                "HTTP {code} must NOT retry — it will never succeed"
+            );
+        }
+        assert!(!DownloadError::ChecksumMismatch {
+            expected: "a".into(),
+            actual: "b".into(),
+        }
+        .is_transient());
+    }
+
+    #[test]
+    fn backoff_doubles_then_clamps() {
+        let p = RetryPolicy {
+            max_attempts: None,
+            initial_backoff: Duration::from_secs(5),
+            max_backoff: Duration::from_secs(60),
+        };
+        assert_eq!(p.backoff(0), Duration::from_secs(5));
+        assert_eq!(p.backoff(1), Duration::from_secs(10));
+        assert_eq!(p.backoff(2), Duration::from_secs(20));
+        assert_eq!(p.backoff(3), Duration::from_secs(40));
+        assert_eq!(p.backoff(4), Duration::from_secs(60)); // clamped
+                                                           // A far-future attempt must clamp, never overflow into a tiny/huge wait.
+        assert_eq!(p.backoff(4_000_000_000), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn forever_never_stops_and_interactive_does() {
+        let f = RetryPolicy::forever();
+        assert!(f.should_retry(0));
+        assert!(f.should_retry(10_000));
+        assert!(f.backoff(99) <= Duration::from_secs(5 * 60));
+
+        let i = RetryPolicy::interactive();
+        assert!(i.should_retry(1));
+        assert!(!i.should_retry(4), "a human must not wait past the budget");
+        // The whole interactive budget stays well under a minute of waiting.
+        let total: Duration = (0..4).map(|a| i.backoff(a)).sum();
+        assert!(
+            total < Duration::from_secs(60),
+            "budget too slow: {total:?}"
+        );
+    }
 }

@@ -302,7 +302,7 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     // self-hosted, so this keeps the first scan full-quality).
     step(
         j,
-        "Preparing the on-device redactor (downloads the ~250 MB PII model)",
+        "Preparing the on-device redactor (downloads the ~430 MB PII model)",
     );
     if modelstat_daemon::engine::ensure_ner_model().await {
         ok_line(j, "on-device redactor ready");
@@ -310,9 +310,28 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     } else {
         warn_line(
             j,
-            "redactor model not ready — the daemon finishes it on its first scan",
+            "redactor model not ready — the daemon keeps retrying in the background",
         );
         emit(j, "redactor_model_not_ready", json!({}));
+    }
+
+    // Every mode: pre-warm the BGE embedder. This is the ONLY thing that ever
+    // downloads it — the daemon loads from the cache and never fetches — so
+    // skipping it here leaves segmentation permanently without its topic-shift
+    // boundary (the one rule of five that isn't a size/time threshold).
+    step(
+        j,
+        "Preparing the on-device embedder (downloads the ~130 MB segmentation model)",
+    );
+    if modelstat_daemon::engine::ensure_embedder_model().await {
+        ok_line(j, "on-device embedder ready");
+        emit(j, "embedder_model_ready", json!({}));
+    } else {
+        warn_line(
+            j,
+            "embedder model not ready — the daemon keeps retrying in the background",
+        );
+        emit(j, "embedder_model_not_ready", json!({}));
     }
 
     // ── 5. Service install ──────────────────────────────────────────────

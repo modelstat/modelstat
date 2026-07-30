@@ -78,41 +78,173 @@ pub fn engine_base_url(config: &Config) -> String {
 }
 
 /// The base on-device model dir (`MODELSTAT_MODELS_DIR` override, else
-/// `~/.modelstat/models`) — one cache for `connect` + the daemon so the ~250 MB
+/// `~/.modelstat/models`) — one cache for `connect` + the daemon so the ~560 MB
 /// NER + BGE weights download once and survive upgrades (§9.5). The `hf/<name>`
 /// cache subdir is owned by `modelstat-download` (`HfModel::dir`); callers pass
 /// this BASE so the downloader and the loaders below agree on `<base>/hf/<name>`
 /// (passing `.../models/hf` here previously doubled it to `.../models/hf/hf/…`).
-fn models_cache_dir() -> PathBuf {
+pub fn models_cache_dir() -> PathBuf {
     std::env::var_os("MODELSTAT_MODELS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| home_path("models"))
 }
 
-/// Best-effort pre-warm of the layer-2 NER redactor model into the shared cache
-/// (§9.5). Returns whether the model dir is now present. `connect`/`mode` call it
-/// so the first scan runs at full redaction quality instead of racing a lazy
-/// download; a failure is never fatal (the daemon self-heals — §9.5).
+/// Which of the daemon's model handles a downloaded model feeds.
+///
+/// An enum, not a string, on purpose: the self-heal matches on it exhaustively,
+/// so adding a model to [`ON_DEVICE_MODELS`] without teaching the daemon to load
+/// it is a COMPILE error rather than a silent no-op. That is the same shape of
+/// mistake that left BGE un-downloaded for the whole life of the Rust daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSlot {
+    Ner,
+    Embedder,
+}
+
+/// One on-device model the collector needs.
+pub struct OnDeviceModel {
+    pub model: &'static modelstat_download::HfModel,
+    /// Stable identifier — the `status --json` key. Never derive this from
+    /// [`Self::label`]: that is prose, and prose gets reworded.
+    pub key: &'static str,
+    /// What a human calls it, in logs and `status`.
+    pub label: &'static str,
+    /// The handle it loads into once present.
+    pub slot: ModelSlot,
+}
+
+/// Every on-device model, in ONE list.
+///
+/// The single list is the point: a model can no longer be added to the loader and
+/// forgotten in the downloader, which is exactly how the BGE weights went
+/// un-downloaded on every install — `ensure_embedder_model` existed and nothing
+/// ever called it. Anything that downloads, heals, or reports models walks this.
+pub const ON_DEVICE_MODELS: [OnDeviceModel; 2] = [
+    OnDeviceModel {
+        model: &modelstat_download::BERT_NER,
+        key: "redactor",
+        label: "PII redactor",
+        slot: ModelSlot::Ner,
+    },
+    OnDeviceModel {
+        model: &modelstat_download::BGE_SMALL,
+        key: "embedder",
+        label: "embedder",
+        slot: ModelSlot::Embedder,
+    },
+];
+
+/// The models whose files are NOT all on disk. Cheap (a `stat` per file),
+/// side-effect-free — what `status` reports and what the self-heal acts on.
+pub fn missing_models() -> Vec<&'static OnDeviceModel> {
+    let dir = models_cache_dir();
+    ON_DEVICE_MODELS
+        .iter()
+        .filter(|m| !m.model.is_present(&dir))
+        .collect()
+}
+
+/// Pre-warm the layer-2 NER redactor into the shared cache (§9.5). Returns
+/// whether it is now present. `connect`/`mode` call it so the first scan runs at
+/// full redaction quality; the bounded [`RetryPolicy::interactive`] keeps a human
+/// from waiting forever, and the daemon's self-heal finishes what this can't.
 pub async fn ensure_ner_model() -> bool {
+    ensure_model(&modelstat_download::BERT_NER, "PII redactor").await
+}
+
+/// Pre-warm the BGE embedder (§9.5) — segmentation's topic-shift boundary.
+pub async fn ensure_embedder_model() -> bool {
+    ensure_model(&modelstat_download::BGE_SMALL, "embedder").await
+}
+
+async fn ensure_model(model: &modelstat_download::HfModel, label: &str) -> bool {
     modelstat_download::ensure_hf_model(
-        &modelstat_download::BERT_NER,
+        model,
         &models_cache_dir(),
-        &modelstat_download::TtyProgress::new("PII redactor"),
+        &modelstat_download::TtyProgress::new(label),
+        &modelstat_download::RetryPolicy::interactive(),
     )
     .await
     .is_ok()
 }
 
-/// Best-effort pre-warm of the embedding model (§9.5); embeddings are fail-open
-/// (absent ⇒ time-gap segmentation), so this is purely a warm-up.
-pub async fn ensure_embedder_model() -> bool {
-    modelstat_download::ensure_hf_model(
-        &modelstat_download::BGE_SMALL,
-        &models_cache_dir(),
-        &modelstat_download::TtyProgress::new("embedder"),
-    )
-    .await
-    .is_ok()
+/// Download whatever [`missing_models`] reports, retrying until it lands.
+///
+/// The daemon spawns this in the background at boot. It exists because `connect`
+/// is the ONLY other downloader: before this, a model that failed its one
+/// download attempt — a network blip, a laptop lid closed mid-install — stayed
+/// missing forever, and the user had no way to know. With cloud/self-hosted the
+/// NER model is worse than a quality loss: flushes fail closed and HOLD, so the
+/// daemon uploads nothing at all until it lands.
+///
+/// Returns the models it successfully fetched, so the caller can hot-swap them in
+/// without a restart. Uses [`RetryPolicy::forever`] — nobody is waiting, and an
+/// offline machine simply resumes when the network returns.
+pub async fn heal_missing_models() -> Vec<&'static OnDeviceModel> {
+    let missing = missing_models();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<&str> = missing.iter().map(|m| m.label).collect();
+    modelstat_log::log_warn!(
+        "on-device models missing ({}) — downloading now; segmentation and \
+         cloud/self-hosted redaction run degraded or held until they land",
+        names.join(", ")
+    );
+    let dir = models_cache_dir();
+    let mut healed = Vec::new();
+    for entry in missing {
+        // SilentSink: a per-chunk progress meter belongs to an interactive
+        // `connect`, not to a log file that would get thousands of lines.
+        match modelstat_download::ensure_hf_model(
+            entry.model,
+            &dir,
+            &modelstat_download::SilentSink,
+            &modelstat_download::RetryPolicy::forever(),
+        )
+        .await
+        {
+            Ok(path) => {
+                modelstat_log::log_info!("{} model downloaded → {}", entry.label, path.display());
+                healed.push(entry);
+            }
+            // `forever` only returns Err on a PERMANENT failure (bad URL, bad
+            // checksum) — a real bug, not a blip, and it needs a human.
+            Err(e) => modelstat_log::log_error!(
+                "{} model could not be downloaded: {e} — it will stay missing \
+                 until this is fixed; `modelstat status` shows the current state",
+                entry.label
+            ),
+        }
+    }
+    healed
+}
+
+/// A model handle the daemon can replace while it runs.
+///
+/// The self-heal downloads a missing model minutes or hours into the process's
+/// life, and the alternative to swapping is running degraded until the next
+/// restart — which for a supervised daemon can be days. The lock is held only
+/// long enough to clone an `Arc` (never across an await), so readers on the scan
+/// path pay a nanosecond and the swap is invisible to them.
+pub struct Swappable<T>(std::sync::RwLock<std::sync::Arc<T>>);
+
+impl<T> Swappable<T> {
+    pub fn new(value: T) -> Self {
+        Self(std::sync::RwLock::new(std::sync::Arc::new(value)))
+    }
+
+    /// The current handle. Poison-safe: a panicked writer must not wedge every
+    /// future scan.
+    pub fn get(&self) -> std::sync::Arc<T> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Install a new handle. In-flight readers keep their old `Arc` and finish
+    /// against it; the next reader sees the new one.
+    pub fn set(&self, value: T) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = std::sync::Arc::new(value);
+    }
 }
 
 /// Resolve one model's on-disk directory: an explicit `env_override` wins,
@@ -152,7 +284,9 @@ impl Embedder for DaemonEmbedder {
 /// Build the embedder for this process. Loads the candle BGE model from the
 /// shared cache when built `--features candle` and its weights are present;
 /// otherwise (or on a load failure) uses [`NoEmbedder`]. Embeddings are
-/// best-effort, so an absent model is a quiet info line, not a hold.
+/// best-effort — segmentation keeps its four size/time boundaries and the server
+/// recomputes the abstract embedding it needs — so an absent model is a warning,
+/// not a hold. It should never happen: `connect`/`mode` download it.
 pub fn build_embedder() -> DaemonEmbedder {
     #[cfg(feature = "candle")]
     {
@@ -164,8 +298,9 @@ pub fn build_embedder() -> DaemonEmbedder {
             }
             Err(err) => {
                 modelstat_log::log_warn!(
-                    "embedder: BGE model not loadable at {} ({err}) — \
-                     segmentation uses the time-gap heuristic until `connect` downloads it",
+                    "embedder: BGE model not loadable at {} ({err}) — segmentation loses its \
+                     topic-shift boundary and splits on size/time only until the background \
+                     download lands",
                     dir.display()
                 );
             }
@@ -214,7 +349,7 @@ pub fn build_ner() -> DaemonNer {
                 modelstat_log::log_warn!(
                     "NER (redaction layer 2): model not loadable at {} ({err}) — \
                      redaction floor (layer 1) still applies; cloud/self-hosted flushes HOLD \
-                     (fail-closed) until `connect` downloads it",
+                     (fail-closed) until the background download lands",
                     dir.display()
                 );
             }
@@ -226,6 +361,77 @@ pub fn build_ner() -> DaemonNer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression guard for the bug this list exists to prevent: the BGE
+    /// weights were never downloaded on ANY install because the loader knew about
+    /// the model and the downloader did not. Everything now walks
+    /// `ON_DEVICE_MODELS`, so the invariant is that the list is complete and each
+    /// entry is coherent.
+    #[test]
+    fn every_model_the_daemon_loads_is_in_the_download_list() {
+        let slots: Vec<ModelSlot> = ON_DEVICE_MODELS.iter().map(|m| m.slot).collect();
+        assert!(
+            slots.contains(&ModelSlot::Ner),
+            "build_ner() loads a model that nothing downloads"
+        );
+        assert!(
+            slots.contains(&ModelSlot::Embedder),
+            "build_embedder() loads a model that nothing downloads — the original bug"
+        );
+        // One entry per slot: two entries feeding the same handle would mean one
+        // silently wins and the other's download is dead weight.
+        let mut seen = slots.clone();
+        seen.sort_by_key(|s| format!("{s:?}"));
+        seen.dedup();
+        assert_eq!(seen.len(), slots.len(), "two models share one slot");
+    }
+
+    /// `status --json` keys are an API the tray and support scripts read.
+    #[test]
+    fn model_keys_are_stable_unique_and_machine_safe() {
+        let keys: Vec<&str> = ON_DEVICE_MODELS.iter().map(|m| m.key).collect();
+        assert_eq!(keys, vec!["redactor", "embedder"], "json keys changed");
+        for entry in &ON_DEVICE_MODELS {
+            assert!(
+                !entry.key.contains(' ') && entry.key == entry.key.to_lowercase(),
+                "key {:?} is not machine-safe",
+                entry.key
+            );
+            assert!(!entry.label.is_empty());
+            assert!(
+                entry.model.weights_size_label.starts_with('~'),
+                "{} has no size label for the user",
+                entry.key
+            );
+        }
+    }
+
+    /// `missing_models` drives both the self-heal and `status`, so "present" must
+    /// mean every file, not just the directory existing.
+    #[test]
+    fn a_model_counts_as_present_only_when_all_its_files_are() {
+        let tmp = std::env::temp_dir().join(format!(
+            "modelstat-models-test-{}",
+            std::process::id() as u64
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let entry = &ON_DEVICE_MODELS[0];
+        let dir = entry.model.dir(&tmp);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!entry.model.is_present(&tmp), "empty dir is not present");
+
+        let files: Vec<_> = entry.model.files.iter().collect();
+        for f in &files[..files.len() - 1] {
+            std::fs::write(dir.join(f.local), b"x").unwrap();
+        }
+        assert!(
+            !entry.model.is_present(&tmp),
+            "a half-downloaded model must not read as present"
+        );
+        std::fs::write(dir.join(files[files.len() - 1].local), b"x").unwrap();
+        assert!(entry.model.is_present(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// Serialize the env-mutating tests in this module — `cargo test` runs them
     /// on multiple threads in one process, and they all read/write the same
