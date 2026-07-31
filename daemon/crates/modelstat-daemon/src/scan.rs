@@ -138,6 +138,7 @@ async fn flush_buffer<S, E, N, G, U, CE>(
     tool_buffer: &mut Vec<ToolCallDraft>,
     pending_cursors: &mut Vec<(String, FileCursor)>,
     run_segments: &mut BTreeMap<String, Vec<Segment>>,
+    run_events: &mut BTreeMap<String, Vec<RawEvent>>,
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
     ner: &N,
@@ -188,6 +189,7 @@ where
         Some(&mut *git as &mut (dyn GitEnrichment + Send)),
         extract_links,
         run_segments,
+        run_events,
     )
     .await;
     let batches = match outcome {
@@ -287,6 +289,10 @@ where
     // a session across flush boundaries, and its title / call-attribution must
     // read every segment seen so far (else a later partial-view title wins).
     let mut run_segments: BTreeMap<String, Vec<Segment>> = BTreeMap::new();
+    // The same accumulation for cloud mode, which produces no local segments: its
+    // session metadata is recomputed from the run-long (excerpt-shed) turns, so a
+    // later flush's partial view can't overwrite a richer earlier one.
+    let mut run_events: BTreeMap<String, Vec<RawEvent>> = BTreeMap::new();
 
     // `flush!()` ships + clears the buffers and advances cursors on success;
     // `Err(Hold)` means the caller must stop (engine down / offline). Each
@@ -301,6 +307,7 @@ where
                 &mut tool_buffer,
                 &mut pending_cursors,
                 &mut run_segments,
+                &mut run_events,
                 resilient,
                 embedder,
                 ner,

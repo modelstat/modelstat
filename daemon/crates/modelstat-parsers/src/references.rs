@@ -136,8 +136,10 @@ pub struct SessionMetadata {
 
 /// The mutable accumulation shape the detectors emit. Deserialize is how a
 /// `RawEvent.references` blob (the per-event `{repos,pull_requests,issues}`) is
-/// folded back into the session-level dedupe.
-#[derive(Debug, Default, Deserialize)]
+/// folded back into the session-level dedupe; Serialize is the other direction —
+/// the cloud flush mines an event's excerpt ONCE and stores the result back into
+/// that blob, so the run-long metadata view can drop the raw turn.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DetectedRefs {
     #[serde(default)]
     pub repos: Vec<RepoRef>,

@@ -125,13 +125,18 @@ fn ms_to_iso(ms: i64) -> String {
 /// disables all three git channels. `extract_links` is the injected best-effort
 /// model channel (4); `None` disables it. Both failing degrades gracefully — the
 /// deterministic channels stand on their own.
-pub async fn build_session_metadata(
+pub async fn build_session_metadata<'g, 'o: 'g>(
     segments: &[Segment],
     events: &[RawEvent],
     // `+ Send`: this git handle is held across the link-extract await, and the
     // whole pass runs inside the daemon's tokio-spawned scan (Send future). Every
     // real impl (RealGitEnrichment) is Send.
-    mut git: Option<&mut (dyn GitEnrichment + Send)>,
+    //
+    // `'g` (the borrow) is split from `'o` (the erased handle's own lifetime). Tied
+    // together — the natural `&mut (dyn … + Send)` — a caller that reborrows one
+    // long-lived handle per batch can't compile, because `&mut` is invariant in the
+    // object lifetime and so won't shorten. The SDK drain does exactly that.
+    mut git: Option<&'g mut (dyn GitEnrichment + Send + 'o)>,
     extract_links: Option<&LinkExtractor<'_>>,
 ) -> BTreeMap<String, SessionMetadata> {
     // Group by session. BTreeMap → sorted, deterministic output map; per-session

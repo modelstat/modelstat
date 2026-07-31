@@ -30,7 +30,16 @@ use modelstat_ingest::RuntimeState;
 ///       stores the zeros we sent). A re-scan also re-prices every event against
 ///       the current rate card, which fixes the historical $0.00 costs from the
 ///       models that had no rate row (core migration 0073).
-pub const PROCESSING_VERSION: i64 = 17;
+/// v18 — session metadata on the cloud + SDK paths. Cloud is the DEFAULT mode and
+///       its flush branch hardcoded `session_metadata: None`, so the repos / PRs /
+///       issues / files a session touched were never sent by anyone — the server's
+///       `session_metadata` table held 0 rows, 0 parts, ever. The detection is
+///       purely local (event git context, on-disk git, forge refs in the turns), so
+///       re-scanning is the ONLY way to recover it for sessions already uploaded:
+///       nothing on the server can derive it after the fact. This bump is what
+///       makes that automatic — an auto-updated daemon wipes its cursors on first
+///       boot and re-processes the world, with no user action.
+pub const PROCESSING_VERSION: i64 = 18;
 
 /// The state a reconcile reads + mutates: the stored marker plus the cursors it
 /// wipes on a bump. Abstracted so the decision is unit-testable without touching
