@@ -495,6 +495,9 @@ async fn drain_loop(daemon: Arc<Daemon>) {
         let pipeline = EnginePipeline::new(&daemon.resilient, &*embedder, &*ner);
         let mut uploader = (*daemon.api).clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
+        // Fresh per pass, like the scan's — the resolver caches cwd→context, and a
+        // long-lived cache would go stale against branch switches between drains.
+        let mut git = modelstat_parsers::RealGitEnrichment::new();
         let outcome = drain_local_queue(
             &*daemon.queue,
             &pipeline,
@@ -502,6 +505,7 @@ async fn drain_loop(daemon: Arc<Daemon>) {
             &daemon.device_id,
             daemon.config.version(),
             now_ms,
+            Some(&mut git as &mut (dyn modelstat_parsers::GitEnrichment + Send)),
         )
         .await;
         match outcome {

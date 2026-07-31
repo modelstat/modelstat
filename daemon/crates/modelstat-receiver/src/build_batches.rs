@@ -13,8 +13,8 @@
 
 use std::collections::BTreeMap;
 
-use modelstat_parsers::ToolCallDraft;
-use modelstat_pipeline::{attach_segment_ids, batch_id};
+use modelstat_parsers::{GitEnrichment, ToolCallDraft};
+use modelstat_pipeline::{attach_segment_ids, batch_id, build_session_metadata};
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
 
 use crate::queue::QueueStore;
@@ -74,7 +74,15 @@ impl BuildBatchesOpts {
 }
 
 /// One pass through the queue. Port of `buildBatches`.
-pub async fn build_batches<Q, P>(store: &Q, pipeline: &P, opts: &BuildBatchesOpts) -> DrainBatches
+pub async fn build_batches<Q, P>(
+    store: &Q,
+    pipeline: &P,
+    opts: &BuildBatchesOpts,
+    // The session-metadata git seam (channels 2/5/6), reborrowed per `finalise`.
+    // `None` disables the on-disk git channels — the content channel still mines
+    // the turns + abstracts, so an SDK with no local checkout still gets refs.
+    mut git: Option<&mut (dyn GitEnrichment + Send)>,
+) -> DrainBatches
 where
     Q: QueueStore,
     P: PipelineRunner,
@@ -114,6 +122,7 @@ where
                     pipeline,
                     &opts.device_id,
                     &opts.daemon_version,
+                    git.as_deref_mut(),
                 )
                 .await
                 {
@@ -137,6 +146,7 @@ where
             pipeline,
             &opts.device_id,
             &opts.daemon_version,
+            git.as_deref_mut(),
         )
         .await
         {
@@ -150,20 +160,32 @@ where
 /// Assemble one batch: run the pipeline per session (segments never span session
 /// boundaries), then attribute tool calls to the segments over the same events.
 /// `None` = a session's pipeline held. Port of `finalise`.
-async fn finalise<P: PipelineRunner>(
+// `'g` (the borrow) is deliberately split from `'o` (the erased handle's own
+// lifetime). Written as one `&mut (dyn … + Send)` they unify, and the per-call
+// reborrow below would then have to last as long as the ORIGINAL handle — which
+// the loop can't give, since it reborrows once per batch.
+async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
     events: &[RawEvent],
     session_ids: &[String],
     calls: &[ToolCallDraft],
     pipeline: &P,
     device_id: &str,
     daemon_version: &str,
+    git: Option<&'g mut (dyn GitEnrichment + Send + 'o)>,
 ) -> Option<IngestBatch> {
     let mut by_session: BTreeMap<String, Vec<RawEvent>> = BTreeMap::new();
+    // `session_ids[i]` is authoritative — it may override what the turn carries,
+    // so the metadata pass (which keys on `RawEvent.session_id`) has to see the
+    // resolved id or it would file a session's references under the stale one.
+    let mut resolved: Vec<RawEvent> = Vec::with_capacity(events.len());
     for (i, ev) in events.iter().enumerate() {
         let sid = session_ids
             .get(i)
             .cloned()
             .unwrap_or_else(|| ev.session_id.clone());
+        let mut e = ev.clone();
+        e.session_id.clone_from(&sid);
+        resolved.push(e);
         by_session.entry(sid).or_default().push(ev.clone());
     }
     let mut segments: Vec<Segment> = Vec::new();
@@ -173,6 +195,12 @@ async fn finalise<P: PipelineRunner>(
             None => return None, // engine down → hold the whole pass
         }
     }
+    // The same join layer between AI spend and shipped work the file-scan path
+    // ships. Built BEFORE the drain strips `content_excerpt`, so the content
+    // channel still sees the turns; only public reference shapes (slugs, PR /
+    // issue numbers, repo-relative paths) end up on the wire — never the text
+    // itself, which is exactly what that strip protects.
+    let session_metadata = build_session_metadata(&segments, &resolved, git, None).await;
     // Segments are in hand, so attribution happens at the last responsible moment.
     let tool_calls = attach_segment_ids(calls, &segments);
     Some(IngestBatch {
@@ -184,7 +212,13 @@ async fn finalise<P: PipelineRunner>(
         tool_calls,
         session_installs: None,
         session_titles: None,
-        session_metadata: None,
+        // Absent (not an empty map) when nothing was found — an empty one would
+        // only overwrite better server state.
+        session_metadata: if session_metadata.is_empty() {
+            None
+        } else {
+            serde_json::to_value(&session_metadata).ok()
+        },
         summarizer_mode: None,
     })
 }
@@ -241,6 +275,64 @@ mod tests {
         }
     }
 
+    /// Same as [`item`], but the turn's text carries a forge reference for the
+    /// content channel to mine.
+    fn item_saying(id: &str, session: &str, ts_ms: i64, excerpt: &str) -> QueueItem {
+        let mut it = item(id, session, ts_ms);
+        it.event.content_excerpt = Some(excerpt.into());
+        it
+    }
+
+    #[tokio::test]
+    async fn sdk_batch_ships_session_metadata() {
+        // The SDK path had the same hole as cloud: `session_metadata: None`. With
+        // no git seam (None) the content channel still mines the turns, so an SDK
+        // host with no local checkout still gets its references.
+        let path = tmp_path("sdk_meta");
+        let q = seed(
+            &path,
+            vec![item_saying(
+                "e1",
+                "s1",
+                0,
+                "shipped in https://github.com/acme/web/pull/7",
+            )],
+        )
+        .await;
+        let out = build_batches(
+            &q,
+            &FakePipeline { held: false },
+            &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+            None,
+        )
+        .await;
+        let DrainBatches::Ready(b) = out else {
+            panic!("ready")
+        };
+        let meta = b[0]
+            .session_metadata
+            .clone()
+            .expect("the SDK batch must carry session_metadata");
+        assert_eq!(meta["s1"]["pull_requests"][0]["number"], 7);
+    }
+
+    #[tokio::test]
+    async fn sdk_batch_omits_metadata_when_no_references_are_found() {
+        let path = tmp_path("sdk_meta_none");
+        let q = seed(&path, vec![item("e1", "s1", 0)]).await;
+        let out = build_batches(
+            &q,
+            &FakePipeline { held: false },
+            &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+            None,
+        )
+        .await;
+        let DrainBatches::Ready(b) = out else {
+            panic!("ready")
+        };
+        assert!(b[0].session_metadata.is_none());
+    }
+
     fn segment_over(session: &str, source_ids: &[&str]) -> Segment {
         Segment {
             segment_id: format!("seg-{session}"),
@@ -292,6 +384,7 @@ mod tests {
             &q,
             &FakePipeline { held: false },
             &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+            None,
         )
         .await;
         match out {
@@ -315,6 +408,7 @@ mod tests {
             &q,
             &FakePipeline { held: false },
             &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+            None,
         )
         .await;
         match out {
@@ -335,7 +429,7 @@ mod tests {
         let q = seed(&path, items).await;
         let mut opts = BuildBatchesOpts::new("dev1", "9.9.9", 10_000);
         opts.force_ship_threshold = 3; // lower it so 3 events force-ship
-        let out = build_batches(&q, &FakePipeline { held: false }, &opts).await;
+        let out = build_batches(&q, &FakePipeline { held: false }, &opts, None).await;
         assert!(matches!(out, DrainBatches::Ready(b) if b.len() == 1));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -354,7 +448,7 @@ mod tests {
         .await;
         let mut opts = BuildBatchesOpts::new("dev1", "9.9.9", 10_000);
         opts.max_events = 2; // force a split: [e1,e2] then [e3]
-        let out = build_batches(&q, &FakePipeline { held: false }, &opts).await;
+        let out = build_batches(&q, &FakePipeline { held: false }, &opts, None).await;
         match out {
             DrainBatches::Ready(b) => {
                 assert_eq!(b.len(), 2);
@@ -374,6 +468,7 @@ mod tests {
             &q,
             &FakePipeline { held: true },
             &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+            None,
         )
         .await;
         assert!(matches!(out, DrainBatches::Held));
@@ -391,6 +486,7 @@ mod tests {
             &q,
             &FakePipeline { held: false },
             &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+            None,
         )
         .await;
         match out {

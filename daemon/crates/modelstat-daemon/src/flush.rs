@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use modelstat_parsers::{GitEnrichment, ToolCallDraft};
+use modelstat_parsers::{detect_references, DetectedRefs, GitEnrichment, ToolCallDraft};
 use modelstat_pipeline::{
     attach_segment_ids_by_map, batch_id, build_for_one_session, build_session_metadata,
     build_session_titles, deep_redact_tool_commands, enrich_tool_call_redaction,
@@ -71,6 +71,11 @@ pub async fn build_flush_batches<S, E, N>(
     git: Option<&mut (dyn GitEnrichment + Send)>,
     extract_links: Option<&LinkExtractor<'_>>,
     run_segments_by_session: &mut BTreeMap<String, Vec<Segment>>,
+    // The cloud twin of `run_segments_by_session`: cloud ships no local segments,
+    // so the run-long view a session's metadata is recomputed from has to be its
+    // turns instead (excerpt-shed — see the accumulation below). Untouched in
+    // local / self-hosted mode, which reads the segment map.
+    run_events_by_session: &mut BTreeMap<String, Vec<RawEvent>>,
 ) -> FlushOutcome
 where
     S: Summarizer,
@@ -94,6 +99,39 @@ where
             );
             return FlushOutcome::Held;
         };
+        // Accumulate this flush's turns into the run-long per-session metadata
+        // view, the cloud twin of `run_segments_by_session` below. A session's
+        // turns arrive over MANY flushes (the 1000-event buffer spans files, and
+        // a live session ships only its new turns each cycle), and the server
+        // versions `session_metadata` by timestamp — last write wins. So a flush
+        // that computed metadata from its own tail alone would OVERWRITE the
+        // richer answer an earlier flush already landed. Recomputing from the
+        // full run view every flush makes the newest write the most complete one.
+        //
+        // Stored as a projection, not the turn: the content channel is mined ONCE
+        // here into `references` and the excerpt dropped. That keeps the map to
+        // ids + cwd + git + a small refs blob for the whole scan (the same
+        // rationale as shedding the embedding below), and keeps the per-flush
+        // recompute off the regex path it would otherwise re-walk every time.
+        for e in &events {
+            let mut lite = e.clone();
+            if let Some(excerpt) = lite.content_excerpt.take().filter(|x| !x.is_empty()) {
+                let mut refs = lite
+                    .references
+                    .take()
+                    .and_then(|r| serde_json::from_value::<DetectedRefs>(r).ok())
+                    .unwrap_or_default();
+                let mined = detect_references(&excerpt, "content");
+                refs.repos.extend(mined.repos);
+                refs.pull_requests.extend(mined.pull_requests);
+                refs.issues.extend(mined.issues);
+                lite.references = serde_json::to_value(&refs).ok();
+            }
+            run_events_by_session
+                .entry(e.session_id.clone())
+                .or_default()
+                .push(lite);
+        }
         // ONE session per /v1/ingest/raw request (the unit of send = unit of retry).
         let wire_calls = attach_segment_ids_by_map(&drafts, &HashMap::new());
         let mut by_session: BTreeMap<String, (Vec<RawEvent>, Vec<_>)> = BTreeMap::new();
@@ -111,9 +149,23 @@ where
                 .1
                 .push(c);
         }
+        // The join layer between AI spend and shipped work rides the raw path too.
+        // Only public reference shapes leave the box (slugs, PR/issue numbers,
+        // repo-relative paths — never prompt or code text), so this is strictly
+        // less egress than the turns already shipped beside it. Restricted to the
+        // sessions this flush ships; no local segments exist in cloud mode, so the
+        // pass runs off the accumulated events alone.
+        let mut metadata_input: Vec<RawEvent> = Vec::new();
+        for sid in by_session.keys() {
+            if let Some(evs) = run_events_by_session.get(sid) {
+                metadata_input.extend(evs.iter().cloned());
+            }
+        }
+        let session_metadata =
+            build_session_metadata(&[], &metadata_input, git, extract_links).await;
         let out = by_session
             .into_iter()
-            .map(|(_sid, (evs, calls))| PreparedBatch {
+            .map(|(sid, (evs, calls))| PreparedBatch {
                 batch: IngestBatch {
                     batch_id: batch_id(),
                     device_id: device_id.into(),
@@ -123,7 +175,13 @@ where
                     tool_calls: calls,
                     session_installs: None,
                     session_titles: None,
-                    session_metadata: None,
+                    // One session per batch ⇒ ship that session's entry alone. A
+                    // session the pass found nothing for stays absent rather than
+                    // riding as an empty map, which would only overwrite better
+                    // server state (`build_session_metadata` omits empty ones).
+                    session_metadata: session_metadata
+                        .get(&sid)
+                        .and_then(|m| serde_json::to_value(BTreeMap::from([(&sid, m)])).ok()),
                     summarizer_mode: None,
                 },
                 raw: true,
@@ -257,6 +315,27 @@ mod tests {
         }
     }
 
+    /// A fake "live" NER — tags Katherine Johnson / Globex Corporation by surface,
+    /// so `ner_active`'s sentinel scrubs and the cloud path proceeds instead of
+    /// fail-closing. Cloud tests that want the HOLD use `UnavailableNer`.
+    struct LiveNer;
+    impl modelstat_redact::NerModel for LiveNer {
+        fn classify(&self, _text: &str) -> Option<Vec<modelstat_redact::NerToken>> {
+            let tok = |ent: &str, word: &str| modelstat_redact::NerToken {
+                entity: ent.into(),
+                word: word.into(),
+                start: None,
+                end: None,
+            };
+            Some(vec![
+                tok("B-PER", "Katherine"),
+                tok("I-PER", "Johnson"),
+                tok("B-ORG", "Globex"),
+                tok("I-ORG", "Corporation"),
+            ])
+        }
+    }
+
     fn ev(session: &str, ts: &str, excerpt: &str) -> RawEvent {
         RawEvent {
             source_event_id: format!("{session}:{ts}"),
@@ -292,6 +371,7 @@ mod tests {
             Duration::ZERO,
         );
         let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
         let events = vec![
             ev("s1", "2026-07-16T10:00:00.000Z", "hello"),
             ev("s1", "2026-07-16T10:01:00.000Z", "world"),
@@ -308,6 +388,7 @@ mod tests {
             None,
             None,
             &mut acc,
+            &mut ev_acc,
         )
         .await;
         match out {
@@ -333,6 +414,7 @@ mod tests {
             Duration::ZERO,
         );
         let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
         let events = vec![ev("s1", "2026-07-16T10:00:00.000Z", "hello")];
         let out = build_flush_batches(
             "dev1",
@@ -346,6 +428,7 @@ mod tests {
             None,
             None,
             &mut acc,
+            &mut ev_acc,
         )
         .await;
         assert!(matches!(out, FlushOutcome::Held));
@@ -362,6 +445,7 @@ mod tests {
             Duration::ZERO,
         );
         let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
         let events = vec![ev("s1", "2026-07-16T10:00:00.000Z", "secret stuff")];
         let out = build_flush_batches(
             "dev1",
@@ -375,9 +459,162 @@ mod tests {
             None,
             None,
             &mut acc,
+            &mut ev_acc,
         )
         .await;
         assert!(matches!(out, FlushOutcome::Held));
+    }
+
+    /// The `{session_id: {repos,pull_requests,...}}` blob a raw batch carries.
+    fn meta_of(pb: &PreparedBatch) -> serde_json::Value {
+        pb.batch
+            .session_metadata
+            .clone()
+            .expect("the cloud batch must carry session_metadata")
+    }
+
+    #[tokio::test]
+    async fn cloud_flush_ships_session_metadata() {
+        // The regression this fixes: cloud is the DEFAULT mode, and it used to
+        // hardcode `session_metadata: None`, so the table was empty in production
+        // for every default install.
+        let resilient = ResilientSummarizer::with_cooldown(
+            Fake {
+                reply: "x".into(),
+                failing: false,
+            },
+            Duration::ZERO,
+        );
+        let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
+        let events = vec![ev(
+            "s1",
+            "2026-07-16T10:00:00.000Z",
+            "fixed it in https://github.com/acme/web/pull/42",
+        )];
+        let out = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "cloud",
+            events,
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &LiveNer,
+            None,
+            None,
+            &mut acc,
+            &mut ev_acc,
+        )
+        .await;
+        let FlushOutcome::Ready(batches) = out else {
+            panic!("a live NER must not hold")
+        };
+        assert_eq!(batches.len(), 1, "one session ⇒ one raw batch");
+        assert!(batches[0].raw, "cloud ships the raw endpoint");
+        let meta = meta_of(&batches[0]);
+        assert_eq!(
+            meta["s1"]["pull_requests"][0]["number"], 42,
+            "the PR the turn referenced must ride the batch, keyed by session"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_metadata_is_recomputed_from_the_whole_run_not_one_flush() {
+        // A session's turns arrive over many flushes and the server's last write
+        // wins, so the LATER flush has to carry the earlier flush's references
+        // too — otherwise it overwrites them with its own narrower view.
+        let resilient = ResilientSummarizer::with_cooldown(
+            Fake {
+                reply: "x".into(),
+                failing: false,
+            },
+            Duration::ZERO,
+        );
+        let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
+        let first = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "cloud",
+            vec![ev(
+                "s1",
+                "2026-07-16T10:00:00.000Z",
+                "opened https://github.com/acme/web/pull/42",
+            )],
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &LiveNer,
+            None,
+            None,
+            &mut acc,
+            &mut ev_acc,
+        )
+        .await;
+        let FlushOutcome::Ready(first) = first else {
+            panic!("ready")
+        };
+        assert_eq!(meta_of(&first[0])["s1"]["pull_requests"][0]["number"], 42);
+
+        // The same session continues; this flush's turns mention nothing.
+        let second = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "cloud",
+            vec![ev("s1", "2026-07-16T10:05:00.000Z", "thanks, looks good")],
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &LiveNer,
+            None,
+            None,
+            &mut acc,
+            &mut ev_acc,
+        )
+        .await;
+        let FlushOutcome::Ready(second) = second else {
+            panic!("ready")
+        };
+        assert_eq!(
+            meta_of(&second[0])["s1"]["pull_requests"][0]["number"],
+            42,
+            "the later flush must still carry PR 42 — it wins on version, so a \
+             narrower view here would erase the reference server-side"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_batch_omits_metadata_when_no_references_are_found() {
+        // An empty map would overwrite better server state, so it must stay absent.
+        let resilient = ResilientSummarizer::with_cooldown(
+            Fake {
+                reply: "x".into(),
+                failing: false,
+            },
+            Duration::ZERO,
+        );
+        let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
+        let out = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "cloud",
+            vec![ev("s1", "2026-07-16T10:00:00.000Z", "no refs here at all")],
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &LiveNer,
+            None,
+            None,
+            &mut acc,
+            &mut ev_acc,
+        )
+        .await;
+        let FlushOutcome::Ready(batches) = out else {
+            panic!("ready")
+        };
+        assert!(batches[0].batch.session_metadata.is_none());
     }
 
     #[tokio::test]
@@ -390,6 +627,7 @@ mod tests {
             Duration::ZERO,
         );
         let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
         let out = build_flush_batches(
             "dev1",
             "9.9.9",
@@ -402,6 +640,7 @@ mod tests {
             None,
             None,
             &mut acc,
+            &mut ev_acc,
         )
         .await;
         assert!(matches!(out, FlushOutcome::Ready(b) if b.is_empty()));

@@ -6,12 +6,6 @@
 //! Named constants so drift is a diff, not an incident (plan §6): a test names
 //! each one. The values mirror the Zod `.max(N)` in `packages/core/src/schemas.ts`.
 
-/// Pipeline generation stamped on every scan; bumping it forces a full re-scan.
-/// Starts at 16 in the Rust daemon (feature §18): the candle NER/embedder swap
-/// shifts segment boundaries + redaction output, so first Rust boot re-processes
-/// the world once (server upserts by segment_id).
-pub const PROCESSING_VERSION: u32 = 16;
-
 // --- RawEvent -------------------------------------------------------------
 pub const MODEL_MAX: usize = 120;
 pub const SESSION_ID_MAX: usize = 120;

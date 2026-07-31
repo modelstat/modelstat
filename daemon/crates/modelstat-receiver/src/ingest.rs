@@ -4,7 +4,7 @@
 //! loopback; we validate, enqueue durably (idempotent), and — on the daemon's
 //! tick — drain: build batches, strip the raw excerpt, upload, mark sent.
 
-use modelstat_parsers::ToolCallDraft;
+use modelstat_parsers::{GitEnrichment, ToolCallDraft};
 use modelstat_wire::{IngestBatch, RawEvent};
 use serde::Deserialize;
 
@@ -132,6 +132,9 @@ pub async fn drain_local_queue<Q, P, U>(
     device_id: &str,
     daemon_version: &str,
     now_ms: i64,
+    // The session-metadata git seam, forwarded to the batch builder. `None` is a
+    // valid wiring (tests, and any host with no local checkout to resolve).
+    git: Option<&mut (dyn GitEnrichment + Send)>,
 ) -> std::io::Result<DrainResult>
 where
     Q: QueueStore,
@@ -142,7 +145,7 @@ where
         return Ok(DrainResult::default());
     }
     let opts = BuildBatchesOpts::new(device_id, daemon_version, now_ms);
-    let batches = match build_batches(store, pipeline, &opts).await {
+    let batches = match build_batches(store, pipeline, &opts, git).await {
         DrainBatches::Held => {
             return Ok(DrainResult {
                 held: true,
@@ -313,6 +316,7 @@ mod tests {
             "dev1",
             "9.9.9",
             2_000_000_000_000,
+            None,
         )
         .await
         .unwrap();
@@ -345,6 +349,7 @@ mod tests {
             "dev1",
             "9.9.9",
             2_000_000_000_000,
+            None,
         )
         .await
         .unwrap();
@@ -368,6 +373,7 @@ mod tests {
             "dev1",
             "9.9.9",
             2_000_000_000_000,
+            None,
         )
         .await
         .unwrap();
