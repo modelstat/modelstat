@@ -17,6 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use modelstat_ingest::accounts::{session_installs_for, Accounts};
 use modelstat_parsers::{detect_references, DetectedRefs, GitEnrichment, ToolCallDraft};
 use modelstat_pipeline::{
     attach_segment_ids_by_map, batch_id, build_for_one_session, build_session_metadata,
@@ -76,6 +77,9 @@ pub async fn build_flush_batches<S, E, N>(
     // turns instead (excerpt-shed — see the accumulation below). Untouched in
     // local / self-hosted mode, which reads the segment map.
     run_events_by_session: &mut BTreeMap<String, Vec<RawEvent>>,
+    // Which provider account is logged in, and since when. Passed in rather than
+    // read here so the caller owns the I/O and this stays a pure builder.
+    accounts: &Accounts,
 ) -> FlushOutcome
 where
     S: Summarizer,
@@ -165,27 +169,34 @@ where
             build_session_metadata(&[], &metadata_input, git, extract_links).await;
         let out = by_session
             .into_iter()
-            .map(|(sid, (evs, calls))| PreparedBatch {
-                batch: IngestBatch {
-                    batch_id: batch_id(),
-                    device_id: device_id.into(),
-                    daemon_version: daemon_version.into(),
-                    events: evs,
-                    segments: Vec::new(),
-                    tool_calls: calls,
-                    session_installs: None,
-                    session_titles: None,
-                    // One session per batch ⇒ ship that session's entry alone. A
-                    // session the pass found nothing for stays absent rather than
-                    // riding as an empty map, which would only overwrite better
-                    // server state (`build_session_metadata` omits empty ones).
-                    session_metadata: session_metadata
-                        .get(&sid)
-                        .and_then(|m| serde_json::to_value(BTreeMap::from([(&sid, m)])).ok()),
-                    summarizer_mode: None,
-                },
-                raw: true,
-                segment_count: 0,
+            .map(|(sid, (evs, calls))| {
+                // Computed before the struct literal below moves `evs`.
+                let installs_for_session = session_installs_for(&evs, accounts);
+                PreparedBatch {
+                    batch: IngestBatch {
+                        batch_id: batch_id(),
+                        device_id: device_id.into(),
+                        daemon_version: daemon_version.into(),
+                        events: evs,
+                        segments: Vec::new(),
+                        tool_calls: calls,
+                        // The account that produced this session, when we can say so
+                        // honestly (see `accounts::session_installs_for`). One session
+                        // per raw batch, so only its own entry rides.
+                        session_installs: installs_for_session,
+                        session_titles: None,
+                        // One session per batch ⇒ ship that session's entry alone. A
+                        // session the pass found nothing for stays absent rather than
+                        // riding as an empty map, which would only overwrite better
+                        // server state (`build_session_metadata` omits empty ones).
+                        session_metadata: session_metadata
+                            .get(&sid)
+                            .and_then(|m| serde_json::to_value(BTreeMap::from([(&sid, m)])).ok()),
+                        summarizer_mode: None,
+                    },
+                    raw: true,
+                    segment_count: 0,
+                }
             })
             .collect();
         return FlushOutcome::Ready(out);
@@ -265,6 +276,8 @@ where
     } else {
         serde_json::to_value(&session_metadata).ok()
     };
+    // Computed before the struct literal below moves `events`.
+    let session_installs = session_installs_for(&events, accounts);
     let batch = IngestBatch {
         batch_id: batch_id(),
         device_id: device_id.into(),
@@ -272,7 +285,9 @@ where
         events,
         segments,
         tool_calls,
-        session_installs: None,
+        // The account behind each session in this batch, for the sessions we can
+        // name one for; absent entirely when we can name none.
+        session_installs,
         session_titles: if session_titles.is_empty() {
             None
         } else {
@@ -361,6 +376,111 @@ mod tests {
         }
     }
 
+    /// The wiring, end to end: a known account reaches the wire field the server
+    /// reads. The decision logic itself is unit-tested in
+    /// `modelstat_ingest::accounts`; this proves the batch actually carries it.
+    #[tokio::test]
+    async fn a_local_flush_names_the_logged_in_account_on_the_wire() {
+        let resilient = ResilientSummarizer::with_cooldown(
+            Fake {
+                reply: "Did the thing".into(),
+                failing: false,
+            },
+            Duration::ZERO,
+        );
+        let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
+        // Logged in well before the session ran.
+        let accounts = Accounts::from([(
+            "anthropic".to_string(),
+            modelstat_ingest::accounts::AccountSnapshot {
+                provider_account_id: "acct-uuid-1".into(),
+                observed_since: 0,
+            },
+        )]);
+        let events = vec![
+            ev("s1", "2026-07-16T10:00:00.000Z", "hello"),
+            ev("s1", "2026-07-16T10:01:00.000Z", "world"),
+        ];
+        let out = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "local",
+            events,
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            None,
+            None,
+            &mut acc,
+            &mut ev_acc,
+            &accounts,
+        )
+        .await;
+        let FlushOutcome::Ready(batches) = out else {
+            panic!("healthy engine must not hold");
+        };
+        let installs = batches[0]
+            .batch
+            .session_installs
+            .as_ref()
+            .expect("the account was known — it must ride on the wire");
+        assert_eq!(
+            installs["s1"]["provider_account_id"], "acct-uuid-1",
+            "the VENDOR's id, which the server translates into ours"
+        );
+        assert_eq!(installs["s1"]["provider"], "anthropic");
+    }
+
+    /// The install-day backlog: months of transcripts, account first seen today.
+    /// Naming one here would be a guess, and a guess puts money on the wrong
+    /// account.
+    #[tokio::test]
+    async fn a_local_flush_names_nothing_for_sessions_older_than_the_account() {
+        let resilient = ResilientSummarizer::with_cooldown(
+            Fake {
+                reply: "Did the thing".into(),
+                failing: false,
+            },
+            Duration::ZERO,
+        );
+        let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
+        // First seen LONG after the session's events (2026-07-16 ≈ 1.784e12 ms).
+        let accounts = Accounts::from([(
+            "anthropic".to_string(),
+            modelstat_ingest::accounts::AccountSnapshot {
+                provider_account_id: "acct-uuid-1".into(),
+                observed_since: 9_000_000_000_000,
+            },
+        )]);
+        let events = vec![ev("s1", "2026-07-16T10:00:00.000Z", "hello")];
+        let out = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "local",
+            events,
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            None,
+            None,
+            &mut acc,
+            &mut ev_acc,
+            &accounts,
+        )
+        .await;
+        let FlushOutcome::Ready(batches) = out else {
+            panic!("healthy engine must not hold");
+        };
+        assert!(
+            batches[0].batch.session_installs.is_none(),
+            "an unnameable session must leave the field OFF the wire, not send an empty map"
+        );
+    }
+
     #[tokio::test]
     async fn local_flush_builds_a_batch_with_segments() {
         let resilient = ResilientSummarizer::with_cooldown(
@@ -389,6 +509,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &Accounts::new(),
         )
         .await;
         match out {
@@ -429,6 +550,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &Accounts::new(),
         )
         .await;
         assert!(matches!(out, FlushOutcome::Held));
@@ -460,6 +582,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &Accounts::new(),
         )
         .await;
         assert!(matches!(out, FlushOutcome::Held));
@@ -505,6 +628,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &Accounts::new(),
         )
         .await;
         let FlushOutcome::Ready(batches) = out else {
@@ -550,6 +674,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &Accounts::new(),
         )
         .await;
         let FlushOutcome::Ready(first) = first else {
@@ -571,6 +696,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &Accounts::new(),
         )
         .await;
         let FlushOutcome::Ready(second) = second else {
@@ -609,6 +735,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &Accounts::new(),
         )
         .await;
         let FlushOutcome::Ready(batches) = out else {
@@ -641,6 +768,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &Accounts::new(),
         )
         .await;
         assert!(matches!(out, FlushOutcome::Ready(b) if b.is_empty()));

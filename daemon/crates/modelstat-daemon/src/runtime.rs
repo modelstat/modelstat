@@ -370,6 +370,12 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     let embedder = daemon.embedder.get();
     let ner = daemon.ner.get();
 
+    // Snapshot the logged-in accounts ONCE for the whole scan, for the same
+    // reason: the heartbeat rewrites this file every 10s, and a switch landing
+    // mid-scan must not split one pass across two accounts. Empty (no file yet,
+    // or nothing detected) simply names nothing and the server infers.
+    let accounts = modelstat_ingest::accounts::load_accounts();
+
     let mut guard = daemon.state.lock().await;
     let tallies = run_scan_over_jobs(
         ordered,
@@ -390,6 +396,7 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         &mut uploader,
         &mut *guard as &mut (dyn CursorStore + Send),
         &mut observer,
+        &accounts,
     )
     .await;
 

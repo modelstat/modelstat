@@ -144,7 +144,11 @@ where
     if store.count_unsent().await == 0 {
         return Ok(DrainResult::default());
     }
-    let opts = BuildBatchesOpts::new(device_id, daemon_version, now_ms);
+    let mut opts = BuildBatchesOpts::new(device_id, daemon_version, now_ms);
+    // Name each shipped session's account, exactly as the file-scan path does.
+    // Read once per drain: the heartbeat rewrites this every 10s, and one drain
+    // must not straddle a switch.
+    opts.accounts = modelstat_ingest::accounts::load_accounts();
     let batches = match build_batches(store, pipeline, &opts, git).await {
         DrainBatches::Held => {
             return Ok(DrainResult {
