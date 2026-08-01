@@ -80,21 +80,30 @@ The installer prints every step as it goes. In order:
    startup, so open a new terminal — or run `source ~/.modelstat/env` — before
    typing `modelstat`.** The installer prints exactly which files it changed.
 4. **Registers your device** with modelstat.ai and gets a claim link.
-5. **(macOS) installs a menu-bar tray** icon.
-6. **Asks where sessions should be summarised** — cloud, local, or self-hosted (see
+5. **Asks where sessions should be summarised** — cloud, local, or self-hosted (see
    [Summariser modes](#summariser-modes)). This is a one-time consent choice.
    Redaction of secrets and names always runs on your machine first, in every mode.
-7. **Prepares the on-device redactor** — a ~250 MB privacy model that finds and
-   removes names/PII locally. Downloads on first run in every mode.
-8. **(local mode only — beta) downloads the summariser model** — a ~2.7 GB model
+6. **(local mode only — beta) downloads the summariser model** — a ~2.7 GB model
    (Qwen3.5-4B) so summarising can happen entirely on your machine.
+7. **Prepares the on-device redactor** — a ~430 MB privacy model that finds and
+   removes names/PII locally. Downloads in every mode.
+8. **Prepares the on-device embedder** — a ~130 MB model (~560 MB with the
+   redactor) that spots where the *topic* of your work changes, so a long session
+   is split where the work actually changed rather than on elapsed time alone.
+   Downloads in every mode.
 9. **Installs a background service** (launchd on macOS, systemd `--user` on Linux, a
    Scheduled Task on Windows) so the daemon keeps running and survives reboots.
-10. **Enables the Claude Code statusline** — live tokens · cost · taxonomy in your
+10. **(macOS) installs a menu-bar tray** icon.
+11. **Enables the Claude Code statusline** — live tokens · cost · taxonomy in your
     terminal (skip with `MODELSTAT_NO_STATUSLINE=1`).
-11. **Detects your AI tools** and wires the modelstat MCP into them, so you can ask
+12. **Detects your AI tools** and wires the modelstat MCP into them, so you can ask
     your assistant about your own spend.
-12. **Opens your dashboard** in the browser to claim the device.
+13. **Opens your dashboard** in the browser to claim the device.
+
+A model download that fails is retried with backoff, and the daemon re-checks both
+models every time it starts — so a drop-out mid-install repairs itself in the
+background rather than leaving a model permanently missing. `modelstat status`
+shows which ones are present.
 
 Your data starts appearing on the dashboard within seconds.
 
@@ -114,8 +123,9 @@ Your data starts appearing on the dashboard within seconds.
 - **No root / admin** for a normal install — everything goes under your home
   directory and runs as a per-user service. Use `--system` only if you want a
   machine-wide service (that one needs admin).
-- **Disk:** ~50 MB for the binaries + ~250 MB for the on-device redactor. Add
-  ~2.7 GB only if you choose **local** summarising.
+- **Disk:** ~50 MB for the binaries + ~560 MB for the two on-device models
+  (~430 MB redactor, ~130 MB embedder). Add ~2.7 GB only if you choose **local**
+  summarising.
 
 ---
 
@@ -353,7 +363,8 @@ is **kept** in `~/.modelstat`, so running `~/.modelstat/bin/modelstat` (full pat
 — the PATH entry is gone) re-enables everything later.
 
 To reclaim disk without fully uninstalling, delete just the models:
-`rm -rf ~/.modelstat/models/`.
+`rm -rf ~/.modelstat/models/`. Note this frees space only while the daemon is
+stopped — a running daemon re-downloads any missing model on its next start.
 
 ### Remove everything
 
@@ -440,7 +451,7 @@ Inside it:
 |---|---|
 | `bin/` | the `modelstat` and `modelstat-summarizer` binaries |
 | `env` | the one-line PATH snippet your shell startup file sources |
-| `models/` | downloaded models (redactor, and Qwen for local mode) |
+| `models/` | downloaded models (redactor + embedder, and Qwen for local mode) |
 | `identity.json` | your device pairing (keep this to stay the same device) |
 | `state.json` | scan cursors and local state |
 | `logs/` | daemon logs |
@@ -470,6 +481,13 @@ install of the retired Node package. Check with `command -v modelstat` (Unix) or
 **I want to re-process my history from scratch.**
 `modelstat reset` wipes the local cursors so the next scan re-reads and
 re-summarises everything.
+
+**How do I check the on-device models actually downloaded?**
+`modelstat status` lists them under **on-device models**, with `✓` or `✗` per
+model (`--json` puts the same thing under `models`). A missing one is not fatal —
+the daemon keeps retrying in the background — but until the embedder lands,
+sessions are split on time and size alone, and in cloud or self-hosted mode a
+missing redactor holds uploads entirely rather than sending unredacted text.
 
 **Does it need Node / Python / Docker?**
 No. The binaries are self-contained.
