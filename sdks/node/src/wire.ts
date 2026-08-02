@@ -62,8 +62,15 @@ export type EventKind =
   | "tool_result"
   | "summary";
 
-/** How the provider billed the call (snake_case on the wire). */
-export type PricingMode = "subscription" | "api";
+/**
+ * How the provider billed the call (snake_case on the wire).
+ *
+ * Stated by the caller, never guessed downstream — only the caller knows
+ * whether the credential behind the call was a flat plan or a metered key.
+ * `"unknown"` is a legal answer: it prices to $0 and is reported as
+ * unattributed usage, rather than being silently billed at list price.
+ */
+export type PricingMode = "subscription" | "api" | "unknown";
 
 /** Outcome of a tool invocation (snake_case on the wire). */
 export type ToolCallStatus =
@@ -104,7 +111,8 @@ export interface RawEvent {
   cwd?: string;
   git?: GitContext;
   duration_ms?: number;
-  pricing_mode?: PricingMode;
+  /** REQUIRED — always sent. The server has no default for it. */
+  pricing_mode: PricingMode;
   /**
    * Redacted excerpt used to build summaries downstream. Capped at 320 chars
    * in the standard (floor-redacted) path; carries the full redacted turns in

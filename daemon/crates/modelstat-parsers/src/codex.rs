@@ -547,7 +547,7 @@ fn parse_inner(
                     references: None,
                     source_file: Some(ctx.source_file.clone()),
                     source_byte_offset: Some(offset),
-                    pricing_mode: None,
+                    pricing_mode: ctx.pricing_mode.clone(),
                 });
                 emitted += 1;
                 turn_index += 1;
@@ -584,7 +584,7 @@ fn parse_inner(
                     references: None,
                     source_file: Some(ctx.source_file.clone()),
                     source_byte_offset: Some(offset),
-                    pricing_mode: None,
+                    pricing_mode: ctx.pricing_mode.clone(),
                 });
                 emitted += 1;
                 continue;

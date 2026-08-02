@@ -20,7 +20,8 @@
       "files_touched": [],
       "content_excerpt": "fix the bug please",
       "source_file": "/tmp/modelstat-fixtures/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl",
-      "source_byte_offset": 300
+      "source_byte_offset": 300,
+      "pricing_mode": "api"
     },
     {
       "source_event_id": "evt_zqd4n169mcng",
@@ -53,7 +54,8 @@
       "files_touched": [],
       "content_excerpt": "Let me look.",
       "source_file": "/tmp/modelstat-fixtures/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl",
-      "source_byte_offset": 504
+      "source_byte_offset": 504,
+      "pricing_mode": "api"
     }
   ],
   "toolCalls": [

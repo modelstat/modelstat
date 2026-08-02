@@ -37,7 +37,7 @@ fn raw_event_full_accepts_and_roundtrips() {
         ev.content_excerpt.as_deref(),
         Some("did some work on the ingest path")
     );
-    assert_eq!(ev.pricing_mode.as_deref(), Some("subscription"));
+    assert_eq!(ev.pricing_mode, "subscription");
 }
 
 #[test]
@@ -50,7 +50,9 @@ fn raw_event_minimal_materializes_defaults() {
     assert!(ev.tool_calls.is_empty());
     assert!(ev.files_touched.is_empty());
     assert!(ev.content_excerpt.is_none());
-    assert!(ev.pricing_mode.is_none());
+    // Required even in the minimal shape: an event that does not say how it
+    // was billed is rejected, not defaulted.
+    assert_eq!(ev.pricing_mode, "subscription");
     // Re-serialize: default containers present, optionals omitted.
     let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
     assert!(v.get("tool_calls").unwrap().is_object());

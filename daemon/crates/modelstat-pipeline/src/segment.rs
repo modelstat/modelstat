@@ -313,7 +313,7 @@ mod tests {
             references: None,
             source_file: None,
             source_byte_offset: None,
-            pricing_mode: None,
+            pricing_mode: "subscription".to_string(),
         };
         ev.tool_calls.insert("Bash".into(), 2);
         let s = turn_surface(&ev);
