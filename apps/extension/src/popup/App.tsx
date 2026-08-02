@@ -1,7 +1,7 @@
 import type React from "react";
 import { useEffect, useState } from "react";
 
-type TodayEntry = { agent: string; tokens: number; cost: number; model: string | null };
+type TodayEntry = { agent: string; tokens: number; model: string | null };
 type AuthStatus =
   | { kind: "registering" }
   | {
@@ -33,7 +33,6 @@ type Session = {
   model: string | null;
   conversation_id: string;
   tokens: number;
-  cost: number;
   messages: number;
   updated_at: string;
 };
@@ -116,10 +115,6 @@ function fmtTokens(n: number): string {
   return `${(n / 1_000_000_000).toFixed(2)}B`;
 }
 
-function fmtUsd(n: number): string {
-  return `$${n.toFixed(n < 1 ? 3 : 2)}`;
-}
-
 function useSnapshot(activeTabId: number | null) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const refresh = () =>
@@ -150,7 +145,6 @@ export function App(): React.JSX.Element {
   }
 
   const totalTokens = snap.today.reduce((s, e) => s + e.tokens, 0);
-  const totalCost = snap.today.reduce((s, e) => s + e.cost, 0);
 
   const statusDot =
     snap.auth.kind === "claimed" && snap.syncEnabled
@@ -193,9 +187,8 @@ export function App(): React.JSX.Element {
         <div className="text-xs text-slate-400 uppercase tracking-wide">today</div>
         <div className="flex items-baseline justify-between mt-1">
           <span className="text-2xl font-bold tabular-nums">{fmtTokens(totalTokens)}</span>
-          <span className="text-sm text-slate-300 tabular-nums">{fmtUsd(totalCost)}</span>
         </div>
-        <div className="text-xs text-slate-500 mt-0.5">tokens · equivalent</div>
+        <div className="text-xs text-slate-500 mt-0.5">tokens · $ in the dashboard</div>
       </section>
 
       {activeTab?.agent && <ActiveTabTracker active={activeTab} snap={snap} />}
@@ -230,7 +223,6 @@ export function App(): React.JSX.Element {
             </div>
             <div className="flex items-baseline gap-3 text-xs tabular-nums">
               <span className="text-slate-300">{fmtTokens(entry.tokens)}</span>
-              <span className="text-slate-400">{fmtUsd(entry.cost)}</span>
             </div>
           </div>
         ))}
@@ -456,7 +448,6 @@ function ActiveTabTracker({ active, snap }: { active: ActiveTab; snap: Snapshot 
           </div>
           <div className="text-sm tabular-nums">
             <span className="text-slate-50 font-semibold">{fmtTokens(session.tokens)}</span>
-            <span className="text-slate-400 ml-2">{fmtUsd(session.cost)}</span>
           </div>
         </div>
       )}
@@ -525,7 +516,6 @@ function SessionsList({ sessions }: { sessions: Session[] }): React.JSX.Element 
               </div>
               <div className="text-right tabular-nums shrink-0">
                 <div className="text-slate-200">{fmtTokens(s.tokens)}</div>
-                <div className="text-[10px] text-slate-500">{fmtUsd(s.cost)}</div>
               </div>
             </div>
           );

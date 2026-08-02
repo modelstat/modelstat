@@ -6,7 +6,6 @@ packages:
   - "packages/core"
   - "packages/mcp"
   - "packages/parsers"
-  - "packages/pricing"
   - "packages/remote-config"
 
 onlyBuiltDependencies:

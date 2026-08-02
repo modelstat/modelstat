@@ -29,7 +29,6 @@ import { createLogger } from "@/common/logger.js";
 import type { NetworkMessage, NetworkScalar } from "@/interpreter/network.js";
 import type { DomEventPayload } from "@/interpreter/runtime-msgs.js";
 import { db, type PendingMessage, type StoredEvent, type SessionRollup } from "./db.js";
-import { priceFor } from "@/background/pricing.js";
 
 const log = createLogger("two-phase");
 
@@ -207,10 +206,10 @@ async function finaliseRow(row: PendingMessage, ctx: CommitterCtx): Promise<void
   }
 
   // OpenAI reports input_tokens / output_tokens INCLUSIVE of their cached /
-  // reasoning subsets; the pricer bills input + cache_read + output + reasoning
+  // reasoning subsets; the server bills input + cache_read + output + reasoning
   // as DISJOINT line items, so subtract the subsets for OpenAI — otherwise cached
-  // and reasoning tokens are paid for twice (G7/G8), in BOTH the popup price
-  // (costUsd below) and the ingested tokens (this StoredEvent feeds the server).
+  // and reasoning tokens are paid for twice (G7/G8) in the ingested tokens this
+  // StoredEvent feeds the server.
   // Mirrors the Codex parser. Anthropic already reports these buckets disjoint.
   // No-op when usage wasn't captured (subtracting 0) or text was tokenized.
   if (ctx.vendor === "openai") {
@@ -222,14 +221,6 @@ async function finaliseRow(row: PendingMessage, ctx: CommitterCtx): Promise<void
   const session_id = `${ctx.agent}::${conversationId}`;
   const source_event_id = `${row.host}::${row.messageId}`;
   const ts = new Date(row.lastUpdatedAt).toISOString();
-
-  const costUsd = await priceFor(ctx.vendor, model, {
-    input,
-    output,
-    cache_creation: row.usage.cache_creation ?? 0,
-    cache_read: row.usage.cache_read ?? 0,
-    reasoning: row.usage.reasoning ?? 0,
-  });
 
   const event: StoredEvent = {
     source_event_id,
@@ -248,7 +239,6 @@ async function finaliseRow(row: PendingMessage, ctx: CommitterCtx): Promise<void
     tokenizer_accuracy: tokenizerAccuracy,
     duration_ms: row.lastUpdatedAt - row.firstSeenAt,
     host: row.host,
-    cost_usd: costUsd,
     summary: null,
     category: null,
     synced: 0,
@@ -269,7 +259,6 @@ async function finaliseRow(row: PendingMessage, ctx: CommitterCtx): Promise<void
           tokens_cache_creation: existing.tokens_cache_creation + event.cache_creation_tokens,
           tokens_cache_read: existing.tokens_cache_read + event.cache_read_tokens,
           tokens_reasoning: existing.tokens_reasoning + event.reasoning_tokens,
-          cost_usd: existing.cost_usd + (event.cost_usd ?? 0),
           updated_at: ts,
         }
       : {
@@ -287,7 +276,6 @@ async function finaliseRow(row: PendingMessage, ctx: CommitterCtx): Promise<void
           tokens_cache_creation: event.cache_creation_tokens,
           tokens_cache_read: event.cache_read_tokens,
           tokens_reasoning: event.reasoning_tokens,
-          cost_usd: event.cost_usd ?? 0,
           summary: null,
           category: null,
           updated_at: ts,
