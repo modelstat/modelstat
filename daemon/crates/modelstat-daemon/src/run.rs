@@ -68,9 +68,13 @@ fn ingest_port() -> u16 {
 /// `runDaemon`.
 pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     // Timestamped logging from the first line: this process runs for days under a
-    // supervisor, and its stderr is a log file someone reads long after the fact.
-    // Unconditional — running `modelstat start` by hand in a terminal is running
-    // the daemon, and must log identically to the supervised one.
+    // supervisor, and its streams are log files someone reads long after the fact
+    // (INFO → `out.log`, WARN/ERROR → `err.log`). Unconditional — running
+    // `modelstat start` by hand in a terminal is running the daemon, and must log
+    // identically to the supervised one.
+    //
+    // The daemon owns its stdout entirely: nothing here may `println!`, or the
+    // stray line lands in `out.log` undated and unattributable.
     modelstat_log::init_service();
 
     // ── Enrollment guard ────────────────────────────────────────────────────
@@ -360,7 +364,9 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
             let folded = accounts::fold_discovery(&stored, &detected, now_ms());
             if folded != stored {
                 if let Err(e) = accounts::save_accounts(&folded) {
-                    eprintln!("accounts: could not persist the logged-in account: {e}");
+                    modelstat_log::log_error!(
+                        "accounts: could not persist the logged-in account: {e}"
+                    );
                 }
             }
         }

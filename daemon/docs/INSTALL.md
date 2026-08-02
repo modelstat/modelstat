@@ -454,7 +454,7 @@ Inside it:
 | `models/` | downloaded models (redactor + embedder, and Qwen for local mode) |
 | `identity.json` | your device pairing (keep this to stay the same device) |
 | `state.json` | scan cursors and local state |
-| `logs/` | daemon logs |
+| `logs/` | daemon logs — `out.log` is what it did, `err.log` is what went wrong (see below) |
 | `summarizer.json` | engine config (self-hosted / local engine only) |
 
 ---
@@ -465,6 +465,26 @@ Inside it:
 Run `modelstat status` to check pairing and the service, and `modelstat jobs` to see
 the local queue. If the device is not claimed, open the claim link the installer
 printed.
+
+**Where are the logs, and which file do I open?**
+`~/.modelstat/logs/`. The daemon splits its lines by severity:
+
+| File | Holds |
+|---|---|
+| `out.log` | routine progress — what the daemon did, and when |
+| `err.log` | warnings and errors only — start here when something is broken |
+
+The summariser engine writes the same pair as `summarizer-out.log` /
+`summarizer-err.log`, and the menu-bar tray as `tray-out.log` / `tray-err.log`.
+Every supervised line starts with a UTC timestamp, so to follow one incident
+across both files, read them together in time order:
+
+```bash
+sort ~/.modelstat/logs/out.log ~/.modelstat/logs/err.log | tail -50
+```
+
+A log that passes 64 MB is trimmed on the next daemon start, with the tail kept
+in the matching `.old.log`.
 
 **`modelstat: command not found` right after installing.**
 Your current shell read its startup file before the installer edited it. Open a

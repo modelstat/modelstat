@@ -1,13 +1,18 @@
 //! Boot-time runaway-log rotation — a port of `apps/daemon/src/daemon.ts`'s
 //! `rotateRunawayLogs`.
 //!
-//! Whoever supervises the daemon — launchd writing `StandardErrorPath` (O_APPEND)
-//! or the tray holding a `FileHandle` — keeps the log fd OPEN across daemon
-//! restarts. So an oversized log must be truncated **in place** (`set_len(0)`):
-//! renaming would detach the path from the live fd and the supervisor would keep
-//! growing the renamed inode forever. We copy the tail to `<name>.old.log` first
-//! so the last crash stacks survive. Best-effort throughout: any fs error leaves
-//! the log as-is and never blocks boot.
+//! Whoever supervises the daemon — launchd writing `StandardOutPath` /
+//! `StandardErrorPath`, or the tray holding its own O_APPEND handle on the same
+//! two files — keeps the log fd OPEN across daemon restarts. So an oversized log
+//! must be truncated **in place** (`set_len(0)`): renaming would detach the path
+//! from the live fd and the supervisor would keep growing the renamed inode
+//! forever. We copy the tail to `<name>.old.log` first so the last crash stacks
+//! survive. Best-effort throughout: any fs error leaves the log as-is and never
+//! blocks boot.
+//!
+//! Both files are rotated, not just `err.log`: since the daemon routes INFO to
+//! stdout, a reprocess narrating every session grows `out.log` the same way a
+//! warn loop grows `err.log`.
 //!
 //! (The 2026-06-11 incident left a 992 MB `err.log` — one warn line repeated ~5M
 //! times during a full reprocess — because launchd never rotates its own paths.)

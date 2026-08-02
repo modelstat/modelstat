@@ -31,12 +31,20 @@ fn main() -> ExitCode {
     let cmd = args.first().map(String::as_str);
 
     // The `_`-prefixed verbs are machine-invoked, never typed: the tray runs
-    // `_ensure-daemon` every 30s and pipes its output straight into
-    // `~/.modelstat/logs/out.log`, and the updater runs `_install-service` from a
-    // detached worker. Their output is only ever read as a log — so timestamp it.
-    // (`_daemon-health`'s JSON goes to stdout and is untouched; logging is stderr.)
+    // `_ensure-daemon` every 30s and files its streams into `~/.modelstat/logs/`,
+    // and the updater runs `_install-service` from a detached worker. Their
+    // output is only ever read as a log — so timestamp it.
+    //
+    // `_daemon-health` is the exception: its whole output is one JSON document
+    // the tray parses off stdout, so it holds stdout reserved and keeps every
+    // level on stderr. An INFO line interleaved into that document is a parse
+    // failure, and the tray would read it as "no daemon".
     if cmd.is_some_and(|c| c.starts_with('_')) {
-        modelstat_log::init_service();
+        if cmd == Some("_daemon-health") {
+            modelstat_log::init_service_stdout_reserved();
+        } else {
+            modelstat_log::init_service();
+        }
     }
 
     match cmd {
@@ -196,8 +204,11 @@ fn cmd_mcp(args: &[String]) -> ExitCode {
     }
     // The stdio bridge runs for as long as its MCP client does, and its stderr is
     // a log file (or a client's log pane) read after the fact — timestamped.
+    // stdout is RESERVED: it carries the JSON-RPC frames the client parses, so
+    // every level goes to stderr here. One INFO line on stdout desynchronises the
+    // protocol and the client drops the connection.
     // `mcp wire` above is an interactive command and deliberately stays plain.
-    modelstat_log::init_service();
+    modelstat_log::init_service_stdout_reserved();
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
