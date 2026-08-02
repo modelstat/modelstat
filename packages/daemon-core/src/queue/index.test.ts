@@ -33,6 +33,7 @@ function rawEvent(
     files_touched: [],
     source_file: null,
     source_byte_offset: null,
+    pricing_mode: "api",
     ...over,
   };
 }

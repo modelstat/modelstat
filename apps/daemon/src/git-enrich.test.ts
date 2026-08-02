@@ -26,6 +26,7 @@ function mkEvent(over: Partial<RawEvent> = {}): RawEvent {
     files_touched: [],
     source_file: "f.jsonl",
     source_byte_offset: 0,
+    pricing_mode: "subscription",
     ...over,
   };
 }

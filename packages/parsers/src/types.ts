@@ -1,4 +1,4 @@
-import type { RawEvent, ToolCallWire } from "@modelstat/core";
+import type { PricingMode, RawEvent, ToolCallWire } from "@modelstat/core";
 
 /** One extracted tool invocation, before segment attribution.
  *
@@ -63,6 +63,15 @@ export interface ParserContext {
   sourceFile: string;
   /** For incremental parsers: skip bytes before this offset. */
   byteOffsetStart?: number;
+  /** How this agent authenticates to its provider on this machine —
+   * resolved once per scan from the agent's own auth file and stamped onto
+   * every event the parse emits. It is a property of the machine's login,
+   * not of a transcript line, so re-reading it per event would be pure
+   * syscall waste.
+   *
+   * Defaults to `"unknown"` when the caller has not resolved it: a caller
+   * that does not know must not have a billable answer invented for it. */
+  pricingMode?: PricingMode;
   /** Streaming sink. When set, the parser delivers events in chunks of
    * at most PARSER_EVENT_CHUNK as it reads the file and does NOT
    * accumulate them in `ParseResult.events`. The parser awaits the sink

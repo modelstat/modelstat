@@ -49,6 +49,7 @@ function ev(over: Partial<RawEvent> & { source_event_id: string; ts: string }): 
     content_excerpt: "Investigated the failing ingest and fixed the test runner.",
     source_file: null,
     source_byte_offset: null,
+    pricing_mode: "api",
     ...over,
   };
 }
