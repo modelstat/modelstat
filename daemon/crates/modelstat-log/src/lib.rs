@@ -334,7 +334,12 @@ mod tests {
         assert!(Mode::ServiceStdoutReserved.is_timestamped());
         assert_eq!(
             render(Mode::Service.is_timestamped(), Level::Info, T, "x"),
-            render(Mode::ServiceStdoutReserved.is_timestamped(), Level::Info, T, "x")
+            render(
+                Mode::ServiceStdoutReserved.is_timestamped(),
+                Level::Info,
+                T,
+                "x"
+            )
         );
     }
 
