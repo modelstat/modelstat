@@ -142,8 +142,9 @@ fn make_backend(_models_dir: &std::path::Path) -> impl Backend {
 }
 
 async fn serve() -> ExitCode {
-    // Supervised, long-running, stderr → `summarizer-err.log`. Timestamps from
-    // the first line (see `modelstat_log`).
+    // Supervised, long-running, and stdout is free (the engine answers over
+    // HTTP, not stdio): INFO → `summarizer-out.log`, WARN/ERROR →
+    // `summarizer-err.log`. Timestamps from the first line (see `modelstat_log`).
     modelstat_log::init_service();
 
     let home = home_dir();

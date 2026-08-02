@@ -345,7 +345,54 @@ final class TrayController: NSObject {
     }
   }
 
-  /// Run `modelstat <args>` to completion, output onto the daemon log.
+  /// `~/.modelstat/logs`, created if absent.
+  private nonisolated static func logsDir() -> String {
+    let dir = ("~/.modelstat/logs" as NSString).expandingTildeInPath
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir
+  }
+
+  /// Open `<logs>/<name>` for **appending**.
+  ///
+  /// `O_APPEND` is the entire point. Three writers share these files — launchd
+  /// holding its own fd for the supervised daemon, this tray, and the daemon's
+  /// boot-time rotation truncating them in place — so every writer has to let
+  /// the kernel place each write at the current end of file.
+  /// `FileHandle(forWritingAtPath:)`, which this used to use, seeks to byte 0
+  /// instead and overwrites whatever is already there: it left `out.log` full of
+  /// shredded half-lines, each tray run eating the head of the previous one.
+  ///
+  /// `nil` means the file could not be opened; the caller lets the child inherit
+  /// the tray's own streams so the output still lands somewhere (`tray-*.log`)
+  /// rather than being dropped.
+  private nonisolated static func appendingLog(_ name: String) -> FileHandle? {
+    let path = "\(logsDir())/\(name)"
+    let fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+    guard fd >= 0 else {
+      // Loud, and never swallowed: without this the output would silently move
+      // to another file and the next person to read out.log would conclude the
+      // tray had simply stopped supervising.
+      let why = String(cString: strerror(errno))
+      FileHandle.standardError.write(
+        Data("modelstat-tray: cannot append to \(path) (\(why)) — this run's output goes to tray-err.log instead\n".utf8))
+      return nil
+    }
+    return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+  }
+
+  /// Point a child's streams at the daemon logs, keeping the two apart.
+  ///
+  /// The child is a `modelstat` verb in service mode, which routes INFO to
+  /// stdout and WARN/ERROR to stderr. Filing them separately is what makes
+  /// `out.log`/`err.log` mean the same thing here as they do when launchd
+  /// supervises the daemon directly — merging both into one file would put
+  /// warnings in `out.log` for these runs only.
+  private nonisolated static func attachDaemonLogs(_ p: Process) {
+    if let out = appendingLog("out.log") { p.standardOutput = out }
+    if let err = appendingLog("err.log") { p.standardError = err }
+  }
+
+  /// Run `modelstat <args>` to completion, output onto the daemon logs.
   /// Returns whether it exited 0.
   private nonisolated static func runCli(cli: URL, args: [String]) -> Bool {
     let p = Process()
@@ -356,11 +403,7 @@ final class TrayController: NSObject {
       p.launchPath = cli.path
       p.arguments = args
     }
-    let logsDir = ("~/.modelstat/logs" as NSString).expandingTildeInPath
-    try? FileManager.default.createDirectory(atPath: logsDir, withIntermediateDirectories: true)
-    let out = FileHandle(forWritingAtPath: "\(logsDir)/out.log") ?? FileHandle.standardOutput
-    p.standardOutput = out
-    p.standardError = out
+    attachDaemonLogs(p)
     do { try p.run() } catch { return false }
     p.waitUntilExit()
     return p.terminationStatus == 0
@@ -667,7 +710,7 @@ final class TrayController: NSObject {
   }
 
   /// Fire-and-forget a `modelstat <args>` invocation (autoupdate / upgrade).
-  /// Best-effort, non-blocking; output is appended to the daemon log.
+  /// Best-effort, non-blocking; output is appended to the daemon logs.
   private func runManaged(_ args: [String]) {
     guard let cli else { return }
     let p = Process()
@@ -678,10 +721,7 @@ final class TrayController: NSObject {
       p.launchPath = cli.path
       p.arguments = args
     }
-    let logsDir = ("~/.modelstat/logs" as NSString).expandingTildeInPath
-    let out = FileHandle(forWritingAtPath: "\(logsDir)/out.log") ?? FileHandle.standardOutput
-    p.standardOutput = out
-    p.standardError = out
+    Self.attachDaemonLogs(p)
     try? p.run()
   }
 
