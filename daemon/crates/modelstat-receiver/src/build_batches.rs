@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+use modelstat_ingest::accounts::{session_installs_for, Accounts};
 use modelstat_parsers::{GitEnrichment, ToolCallDraft};
 use modelstat_pipeline::{attach_segment_ids, batch_id, build_session_metadata};
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
@@ -54,6 +55,10 @@ pub struct BuildBatchesOpts {
     pub debounce_ms: i64,
     pub max_events: usize,
     pub force_ship_threshold: usize,
+    /// Which provider account is logged in, and since when — the snapshot each
+    /// shipped session is named against. Empty (the `new` default) names
+    /// nothing, leaving the server to infer exactly as before.
+    pub accounts: Accounts,
 }
 
 impl BuildBatchesOpts {
@@ -69,6 +74,7 @@ impl BuildBatchesOpts {
             debounce_ms: SESSION_DEBOUNCE_MS,
             max_events: INGEST_BATCH_MAX_EVENTS,
             force_ship_threshold: FORCE_SHIP_THRESHOLD,
+            accounts: Accounts::new(),
         }
     }
 }
@@ -123,6 +129,7 @@ where
                     &opts.device_id,
                     &opts.daemon_version,
                     git.as_deref_mut(),
+                    &opts.accounts,
                 )
                 .await
                 {
@@ -147,6 +154,7 @@ where
             &opts.device_id,
             &opts.daemon_version,
             git.as_deref_mut(),
+            &opts.accounts,
         )
         .await
         {
@@ -172,6 +180,7 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
     device_id: &str,
     daemon_version: &str,
     git: Option<&'g mut (dyn GitEnrichment + Send + 'o)>,
+    accounts: &Accounts,
 ) -> Option<IngestBatch> {
     let mut by_session: BTreeMap<String, Vec<RawEvent>> = BTreeMap::new();
     // `session_ids[i]` is authoritative — it may override what the turn carries,
@@ -210,7 +219,9 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
         events: events.to_vec(),
         segments,
         tool_calls,
-        session_installs: None,
+        // Keyed on the session ids the SHIPPED events carry (`events`, not
+        // `resolved`) — that is what the server looks these up by.
+        session_installs: session_installs_for(events, accounts),
         session_titles: None,
         // Absent (not an empty map) when nothing was found — an empty one would
         // only overwrite better server state.

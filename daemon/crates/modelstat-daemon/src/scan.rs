@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+use modelstat_ingest::accounts::Accounts;
 use modelstat_ingest::state::FileCursor;
 use modelstat_parsers::{GitEnrichment, ParseResult, ToolCallDraft};
 use modelstat_pipeline::{Embedder, LinkExtractor, ResilientSummarizer, Summarizer};
@@ -139,6 +140,7 @@ async fn flush_buffer<S, E, N, G, U, CE>(
     pending_cursors: &mut Vec<(String, FileCursor)>,
     run_segments: &mut BTreeMap<String, Vec<Segment>>,
     run_events: &mut BTreeMap<String, Vec<RawEvent>>,
+    accounts: &Accounts,
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
     ner: &N,
@@ -190,6 +192,7 @@ where
         extract_links,
         run_segments,
         run_events,
+        accounts,
     )
     .await;
     let batches = match outcome {
@@ -258,6 +261,10 @@ pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE>(
     // impl (RuntimeState, StatusObserver, RealGitEnrichment) is `Send`.
     cursors: &mut (dyn CursorStore + Send),
     observer: &mut (dyn ScanObserver + Send),
+    // Which provider account is logged in, and since when — the snapshot each
+    // shipped session is named against. Injected like every other dependency
+    // here; an empty map simply names nothing and the server infers.
+    accounts: &Accounts,
 ) -> ScanTallies
 where
     S: Summarizer,
@@ -308,6 +315,7 @@ where
                 &mut pending_cursors,
                 &mut run_segments,
                 &mut run_events,
+                accounts,
                 resilient,
                 embedder,
                 ner,
@@ -715,6 +723,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -764,6 +773,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -807,6 +817,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -847,6 +858,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -887,6 +899,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -937,6 +950,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
         assert!(t1.held, "cycle 1 must hold");
@@ -966,6 +980,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
         assert!(!t2.held, "cycle 2 must commit");
@@ -1010,6 +1025,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -1055,6 +1071,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -1105,6 +1122,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -1155,6 +1173,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -1212,6 +1231,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -1256,6 +1276,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 
@@ -1295,6 +1316,7 @@ mod tests {
             &mut uploader,
             &mut cursors,
             &mut obs,
+            &Accounts::new(),
         )
         .await;
 

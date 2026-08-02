@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use modelstat_ingest::accounts;
 use modelstat_ingest::state::save_state;
 use modelstat_ingest::{home_path, Config};
 use modelstat_parsers::discovery::{discover, DiscoveryOptions, DiscoveryOutput};
@@ -343,6 +344,27 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
         let disc = tokio::task::spawn_blocking(|| discover(&DiscoveryOptions::default()))
             .await
             .ok();
+        // Remember which account is logged in, for the scan to name on each
+        // session it ships. Folded on EVERY beat, not just the ones that attach a
+        // snapshot to the heartbeat: the two cadences are unrelated, and the
+        // window `observed_since` measures is only correct if every reading
+        // updates it. Best-effort — a failed write just means nothing is stamped
+        // and the server infers, exactly as before.
+        if let Some(d) = disc.as_ref() {
+            let detected: Vec<(String, String)> = d
+                .identities
+                .iter()
+                .map(|i| (i.provider.clone(), i.provider_account_id.clone()))
+                .collect();
+            let stored = accounts::load_accounts();
+            let folded = accounts::fold_discovery(&stored, &detected, now_ms());
+            if folded != stored {
+                if let Err(e) = accounts::save_accounts(&folded) {
+                    eprintln!("accounts: could not persist the logged-in account: {e}");
+                }
+            }
+        }
+
         let attach = disc.as_ref().and_then(|d| {
             daemon.with_status(|s| {
                 s.set_stat("installations_detected", json!(d.installations.len()));
