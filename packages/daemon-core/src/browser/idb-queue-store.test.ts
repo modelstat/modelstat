@@ -190,6 +190,7 @@ function rawEvent(source_event_id: string, session_id: string): RawEvent {
     files_touched: [],
     source_file: null,
     source_byte_offset: null,
+    pricing_mode: "api",
   };
 }
 

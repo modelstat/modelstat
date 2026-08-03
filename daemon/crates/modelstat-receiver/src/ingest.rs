@@ -263,6 +263,7 @@ mod tests {
             "agent": "claude_code",
             "provider": "anthropic",
             "session_id": "s1",
+            "pricing_mode": "api",
             "content_excerpt": "secret raw text"
         })
     }
@@ -286,6 +287,32 @@ mod tests {
         assert!(parse_batch(&body(serde_json::json!({ "events": [e] })))
             .unwrap_err()
             .contains("source_event_id"));
+    }
+
+    /// An SDK event that does not say how it was billed is REJECTED here, at
+    /// the daemon's own edge, rather than travelling to the server to be
+    /// guessed at. The old server-side default (`api`) turned exactly this
+    /// silence into full list-price spend on subscription usage.
+    #[test]
+    fn an_event_without_a_pricing_mode_is_rejected() {
+        let mut e = ok_event("e1");
+        e.as_object_mut().unwrap().remove("pricing_mode");
+        let err = parse_batch(&body(serde_json::json!({ "events": [e] }))).unwrap_err();
+        assert!(
+            err.contains("pricing_mode"),
+            "the error must name the field: {err}"
+        );
+    }
+
+    /// …and a client that genuinely cannot tell is accepted, because saying so
+    /// is an answer. It prices to $0 server-side and is reported as
+    /// unattributed usage, never silently billed.
+    #[test]
+    fn an_event_may_state_that_the_mode_is_unknown() {
+        let mut e = ok_event("e1");
+        e["pricing_mode"] = serde_json::json!("unknown");
+        let batch = parse_batch(&body(serde_json::json!({ "events": [e] }))).unwrap();
+        assert_eq!(batch.events[0].pricing_mode, "unknown");
     }
 
     #[tokio::test]

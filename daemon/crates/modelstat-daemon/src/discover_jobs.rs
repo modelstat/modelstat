@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use modelstat_parsers::{
-    parse_claude_code_jsonl, parse_claude_code_jsonl_streaming, parse_codex_rollout,
+    auth_mode, parse_claude_code_jsonl, parse_claude_code_jsonl_streaming, parse_codex_rollout,
     parse_codex_rollout_streaming, parse_pi_session, parse_pi_session_streaming, ParseResult,
     ParserContext,
 };
@@ -122,9 +122,31 @@ pub fn discover_jobs() -> Vec<ScanJob> {
     home_dir().map(|h| discover_jobs_in(&h)).unwrap_or_default()
 }
 
+/// How the agent behind `kind` authenticates on this machine — the value every
+/// event from this job carries, and the only thing that decides whether its
+/// tokens are billable.
+///
+/// Read here, once per job, rather than inside the parse loop: it is a property
+/// of the machine's login, so re-reading it per transcript line would be pure
+/// syscall waste. Resolves to `unknown` when `$HOME` itself is unreadable —
+/// there is nowhere left to look, and inventing a mode from no evidence is the
+/// exact failure this replaced.
+fn pricing_mode_for(kind: ParserKind) -> String {
+    let home = home_dir()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match kind {
+        ParserKind::ClaudeCode => auth_mode::claude_code_pricing_mode(&home),
+        ParserKind::Codex => auth_mode::codex_pricing_mode(&home),
+        ParserKind::Pi => auth_mode::pi_pricing_mode(),
+    }
+    .to_string()
+}
+
 /// Parse one job (collect mode) with the right parser.
 pub fn parse_job(device_id: &str, job: &ScanJob) -> std::io::Result<ParseResult> {
-    let ctx = ParserContext::new(device_id, job.path.clone());
+    let ctx = ParserContext::new(device_id, job.path.clone())
+        .with_pricing_mode(pricing_mode_for(job.kind));
     match job.kind {
         ParserKind::ClaudeCode => parse_claude_code_jsonl(&ctx),
         ParserKind::Codex => parse_codex_rollout(&ctx),
@@ -143,7 +165,8 @@ pub fn parse_job_streaming(
     job: &ScanJob,
     emit: &mut dyn FnMut(Vec<RawEvent>),
 ) -> std::io::Result<ParseResult> {
-    let ctx = ParserContext::new(device_id, job.path.clone());
+    let ctx = ParserContext::new(device_id, job.path.clone())
+        .with_pricing_mode(pricing_mode_for(job.kind));
     match job.kind {
         ParserKind::ClaudeCode => parse_claude_code_jsonl_streaming(&ctx, emit),
         ParserKind::Codex => parse_codex_rollout_streaming(&ctx, emit),

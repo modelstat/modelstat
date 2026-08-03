@@ -54,11 +54,19 @@ pub enum EventKind {
 }
 
 /// How the provider billed the call.
+///
+/// Stated by the caller, never guessed downstream: the SDK is the only place
+/// that knows whether the credential behind this call was a flat plan or a
+/// metered key. [`PricingMode::Unknown`] is a legal answer for a caller that
+/// genuinely cannot tell — it prices to $0 and is reported as unattributed
+/// usage, which is the honest outcome. There is no default, because the default
+/// the server used to apply (`Api`) billed subscription usage at list price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingMode {
     Subscription,
     Api,
+    Unknown,
 }
 
 /// Outcome of a tool invocation.
@@ -104,8 +112,8 @@ pub struct RawEvent {
     pub git: Option<GitContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pricing_mode: Option<PricingMode>,
+    /// REQUIRED — always serialized. The server has no default for it.
+    pub pricing_mode: PricingMode,
     /// Redacted excerpt used to build summaries downstream. Capped at 320 chars
     /// in the standard (floor-redacted) path; carries the full redacted turns in
     /// remote-raw mode, where the server summarizes.

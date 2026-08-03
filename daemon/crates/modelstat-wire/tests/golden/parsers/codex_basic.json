@@ -27,7 +27,8 @@
       },
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl",
-      "source_byte_offset": 635
+      "source_byte_offset": 635,
+      "pricing_mode": "subscription"
     }
   ],
   "toolCalls": [

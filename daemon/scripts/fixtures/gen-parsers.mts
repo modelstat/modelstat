@@ -57,7 +57,7 @@ async function claudeFixtures(): Promise<void> {
     ]),
     claudeUser("u2", [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }]),
   ]);
-  const basicRes = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: basic });
+  const basicRes = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: basic, pricingMode: "subscription" });
   writeGolden("parsers/claude_basic.json", { deviceId: "dev_1", sourceFile: basic, ...basicRes });
 
   // 2. <synthetic> kept verbatim; does not contaminate lastModel.
@@ -66,7 +66,7 @@ async function claudeFixtures(): Promise<void> {
     claudeAssistant("s2", "<synthetic>", [{ type: "text", text: "Prompt is too long" }]),
     claudeUser("s3", "next prompt"),
   ]);
-  const synthRes = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: synthetic });
+  const synthRes = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: synthetic, pricingMode: "subscription" });
   writeGolden("parsers/claude_synthetic.json", {
     deviceId: "dev_1",
     sourceFile: synthetic,
@@ -90,7 +90,7 @@ async function claudeFixtures(): Promise<void> {
     // Native line (sessionId = filename) → kept.
     { type: "user", uuid: "copy-u1", sessionId: copySid, timestamp: "2026-06-01T11:00:00.000Z", cwd: CWD, message: { role: "user", content: "new work in resumed session" } },
   ]);
-  const resumeRes = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: copyFile });
+  const resumeRes = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: copyFile, pricingMode: "subscription" });
   writeGolden("parsers/claude_resume_copy.json", {
     deviceId: "dev_1",
     sourceFile: copyFile,
@@ -118,7 +118,7 @@ async function codexFixtures(): Promise<void> {
     { timestamp: "2026-06-08T15:50:01.000Z", type: "event_msg", payload: { type: "token_count", rate_limits: { primary_used_percent: 12.5 } } },
   ];
   const file = writeLines(join(BASE, "codex", `rollout-2026-06-08T15-49-00-${CODEX_SID}.jsonl`), lines);
-  const res = await parseCodexRollout({ deviceId: "dev_1", sourceFile: file });
+  const res = await parseCodexRollout({ deviceId: "dev_1", sourceFile: file, pricingMode: "subscription" });
   writeGolden("parsers/codex_basic.json", { deviceId: "dev_1", sourceFile: file, events: res.events, toolCalls: res.toolCalls });
 }
 
@@ -140,7 +140,7 @@ async function piFixtures(): Promise<void> {
     { type: "message", id: "43c1351d", parentId: "d2888ba8", timestamp: "2026-06-26T23:53:44.382Z", message: { role: "toolResult", toolCallId: "tc_pi_1", toolName: "read_file", content: [{ type: "text", text: "a\nb\nc" }], isError: false } },
   ];
   const file = writeLines(join(BASE, "pi", `2026-06-26T23-53-00-262Z_${PI_SID}.jsonl`), lines);
-  const res = await parsePiSession({ deviceId: "dev_1", sourceFile: file });
+  const res = await parsePiSession({ deviceId: "dev_1", sourceFile: file, pricingMode: "api" });
   writeGolden("parsers/pi_basic.json", { deviceId: "dev_1", sourceFile: file, events: res.events, toolCalls: res.toolCalls });
 }
 

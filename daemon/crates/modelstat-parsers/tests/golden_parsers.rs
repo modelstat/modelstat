@@ -70,8 +70,21 @@ fn tool_calls_of(g: &Value) -> Vec<ToolCallDraft> {
     serde_json::from_value(g.get("toolCalls").cloned().unwrap_or(Value::Array(vec![]))).unwrap()
 }
 
+/// A parse context for a machine whose agent is logged in with a flat plan.
+///
+/// Stated explicitly because the parsers no longer decide this: they stamp
+/// whatever the scan resolved from the machine's own auth material. The
+/// fixtures encode a subscription login, so the context must say so — a test
+/// that left it at the `unknown` floor would be pinning the wrong contract.
 fn ctx(source_file: &str) -> ParserContext {
     ParserContext::new("dev_1", source_file)
+        .with_pricing_mode(modelstat_parsers::auth_mode::PRICING_MODE_SUBSCRIPTION)
+}
+
+/// Same, for the pi fixtures — pi has no subscription path, it bills a key.
+fn ctx_api(source_file: &str) -> ParserContext {
+    ParserContext::new("dev_1", source_file)
+        .with_pricing_mode(modelstat_parsers::auth_mode::PRICING_MODE_API)
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
@@ -144,7 +157,7 @@ fn parser_golden_parity() {
         let file = format!(
             "{BASE}/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl"
         );
-        let res = parse_pi_session(&ctx(&file)).unwrap();
+        let res = parse_pi_session(&ctx_api(&file)).unwrap();
         let g = golden("pi_basic.json");
         assert_eq!(res.events, events_of(&g), "pi events");
         assert_eq!(res.tool_calls, tool_calls_of(&g), "pi toolCalls");
@@ -187,8 +200,8 @@ fn parser_golden_parity() {
             "{BASE}/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl"
         );
         assert_stream_matches(
-            parse_pi_session(&ctx(&pi)).unwrap(),
-            |emit| parse_pi_session_streaming(&ctx(&pi), emit).unwrap(),
+            parse_pi_session(&ctx_api(&pi)).unwrap(),
+            |emit| parse_pi_session_streaming(&ctx_api(&pi), emit).unwrap(),
             "pi",
         );
     }

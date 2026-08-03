@@ -92,6 +92,11 @@ export async function parseCursorTrackingDb(
         files_touched: [],
         source_file: ctx.sourceFile,
         source_byte_offset: null,
+        // Cursor bills its own flat plan; `provider` here is `cursor`,
+        // not a model vendor, so there is no metered path to confuse it
+        // with. These rows carry no tokens either, so the mode moves no
+        // money — it is stated for the contract, not for the maths.
+        pricing_mode: "subscription",
       });
     }
   } finally {

@@ -43,6 +43,7 @@ function mkEvent(over: {
     duration_ms: null,
     source_file: "f.jsonl",
     source_byte_offset: 0,
+    pricing_mode: "subscription",
     ...(over.content_excerpt ? { content_excerpt: over.content_excerpt } : {}),
   });
 }
@@ -159,6 +160,7 @@ test("the per-file capture window extends past the session (grace) and caps at t
       duration_ms: null,
       source_file: "f.jsonl",
       source_byte_offset: 0,
+      pricing_mode: "subscription",
     });
   const segAt = (sid: string, startIso: string, endIso: string): Segment =>
     Segment.parse({
@@ -245,6 +247,7 @@ test("event.references (the parser's full-text scan) feeds session metadata", as
     duration_ms: null,
     source_file: "f.jsonl",
     source_byte_offset: 0,
+    pricing_mode: "subscription",
     references: {
       repos: [],
       pull_requests: [

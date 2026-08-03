@@ -461,11 +461,12 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         ...(refs ? { references: refs } : {}),
         source_file: ctx.sourceFile,
         source_byte_offset: offsetAtLineStart,
-        // Files in ~/.claude/projects/ come from the Claude Code app
-        // used via subscription (not the raw API). Mark them so the
-        // server short-circuits token-level cost to $0 — the user has
-        // already paid the flat monthly fee.
-        pricing_mode: "subscription",
+        // Observed from the machine's own login, not assumed. This was
+        // hardcoded `"subscription"` on the grounds that ~/.claude/projects/
+        // means the Claude Code app — true for most people, and silently
+        // wrong for anyone running it on an ANTHROPIC_API_KEY, whose real
+        // spend was then reported as $0.
+        pricing_mode: ctx.pricingMode ?? "unknown",
       });
     } else if (obj.type === "user") {
       const u = obj as ClaudeUserLine;
@@ -521,7 +522,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         ...(refs ? { references: refs } : {}),
         source_file: ctx.sourceFile,
         source_byte_offset: offsetAtLineStart,
-        pricing_mode: "subscription",
+        pricing_mode: ctx.pricingMode ?? "unknown",
       });
     } else if (obj.type === "tool_use") {
       // Top-level `type:'tool_use'` line form (see the header comment) —

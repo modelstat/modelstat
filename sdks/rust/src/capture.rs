@@ -72,7 +72,10 @@ pub struct LlmCall {
     pub completion: Option<String>,
     pub cwd: Option<String>,
     pub git: Option<GitContext>,
-    pub pricing_mode: Option<PricingMode>,
+    /// How this call was billed. Set it — [`PricingMode::Unknown`] is the
+    /// honest value when the caller cannot tell, and is reported as
+    /// unattributed usage rather than silently priced.
+    pub pricing_mode: PricingMode,
     pub tool_calls: Vec<ToolCallInput>,
     /// Per-call attribution tags. Highest-priority layer: these override
     /// `Config::metadata` for any shared key. Capped before send.
@@ -95,7 +98,10 @@ impl LlmCall {
             completion: None,
             cwd: None,
             git: None,
-            pricing_mode: None,
+            // Unknown until the caller says otherwise: an SDK user who never
+            // touches this field has not told us how they pay, and guessing is
+            // what put $39.65 of imaginary spend on a subscription account.
+            pricing_mode: PricingMode::Unknown,
             tool_calls: Vec::new(),
             metadata: BTreeMap::new(),
         }

@@ -89,15 +89,23 @@ export const RawEvent = z.object({
   source_file: z.string().max(1024).nullable(),
   source_byte_offset: z.number().int().nonnegative().nullable(),
 
-  // Billing mode. Agents with a flat-fee subscription tier (Claude
-  // Code, Cursor Pro, GitHub Copilot, etc) emit events tagged
-  // `pricing_mode: "subscription"` — the server short-circuits cost to $0
-  // for those, since token-level pricing doesn't apply once the user
-  // is paying the subscription. `api` (or absent) means pay-per-token
-  // against whatever rates the org has configured.
-  pricing_mode: z.enum(["subscription", "api"]).optional(),
+  // How this call was billed, as the CLIENT observed it. REQUIRED — the
+  // server has no default for it, because the default it used to have
+  // (`api`) priced every Codex CLI session at full list price, billing
+  // ChatGPT-Plus users for calls their plan already covered.
+  //
+  //   subscription — a flat plan covers it; cost short-circuits to $0.
+  //   api          — metered pay-per-token against the org's rates.
+  //   unknown      — the client looked at the auth material and could not
+  //                  tell. An ANSWER, not an absent field: it prices to $0
+  //                  (a guess must never become spend) and is reported as
+  //                  unattributed usage that still needs one.
+  pricing_mode: z.enum(["subscription", "api", "unknown"]),
 });
 export type RawEvent = z.infer<typeof RawEvent>;
+/** How a call was billed, as the client observed it. `unknown` is a stated
+ * answer — the client looked and could not tell — never an absent field. */
+export type PricingMode = RawEvent["pricing_mode"];
 
 /** Redaction report summary — counts only, never actual content.
  *
