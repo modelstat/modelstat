@@ -396,13 +396,8 @@ final class TrayController: NSObject {
   /// Returns whether it exited 0.
   private nonisolated static func runCli(cli: URL, args: [String]) -> Bool {
     let p = Process()
-    if cli.pathExtension == "mjs" {
-      p.launchPath = "/usr/bin/env"
-      p.arguments = ["node", cli.path] + args
-    } else {
-      p.launchPath = cli.path
-      p.arguments = args
-    }
+    p.launchPath = cli.path
+    p.arguments = args
     attachDaemonLogs(p)
     do { try p.run() } catch { return false }
     p.waitUntilExit()
@@ -442,13 +437,8 @@ final class TrayController: NSObject {
   private func refreshStats() {
     guard let cli else { return }
     let p = Process()
-    if cli.pathExtension == "mjs" {
-      p.launchPath = "/usr/bin/env"
-      p.arguments = ["node", cli.path, "status", "--json"]
-    } else {
-      p.launchPath = cli.path
-      p.arguments = ["status", "--json"]
-    }
+    p.launchPath = cli.path
+    p.arguments = ["status", "--json"]
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = Pipe()
@@ -457,7 +447,8 @@ final class TrayController: NSObject {
     } catch {
       // Surface the failure in the menu instead of leaving the title
       // stuck on whatever it was last (e.g. "Starting…" forever). Most
-      // likely cause is `node` not being on the launchd-inherited PATH.
+      // likely cause is the binary having been moved or removed since
+      // `locateCli()` last resolved it.
       statusMI.title = "status failed: \(error.localizedDescription)"
       return
     }
@@ -714,13 +705,8 @@ final class TrayController: NSObject {
   private func runManaged(_ args: [String]) {
     guard let cli else { return }
     let p = Process()
-    if cli.pathExtension == "mjs" {
-      p.launchPath = "/usr/bin/env"
-      p.arguments = ["node", cli.path] + args
-    } else {
-      p.launchPath = cli.path
-      p.arguments = args
-    }
+    p.launchPath = cli.path
+    p.arguments = args
     Self.attachDaemonLogs(p)
     try? p.run()
   }

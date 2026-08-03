@@ -7,8 +7,9 @@
 //! - [`release`] — the `daemon_release` heartbeat verdict + the GitHub-Releases
 //!   archive URL for this target triple.
 //! - [`perform`] — the binary self-replace state machine: download + verify →
-//!   stop engine + quiesce → atomic swap of BOTH binaries (keep `.prev`) →
-//!   `_install-service` → health probe → rollback on failure.
+//!   stop engine + quiesce → atomic swap of BOTH binaries (keep `.prev`) → swap
+//!   the macOS tray bundle when one is installed → `_install-service` → health
+//!   probe → rollback on failure.
 //!
 //! The old npm/postinstall self-update (and its libnode-bricking class) is gone
 //! (feature §22): `upgrade` replaces the running binaries in place from a GitHub
@@ -26,8 +27,10 @@ pub use auto_update::{
 pub use marker::{clear_upgrade_marker, upgrade_in_progress, write_upgrade_marker};
 pub use perform::{
     maybe_auto_update, perform_upgrade, rollback_pair, swap_pair, upgrade_now, AutoUpdateStep,
-    UpgradeOutcome,
+    StagedRelease, UpgradeOutcome,
 };
+#[cfg(target_os = "macos")]
+pub use perform::{rollback_tray, swap_tray};
 pub use release::{
     archive_url, resolve_latest_version, target_triple, DaemonRelease, ReleaseVerdict,
 };

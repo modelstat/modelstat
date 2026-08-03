@@ -4,6 +4,27 @@
 //! health probe → rollback the `.prev` pair on failure. The collector and engine
 //! always move in lockstep from one archive, which kills the collector↔engine
 //! skew and the npm-postinstall bricking class the TS daemon suffered.
+//!
+//! # The macOS tray rides along
+//!
+//! The mac archives carry `ModelstatTray.app` next to the two binaries, and it is
+//! swapped in the same step. Before that it was staged ONLY by `_setup-runtime`,
+//! which runs from the install script and never from here — so a machine that
+//! installed once kept its original tray binary forever while the daemon updated
+//! underneath it, and a tray fix reached nobody until they re-ran the installer
+//! by hand. Nothing announced the skew.
+//!
+//! Two rules the tray does not share with the binaries:
+//!
+//! * **Replace, never install.** `modelstat stop` deletes the bundle on purpose.
+//!   An absent tray is a decision, so the swap is skipped rather than
+//!   resurrecting an app somebody removed.
+//! * **A tray failure does not roll back the daemon.** The collector is the
+//!   product and the tray is a menu-bar convenience; undoing a good daemon
+//!   update because an icon would not copy is the worse outcome. The failure is
+//!   carried into the outcome note instead of being swallowed, and [`swap_tray`]
+//!   restores the previous bundle before returning, so a failed swap leaves a
+//!   working tray rather than none.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -20,6 +41,25 @@ const HEALTH_PROBE_MS: u64 = 90_000;
 /// The two binary base names installed together (plan D9).
 const COLLECTOR_BIN: &str = "modelstat";
 const ENGINE_BIN: &str = "modelstat-summarizer";
+/// The macOS menu-bar tray bundle, carried only by the mac archives. Must match
+/// the directory `release-daemon-rs.yml` copies into the mac stage, and the name
+/// `modelstat_service::tray::tray_app_path()` installs to.
+#[cfg(target_os = "macos")]
+const TRAY_APP: &str = "ModelstatTray.app";
+
+/// Everything a release archive carried, once staged into `update-staging`.
+///
+/// A named struct rather than a tuple: which `Option<PathBuf>` is which stopped
+/// being obvious at three, and each one is absent for its own reason.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StagedRelease {
+    /// The collector (`modelstat`).
+    pub collector: Option<PathBuf>,
+    /// The summariser engine — absent on a collector-only archive.
+    pub engine: Option<PathBuf>,
+    /// The staged `ModelstatTray.app` root. Only the mac archives carry one.
+    pub tray_app: Option<PathBuf>,
+}
 
 /// The outcome of an upgrade attempt — carries the loud user-facing note (§21.12:
 /// every failure is visible).
@@ -115,6 +155,72 @@ pub fn rollback_pair(bin_dir: &Path) {
     rollback_one(bin_dir, ENGINE_BIN);
 }
 
+/// The rollback copy of an installed tray bundle: `ModelstatTray.app.prev`, a
+/// sibling of the live one so both stay on the same filesystem and the restore
+/// is a rename rather than a copy.
+#[cfg(target_os = "macos")]
+fn tray_prev(live: &Path) -> PathBuf {
+    let name = live
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| TRAY_APP.to_string());
+    live.with_file_name(format!("{name}.prev"))
+}
+
+/// Swap a staged tray bundle over the installed one, keeping the current bundle
+/// as `<name>.prev`.
+///
+/// **Transactional.** A bundle is a directory tree, so unlike a binary there is a
+/// window where the live path holds neither version. If anything after the first
+/// rename fails, the previous bundle is put back before returning the error —
+/// the caller is then reporting "the tray could not be updated", never "the tray
+/// is gone". A half-swapped `.app` would leave `tray_binary().exists()` false,
+/// `ensure_tray_installed()` would quietly decline to install the agent, and the
+/// user's menu bar would just be empty with nothing said.
+#[cfg(target_os = "macos")]
+pub fn swap_tray(live: &Path, staged: &Path) -> std::io::Result<()> {
+    let prev = tray_prev(live);
+    let _ = std::fs::remove_dir_all(&prev);
+    std::fs::rename(live, &prev)?;
+    if std::fs::rename(staged, live).is_ok() {
+        return Ok(());
+    }
+    // Staging may sit on another mount, where rename() cannot cross. `cp -R` is
+    // what `_setup-runtime` already stages the bundle with, and it preserves the
+    // symlinks and permissions an ad-hoc code signature is validated against.
+    let copied = std::process::Command::new("cp")
+        .arg("-R")
+        .arg(staged)
+        .arg(live)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if copied {
+        let _ = std::fs::remove_dir_all(staged);
+        return Ok(());
+    }
+    // Undo the first rename so the machine keeps the tray it had.
+    let _ = std::fs::remove_dir_all(live);
+    let _ = std::fs::rename(&prev, live);
+    Err(std::io::Error::other(format!(
+        "could not move the staged bundle into {}",
+        live.display()
+    )))
+}
+
+/// Restore the tray bundle from its `.prev` copy, for the health-probe rollback.
+/// Silent no-op when there is no `.prev` — the same shape as [`rollback_one`],
+/// because a rollback that itself fails must not mask the failure being rolled
+/// back.
+#[cfg(target_os = "macos")]
+pub fn rollback_tray(live: &Path) {
+    let prev = tray_prev(live);
+    if prev.exists() {
+        let _ = std::fs::remove_dir_all(live);
+        let _ = std::fs::rename(&prev, live);
+    }
+}
+
 /// Download the target archive (verified sha256 when pinned) and extract the two
 /// binaries into `staging`. Returns their staged paths (`None` when the archive
 /// didn't carry one). The archive layout is plan D9: `modelstat` +
@@ -123,7 +229,7 @@ async fn stage_release(
     version: &str,
     sha256: Option<&str>,
     staging: &Path,
-) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
+) -> Result<StagedRelease, String> {
     std::fs::create_dir_all(staging).map_err(|e| e.to_string())?;
     let triple = target_triple();
     let url = archive_url(version, triple);
@@ -140,27 +246,61 @@ async fn stage_release(
     download(&client, &spec, &TtyProgress::new("update"))
         .await
         .map_err(|e| format!("download failed: {e}"))?;
-    extract_pair(&archive, staging).map_err(|e| format!("extract failed: {e}"))
+    extract_release(&archive, staging).map_err(|e| format!("extract failed: {e}"))
 }
 
-/// Extract the collector + engine binaries from the release archive.
+/// The path of an archive entry relative to the tray bundle root, when the entry
+/// lives inside it. Archive paths arrive as `./ModelstatTray.app/Contents/…`, so
+/// the leading `.` is dropped before matching; the bundle root itself maps to an
+/// empty path.
+#[cfg(target_os = "macos")]
+fn tray_relative(p: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut comps = p
+        .components()
+        .filter(|c| !matches!(c, Component::CurDir | Component::RootDir));
+    match comps.next() {
+        Some(Component::Normal(name)) if name == TRAY_APP => Some(comps.collect()),
+        _ => None,
+    }
+}
+
+/// Extract the collector + engine binaries — and, on macOS, the whole tray bundle
+/// — from the release archive.
 #[cfg(not(windows))]
-fn extract_pair(archive: &Path, dir: &Path) -> std::io::Result<(Option<PathBuf>, Option<PathBuf>)> {
+fn extract_release(archive: &Path, dir: &Path) -> std::io::Result<StagedRelease> {
     use flate2::read::GzDecoder;
     let f = std::fs::File::open(archive)?;
     let mut tar = tar::Archive::new(GzDecoder::new(f));
-    let (mut collector, mut engine) = (None, None);
+    let mut staged = StagedRelease::default();
     for entry in tar.entries()? {
         let mut entry = entry?;
-        let name = entry
-            .path()?
+        let path = entry.path()?.into_owned();
+
+        // The tray is a directory tree, so it is unpacked under its own relative
+        // path rather than flattened by file name: `Contents/MacOS/modelstat-tray`
+        // and `Contents/_CodeSignature/CodeResources` have to keep their places or
+        // the bundle stops being loadable and its signature stops validating.
+        #[cfg(target_os = "macos")]
+        if let Some(rel) = tray_relative(&path) {
+            let root = dir.join(TRAY_APP);
+            let out = root.join(&rel);
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            entry.unpack(&out)?;
+            staged.tray_app = Some(root);
+            continue;
+        }
+
+        let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let dest = if name == COLLECTOR_BIN {
-            &mut collector
+            &mut staged.collector
         } else if name == ENGINE_BIN {
-            &mut engine
+            &mut staged.engine
         } else {
             continue;
         };
@@ -168,14 +308,15 @@ fn extract_pair(archive: &Path, dir: &Path) -> std::io::Result<(Option<PathBuf>,
         entry.unpack(&out)?;
         *dest = Some(out);
     }
-    Ok((collector, engine))
+    Ok(staged)
 }
 
+/// Windows carries no tray (§15 — Windows and Linux are headless).
 #[cfg(windows)]
-fn extract_pair(archive: &Path, dir: &Path) -> std::io::Result<(Option<PathBuf>, Option<PathBuf>)> {
+fn extract_release(archive: &Path, dir: &Path) -> std::io::Result<StagedRelease> {
     let f = std::fs::File::open(archive)?;
     let mut zip = zip::ZipArchive::new(f).map_err(std::io::Error::other)?;
-    let (mut collector, mut engine) = (None, None);
+    let mut staged = StagedRelease::default();
     for i in 0..zip.len() {
         let mut file = zip.by_index(i).map_err(std::io::Error::other)?;
         let name = file
@@ -183,9 +324,9 @@ fn extract_pair(archive: &Path, dir: &Path) -> std::io::Result<(Option<PathBuf>,
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_default();
         let dest = if name == exe(COLLECTOR_BIN) {
-            &mut collector
+            &mut staged.collector
         } else if name == exe(ENGINE_BIN) {
-            &mut engine
+            &mut staged.engine
         } else {
             continue;
         };
@@ -194,7 +335,7 @@ fn extract_pair(archive: &Path, dir: &Path) -> std::io::Result<(Option<PathBuf>,
         std::io::copy(&mut file, &mut w)?;
         *dest = Some(out);
     }
-    Ok((collector, engine))
+    Ok(staged)
 }
 
 /// Poll the freshly-installed collector for `≤90s` until it reports the target
@@ -233,8 +374,8 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
     write_upgrade_marker(Some(target), Some(std::process::id()), now_ms).ok();
 
     let staging = modelstat_ingest::home_path("update-staging");
-    let (collector, engine) = match stage_release(target, sha256, &staging).await {
-        Ok(pair) => pair,
+    let staged = match stage_release(target, sha256, &staging).await {
+        Ok(s) => s,
         Err(e) => {
             clear_upgrade_marker();
             return UpgradeOutcome::Failed(format!(
@@ -251,7 +392,11 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
         modelstat_service::Scope::User,
     );
 
-    if let Err(e) = swap_pair(&bin_dir, collector.as_deref(), engine.as_deref()) {
+    if let Err(e) = swap_pair(
+        &bin_dir,
+        staged.collector.as_deref(),
+        staged.engine.as_deref(),
+    ) {
         rollback_pair(&bin_dir);
         clear_upgrade_marker();
         return UpgradeOutcome::Failed(format!(
@@ -259,7 +404,17 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
         ));
     }
 
-    // Rewrite both service files + bounce them onto the new binaries.
+    // The tray bundle rides the same archive, so a tray fix lands here instead of
+    // waiting for someone to re-run the installer. Deliberately NOT fatal: see
+    // the module header — a menu-bar icon that would not copy must not undo a
+    // good daemon update, so the failure is carried into the note below rather
+    // than swallowed, and the previous bundle is still in place.
+    let tray_note = swap_tray_if_installed(&staged);
+
+    // Rewrite both service files + bounce them onto the new binaries. This also
+    // reloads the tray agent (`_install-service` → `ensure_tray_installed` →
+    // `launchd_reload`), which is what restarts the running tray onto the bundle
+    // just swapped in — hence the swap has to happen above this line.
     let live = bin_dir.join(exe(COLLECTOR_BIN));
     let _ = std::process::Command::new(&live)
         .arg("_install-service")
@@ -268,16 +423,24 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
     match health_probe(&bin_dir, target).await {
         Ok(()) => {
             let _ = std::fs::remove_dir_all(&staging);
+            // Drop the tray's rollback copy now the probe has passed. The
+            // binaries keep their `.prev` in the hidden `~/.modelstat/bin`, but
+            // the tray's sibling lives in `~/Applications` — somewhere people
+            // actually browse — and a stray `ModelstatTray.app.prev` there reads
+            // as a second, broken install.
+            discard_tray_prev();
             // Marker is cleared by the freshly-booted daemon (it holds the lock ⇒
             // the update landed); clear here too for the manual-CLI path.
             clear_upgrade_marker();
             UpgradeOutcome::Completed(format!(
-                "updated to {} — the service is running the new build",
-                bare_version(target)
+                "updated to {} — the service is running the new build{}",
+                bare_version(target),
+                tray_note.unwrap_or_default()
             ))
         }
         Err(e) => {
             rollback_pair(&bin_dir);
+            rollback_tray_if_installed();
             let _ = std::process::Command::new(bin_dir.join(exe(COLLECTOR_BIN)))
                 .arg("_install-service")
                 .status();
@@ -288,6 +451,53 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
         }
     }
 }
+
+/// Swap the staged tray over the installed one, when there is both a staged
+/// bundle and an installed one to replace. Returns a note to append to the
+/// upgrade outcome — `None` when there was nothing to do, `Some` when the swap
+/// failed and the user needs to know the tray stayed behind.
+///
+/// Replace-never-install is the point: `modelstat stop` deletes the bundle, so an
+/// absent tray means someone removed it and an update must not bring it back.
+#[cfg(target_os = "macos")]
+fn swap_tray_if_installed(staged: &StagedRelease) -> Option<String> {
+    let staged_app = staged.tray_app.as_deref()?;
+    let live = modelstat_service::tray::tray_app_path();
+    if !live.exists() {
+        return None;
+    }
+    match swap_tray(&live, staged_app) {
+        Ok(()) => None,
+        Err(e) => Some(format!(
+            " — but the menu-bar tray could not be updated ({e}); it is still running the previous build, reinstall to refresh it"
+        )),
+    }
+}
+
+/// No tray off macOS (§15 — Windows and Linux are headless).
+#[cfg(not(target_os = "macos"))]
+fn swap_tray_if_installed(_staged: &StagedRelease) -> Option<String> {
+    None
+}
+
+/// Put the previous tray bundle back alongside the binary rollback, so a failed
+/// health probe leaves the whole install on the build it was working on.
+#[cfg(target_os = "macos")]
+fn rollback_tray_if_installed() {
+    rollback_tray(&modelstat_service::tray::tray_app_path());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn rollback_tray_if_installed() {}
+
+/// Remove the tray's `.prev` bundle once the update is confirmed good.
+#[cfg(target_os = "macos")]
+fn discard_tray_prev() {
+    let _ = std::fs::remove_dir_all(tray_prev(&modelstat_service::tray::tray_app_path()));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn discard_tray_prev() {}
 
 /// Milliseconds since the Unix epoch (marker clock).
 fn now_ms() -> i64 {
@@ -445,6 +655,201 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `.app` is a directory tree, and the tray fix in #75 only reaches an
+    /// existing install if that tree is swapped whole and can be put back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tray_bundle_swaps_whole_and_rolls_back_whole() {
+        let dir = std::env::temp_dir().join(format!("msu-tray-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let apps = dir.join("Applications");
+        let live = apps.join(TRAY_APP);
+
+        // An installed bundle, with its binary nested where a real one lives.
+        std::fs::create_dir_all(live.join("Contents/MacOS")).unwrap();
+        std::fs::write(live.join("Contents/MacOS/modelstat-tray"), b"TRAY_OLD").unwrap();
+        std::fs::write(live.join("Contents/Info.plist"), b"PLIST_OLD").unwrap();
+        // …and a staged replacement.
+        let staged = dir.join("staging").join(TRAY_APP);
+        std::fs::create_dir_all(staged.join("Contents/MacOS")).unwrap();
+        std::fs::write(staged.join("Contents/MacOS/modelstat-tray"), b"TRAY_NEW").unwrap();
+        std::fs::write(staged.join("Contents/Info.plist"), b"PLIST_NEW").unwrap();
+
+        swap_tray(&live, &staged).unwrap();
+        assert_eq!(
+            std::fs::read(live.join("Contents/MacOS/modelstat-tray")).unwrap(),
+            b"TRAY_NEW"
+        );
+        // The nested structure has to survive, or the bundle stops being loadable.
+        assert_eq!(
+            std::fs::read(live.join("Contents/Info.plist")).unwrap(),
+            b"PLIST_NEW"
+        );
+        assert_eq!(
+            std::fs::read(tray_prev(&live).join("Contents/MacOS/modelstat-tray")).unwrap(),
+            b"TRAY_OLD"
+        );
+
+        rollback_tray(&live);
+        assert_eq!(
+            std::fs::read(live.join("Contents/MacOS/modelstat-tray")).unwrap(),
+            b"TRAY_OLD"
+        );
+        assert_eq!(
+            std::fs::read(live.join("Contents/Info.plist")).unwrap(),
+            b"PLIST_OLD"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The transactional guarantee. A bundle swap has a window where the live
+    /// path holds neither version; if the second move fails there, the previous
+    /// bundle must come back. Leaving no bundle would make
+    /// `ensure_tray_installed()` quietly decline to install the agent, and the
+    /// user's menu bar would empty with nothing said.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_tray_swap_leaves_the_previous_bundle_in_place() {
+        let dir = std::env::temp_dir().join(format!("msu-tray-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let live = dir.join("Applications").join(TRAY_APP);
+        std::fs::create_dir_all(live.join("Contents/MacOS")).unwrap();
+        std::fs::write(live.join("Contents/MacOS/modelstat-tray"), b"TRAY_OLD").unwrap();
+
+        // Staged path that does not exist: both the rename and the `cp -R`
+        // fallback fail, which is the window this guards.
+        let missing = dir.join("staging").join(TRAY_APP);
+        let err = swap_tray(&live, &missing).unwrap_err();
+        assert!(
+            err.to_string().contains("could not move"),
+            "expected a loud move failure, got {err}"
+        );
+
+        // The machine still has the tray it started with.
+        assert!(live.exists(), "the live bundle was left missing");
+        assert_eq!(
+            std::fs::read(live.join("Contents/MacOS/modelstat-tray")).unwrap(),
+            b"TRAY_OLD"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `modelstat stop` deletes the bundle on purpose, so "no tray installed" is
+    /// a decision the updater has to respect rather than undo.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_uninstalled_tray_is_never_resurrected() {
+        // No `tray_app` in the archive ⇒ nothing to do, whatever is on disk.
+        assert_eq!(swap_tray_if_installed(&StagedRelease::default()), None);
+    }
+
+    /// End-to-end over a real `.tar.gz` laid out exactly like the published mac
+    /// archive (verified against `modelstat-1.4.1-aarch64-apple-darwin.tar.gz`):
+    /// `./modelstat`, `./modelstat-summarizer`, and a `./ModelstatTray.app/`
+    /// tree beside them.
+    ///
+    /// The trap this guards: the binary matcher keys off the entry's FILE NAME,
+    /// so a bundle unpacked by file name would flatten `Contents/MacOS/…` into
+    /// the staging root and destroy the app.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_pulls_the_tray_tree_out_of_a_real_archive_layout() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let dir = std::env::temp_dir().join(format!("msu-extract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("release.tar.gz");
+
+        let entries: [(&str, &[u8]); 5] = [
+            ("./modelstat", b"COLLECTOR"),
+            ("./modelstat-summarizer", b"ENGINE"),
+            ("./ModelstatTray.app/Contents/Info.plist", b"PLIST"),
+            ("./ModelstatTray.app/Contents/MacOS/modelstat-tray", b"TRAY"),
+            (
+                "./ModelstatTray.app/Contents/_CodeSignature/CodeResources",
+                b"SIG",
+            ),
+        ];
+        {
+            let f = std::fs::File::create(&archive).unwrap();
+            let mut builder = tar::Builder::new(GzEncoder::new(f, Compression::fast()));
+            for (path, data) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder.append_data(&mut header, path, data).unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+
+        let out = dir.join("staging");
+        std::fs::create_dir_all(&out).unwrap();
+        let staged = extract_release(&archive, &out).unwrap();
+
+        assert_eq!(staged.collector, Some(out.join(COLLECTOR_BIN)));
+        assert_eq!(staged.engine, Some(out.join(ENGINE_BIN)));
+        assert_eq!(staged.tray_app, Some(out.join(TRAY_APP)));
+
+        // The bundle keeps its shape — this is what makes it loadable and keeps
+        // its signature checkable.
+        let app = out.join(TRAY_APP);
+        assert_eq!(
+            std::fs::read(app.join("Contents/MacOS/modelstat-tray")).unwrap(),
+            b"TRAY"
+        );
+        assert_eq!(
+            std::fs::read(app.join("Contents/Info.plist")).unwrap(),
+            b"PLIST"
+        );
+        assert_eq!(
+            std::fs::read(app.join("Contents/_CodeSignature/CodeResources")).unwrap(),
+            b"SIG"
+        );
+        // …and nothing from inside the bundle was flattened into the root.
+        assert!(
+            !out.join("modelstat-tray").exists(),
+            "a bundle file was unpacked by file name into the staging root"
+        );
+        // The collector is the archive's own binary, not anything from the app.
+        assert_eq!(
+            std::fs::read(out.join(COLLECTOR_BIN)).unwrap(),
+            b"COLLECTOR"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Archive paths arrive as `./ModelstatTray.app/…`; everything else in the
+    /// archive must be left to the binary matcher.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tray_entries_are_recognised_and_nothing_else_is() {
+        assert_eq!(
+            tray_relative(Path::new(
+                "./ModelstatTray.app/Contents/MacOS/modelstat-tray"
+            )),
+            Some(PathBuf::from("Contents/MacOS/modelstat-tray"))
+        );
+        // The bundle root maps to an empty relative path (the directory itself).
+        assert_eq!(
+            tray_relative(Path::new("./ModelstatTray.app/")),
+            Some(PathBuf::new())
+        );
+        assert_eq!(
+            tray_relative(Path::new("ModelstatTray.app/Contents")),
+            Some(PathBuf::from("Contents"))
+        );
+        // The two binaries sit beside the bundle and must not be captured by it.
+        assert_eq!(tray_relative(Path::new("./modelstat")), None);
+        assert_eq!(tray_relative(Path::new("./modelstat-summarizer")), None);
+        assert_eq!(tray_relative(Path::new("./ModelstatTrayOther.app/x")), None);
     }
 
     #[test]
