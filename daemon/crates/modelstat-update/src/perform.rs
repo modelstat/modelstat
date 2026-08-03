@@ -243,9 +243,12 @@ async fn stage_release(
         size_label: None,
         label: format!("modelstat {}", bare_version(version)),
     };
+    // No prefix — `DownloadError` already renders as "download failed: …", and
+    // this string is now read by users rather than discarded, so the doubled
+    // "download failed: download failed: HTTP 404" it used to produce matters.
     download(&client, &spec, &TtyProgress::new("update"))
         .await
-        .map_err(|e| format!("download failed: {e}"))?;
+        .map_err(|e| e.to_string())?;
     extract_release(&archive, staging).map_err(|e| format!("extract failed: {e}"))
 }
 

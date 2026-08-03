@@ -129,11 +129,19 @@ fn main() -> ExitCode {
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
                 let outcome = modelstat_update::perform_upgrade(&target, None, now).await;
-                if let Some(n) = outcome.note() {
-                    eprintln!("modelstat: {n}");
+                // Severity, not a bare `eprintln!`: this is the record of whether
+                // the machine actually changed builds, and it has to carry a
+                // timestamp and land in the file its level belongs in. A failure
+                // filed under out.log reads as a successful update.
+                use modelstat_update::UpgradeOutcome;
+                match &outcome {
+                    UpgradeOutcome::Failed(n) => modelstat_log::log_error!("{n}"),
+                    UpgradeOutcome::OffNudge(n) => modelstat_log::log_warn!("{n}"),
+                    UpgradeOutcome::Completed(n) => modelstat_log::log_info!("{n}"),
+                    UpgradeOutcome::Skipped => {}
                 }
                 match outcome {
-                    modelstat_update::UpgradeOutcome::Failed(_) => ExitCode::FAILURE,
+                    UpgradeOutcome::Failed(_) => ExitCode::FAILURE,
                     _ => ExitCode::SUCCESS,
                 }
             })

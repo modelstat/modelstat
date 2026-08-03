@@ -475,21 +475,74 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Open a log file for appending, for handing to the update worker as one of its
+/// streams.
+///
+/// `O_APPEND`, like every other writer on these two files: launchd holds its own
+/// fd for this daemon, the tray holds one for the verbs it runs, and boot-time
+/// rotation truncates them in place. Truncating here instead would delete the
+/// history this daemon just wrote — the same class of bug the tray had, where a
+/// non-appending handle overwrote `out.log` from byte 0.
+///
+/// The worker's fd stays valid across the service bounce that kills this daemon
+/// mid-upgrade: it is a dup of an open file, not a pipe to a parent about to die.
+fn open_append(path: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
+/// The worker's `(stdout, stderr)` — the daemon's own two log files. `None` when
+/// either cannot be opened, so the caller can say so rather than half-redirect.
+fn update_log_streams() -> Option<(std::fs::File, std::fs::File)> {
+    let logs = modelstat_ingest::home_path("logs");
+    std::fs::create_dir_all(&logs).ok()?;
+    Some((
+        open_append(&logs.join("out.log"))?,
+        open_append(&logs.join("err.log"))?,
+    ))
+}
+
 /// Spawn `modelstat _apply-update <target>` DETACHED — a separate process that
 /// outlives this daemon, because the swap it performs runs `_install-service`,
 /// which bounces (and kills) this very daemon mid-upgrade. A new process
 /// group/session keeps the updater alive through that bounce (§13 — the TS
 /// daemon likewise ran the update in a detached worker).
+///
+/// Its streams go to the daemon's own log files. They used to go to `/dev/null`,
+/// which meant the worker was the ONE step of an upgrade nobody could see: this
+/// function logs "auto-updating to X" before spawning, and the worker's verdict —
+/// including "rolled back to the previous build" — was discarded. Every update
+/// therefore looked like it had succeeded, and a machine could sit on a
+/// rolled-back build indefinitely with nothing anywhere saying so.
 fn spawn_detached_update(target: &str) {
     let Ok(exe) = std::env::current_exe() else {
+        modelstat_log::log_error!(
+            "auto-update to {target} not started: this daemon cannot locate its own binary"
+        );
         return;
     };
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("_apply-update")
         .arg(target)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null());
+    // The worker runs in service mode, so it splits INFO onto stdout and
+    // WARN/ERROR onto stderr exactly like this daemon does — point each at the
+    // file that severity belongs in. If a log file cannot be opened, inherit
+    // rather than discard: our own streams already land in the right place, and
+    // a visible line in the wrong file beats a lost one.
+    match update_log_streams() {
+        Some((out, err)) => {
+            cmd.stdout(out).stderr(err);
+        }
+        None => {
+            modelstat_log::log_warn!(
+                "auto-update worker: could not open the log files; its output follows this daemon's streams instead"
+            );
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -502,7 +555,11 @@ fn spawn_detached_update(target: &str) {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
-    let _ = cmd.spawn();
+    // A worker that never started is the quietest failure of all: the line above
+    // already promised the update, and the next heartbeat would promise it again.
+    if let Err(e) = cmd.spawn() {
+        modelstat_log::log_error!("auto-update to {target} could not start its worker: {e}");
+    }
 }
 
 /// The 5s SDK-drain loop with skip-backoff: build local segments from the durable
@@ -763,5 +820,44 @@ async fn wait_for_shutdown() -> u8 {
     {
         let _ = tokio::signal::ctrl_c().await;
         130
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// The update worker inherits these handles and writes its verdict through
+    /// them, so opening them must APPEND. A truncating handle would delete the
+    /// log this daemon just wrote — the same failure the tray had, where a
+    /// non-appending handle overwrote `out.log` from byte 0 on every run.
+    #[test]
+    fn worker_log_handles_append_rather_than_truncate() {
+        let dir = std::env::temp_dir().join(format!("msd-append-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.log");
+        std::fs::write(&path, b"EARLIER LINE\n").unwrap();
+
+        let mut f = open_append(&path).expect("open an existing log for append");
+        f.write_all(b"WORKER LINE\n").unwrap();
+        drop(f);
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "EARLIER LINE\nWORKER LINE\n",
+            "the worker's handle overwrote the daemon's own log"
+        );
+
+        // A log that does not exist yet is created, not an error — a fresh
+        // install updates before it has ever written a line.
+        let fresh = dir.join("err.log");
+        let mut f = open_append(&fresh).expect("create a missing log");
+        f.write_all(b"FIRST\n").unwrap();
+        drop(f);
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "FIRST\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
