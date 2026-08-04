@@ -125,6 +125,9 @@ struct LocalStatsCounters: Decodable {
   let identities_detected: Int?
   let files_scanned: Int?
   let files_unchanged: Int?
+  /// Transcripts the latest scan pass could not parse. They keep re-trying, but
+  /// they contribute nothing until they read, so the count belongs on screen.
+  let files_failed: Int?
   let events_uploaded: Int?
   let batches_uploaded: Int?
   /// Lifetime count of cognition segments uploaded from this machine
@@ -572,6 +575,10 @@ final class TrayController: NSObject {
       if events > 0 { bits.append("\(fmtCount(events)) events") }
       if scanned > 0 { bits.append("\(scanned) files") }
       if queue > 0 { bits.append("\(queue) in queue") }
+      // Loud, never buried in the log: these files keep re-trying and never
+      // block the others, but until one parses it contributes no sessions.
+      let failed = c.files_failed ?? 0
+      if failed > 0 { bits.append("⚠ \(failed) unreadable") }
       setInfo(pipelineMI, bits.joined(separator: " · "))
     } else {
       setInfo(pipelineMI, "")
