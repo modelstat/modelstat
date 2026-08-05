@@ -20,7 +20,7 @@ use modelstat_pipeline::{Embedder, LinkExtractor, ResilientSummarizer, Summarize
 use modelstat_redact::NerModel;
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
 
-use crate::discover_jobs::ScanJob;
+use crate::discover_jobs::{ParserKind, ScanJob};
 use crate::flush::{build_flush_batches, FlushOutcome};
 
 /// Ship a batch the moment the event buffer reaches this many events — mirrors
@@ -43,6 +43,13 @@ pub const MAX_FILES_PER_SCAN: usize = 12;
 /// so even a multi-hundred-MB transcript never fully materialises. Backpressure:
 /// the (blocking-thread) parser parks on `blocking_send` once this many chunks
 /// queue, so it stops reading while a batch is being summarised + uploaded.
+/// How far behind the watermark a non-positional source (Cursor) re-ships on
+/// every scan. A chat row can be written while the assistant is still streaming
+/// into it, so freezing it the instant it is first seen would store a
+/// half-written message forever. Re-sending a settled row is free — ids are
+/// deterministic and the server upserts — so a short overlap buys self-healing.
+const RESHIP_LAG_MS: i64 = 10 * 60 * 1000;
+
 const STREAM_CHANNEL_CAP: usize = 4;
 
 /// Per-cycle scan bounds. `scan_all` passes `{ Some(MAX_FILES_PER_SCAN), false }`;
@@ -366,6 +373,22 @@ where
             (false, Some(cur), Some(cs)) if cs.size >= cur.size => cur.size,
             _ => 0,
         };
+        // A key/value source (Cursor) has no byte coordinate: its floor is a
+        // timestamp watermark carried on the job, and the parser applies it
+        // (its rows carry no cross-record state, unlike a transcript line).
+        // Never on a force scan — that exists to re-upload on purpose.
+        let mut job = job.clone();
+        job.since_ms = match (opts.force_read_all, job.kind, cur.as_ref()) {
+            (false, ParserKind::Cursor, Some(cur)) => cur
+                .shipped_through_ms
+                .map(|ms| ms.saturating_sub(RESHIP_LAG_MS)),
+            _ => None,
+        };
+        let job = &job;
+        // Highest record instant actually buffered from this file — the next
+        // watermark, applied only by a successful flush (below), exactly like a
+        // byte cursor.
+        let mut max_record_ms: Option<i64> = None;
         // Stream this file's events through a bounded channel while the SYNC
         // streaming parser runs on a spawn-blocking thread. The parser can't await
         // the async flush, so the channel bridges them: the async side drains a
@@ -394,6 +417,14 @@ where
                 // with no recorded offset can't be placed, so it always ships.
                 if e.source_byte_offset.is_some_and(|o| o < shipped_below) {
                     continue;
+                }
+                if job.kind == ParserKind::Cursor {
+                    if let Some(ms) = chrono::DateTime::parse_from_rfc3339(&e.ts)
+                        .ok()
+                        .map(|d| d.timestamp_millis())
+                    {
+                        max_record_ms = Some(max_record_ms.map_or(ms, |m: i64| m.max(ms)));
+                    }
                 }
                 buffer.push(e);
                 if buffer.len() >= BATCH_MAX_EVENTS && flush!().is_err() {
@@ -462,7 +493,16 @@ where
         // before. If we're offline the next scan retries from the same position. A
         // checksum read that failed leaves no cursor (the file re-parses next
         // time), matching the TS `.catch(() => null)`.
-        if let Some(cs) = cs {
+        if let Some(mut cs) = cs {
+            // Keep the previous watermark when this pass shipped nothing new, so
+            // a quiet scan never rewinds the floor.
+            cs.shipped_through_ms = match (
+                max_record_ms,
+                cur.as_ref().and_then(|c| c.shipped_through_ms),
+            ) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
             pending_cursors.push((job.path.clone(), cs));
         }
         // Stop after the cap so memory + time per cycle stay bounded. The trailing
@@ -617,6 +657,7 @@ mod tests {
     /// lets the file through (it GREW) and the floor is what does the work.
     fn confirmed_through(size: u64) -> FileCursor {
         FileCursor {
+            shipped_through_ms: None,
             size,
             mtime: 1,
             tail_hash: "older".into(),
@@ -625,6 +666,7 @@ mod tests {
 
     fn job(path: &str) -> ScanJob {
         ScanJob {
+            since_ms: None,
             path: path.into(),
             kind: ParserKind::ClaudeCode,
         }
@@ -681,6 +723,7 @@ mod tests {
     // A checksum seam: distinct size+tail per path so files look "changed".
     fn checksum(path: &str) -> Option<FileCursor> {
         Some(FileCursor {
+            shipped_through_ms: None,
             size: 100,
             mtime: 1,
             tail_hash: format!("h-{path}"),
@@ -750,6 +793,7 @@ mod tests {
         cursors.set_cursor(
             "/a.jsonl",
             FileCursor {
+                shipped_through_ms: None,
                 size: 100,
                 mtime: 999, // mtime differs — must NOT matter
                 tail_hash: "h-/a.jsonl".into(),
@@ -794,6 +838,7 @@ mod tests {
         cursors.set_cursor(
             "/a.jsonl",
             FileCursor {
+                shipped_through_ms: None,
                 size: 100,
                 mtime: 1,
                 tail_hash: "h-/a.jsonl".into(),
