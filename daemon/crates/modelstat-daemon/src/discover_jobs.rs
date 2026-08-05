@@ -123,6 +123,21 @@ fn claude_search_roots(home: &Path) -> Vec<(PathBuf, Option<&'static str>, usize
     {
         roots.push((parent, None, 0));
     }
+    // Data directories named by agents RUNNING right now. This is the only way
+    // to reach an install nothing on disk points at — a second Claude started
+    // with `--config-dir ~/.claude-instances/second` keeps its sessions
+    // somewhere no path list, and no application-data sweep, would look.
+    for (agent, dir) in modelstat_parsers::discovery::agent_data_dirs_from_processes() {
+        if agent == "claude_code" || agent == "claude_desktop" {
+            let path = PathBuf::from(&dir);
+            let label = desktop_host_label(&path);
+            // Searched as deeply as an application's own data dir: a relocated
+            // install is a full copy of the layout, so a Desktop instance
+            // nests its transcripts exactly as far down as the original.
+            roots.push((path, label, CLAUDE_SEARCH_MAX_DEPTH));
+        }
+    }
+
     // Every application's data directory, per platform — NOT a list of app
     // names. An app's data dir is named after the app, and there is no way to
     // know that name in advance: a second install is "Claude Second", a beta is
