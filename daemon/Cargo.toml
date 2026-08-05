@@ -53,6 +53,7 @@ serde = { version = "1", features = ["derive"] }
 # sorted. Required for tool-arg hashing parity — `args_hash` is sha256 over the
 # JSON exactly as `JSON.stringify` emits it (source-key order). Only affects
 # `Value` serialization; struct-field `BTreeMap`s are unchanged.
+serde_yaml_ng = "0.10"
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"
 sha2 = "0.10"
