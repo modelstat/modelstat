@@ -50,7 +50,22 @@ use modelstat_ingest::RuntimeState;
 ///       ONLY way history gains full transcripts. The server dedupes on
 ///       `(scope, source_event_id)` and ReplacingMergeTree upserts the wider
 ///       rows over the old ones — the re-scan is pure upgrade.
-pub const PROCESSING_VERSION: i64 = 19;
+/// v20 — codex + cursor join conversation capture (SPEC 0005). Codex shipped
+///       `content_excerpt: None` on every event, so its sessions produced no
+///       `messages` rows and no stance at all; it now carries the typed prompt
+///       (`event_msg`/`user_message`) and the assistant's prose (buffered from
+///       `event_msg`/`agent_message` onto the usage-bearing `token_count`
+///       event, so one event holds both text and tokens, as the other parsers
+///       do — codex repeats each message as a `response_item`, which stays
+///       text-free so nothing is captured twice). Cursor was worse than empty:
+///       it read `ai_code_hashes`, a table current Cursor does not create
+///       (absent from every global + workspace DB on a live install), so it
+///       could only ever emit nothing; it now reads the real chat store
+///       (`cursorDiskKV` bubbles) and emits verbatim user/assistant messages
+///       with per-conversation turn ordinals. Both are local-only facts, so a
+///       re-scan is the only way sessions already uploaded gain their
+///       transcripts.
+pub const PROCESSING_VERSION: i64 = 20;
 
 /// The state a reconcile reads + mutates: the stored marker plus the cursors it
 /// wipes on a bump. Abstracted so the decision is unit-testable without touching

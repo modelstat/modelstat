@@ -20,6 +20,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::sync::OnceLock;
 
+use modelstat_redact::redact;
 use modelstat_wire::{
     source_event_id, tc_fallback_id, EventSource, GitContext, RawEvent, TokenUsage,
 };
@@ -56,6 +57,36 @@ fn is_shell_tool_name(name: &str) -> bool {
         name,
         "shell" | "local_shell_call" | "exec_command" | "run_terminal_cmd"
     )
+}
+
+/// SPEC 0005 capture: one message's VERBATIM text + its length in chars.
+/// Redaction is the only transformation — nothing is stripped, elided, or cut
+/// short (the wire clamp is an extreme malicious-size guard, applied later).
+/// Empty in → `(None, None)`, so a text-less line states no text rather than
+/// an empty one.
+fn message_text(raw: &str) -> (Option<String>, Option<u64>) {
+    let text = raw.trim();
+    if text.is_empty() {
+        return (None, None);
+    }
+    let chars = text.chars().count() as u64;
+    let cleaned = redact(text, None).text;
+    if cleaned.is_empty() {
+        (None, None)
+    } else {
+        (Some(cleaned), Some(chars))
+    }
+}
+
+/// Drain the buffered `agent_message` prose for one round trip. Codex can
+/// stream more than one message before a token count lands; they are joined as
+/// written, in order.
+fn take_message_text(buf: &mut Vec<String>) -> (Option<String>, Option<u64>) {
+    if buf.is_empty() {
+        return (None, None);
+    }
+    let joined = std::mem::take(buf).join("\n\n");
+    message_text(&joined)
 }
 
 fn schema_drift(detail: &str) -> std::io::Error {
@@ -291,6 +322,15 @@ fn parse_inner(
     let mut model: Option<String> = None;
     let mut turn_index: u64 = 0;
     let mut last_ts: Option<String> = None;
+    // SPEC 0005: codex writes the assistant's prose on `event_msg`/
+    // `agent_message` lines but its token counters on `event_msg`/`token_count`
+    // lines, so the text is buffered here and attached to the next
+    // usage-bearing assistant event — one event carrying BOTH, as the other
+    // parsers produce. A round trip that only ran tools contributes nothing and
+    // its event honestly carries no text. (Codex also repeats every message as
+    // a `response_item`; capturing those too would double every message, so
+    // the response_item path stays text-free.)
+    let mut agent_text: Vec<String> = Vec::new();
     let mut open_calls: HashMap<String, usize> = HashMap::new();
     let mut pending_aggregate: BTreeMap<String, u64> = BTreeMap::new();
 
@@ -521,6 +561,8 @@ fn parse_inner(
                     remote_slug: Some(s.clone()),
                     branch: None,
                 });
+                // The prose codex streamed for this round trip, verbatim.
+                let (content_excerpt, content_bytes) = take_message_text(&mut agent_text);
                 sink.push(RawEvent {
                     source_event_id: source_event_id(
                         &ctx.device_id,
@@ -543,8 +585,8 @@ fn parse_inner(
                     duration_ms: None,
                     tool_calls: std::mem::take(&mut pending_aggregate),
                     files_touched: Vec::new(),
-                    content_excerpt: None,
-                    content_bytes: None,
+                    content_excerpt,
+                    content_bytes,
                     references: None,
                     source_file: Some(ctx.source_file.clone()),
                     source_byte_offset: Some(offset),
@@ -554,11 +596,34 @@ fn parse_inner(
                 turn_index += 1;
                 continue;
             }
+            if ptype == "agent_message" {
+                // Buffered, not emitted: the assistant's event is the
+                // usage-bearing `token_count` line above.
+                if let Some(t) = payload
+                    .and_then(|p| p.get("message"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    agent_text.push(t.to_string());
+                }
+                skipped += 1;
+                continue;
+            }
             if ptype == "user_message" {
                 if session_id.is_none() {
                     skipped += 1;
                     continue;
                 }
+                // What the developer actually typed. `event_msg` carries the
+                // typed prompt; the parallel `response_item` user rows also
+                // include harness-injected content, so this is the honest one.
+                let (content_excerpt, content_bytes) = message_text(
+                    payload
+                        .and_then(|p| p.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                );
                 sink.push(RawEvent {
                     source_event_id: source_event_id(
                         &ctx.device_id,
@@ -573,7 +638,12 @@ fn parse_inner(
                     provider: "openai".to_string(),
                     model: model.clone(),
                     session_id: session_id.clone().unwrap(),
-                    turn_index: None,
+                    // Codex's ordinal counts API round trips (it advances on
+                    // each usage-bearing `token_count`), not typed prompts —
+                    // unlike the other parsers. Stated so a message still
+                    // carries its position; the server derives conversation
+                    // turns from the role sequence regardless.
+                    turn_index: Some(turn_index),
                     parent_event_id: None,
                     cwd: cwd.clone(),
                     git: None,
@@ -581,8 +651,8 @@ fn parse_inner(
                     duration_ms: None,
                     tool_calls: BTreeMap::new(),
                     files_touched: Vec::new(),
-                    content_excerpt: None,
-                    content_bytes: None,
+                    content_excerpt,
+                    content_bytes,
                     references: None,
                     source_file: Some(ctx.source_file.clone()),
                     source_byte_offset: Some(offset),
