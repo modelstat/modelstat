@@ -171,11 +171,31 @@ impl ScanObserver for StatusObserver<'_> {
             s.set_progress(index as u64 + 1, total as u64);
             // The PHASE too, not just the message: the previous file left it on
             // `Uploading`, and a bare message change renders as the contradictory
-            // "uploading — File 4/71: …".
+            // "uploading — file 4 of 71: …".
+            let prefix = if s.catching_up {
+                "catching up on history · "
+            } else {
+                ""
+            };
             s.set_phase(
                 Phase::Scanning,
-                format!("File {}/{total}: {name}", index + 1),
+                format!("{prefix}file {} of {total}: {name}", index + 1),
             );
+        });
+    }
+    /// A transcript that would not parse. It keeps no cursor, so it re-tries on
+    /// every later scan — but it has to be VISIBLE meanwhile: an unreadable file
+    /// contributes no sessions, and burying that in the log is exactly the silent
+    /// degrade this daemon is not allowed to do.
+    /// The COUNT is not bumped here — `execute_scan` publishes the pass's own
+    /// `files_failed` tally. A cumulative counter would read "53 files failed"
+    /// for one broken transcript retried across 53 passes; what the user needs is
+    /// how many are failing right now.
+    fn on_file_failed(&mut self, path: &str, error: &str) {
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        self.with(|s| {
+            s.set_stat("last_failed_file", json!(name));
+            s.set_stat("last_failed_error", json!(error));
         });
     }
     fn on_upload(&mut self, events: usize, segments: usize) {
@@ -211,6 +231,13 @@ impl ScanObserver for StatusObserver<'_> {
 /// Events in every mode, never segments: a batch always carries events (cloud
 /// ships raw events and 0 segments; local / self-hosted ship both), so this can
 /// never read a misleading "0 segments".
+///
+/// The file position leads with "catching up on history" whenever a backlog is
+/// draining. The old wording — "file 57/630" — read as "573 files failed" and had
+/// people assume their older sessions were lost, when the drain simply had not
+/// reached them yet (they upload newest-first). It also meant the honest
+/// "Catching up on history…" line set between passes was erased by the very next
+/// upload, so the one message that explained the wait was never on screen.
 fn shipped_line(s: &Status, in_flight: u64) -> String {
     let sent = s
         .stats
@@ -218,10 +245,17 @@ fn shipped_line(s: &Status, in_flight: u64) -> String {
         .and_then(Value::as_u64)
         .unwrap_or(0)
         + in_flight;
-    let mut line = format!("{} events sent", thousands(sent));
+    let mut line = String::new();
     if s.progress_total > 0 {
-        line.push_str(&format!(" · file {}/{}", s.progress_done, s.progress_total));
+        if s.catching_up {
+            line.push_str("catching up on history · ");
+        }
+        line.push_str(&format!(
+            "file {} of {} · ",
+            s.progress_done, s.progress_total
+        ));
     }
+    line.push_str(&format!("{} events sent", thousands(sent)));
     line
 }
 
@@ -412,6 +446,10 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     daemon.with_status(|s| {
         s.bump_stat("files_scanned", tallies.files_scanned as u64);
         s.bump_stat("files_unchanged", tallies.files_unchanged as u64);
+        // SET, not bump: how many files are failing to parse *right now*. These
+        // re-try every pass, so accumulating would multiply one bad transcript by
+        // the number of passes and read as a flood of distinct failures.
+        s.set_stat("files_failed", json!(tallies.files_failed));
         s.set_stat("segments_sent", json!(segments_sent));
         s.set_stat("segments_sending", json!(0));
     });
@@ -428,6 +466,10 @@ pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
     daemon.with_status(|s| {
         s.set_phase(Phase::Scanning, format!("Scanning local JSONL ({reason})"));
         s.set_progress(0, 0);
+        // Start each run honest: the flag latches on below only once THIS run has
+        // proven a backlog by hitting the cap with work left. A stale `true` from
+        // a run that ended held would otherwise claim a backlog that has drained.
+        s.set_catching_up(false);
     });
     let opts = RunScanOptions {
         max_files: Some(MAX_FILES_PER_SCAN),
@@ -454,12 +496,18 @@ pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
         if !t.more_pending {
             break;
         }
-        // Backlog still draining — yield briefly so the receiver/heartbeat aren't
-        // starved, then take the next newest cap-12 batch.
-        daemon.with_status(|s| s.set_phase(Phase::Processing, "Catching up on history…"));
+        // Backlog still draining — latch the flag so every message this run
+        // renders ("file 57 of 630", the per-file scanning line) says WHY the
+        // wait is long. Setting it as a phase message instead would be erased by
+        // the next upload a fraction of a second later, which is how the old
+        // "Catching up on history…" line stayed invisible.
+        daemon.with_status(|s| s.set_catching_up(true));
+        // Yield briefly so the receiver/heartbeat aren't starved, then take the
+        // next newest cap-12 batch.
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     daemon.with_status(|s| {
+        s.set_catching_up(false);
         s.set_phase(Phase::Watching, "Waiting for new events");
         s.set_progress(0, 0);
     });
@@ -634,7 +682,7 @@ mod tests {
         assert_eq!(status.lock().unwrap().phase, Phase::Scanning);
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("File 1/3: c.jsonl")
+            Some("file 1 of 3: c.jsonl")
         );
 
         obs.on_upload(10, 4);
@@ -656,15 +704,51 @@ mod tests {
         obs.on_upload(1000, 0);
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("1,000 events sent · file 3/71")
+            Some("file 3 of 71 · 1,000 events sent")
         );
         obs.on_uploaded(1000, 0);
 
         obs.on_upload(1000, 0); // same batch size, DIFFERENT line
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("2,000 events sent · file 3/71")
+            Some("file 3 of 71 · 2,000 events sent")
         );
+    }
+
+    #[test]
+    fn a_draining_backlog_says_so_on_every_line_it_renders() {
+        // The reported confusion: "file 57/630" read as "573 files failed", so a
+        // user concluded their older sessions were lost when the newest-first
+        // drain simply had not reached them. The run-long flag has to survive the
+        // uploads — the phase message that used to carry "Catching up on history…"
+        // was overwritten by the very next batch and never reached the screen.
+        let status = StdMutex::new(Status::default());
+        status.lock().unwrap().set_catching_up(true);
+        let mut obs = StatusObserver { status: &status };
+
+        obs.on_file("/a/b/c.jsonl", 56, 630);
+        assert_eq!(
+            status.lock().unwrap().message.as_deref(),
+            Some("catching up on history · file 57 of 630: c.jsonl")
+        );
+
+        obs.on_upload(1000, 0);
+        assert_eq!(
+            status.lock().unwrap().message.as_deref(),
+            Some("catching up on history · file 57 of 630 · 1,000 events sent")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_transcript_is_named_in_the_status() {
+        // Never a silent skip: the file keeps re-trying, but until it parses it
+        // contributes no sessions, so the tray has to be able to say which one.
+        let status = StdMutex::new(Status::default());
+        let mut obs = StatusObserver { status: &status };
+        obs.on_file_failed("/a/b/broken.jsonl", "unexpected end of file");
+        let s = status.lock().unwrap();
+        assert_eq!(s.stats["last_failed_file"], json!("broken.jsonl"));
+        assert_eq!(s.stats["last_failed_error"], json!("unexpected end of file"));
     }
 
     #[test]

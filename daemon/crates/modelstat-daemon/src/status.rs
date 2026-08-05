@@ -63,6 +63,12 @@ pub struct Status {
     pub last_event_at: Option<String>,
     pub update: Option<UpdateInfo>,
     pub auto_update: bool,
+    /// True while a cold-start backlog is still draining — the scan hit its
+    /// per-cycle file cap with work left over. Purely local display state that
+    /// shapes the progress message, so it is deliberately NOT in `snapshot_body`:
+    /// the wire already carries `progress_done`/`progress_total`, and the tray
+    /// reads the rendered `message`.
+    pub catching_up: bool,
 }
 
 impl Default for Status {
@@ -77,6 +83,7 @@ impl Default for Status {
             last_event_at: None,
             update: None,
             auto_update: false,
+            catching_up: false,
         }
     }
 }
@@ -95,6 +102,9 @@ impl Status {
     }
     pub fn set_queue(&mut self, size: u64) {
         self.queue_size = size;
+    }
+    pub fn set_catching_up(&mut self, catching_up: bool) {
+        self.catching_up = catching_up;
     }
     /// Increment a numeric stat by `n` (missing/non-numeric → starts at 0).
     pub fn bump_stat(&mut self, key: &str, n: u64) -> u64 {

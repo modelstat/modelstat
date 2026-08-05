@@ -63,6 +63,10 @@ pub struct RunScanOptions {
 pub struct ScanTallies {
     pub files_scanned: usize,
     pub files_unchanged: usize,
+    /// Files whose parse failed this pass. They keep no cursor, so they re-try on
+    /// every later scan (never dropped) — but they do NOT spend the per-cycle
+    /// budget, so a permanently unreadable transcript can't starve the backlog.
+    pub files_failed: usize,
     pub batches_uploaded: u64,
     pub events_uploaded: u64,
     pub segments_uploaded: u64,
@@ -113,6 +117,13 @@ pub trait ScanObserver {
     /// Before parsing each file — `index` 0-based, `total` = files discovered.
     fn on_file(&mut self, path: &str, index: usize, total: usize) {
         let _ = (path, index, total);
+    }
+    /// A file could not be parsed. It is retried on every later scan (its cursor
+    /// never advanced), so this is not a drop — but it must surface in the status
+    /// rather than only in the log, or a transcript that never reads silently
+    /// stops contributing sessions.
+    fn on_file_failed(&mut self, path: &str, error: &str) {
+        let _ = (path, error);
     }
     /// Right before a batch POSTs — these records are now in-flight.
     fn on_upload(&mut self, events: usize, segments: usize) {
@@ -347,7 +358,12 @@ where
                 }
             }
         }
-        tallies.files_scanned += 1;
+        // NOTE: `files_scanned` is counted AFTER the parse succeeds (below), not
+        // here. It is what the per-cycle cap spends, and a file that always fails
+        // to parse must not spend it — otherwise a handful of unreadable
+        // transcripts at the head of the newest-first list burn the whole budget
+        // on every pass and the backlog behind them advances one file per cycle.
+        //
         // Everything below this byte offset already landed on a CONFIRMED upload,
         // so this scan parses it but does not re-send it. Without the floor a live
         // transcript re-ships in FULL every time the session appends a line — a
@@ -417,17 +433,27 @@ where
         // The parser finished streaming; take its tail (tool-call drafts + script
         // contexts + stats). A parse error / task panic skips this one file loudly
         // — the scan carries on and the file re-tries next cycle.
+        //
+        // A failure costs no budget and queues no cursor, so the file re-tries on
+        // every later scan (never dropped) while the good files behind it keep
+        // draining. `on_file_failed` puts it in the status — a file that never
+        // reads has to be visible, not just logged.
         let mut r = match parse_handle.await {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 modelstat_log::log_error!("parse failed for {}: {e}", job.path);
+                tallies.files_failed += 1;
+                observer.on_file_failed(&job.path, &e.to_string());
                 continue;
             }
             Err(join) => {
                 modelstat_log::log_error!("parse task panicked for {}: {join}", job.path);
+                tallies.files_failed += 1;
+                observer.on_file_failed(&job.path, &join.to_string());
                 continue;
             }
         };
+        tallies.files_scanned += 1;
         // Summarise each command's script/bash FILES into the drafts' redacted
         // abstracts — best-effort + additive; a failure leaves them empty and never
         // blocks the upload. Runs before the drafts buffer so the enriched version
@@ -667,6 +693,35 @@ mod tests {
         move |j: &ScanJob, emit: &mut dyn FnMut(Vec<RawEvent>)| {
             for chunk in events.chunks(chunk_size.max(1)) {
                 emit(chunk.to_vec());
+            }
+            Ok(ParseResult {
+                events: Vec::new(),
+                tool_calls: Vec::new(),
+                script_contexts: Vec::new(),
+                stats: ParseStats::default(),
+                source_file: j.path.clone(),
+            })
+        }
+    }
+
+    // A parse seam that fails for every job whose path contains "broken" and
+    // succeeds (emitting `events`) for the rest.
+    fn parse_failing_on_broken(
+        events: Vec<RawEvent>,
+    ) -> impl Fn(&ScanJob, &mut dyn FnMut(Vec<RawEvent>)) -> std::io::Result<ParseResult>
+           + Send
+           + Sync
+           + Clone
+           + 'static {
+        move |j: &ScanJob, emit: &mut dyn FnMut(Vec<RawEvent>)| {
+            if j.path.contains("broken") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected end of file",
+                ));
+            }
+            if !events.is_empty() {
+                emit(events.clone());
             }
             Ok(ParseResult {
                 events: Vec::new(),
@@ -1035,6 +1090,64 @@ mod tests {
         // Only the first file's events shipped + cursor advanced.
         assert!(cursors.get_cursor("/a.jsonl").is_some());
         assert!(cursors.get_cursor("/b.jsonl").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_file_never_spends_the_per_cycle_budget() {
+        // The starvation bug: a transcript that always fails to parse counted
+        // against the cap, so with `max_files` worth of them at the head of the
+        // newest-first list every pass burned its whole budget re-failing on the
+        // same files and the backlog behind them advanced one file per cycle.
+        // A failure must cost nothing: the cap is a budget for WORK DONE.
+        struct Failures(Vec<String>);
+        impl ScanObserver for Failures {
+            fn on_file_failed(&mut self, path: &str, _error: &str) {
+                self.0.push(path.to_string());
+            }
+        }
+
+        let resilient = healthy();
+        let mut git = NoGit;
+        let mut uploader = RecordingUploader::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = Failures(Vec::new());
+        let t = run_scan_over_jobs(
+            vec![
+                job("/broken-1.jsonl"),
+                job("/broken-2.jsonl"),
+                job("/good.jsonl"),
+            ],
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(Some(1), false), // budget of ONE file
+            &resilient,
+            &NoEmbedder,
+            &UnavailableNer,
+            &mut git,
+            None,
+            parse_failing_on_broken(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &mut uploader,
+            &mut cursors,
+            &mut obs,
+            &Accounts::new(),
+        )
+        .await;
+
+        // The two broken files cost no budget, so the good one behind them still
+        // got scanned and shipped within the SAME pass.
+        assert_eq!(t.files_failed, 2);
+        assert_eq!(t.files_scanned, 1);
+        assert!(cursors.get_cursor("/good.jsonl").is_some());
+        // Never dropped and never silent: no cursor, so they re-try next cycle,
+        // and both were reported by path rather than only logged.
+        assert!(cursors.get_cursor("/broken-1.jsonl").is_none());
+        assert!(cursors.get_cursor("/broken-2.jsonl").is_none());
+        assert_eq!(obs.0, vec!["/broken-1.jsonl", "/broken-2.jsonl"]);
     }
 
     #[tokio::test]
