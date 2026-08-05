@@ -114,6 +114,11 @@ pub struct ParserContext {
     /// applied to the SEND, since they carry cross-line state that a mid-file
     /// start would lose; a key/value row carries none, so skipping is safe.
     pub since_ms: Option<i64>,
+    /// Overrides the agent name the parse stamps on every event. Set when a
+    /// HOST runs another agent's binary in its own format — Claude Desktop's
+    /// local agent mode writes Claude Code transcripts, but the human used
+    /// Claude Desktop. `None` keeps the parser's own name.
+    pub agent_label: Option<String>,
 }
 
 impl ParserContext {
@@ -130,6 +135,7 @@ impl ParserContext {
             source_file: source_file.into(),
             byte_offset_start: 0,
             since_ms: None,
+            agent_label: None,
             pricing_mode: crate::auth_mode::PRICING_MODE_UNKNOWN.to_string(),
         }
     }
@@ -146,6 +152,22 @@ impl ParserContext {
     pub fn with_since_ms(mut self, since_ms: Option<i64>) -> Self {
         self.since_ms = since_ms;
         self
+    }
+
+    /// See [`ParserContext::agent_label`].
+    #[must_use]
+    pub fn with_agent_label(mut self, agent_label: Option<String>) -> Self {
+        self.agent_label = agent_label;
+        self
+    }
+
+    /// The agent name to stamp: the host's label when one was set, else the
+    /// parser's own `default`.
+    #[must_use]
+    pub fn agent(&self, default: &str) -> String {
+        self.agent_label
+            .clone()
+            .unwrap_or_else(|| default.to_string())
     }
 }
 

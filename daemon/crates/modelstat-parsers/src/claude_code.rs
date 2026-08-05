@@ -210,6 +210,10 @@ fn parse_inner(
     // ordinal; events before the first prompt sit in turn 0.
     let mut current_turn: u64 = 0;
     let mut saw_user_prompt = false;
+    // The agent to stamp: the host's label (Claude Desktop runs Claude Code in
+    // this exact format) or the parser's own name. Resolved once — it is a
+    // property of the job, not of a line.
+    let agent_name = ctx.agent("claude_code");
 
     let filename_session_id = derive_session_id_from_filename(&ctx.source_file);
     let mut ancestors = AncestorCache::new(&ctx.source_file);
@@ -341,6 +345,7 @@ fn parse_inner(
                         model.as_deref(),
                         cwd.as_deref(),
                         Some(current_turn),
+                        &agent_name,
                         &mut script_contexts,
                     );
                     let identity = tool_identity(&draft.server, &draft.name);
@@ -377,7 +382,7 @@ fn parse_inner(
                     .unwrap_or("")
                     .to_string(),
                 kind: "assistant_message".to_string(),
-                agent: "claude_code".to_string(),
+                agent: agent_name.clone(),
                 provider: "anthropic".to_string(),
                 model,
                 session_id: session_id.clone().unwrap(),
@@ -475,7 +480,7 @@ fn parse_inner(
                     .unwrap_or("")
                     .to_string(),
                 kind: "user_message".to_string(),
-                agent: "claude_code".to_string(),
+                agent: ctx.agent("claude_code"),
                 provider: "anthropic".to_string(),
                 model: last_model.clone(),
                 session_id: session_id.clone().unwrap(),
@@ -535,6 +540,7 @@ fn parse_inner(
                 last_model.as_deref(),
                 cwd.as_deref(),
                 Some(current_turn),
+                &agent_name,
                 &mut script_contexts,
             );
             let call_id_opt = obj.get("id").and_then(Value::as_str).map(str::to_string);
@@ -572,6 +578,7 @@ fn build_tool_call_draft(
     model: Option<&str>,
     cwd: Option<&str>,
     turn_index: Option<u64>,
+    agent: &str,
     contexts: &mut Vec<LocalToolContext>,
 ) -> ToolCallDraft {
     let (server, name) = split_observed_tool_name(observed_name);
@@ -602,7 +609,7 @@ fn build_tool_call_draft(
         external_call_id,
         session_id: session_id.to_string(),
         source_event_id: source_event_id_str.to_string(),
-        agent: "claude_code".to_string(),
+        agent: agent.to_string(),
         server,
         name,
         turn_index,

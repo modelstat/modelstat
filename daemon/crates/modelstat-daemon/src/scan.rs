@@ -666,6 +666,7 @@ mod tests {
 
     fn job(path: &str) -> ScanJob {
         ScanJob {
+            agent_label: None,
             since_ms: None,
             path: path.into(),
             kind: ParserKind::ClaudeCode,
