@@ -664,6 +664,7 @@ async fn reconcile_once(
     let mut parse_counts = |path: &str| -> Option<PerDaySession> {
         let kind = *kinds.get(path)?;
         let job = ScanJob {
+            agent_label: None,
             path: path.to_string(),
             kind,
             // The reconcile digest counts a file WHOLE — it answers "what does

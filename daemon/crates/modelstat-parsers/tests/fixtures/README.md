@@ -10,6 +10,7 @@ lets a parser pass against a world that isn't there.
 |---|---|
 | `tree/codex/rollout-*.jsonl` | A real `codex exec` run (codex-cli 0.147.0-alpha) against a throwaway `uploader.js` in a neutral temp directory. |
 | `tree/cursor/state.vscdb` | Two real Cursor conversations from a live `globalStorage/state.vscdb`. |
+| `tree/claude-desktop/*.jsonl` | A real Claude Desktop local-agent-mode session — the same Claude Code format, from the desktop app's own data dir. |
 | `tree/claude*`, `tree/pi` | Pre-existing fixtures. |
 
 ## What was removed, and why
@@ -26,8 +27,14 @@ so every value that remains is verbatim as the agent wrote it:
   lint results, file chunks — which is megabytes the parser never reads and
   where local paths live.
 
-Both files are checked to contain no home paths, e-mail addresses, or
-credential-shaped strings.
+- **claude-desktop**: the machine's user name only (`/Users/<name>` →
+  `/Users/dev`, and the same inside the encoded project-dir name). Unlike the
+  other two, a path here is a load-bearing field — `cwd` drives repo detection —
+  so the record cannot simply be dropped. The substitution is mechanical and
+  preserves every record's shape exactly; no structure is invented.
+
+All fixtures are checked to contain no e-mail addresses or credential-shaped
+strings, and no home path other than the placeholder above.
 
 ## Regenerating the goldens
 

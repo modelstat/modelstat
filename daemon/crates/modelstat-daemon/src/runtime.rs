@@ -308,6 +308,7 @@ fn eager_target_jobs(session_ids: &[String], file: Option<&str>) -> Vec<ScanJob>
         return match all.iter().find(|j| j.path == f) {
             Some(j) => vec![j.clone()],
             None => vec![ScanJob {
+                agent_label: None,
                 since_ms: None,
                 path: f.to_string(),
                 kind: kind_for_path(f),

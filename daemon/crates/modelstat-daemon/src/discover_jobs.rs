@@ -39,6 +39,11 @@ pub struct ScanJob {
     /// already shipped through this instant. The scan fills it from the file's
     /// cursor; discovery always yields `None`.
     pub since_ms: Option<i64>,
+    /// Overrides the agent the parser stamps on every event. Set when a HOST
+    /// runs another agent's binary — Claude Desktop's local agent mode is
+    /// Claude Code by format, but the human used Claude Desktop, and `agent`
+    /// names the tool the human used. `None` keeps the parser's own name.
+    pub agent_label: Option<String>,
 }
 
 /// `$HOME` (or `%USERPROFILE%`), matching the parsers' own home probe.
@@ -68,24 +73,122 @@ fn is_rollout_jsonl(p: &Path) -> bool {
             .unwrap_or(false)
 }
 
+/// How deep to hunt for a `.claude/projects` tree under a search root. Claude
+/// Desktop nests it four levels down (`local-agent-mode-sessions/<a>/<b>/
+/// local_<c>/.claude`); the cap keeps an unlucky root — a multi-GB app-data
+/// directory full of caches and VM images — from turning a scan into a full
+/// disk walk.
+const CLAUDE_SEARCH_MAX_DEPTH: usize = 6;
+
+/// Directory names never worth descending: vendor caches, blob stores and VM
+/// images that hold no transcripts and plenty of gigabytes.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "blob_storage",
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "CachedData",
+    "Crashpad",
+    "logs",
+    "claude-code-vm",
+    "Partitions",
+    "Service Worker",
+    "IndexedDB",
+    "Local Storage",
+];
+
+/// Where to hunt for Claude Code transcript trees, and the agent label sessions
+/// found under each should carry.
+///
+/// The label matters: a Desktop-hosted session IS Claude Code by format, but
+/// the human used **Claude Desktop**, and `agent` names the tool the human
+/// used. Merging them would destroy a distinction nothing can recover later;
+/// keeping them apart can always be summed at read time.
+fn claude_search_roots(home: &Path) -> Vec<(PathBuf, Option<&'static str>)> {
+    // The CLI's own home.
+    let mut roots: Vec<(PathBuf, Option<&'static str>)> = vec![(home.to_path_buf(), None)];
+    // `CLAUDE_CONFIG_DIR` relocates that home; a user who set it would
+    // otherwise report nothing at all. It points AT the `.claude` dir, so the
+    // shape search starts at its parent.
+    if let Some(parent) = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|c| Path::new(&c).parent().map(Path::to_path_buf))
+    {
+        roots.push((parent, None));
+    }
+    // Claude Desktop's application data, per platform (probed, not `cfg!`d).
+    for rel in [
+        "Library/Application Support/Claude",
+        ".config/Claude",
+        "AppData/Roaming/Claude",
+    ] {
+        roots.push((home.join(rel), Some("claude_desktop")));
+    }
+    roots.retain(|(p, _)| p.is_dir());
+    roots
+}
+
+/// Walk `root` (bounded) for `.claude/projects/<dir>/*.jsonl` transcripts.
+///
+/// Only the `projects` tree is taken. A Desktop session directory also holds an
+/// `audit.jsonl` beside it, and that file is the SAME conversation in the
+/// Agent-SDK's shape — verified on a real install, where every message text and
+/// 21 of 25 line uuids appear in both. Walking both would double every message
+/// and every token the session cost.
+fn collect_claude_projects(
+    root: &Path,
+    depth_left: usize,
+    agent: Option<&'static str>,
+    jobs: &mut Vec<ScanJob>,
+) {
+    let projects = root.join(".claude/projects");
+    if projects.is_dir() {
+        for proj in child_paths(&projects) {
+            if proj.is_dir() {
+                for f in child_paths(&proj) {
+                    if is_jsonl(&f) {
+                        jobs.push(ScanJob {
+                            path: f.to_string_lossy().into_owned(),
+                            kind: ParserKind::ClaudeCode,
+                            since_ms: None,
+                            agent_label: agent.map(str::to_string),
+                        });
+                    }
+                }
+            }
+        }
+        // A transcript tree never nests another; stop descending this branch.
+        return;
+    }
+    if depth_left == 0 {
+        return;
+    }
+    for child in child_paths(root) {
+        let name = child.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // `.claude` is handled above; skip other dotdirs and the heavyweights.
+        if name.starts_with('.') || SKIP_DIRS.contains(&name) || !child.is_dir() {
+            continue;
+        }
+        collect_claude_projects(&child, depth_left - 1, agent, jobs);
+    }
+}
+
 /// Discover every scan job under `home` (the 3 active parsers). Test-injectable
 /// root; [`discover_jobs`] passes the real home.
 pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
     let mut jobs = Vec::new();
 
-    // Claude Code — ~/.claude/projects/<p>/*.jsonl
-    for proj in child_paths(&home.join(".claude/projects")) {
-        if proj.is_dir() {
-            for f in child_paths(&proj) {
-                if is_jsonl(&f) {
-                    jobs.push(ScanJob {
-                        path: f.to_string_lossy().into_owned(),
-                        kind: ParserKind::ClaudeCode,
-                        since_ms: None,
-                    });
-                }
-            }
-        }
+    // Claude Code — ~/.claude/projects/<encoded-cwd>/<session>.jsonl, plus the
+    // same tree wherever an EMBEDDER puts it. Searched by SHAPE rather than by
+    // one hard-coded path: Claude Desktop's local agent mode runs Claude Code
+    // with a relocated home, so its transcripts sit at
+    // `<app-data>/local-agent-mode-sessions/<a>/<b>/local_<c>/.claude/projects/...`
+    // and were invisible for as long as only `$HOME` was walked. Anything else
+    // hosting Claude Code the same way is picked up for free.
+    for (root, agent) in claude_search_roots(home) {
+        collect_claude_projects(&root, CLAUDE_SEARCH_MAX_DEPTH, agent, &mut jobs);
     }
 
     // Codex — ~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl
@@ -98,6 +201,7 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
                             path: f.to_string_lossy().into_owned(),
                             kind: ParserKind::Codex,
                             since_ms: None,
+                            agent_label: None,
                         });
                     }
                 }
@@ -116,6 +220,7 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
                 for f in child_paths(&proj) {
                     if is_jsonl(&f) {
                         jobs.push(ScanJob {
+                            agent_label: None,
                             since_ms: None,
                             path: f.to_string_lossy().into_owned(),
                             kind: ParserKind::Pi,
@@ -137,6 +242,7 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
                 kind: ParserKind::Cursor,
                 // Filled by the scan from the file's cursor.
                 since_ms: None,
+                agent_label: None,
             });
         }
     }
@@ -188,7 +294,8 @@ fn pricing_mode_for(kind: ParserKind) -> String {
 pub fn parse_job(device_id: &str, job: &ScanJob) -> std::io::Result<ParseResult> {
     let ctx = ParserContext::new(device_id, job.path.clone())
         .with_pricing_mode(pricing_mode_for(job.kind))
-        .with_since_ms(job.since_ms);
+        .with_since_ms(job.since_ms)
+        .with_agent_label(job.agent_label.clone());
     match job.kind {
         ParserKind::ClaudeCode => parse_claude_code_jsonl(&ctx),
         ParserKind::Codex => parse_codex_rollout(&ctx),
@@ -210,7 +317,8 @@ pub fn parse_job_streaming(
 ) -> std::io::Result<ParseResult> {
     let ctx = ParserContext::new(device_id, job.path.clone())
         .with_pricing_mode(pricing_mode_for(job.kind))
-        .with_since_ms(job.since_ms);
+        .with_since_ms(job.since_ms)
+        .with_agent_label(job.agent_label.clone());
     match job.kind {
         ParserKind::ClaudeCode => parse_claude_code_jsonl_streaming(&ctx, emit),
         ParserKind::Codex => parse_codex_rollout_streaming(&ctx, emit),

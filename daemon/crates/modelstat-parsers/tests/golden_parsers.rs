@@ -141,6 +141,31 @@ fn parser_golden_parity() {
         assert_eq!(res.events, events_of(&g), "claude_resume_copy events");
     }
 
+    // 3b. Claude Desktop — the SAME Claude Code format, discovered under the
+    //     desktop app's data dir and stamped with the host's agent label.
+    {
+        let file = format!("{BASE}/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl");
+        let res = parse_claude_code_jsonl(
+            &ctx(&file).with_agent_label(Some("claude_desktop".to_string())),
+        )
+        .unwrap();
+        let g = golden("claude_desktop.json");
+        assert_eq!(res.events, events_of(&g), "claude_desktop events");
+        assert_eq!(
+            res.tool_calls,
+            tool_calls_of(&g),
+            "claude_desktop toolCalls"
+        );
+        assert!(
+            res.events.iter().all(|e| e.agent == "claude_desktop"),
+            "the host's label replaces the parser's own name"
+        );
+        assert!(
+            res.tool_calls.iter().all(|c| c.agent == "claude_desktop"),
+            "tool calls carry it too, or a session's calls and events disagree"
+        );
+    }
+
     // 4. Codex — disjoint token buckets, tool call anchored to its own line.
     {
         let file = format!(
@@ -280,6 +305,16 @@ fn regen_goldens() {
         &parse_claude_code_jsonl(&ctx(&format!(
             "{BASE}/claude-resume/projects/myproj/44444444-4444-4444-4444-444444444444.jsonl"
         )))
+        .unwrap(),
+    );
+    dump(
+        "claude_desktop.json",
+        &parse_claude_code_jsonl(
+            &ctx(&format!(
+                "{BASE}/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl"
+            ))
+            .with_agent_label(Some("claude_desktop".to_string())),
+        )
         .unwrap(),
     );
     dump(
