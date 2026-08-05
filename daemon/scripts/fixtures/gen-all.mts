@@ -10,11 +10,14 @@
 import { generator as idsTooling } from "./gen-ids-tooling.mts";
 import { generator as redaction } from "./gen-redaction.mts";
 import { generator as wire } from "./gen-wire.mts";
-import { generator as parsers } from "./gen-parsers.mts";
 import { generator as misc } from "./gen-misc.mts";
 import type { Generator } from "./lib.mts";
 
-const GENERATORS: Generator[] = [idsTooling, redaction, wire, parsers, misc];
+// Parser goldens are Rust-generated since SPEC 0005 (the Rust parsers
+// deliberately supersede the retired TS port): see the REGEN_GOLDENS test in
+// daemon/crates/modelstat-parsers/tests/golden_parsers.rs. This generator
+// covers the families that still have dual implementations.
+const GENERATORS: Generator[] = [idsTooling, redaction, wire, misc];
 
 async function main(): Promise<void> {
   for (const gen of GENERATORS) {
