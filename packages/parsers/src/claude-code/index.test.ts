@@ -269,11 +269,10 @@ test("tool calls get a structural action on-device; raw command is reduced to fa
     ]),
   ]);
   const { toolCalls } = await parseClaudeCodeJsonl({ deviceId: "dev_1", sourceFile: file });
-  // The on-device extractor fills `action` with structural facts + a redacted
-  // command; semantics (action/object/keywords/abstract) are server-derived.
+  // The on-device extractor fills `action` with STRUCTURAL facts + a redacted
+  // command only; the whole operation frame is server-derived (SPEC 0004).
   assert.equal(toolCalls[0]?.action?.surface, "shell");
   assert.equal(toolCalls[0]?.action?.executable, "git");
-  assert.equal(toolCalls[0]?.action?.action, null, "semantics are server-side");
   assert.equal(toolCalls[1]?.action?.surface, "builtin");
   assert.equal(toolCalls[1]?.action?.executable, "Read");
   assert.equal(toolCalls[2]?.action?.surface, "shell");

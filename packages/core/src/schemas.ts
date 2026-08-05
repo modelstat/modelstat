@@ -197,12 +197,17 @@ export const Segment = z.object({
 export type Segment = z.infer<typeof Segment>;
 
 /**
- * On-device action decomposition of a tool call — a nested, additive object so
- * the top-level ToolCallWire stays stable as attributes grow. Bit-aligned with
- * the backend's Rust wire schema: the field set, caps, and defaults must match
- * exactly. Privacy: only governed tokens, the value-masked `param_shape`, and
- * the compliance-redacted command (PII/secrets stripped) ride this —
- * un-redacted raw never does. Produced on-device.
+ * On-device STRUCTURAL decomposition of a tool call — a nested, additive object
+ * so the top-level ToolCallWire stays stable as attributes grow. Bit-aligned
+ * with the backend's Rust wire schema: the field set, caps, and defaults must
+ * match exactly. Privacy: only the value-masked `param_shape` and the
+ * compliance-redacted command (PII/secrets stripped) ride this — un-redacted raw
+ * never does. Produced on-device.
+ *
+ * SPEC 0004: the wire carries NO semantic fields. The server derives the whole
+ * operation frame (action / object / system / environment / effect /
+ * multiplicity / label / blast_radius) from `command_redacted`, cached per
+ * distinct command — so it stays accurate + re-runnable as the model improves.
  */
 export const ToolAction = z
   .object({
@@ -210,25 +215,15 @@ export const ToolAction = z
     surface: z.string().max(40),
     /** Concrete program/operation, or a generic bucket token. (tier 0 | bucket) */
     executable: z.string().max(80).nullable().default(null),
-    /** Verb/intent (`restart`, `read`, …). (tier 0) */
-    action: z.string().max(40).nullable().default(null),
-    /** What it acts on (`deployment`, `file`, …). (tier 0) */
-    object: z.string().max(60).nullable().default(null),
-    /** Governed safe flags (`destructive`, `remote`, …). (tier 0) */
-    qualifiers: z.array(z.string().max(40)).max(8).default([]),
     /** Value-masked argument skeleton (every value → `§`). Carried in full up
      * to a malicious-size guard (mirrors backend `MAX_TOOL_ACTION_PARAM_SHAPE_CHARS`);
      * the daemon clamps rather than truncating semantically. (tier 1) */
     param_shape: z.string().max(16_384).nullable().default(null),
-    /** Relevant non-sensitive keywords (e.g. ["rollout","restart","prod"]),
-     * OpenAI-redacted on-device. (tier 0) */
-    keywords: z.array(z.string().max(40)).max(12).default([]),
-    /** Human-readable command summary (e.g. "redeploying service payments-api"),
-     * OpenAI-redacted on-device. (tier 0) */
-    abstract: z.string().max(200).nullable().default(null),
     /** The compliance-redacted command text — PII/secrets stripped on-device
-     * (SOC2/GDPR), org-internal infra intact; the server derives semantics from
-     * it. Un-redacted raw never ships. (tier 0, post-redaction) */
+     * (SOC2/GDPR), org-internal infra intact; the server derives the WHOLE
+     * operation frame (action/object/system/environment/effect/multiplicity/
+     * label/blast_radius) from it, cached per command. Un-redacted raw never
+     * ships. (tier 0, post-redaction) */
     command_redacted: z.string().max(16_384).nullable().default(null),
     /** Per-script content abstracts for any script/bash FILES the command runs
      * — summarized on-device by the local model, then redacted. Ordered by
@@ -239,8 +234,6 @@ export const ToolAction = z
       .array(z.object({ token: z.string().max(200), summary: z.string().max(200) }))
       .max(8)
       .default([]),
-    /** Extractor confidence in [0, 1]. */
-    confidence: z.number().min(0).max(1).default(0),
     /** Provenance of the extraction, e.g. `shell.v3`. */
     extractor: z.string().max(40),
   })

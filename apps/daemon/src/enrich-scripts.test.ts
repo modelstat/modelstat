@@ -5,20 +5,14 @@ import type { ToolAction } from "@modelstat/core";
 import type { LocalToolContext } from "@modelstat/parsers";
 import { defaultRoots, type EnrichScriptsDeps, enrichToolCallScripts } from "./enrich-scripts.js";
 
-/** A wire-shaped ToolAction with everything null/empty except command_redacted. */
+/** A structural-only wire ToolAction (SPEC 0004) — just command_redacted. */
 function action(command_redacted: string | null): ToolAction {
   return {
     surface: "shell",
     executable: "bash",
-    action: null,
-    object: null,
-    qualifiers: [],
     param_shape: null,
-    keywords: [],
-    abstract: null,
     command_redacted,
     scripts: [],
-    confidence: 0,
     extractor: "shell.v1",
   };
 }
