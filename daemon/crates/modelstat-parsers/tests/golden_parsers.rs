@@ -144,7 +144,7 @@ fn parser_golden_parity() {
     // 4. Codex — disjoint token buckets, tool call anchored to its own line.
     {
         let file = format!(
-            "{BASE}/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl"
+            "{BASE}/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl"
         );
         let res = parse_codex_rollout(&ctx(&file)).unwrap();
         let g = golden("codex_basic.json");
@@ -188,7 +188,7 @@ fn parser_golden_parity() {
         );
 
         let codex = format!(
-            "{BASE}/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl"
+            "{BASE}/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl"
         );
         assert_stream_matches(
             parse_codex_rollout(&ctx(&codex)).unwrap(),
@@ -285,7 +285,7 @@ fn regen_goldens() {
     dump(
         "codex_basic.json",
         &parse_codex_rollout(&ctx(&format!(
-            "{BASE}/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl"
+            "{BASE}/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl"
         )))
         .unwrap(),
     );

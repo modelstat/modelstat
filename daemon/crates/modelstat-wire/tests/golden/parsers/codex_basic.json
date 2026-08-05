@@ -1,74 +1,132 @@
 {
   "deviceId": "dev_1",
-  "sourceFile": "/tmp/modelstat-fixtures/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl",
+  "sourceFile": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
   "events": [
     {
-      "source_event_id": "evt_2mpv0mc8gcpiz",
-      "ts": "2026-06-08T15:50:00.000Z",
+      "source_event_id": "evt_36pa237q80av4",
+      "ts": "2026-08-05T11:58:59.076Z",
+      "kind": "user_message",
+      "agent": "codex_cli",
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": "/private/tmp/modelstat-fixture-gen/api",
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "content_excerpt": "Read uploader.js and tell me in one sentence what it does.",
+      "content_bytes": 58,
+      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
+      "source_byte_offset": 7771,
+      "pricing_mode": "subscription"
+    },
+    {
+      "source_event_id": "evt_14p55gfv1e4x",
+      "ts": "2026-08-05T11:59:02.811Z",
       "kind": "assistant_message",
       "agent": "codex_cli",
       "provider": "openai",
-      "model": "gpt-5.5",
-      "session_id": "55555555-5555-5555-5555-555555555555",
+      "model": "gpt-5.6-terra",
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
       "turn_index": 0,
       "parent_event_id": null,
-      "cwd": "/Users/dev/projects/api",
+      "cwd": "/private/tmp/modelstat-fixture-gen/api",
       "git": null,
       "tokens": {
-        "input": 70,
-        "output": 30,
+        "input": 4401,
+        "output": 88,
         "cache_creation": 0,
-        "cache_read": 30,
-        "reasoning": 20
+        "cache_read": 9984,
+        "reasoning": 21
       },
       "duration_ms": null,
       "tool_calls": {
-        "update_plan": 1
+        "exec": 1
       },
       "files_touched": [],
-      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl",
-      "source_byte_offset": 635,
+      "content_excerpt": "I’ll inspect `uploader.js` and summarize its behavior in one sentence.",
+      "content_bytes": 70,
+      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
+      "source_byte_offset": 11142,
+      "pricing_mode": "subscription"
+    },
+    {
+      "source_event_id": "evt_14p55gfv23kt",
+      "ts": "2026-08-05T11:59:04.046Z",
+      "kind": "assistant_message",
+      "agent": "codex_cli",
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+      "turn_index": 1,
+      "parent_event_id": null,
+      "cwd": "/private/tmp/modelstat-fixture-gen/api",
+      "git": null,
+      "tokens": {
+        "input": 460,
+        "output": 27,
+        "cache_creation": 0,
+        "cache_read": 14080,
+        "reasoning": 0
+      },
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "content_excerpt": "`uploader.js` exports an `upload` function that POSTs its input to the `/widgets` endpoint.",
+      "content_bytes": 91,
+      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
+      "source_byte_offset": 12697,
       "pricing_mode": "subscription"
     }
   ],
   "toolCalls": [
     {
-      "external_call_id": "call_1",
-      "session_id": "55555555-5555-5555-5555-555555555555",
-      "source_event_id": "evt_2mpv0mc8gcm9k",
+      "external_call_id": "call_mqV5UTEptgHbhQ0ivRwonitC",
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+      "source_event_id": "evt_14p55gfv3ogg",
       "agent": "codex_cli",
       "server": "builtin",
-      "name": "update_plan",
+      "name": "exec",
       "turn_index": 0,
       "call_index": 0,
-      "started_at": "2026-06-08T15:49:39.854Z",
-      "ended_at": "2026-06-08T15:49:40.072Z",
+      "started_at": "2026-08-05T11:59:02.131Z",
+      "ended_at": "2026-08-05T11:59:02.811Z",
       "status": "success",
-      "args_hash": "e189f36f6e430ec191ae78163dcf2b98bb55958af64771e942a729e68dc7b10c",
-      "signature_hash": "64879f7d6b960a01909762d911a32d4582c20010c5641ee90278b644a9e3b525",
-      "args_bytes": 46,
-      "result_bytes": 14,
-      "model": "gpt-5.5",
+      "args_hash": "39e4c8853f055c039f13fb1cb9b51ee3abe58e6fceb3e873d38cbc0849349aec",
+      "signature_hash": "none",
+      "args_bytes": 206,
+      "result_bytes": 209,
+      "model": "gpt-5.6-terra",
       "action": {
-        "surface": "builtin",
-        "executable": "update_plan",
+        "surface": "shell",
+        "executable": "const",
         "action": null,
         "object": null,
         "qualifiers": [],
-        "param_shape": null,
+        "param_shape": "§ § § § -n § § §",
         "keywords": [],
         "abstract": null,
-        "command_redacted": null,
+        "command_redacted": "const r = await tools.exec_command({\"cmd\":\"sed -n '1,240p' uploader.js\",\"workdir\":\"/private/tmp/modelstat-fixture-gen/api\",\"yield_time_ms\":10000,\"max_output_tokens\":12000});\ntext(r.output);\n",
         "scripts": [],
         "confidence": 0.0,
-        "extractor": "builtin.v1"
+        "extractor": "shell.v3"
       }
     }
   ],
-  "scriptContexts": [],
+  "scriptContexts": [
+    {
+      "external_call_id": "call_mqV5UTEptgHbhQ0ivRwonitC",
+      "command": "const r = await tools.exec_command({\"cmd\":\"sed -n '1,240p' uploader.js\",\"workdir\":\"/private/tmp/modelstat-fixture-gen/api\",\"yield_time_ms\":10000,\"max_output_tokens\":12000});\ntext(r.output);\n",
+      "cwd": "/private/tmp/modelstat-fixture-gen/api"
+    }
+  ],
   "stats": {
-    "rawLines": 6,
-    "emittedEvents": 1,
-    "skipped": 1
+    "rawLines": 18,
+    "emittedEvents": 3,
+    "skipped": 11
   }
 }
