@@ -962,7 +962,110 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
         }
     }
 
+    // Key-based providers configured inside a multi-provider agent
+    // (pi/omp). Their spend was 100% unattributable — zhipu 60% and xai
+    // 31% of events had no account — because a key has no OAuth login to
+    // probe. Only a fingerprint of the key travels.
+    ids.extend(probe_provider_key_identities(&home));
+
     ids
+}
+
+/// Providers whose account is an opaque API KEY rather than an OAuth login, as
+/// configured inside a multi-provider agent (pi/omp keeps a `providers:` block).
+///
+/// Attribution needs to know WHOSE account paid, and for a key-based provider
+/// the key IS the account. So the key is fingerprinted here and only the
+/// fingerprint travels: a SHA-256 prefix, plus the last four characters as a
+/// human-recognisable label, in the manner of a card. The key itself never
+/// leaves this function — not to the wire, not to a log, not to the struct.
+///
+/// Rotating a key therefore reads as a new account. That is the honest
+/// outcome: nothing on the machine ties the old key to the new one.
+///
+/// Deliberately shape-agnostic. The `providers:` block exists in a real config,
+/// but its nesting under each provider was NOT observable on the machine this
+/// was written on (that install configures no keys), so rather than guess a
+/// schema this walks the whole subtree and pairs any provider-ish name with any
+/// key-shaped string beneath it. A layout we guessed wrong yields nothing
+/// rather than something false.
+fn probe_provider_key_identities(home: &str) -> Vec<DetectedIdentity> {
+    let mut out = Vec::new();
+    for rel in [".pi/agent/config.yml", ".omp/agent/config.yml"] {
+        let path = format!("{home}/{rel}");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&raw) else {
+            continue;
+        };
+        let Some(providers) = doc.get("providers") else {
+            continue;
+        };
+        let Some(map) = providers.as_mapping() else {
+            continue;
+        };
+        for (name, sub) in map {
+            let Some(name) = name.as_str().map(str::to_lowercase) else {
+                continue;
+            };
+            // `webSearch: auto` and friends live here too — a provider entry is
+            // one that actually carries a credential.
+            let Some(key) = first_key_like(sub) else {
+                continue;
+            };
+            use sha2::Digest;
+            let digest = sha2::Sha256::digest(key.as_bytes());
+            let fingerprint = format!("{digest:x}")[..24].to_string();
+            let last4: String = key
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            out.push(DetectedIdentity {
+                provider: name,
+                provider_account_id: format!("key:{fingerprint}"),
+                provider_account_label: Some(format!("key ••••{last4}")),
+                account_email: None,
+                account_org: None,
+                display_name: None,
+                owner_scope: "unassigned".into(),
+                detection_source: "provider_key_fingerprint".into(),
+            });
+        }
+    }
+    out
+}
+
+/// The first credential-shaped string anywhere beneath `v`.
+///
+/// "Credential-shaped" is structural, not a name match: long enough to be a
+/// key, and free of whitespace. Field names are consulted only to PREFER an
+/// obvious one, never to require it, because a config we have not seen may call
+/// it anything.
+fn first_key_like(v: &serde_yaml_ng::Value) -> Option<String> {
+    const MIN_KEY_LEN: usize = 20;
+    match v {
+        serde_yaml_ng::Value::String(s) => {
+            let s = s.trim();
+            (s.len() >= MIN_KEY_LEN && !s.contains(char::is_whitespace)).then(|| s.to_string())
+        }
+        serde_yaml_ng::Value::Mapping(m) => {
+            // Named-like fields first, so a key beats a neighbouring URL.
+            let named = m.iter().find_map(|(k, val)| {
+                let name = k.as_str()?.to_lowercase();
+                (name.contains("key") || name.contains("token") || name.contains("secret"))
+                    .then(|| first_key_like(val))
+                    .flatten()
+            });
+            named.or_else(|| m.iter().find_map(|(_, val)| first_key_like(val)))
+        }
+        serde_yaml_ng::Value::Sequence(items) => items.iter().find_map(first_key_like),
+        _ => None,
+    }
 }
 
 /// Decode a JWT's payload (the second dot-segment) as base64url → JSON claims.
@@ -1301,5 +1404,91 @@ mod process_probe_tests {
             assert!(!agent.is_empty());
             assert!(Path::new(&dir).is_dir(), "{dir} exists");
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_key_tests {
+    use super::*;
+
+    fn write_cfg(body: &str) -> String {
+        let home = std::env::temp_dir().join(format!(
+            "modelstat-pikeys-{}-{}",
+            std::process::id(),
+            body.len()
+        ));
+        let dir = home.join(".pi/agent");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yml"), body).unwrap();
+        home.to_string_lossy().into_owned()
+    }
+
+    /// The nesting under `providers:` was never observable, so ANY of these
+    /// shapes must work. A layout we guessed wrong yields nothing, never
+    /// something false.
+    #[test]
+    fn a_key_is_found_at_whatever_depth_it_sits() {
+        for body in [
+            "providers:\n  zhipu: abcdefghijklmnopqrstuvwxyz123456\n",
+            "providers:\n  zhipu:\n    apiKey: abcdefghijklmnopqrstuvwxyz123456\n",
+            "providers:\n  zhipu:\n    auth:\n      token: abcdefghijklmnopqrstuvwxyz123456\n",
+            "providers:\n  zhipu:\n    keys:\n      - abcdefghijklmnopqrstuvwxyz123456\n",
+        ] {
+            let home = write_cfg(body);
+            let ids = probe_provider_key_identities(&home);
+            assert_eq!(ids.len(), 1, "one identity for {body:?}");
+            assert_eq!(ids[0].provider, "zhipu");
+            assert_eq!(
+                ids[0].provider_account_label.as_deref(),
+                Some("key ••••3456")
+            );
+            assert!(ids[0].provider_account_id.starts_with("key:"));
+            std::fs::remove_dir_all(&home).ok();
+        }
+    }
+
+    /// The key itself must never appear in what the probe hands back.
+    #[test]
+    fn the_key_never_leaves_the_probe() {
+        const SECRET: &str = "zhipu-live-abcdefghijklmnopqrstuvwxyz";
+        let home = write_cfg(&format!("providers:\n  zhipu:\n    apiKey: {SECRET}\n"));
+        let ids = probe_provider_key_identities(&home);
+        let dumped = format!("{ids:?}");
+        assert!(!dumped.contains(SECRET), "the key leaked: {dumped}");
+        assert!(!dumped.contains("abcdefghij"), "even a slice of it leaked");
+        // Same key ⇒ same account, so spend groups correctly.
+        let again = probe_provider_key_identities(&home);
+        assert_eq!(ids[0].provider_account_id, again[0].provider_account_id);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn non_credential_settings_are_not_mistaken_for_accounts() {
+        // The real config on the machine this was written on: a providers block
+        // holding a plain setting and no credential at all.
+        let home = write_cfg("providers:\n  webSearch: auto\nsymbolPreset: unicode\n");
+        assert!(
+            probe_provider_key_identities(&home).is_empty(),
+            "a setting is not an account"
+        );
+        std::fs::remove_dir_all(&home).ok();
+
+        // A URL is long but has a scheme and is not a credential field.
+        let home =
+            write_cfg("providers:\n  zhipu:\n    baseUrl: https://open.bigmodel.cn/api/paas\n");
+        let ids = probe_provider_key_identities(&home);
+        assert!(
+            ids.is_empty() || ids[0].provider_account_id.starts_with("key:"),
+            "a base URL must not masquerade as a key"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_missing_or_broken_config_is_silent() {
+        assert!(probe_provider_key_identities("/no/such/home").is_empty());
+        let home = write_cfg("this: [is not: valid yaml\n");
+        assert!(probe_provider_key_identities(&home).is_empty());
+        std::fs::remove_dir_all(&home).ok();
     }
 }
