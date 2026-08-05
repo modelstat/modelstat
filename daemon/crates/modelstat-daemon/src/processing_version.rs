@@ -40,15 +40,16 @@ use modelstat_ingest::RuntimeState;
 ///       makes that automatic — an auto-updated daemon wipes its cursors on first
 ///       boot and re-processes the world, with no user action.
 /// v19 — conversation capture (SPEC 0005). Message excerpts become real bodies:
-///       verbatim typed text (paste payload elided behind `[pasted: …]` markers,
-///       platform-injected noise dropped), cap 320 → 16384, plus `content_bytes`,
-///       `turn_index` for claude_code/pi, and Claude Code's own stated
-///       `toolUseResult.durationMs`. The server now materializes these into the
-///       `messages` table and turn-timing columns; everything already uploaded
-///       carries only the old 320-char strip-all-code excerpts, so re-scanning the
-///       local JSONL corpus is the ONLY way history gains full transcripts. The
-///       server dedupes on `(scope, source_event_id)` and ReplacingMergeTree
-///       upserts the wider rows over the old ones — the re-scan is pure upgrade.
+///       the VERBATIM redacted text of what was said — nothing regexed away, no
+///       truncation (the wire cap, raised 320 → 262144, is an extreme
+///       malicious-size guard only) — plus `content_bytes`, `turn_index` for
+///       claude_code/pi, and Claude Code's own stated `toolUseResult.durationMs`.
+///       The server materializes these into the `messages` table and turn-timing
+///       columns; everything already uploaded carries only the old 320-char
+///       strip-all-code excerpts, so re-scanning the local JSONL corpus is the
+///       ONLY way history gains full transcripts. The server dedupes on
+///       `(scope, source_event_id)` and ReplacingMergeTree upserts the wider
+///       rows over the old ones — the re-scan is pure upgrade.
 pub const PROCESSING_VERSION: i64 = 19;
 
 /// The state a reconcile reads + mutates: the stored marker plus the cursors it

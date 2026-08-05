@@ -26,7 +26,7 @@ use crate::references::detect_event_references;
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
-use crate::util::{cap_with_marker, elide_pastes, slice_utf16, strip_injected, tidy_verbatim};
+use crate::util::slice_utf16;
 use modelstat_wire::tc_fallback_id;
 
 /// `<session-uuid>.jsonl` at the end of a path → the uuid.
@@ -50,25 +50,27 @@ pub fn decode_encoded_dir(encoded: &str) -> String {
     stripped.replace('-', "/")
 }
 
-/// Extract the message's redacted, paste-elided VERBATIM text (SPEC 0005) plus
-/// the cleaned pre-elision length in chars. Only `text` blocks contribute.
-/// Pipeline: drop platform-injected noise → measure (that's `content_bytes`) →
-/// elide pasted payload behind `[pasted: …]` markers → redact (L1 floor) → cap
-/// with a trailing `[+N chars]` marker. What the developer actually typed —
-/// including small code snippets — survives verbatim; payload never ships.
+/// Extract the message's redacted VERBATIM text (SPEC 0005) plus its length in
+/// chars. Only `text` blocks contribute, and NOTHING is processed away — no
+/// code stripping, no paste heuristics, no truncation: the world is too
+/// diverse for regex/thresholds, so any semantic judgment about the text
+/// (typed vs pasted, noise vs signal) belongs to the LLM layers downstream.
+/// The only bound anywhere is the wire clamp
+/// ([`modelstat_wire::caps::CONTENT_EXCERPT_MAX`]), an extreme
+/// malicious-size guard, and redaction — the deterministic security floor —
+/// still runs before anything leaves the machine.
 fn extract_excerpt(content: &Value) -> Option<(String, u64)> {
     let text = join_text(content)?;
-    let typed = tidy_verbatim(&strip_injected(&text));
-    if typed.is_empty() {
+    let text = text.trim();
+    if text.is_empty() {
         return None;
     }
-    let pre_chars = typed.chars().count() as u64;
-    let cleaned = redact(&tidy_verbatim(&elide_pastes(&typed)), None).text;
-    let capped = cap_with_marker(&cleaned, modelstat_wire::caps::CONTENT_EXCERPT_MAX);
-    if capped.is_empty() {
+    let pre_chars = text.chars().count() as u64;
+    let cleaned = redact(text, None).text;
+    if cleaned.is_empty() {
         None
     } else {
-        Some((capped, pre_chars))
+        Some((cleaned, pre_chars))
     }
 }
 
@@ -89,7 +91,7 @@ fn join_text(content: &Value) -> Option<String> {
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
                 .filter_map(|b| b.get("text").and_then(Value::as_str))
                 .collect();
-            let joined = parts.join(" ");
+            let joined = parts.join("\n\n");
             if joined.is_empty() {
                 None
             } else {

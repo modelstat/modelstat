@@ -23,7 +23,7 @@ use crate::references::detect_event_references;
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
-use crate::util::{cap_with_marker, elide_pastes, slice_utf16, strip_injected, tidy_verbatim};
+use crate::util::slice_utf16;
 
 /// Map pi's free-form provider string onto the closed PROVIDERS enum. Substring
 /// matches (not equality) — pi sometimes records a model name in the provider slot.
@@ -75,30 +75,27 @@ fn join_text_blocks(content: &Value) -> String {
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
                 .filter_map(|b| b.get("text").and_then(Value::as_str))
                 .collect();
-            parts.join(" ")
+            parts.join("\n\n")
         }
         _ => String::new(),
     }
 }
 
-/// SPEC 0005: redacted, paste-elided VERBATIM text + cleaned pre-elision chars
-/// (mirrors `claude_code::extract_excerpt`; see there for the pipeline).
+/// SPEC 0005: redacted VERBATIM text + its length in chars (mirrors
+/// `claude_code::extract_excerpt` — nothing processed away, no truncation;
+/// the wire clamp is the only, extreme, bound).
 fn extract_excerpt(content: &Value) -> Option<(String, u64)> {
     let text = join_text_blocks(content);
+    let text = text.trim();
     if text.is_empty() {
         return None;
     }
-    let typed = tidy_verbatim(&strip_injected(&text));
-    if typed.is_empty() {
-        return None;
-    }
-    let pre_chars = typed.chars().count() as u64;
-    let cleaned = redact(&tidy_verbatim(&elide_pastes(&typed)), None).text;
-    let capped = cap_with_marker(&cleaned, modelstat_wire::caps::CONTENT_EXCERPT_MAX);
-    if capped.is_empty() {
+    let pre_chars = text.chars().count() as u64;
+    let cleaned = redact(text, None).text;
+    if cleaned.is_empty() {
         None
     } else {
-        Some((capped, pre_chars))
+        Some((cleaned, pre_chars))
     }
 }
 
