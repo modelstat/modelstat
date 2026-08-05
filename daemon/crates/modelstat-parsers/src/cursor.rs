@@ -57,16 +57,35 @@ struct Bubble {
 /// they are not messages and would be empty rows.
 pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseResult> {
     // Snapshot the DB to a temp copy (plan D6) so we never lock the live file.
-    let bytes = fs::read(&ctx.source_file)?;
+    //
+    // The `-wal` and `-shm` sidecars come TOO. Cursor runs the store in WAL
+    // mode, so the main file alone is not a database: with a dirty write-ahead
+    // log, opening a copy of it fails outright ("unable to open database file",
+    // SQLITE_CANTOPEN) — and on the one occasion it does open, because the WAL
+    // happened to be checkpointed, it is missing every conversation still
+    // living in the log. Measured on a real install: main-file-only was
+    // unreadable, while the three files together read 408 records.
     let tmp = std::env::temp_dir().join(format!(
         "modelstat-cursor-{}-{}.vscdb",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::write(&tmp, &bytes)?;
+    fs::write(&tmp, fs::read(&ctx.source_file)?)?;
+    // Best-effort: a checkpointed store has no sidecars, and the main file is
+    // then self-contained.
+    for suffix in ["-wal", "-shm"] {
+        let side = format!("{}{suffix}", ctx.source_file);
+        if let Ok(bytes) = fs::read(&side) {
+            let _ = fs::write(format!("{}{suffix}", tmp.to_string_lossy()), bytes);
+        }
+    }
 
     let result = read_bubbles(&tmp);
+    // SQLite may have checkpointed the copy's log on open, so clear all three.
     let _ = fs::remove_file(&tmp);
+    for suffix in ["-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", tmp.to_string_lossy()));
+    }
     let mut bubbles = result.map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let raw_lines = bubbles.len() as u64;
@@ -298,6 +317,60 @@ mod since_floor_tests {
         ("b3", 1, "second ask", "2026-06-20T11:00:00.000Z"),
         ("b4", 2, "second reply", "2026-06-20T11:00:04.000Z"),
     ];
+
+    /// Cursor runs its store in WAL mode. Copying only the main file — which is
+    /// what this parser did until the sidecars came along — cannot even OPEN a
+    /// store whose write-ahead log is dirty, so every Cursor session on the
+    /// machine was silently unreadable.
+    #[test]
+    fn a_wal_mode_store_with_a_dirty_log_is_still_read() {
+        let path = std::env::temp_dir().join(format!(
+            "modelstat-cursor-wal-{}-{}.vscdb",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        // WAL, and never checkpoint: the rows stay in the sidecar.
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        conn.execute(
+            "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        for (bid, kind, text, ts) in [
+            ("w1", 1, "in the log", "2026-06-20T10:00:00.000Z"),
+            ("w2", 2, "also in the log", "2026-06-20T10:00:02.000Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO cursorDiskKV VALUES (?,?)",
+                rusqlite::params![
+                    format!("bubbleId:comp-wal:{bid}"),
+                    format!(r#"{{"type":{kind},"text":"{text}","createdAt":"{ts}"}}"#)
+                ],
+            )
+            .unwrap();
+        }
+        let wal = format!("{}-wal", path.to_string_lossy());
+        assert!(
+            std::fs::metadata(&wal)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false),
+            "the test's premise: rows are sitting in a dirty WAL"
+        );
+
+        // Parse with the writer still connected, exactly as a live Cursor is.
+        let r = parse_cursor_tracking_db(&ParserContext::new("dev_1", path.to_string_lossy()))
+            .expect("a WAL-mode store is readable");
+        assert_eq!(r.events.len(), 2, "both logged rows are read");
+        assert_eq!(r.events[0].content_excerpt.as_deref(), Some("in the log"));
+
+        drop(conn);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.to_string_lossy()));
+        }
+    }
 
     #[test]
     fn without_a_floor_every_message_ships() {
