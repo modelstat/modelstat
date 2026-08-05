@@ -11,7 +11,10 @@ pub const MODEL_MAX: usize = 120;
 pub const SESSION_ID_MAX: usize = 120;
 pub const FILES_TOUCHED_ITEM_MAX: usize = 512;
 pub const FILES_TOUCHED_COUNT_MAX: usize = 256;
-pub const CONTENT_EXCERPT_MAX: usize = 320;
+// SPEC 0005: a real message body, not summarizer feed — VERBATIM redacted
+// text, never processed short. This bound exists only as an extreme
+// malicious-size guard (was 320 pre-capture); no real message approaches it.
+pub const CONTENT_EXCERPT_MAX: usize = 262_144;
 pub const SOURCE_FILE_MAX: usize = 1024;
 
 // --- Segment --------------------------------------------------------------

@@ -43,5 +43,11 @@
       "pricing_mode": "subscription"
     }
   ],
-  "toolCalls": []
+  "toolCalls": [],
+  "scriptContexts": [],
+  "stats": {
+    "rawLines": 2,
+    "emittedEvents": 2,
+    "skipped": 0
+  }
 }

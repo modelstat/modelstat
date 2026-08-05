@@ -581,6 +581,7 @@ mod tests {
 
     fn ev(session: &str, ts: &str) -> RawEvent {
         RawEvent {
+            content_bytes: None,
             source_event_id: format!("{session}:{ts}"),
             ts: ts.into(),
             kind: "message".into(),

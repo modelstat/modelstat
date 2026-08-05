@@ -294,6 +294,7 @@ mod tests {
     fn turn_surface_is_metadata_only() {
         use modelstat_wire::{RawEvent, TokenUsage};
         let mut ev = RawEvent {
+            content_bytes: None,
             source_event_id: "e".into(),
             ts: "2026-01-01T00:00:00Z".into(),
             kind: "assistant_message".into(),

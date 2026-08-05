@@ -97,6 +97,11 @@ pub struct RawEvent {
     pub files_touched: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_excerpt: Option<String>,
+    /// Chars of the cleaned message text BEFORE paste-elision/truncation
+    /// (SPEC 0005) — "was this cut / how big was the real prompt" as a stored
+    /// fact. Only set when `content_excerpt` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<Value>,
     #[serde(default)]
@@ -435,6 +440,7 @@ mod tests {
             tool_calls: BTreeMap::new(),
             files_touched: vec![],
             content_excerpt: None,
+            content_bytes: None,
             references: None,
             source_file: None,
             source_byte_offset: None,
@@ -446,6 +452,7 @@ mod tests {
         assert!(v.get("source_file").unwrap().is_null());
         // optional → omitted
         assert!(v.get("content_excerpt").is_none());
+        assert!(v.get("content_bytes").is_none());
         // required → always present, even at its most conservative value
         assert_eq!(v.get("pricing_mode").unwrap(), "subscription");
         // default → materialized

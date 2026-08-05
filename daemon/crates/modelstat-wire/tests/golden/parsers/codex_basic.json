@@ -60,9 +60,15 @@
         "abstract": null,
         "command_redacted": null,
         "scripts": [],
-        "confidence": 0,
+        "confidence": 0.0,
         "extractor": "builtin.v1"
       }
     }
-  ]
+  ],
+  "scriptContexts": [],
+  "stats": {
+    "rawLines": 6,
+    "emittedEvents": 1,
+    "skipped": 1
+  }
 }

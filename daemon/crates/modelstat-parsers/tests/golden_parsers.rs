@@ -229,3 +229,75 @@ where
     );
     assert_eq!(res.stats, collected.stats, "{label}: streamed stats differ");
 }
+
+/// Regenerate the frozen goldens from CURRENT parser output:
+/// `REGEN_GOLDENS=1 cargo test -p modelstat-parsers --test golden_parsers regen`.
+/// No-op without the env var. The goldens exist so parser-output drift is a
+/// deliberate, reviewed diff — regenerate, then READ the diff before committing.
+#[test]
+fn regen_goldens() {
+    if std::env::var("REGEN_GOLDENS").is_err() {
+        return;
+    }
+    materialize_tree();
+    let dump = |name: &str, res: &modelstat_parsers::types::ParseResult| {
+        let path = format!("{}/{name}", golden_dir());
+        let prev = golden(name);
+        let sc: Vec<Value> = res
+            .script_contexts
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "external_call_id": c.external_call_id,
+                    "command": c.command,
+                    "cwd": c.cwd,
+                })
+            })
+            .collect();
+        let v = serde_json::json!({
+            "deviceId": prev.get("deviceId").cloned().unwrap_or_else(|| Value::from("dev_1")),
+            "sourceFile": res.source_file,
+            "events": res.events,
+            "toolCalls": res.tool_calls,
+            "scriptContexts": sc,
+            "stats": res.stats,
+        });
+        let mut text = serde_json::to_string_pretty(&v).unwrap();
+        text.push('\n');
+        std::fs::write(&path, text).unwrap_or_else(|e| panic!("write {path}: {e}"));
+    };
+    let claude = |sid: &str| format!("{BASE}/claude/{sid}.jsonl");
+    dump(
+        "claude_basic.json",
+        &parse_claude_code_jsonl(&ctx(&claude("11111111-1111-1111-1111-111111111111"))).unwrap(),
+    );
+    dump(
+        "claude_synthetic.json",
+        &parse_claude_code_jsonl(&ctx(&claude("22222222-2222-2222-2222-222222222222"))).unwrap(),
+    );
+    dump(
+        "claude_resume_copy.json",
+        &parse_claude_code_jsonl(&ctx(&format!(
+            "{BASE}/claude-resume/projects/myproj/44444444-4444-4444-4444-444444444444.jsonl"
+        )))
+        .unwrap(),
+    );
+    dump(
+        "codex_basic.json",
+        &parse_codex_rollout(&ctx(&format!(
+            "{BASE}/codex/rollout-2026-06-08T15-49-00-55555555-5555-5555-5555-555555555555.jsonl"
+        )))
+        .unwrap(),
+    );
+    dump(
+        "pi_basic.json",
+        &parse_pi_session(&ctx_api(&format!(
+            "{BASE}/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl"
+        )))
+        .unwrap(),
+    );
+    dump(
+        "cursor_basic.json",
+        &parse_cursor_tracking_db(&ctx(&format!("{BASE}/cursor/state.vscdb"))).unwrap(),
+    );
+}

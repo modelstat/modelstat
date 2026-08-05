@@ -306,6 +306,7 @@ mod tests {
     /// A minimal event: only session / provider / ts matter here.
     fn ev(session: &str, provider: &str, ts: &str) -> RawEvent {
         RawEvent {
+            content_bytes: None,
             source_event_id: format!("evt:{session}:{ts}"),
             ts: ts.into(),
             kind: "assistant_message".into(),

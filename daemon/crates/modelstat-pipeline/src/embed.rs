@@ -200,6 +200,7 @@ mod tests {
         use crate::segment::segment_turns;
         use modelstat_wire::RawEvent;
         let mk = |ts: &str| RawEvent {
+            content_bytes: None,
             source_event_id: "e".into(),
             ts: ts.into(),
             kind: "user_message".into(),

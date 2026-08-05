@@ -133,6 +133,12 @@ jobs:
         run: npx tsx daemon/scripts/fixtures/gen-all.mts
       - name: Re-emit the Rust wire fixtures
         run: cargo run -q -p modelstat-wire --example emit_fixtures
+      # The PARSER goldens regenerate from the Rust parsers — since SPEC 0005
+      # the Rust implementation deliberately supersedes the retired TS port
+      # (verbatim excerpts, turn_index, content_bytes), so TS is no longer
+      # their oracle. Reproducibility is still gated: regen + git-diff.
+      - name: Regenerate parser goldens from the Rust parsers
+        run: REGEN_GOLDENS=1 cargo test -q -p modelstat-parsers --test golden_parsers regen --locked
       - name: Fixtures must be reproducible (no drift from committed)
         working-directory: .
         run: git diff --exit-code -- daemon/crates/modelstat-wire/tests/golden

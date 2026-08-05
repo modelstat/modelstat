@@ -697,6 +697,7 @@ mod tests {
 
     fn ev(id: &str, ts: &str, kind: &str, content: Option<&str>) -> RawEvent {
         RawEvent {
+            content_bytes: None,
             source_event_id: id.into(),
             ts: ts.into(),
             kind: kind.into(),
