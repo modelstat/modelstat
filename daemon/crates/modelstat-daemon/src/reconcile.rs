@@ -453,6 +453,7 @@ mod tests {
         store.cursor.insert(
             "/a.jsonl".into(),
             FileCursor {
+                shipped_through_ms: None,
                 size: 1,
                 mtime: 1,
                 tail_hash: "x".into(),
@@ -602,6 +603,7 @@ mod tests {
         store.cursor.insert(
             "/gone.jsonl".into(),
             FileCursor {
+                shipped_through_ms: None,
                 size: 1,
                 mtime: 1,
                 tail_hash: "x".into(),

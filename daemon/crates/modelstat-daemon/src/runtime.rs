@@ -308,6 +308,7 @@ fn eager_target_jobs(session_ids: &[String], file: Option<&str>) -> Vec<ScanJob>
         return match all.iter().find(|j| j.path == f) {
             Some(j) => vec![j.clone()],
             None => vec![ScanJob {
+                since_ms: None,
                 path: f.to_string(),
                 kind: kind_for_path(f),
             }],
@@ -359,6 +360,7 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     };
     let checksum = |path: &str| {
         quick_checksum(path).ok().map(|c| FileCursor {
+            shipped_through_ms: None,
             size: c.size,
             mtime: c.mtime as i64,
             tail_hash: c.tail_hash,

@@ -37,6 +37,13 @@ pub struct FileCursor {
     pub size: u64,
     pub mtime: i64,
     pub tail_hash: String,
+    /// Watermark for sources whose records are NOT positional — Cursor's
+    /// `state.vscdb`, where a chat message is a key/value row, not a byte range.
+    /// Their floor is "already shipped through this instant" instead of "already
+    /// shipped below this offset". Absent (and omitted from `state.json`) for
+    /// every transcript file, so the serialized shape is unchanged for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shipped_through_ms: Option<i64>,
 }
 
 /// The runtime state as HELD and SERIALIZED. Field order = the `state_v16.json`

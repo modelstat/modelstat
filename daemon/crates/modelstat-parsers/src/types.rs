@@ -108,6 +108,12 @@ pub struct ParserContext {
     /// `auth.json` once per token_count line would be thousands of syscalls per
     /// file.
     pub pricing_mode: String,
+    /// For non-positional sources (Cursor's key/value chat store): skip records
+    /// older than this instant, which the scan already shipped. `None` reads
+    /// everything. Positional parsers ignore it — their floor is a byte offset
+    /// applied to the SEND, since they carry cross-line state that a mid-file
+    /// start would lose; a key/value row carries none, so skipping is safe.
+    pub since_ms: Option<i64>,
 }
 
 impl ParserContext {
@@ -123,6 +129,7 @@ impl ParserContext {
             device_id: device_id.into(),
             source_file: source_file.into(),
             byte_offset_start: 0,
+            since_ms: None,
             pricing_mode: crate::auth_mode::PRICING_MODE_UNKNOWN.to_string(),
         }
     }
@@ -131,6 +138,13 @@ impl ParserContext {
     #[must_use]
     pub fn with_pricing_mode(mut self, mode: impl Into<String>) -> Self {
         self.pricing_mode = mode.into();
+        self
+    }
+
+    /// See [`ParserContext::since_ms`].
+    #[must_use]
+    pub fn with_since_ms(mut self, since_ms: Option<i64>) -> Self {
+        self.since_ms = since_ms;
         self
     }
 }

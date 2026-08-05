@@ -666,6 +666,9 @@ async fn reconcile_once(
         let job = ScanJob {
             path: path.to_string(),
             kind,
+            // The reconcile digest counts a file WHOLE — it answers "what does
+            // this machine hold", not "what is left to ship".
+            since_ms: None,
         };
         let r = parse_job(&device_id, &job).ok()?;
         let mut out: PerDaySession = BTreeMap::new();

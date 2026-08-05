@@ -19,8 +19,10 @@
 //! `tokenCount`, but it is `{input:0, output:0}` on every real row observed, so
 //! this parser states no tokens rather than inventing zeros.
 //!
-//! As-built this parser is DORMANT: `discover_jobs` does not walk Cursor unless
-//! `MODELSTAT_ENABLE_CURSOR_PARSER=1` (feature §7.1).
+//! `discover_jobs` walks the store on every scan (macOS / Linux / Windows user
+//! data paths). It was unwalked for this parser's whole life — the docs claimed
+//! `MODELSTAT_ENABLE_CURSOR_PARSER=1` gated it, and no such flag ever existed in
+//! the code, so Cursor was simply never read.
 //!
 //! Per plan D6 we open a byte-snapshot COPY read-only (read file → temp → open),
 //! never the live file, so we never lock a DB Cursor has open.
@@ -107,6 +109,17 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             }
             saw_user_prompt = true;
         }
+        // Already shipped. Applied HERE, after the ordinal above: the floor
+        // must not renumber turns, or the same message would carry a different
+        // `turn_index` on a resumed scan than it did on the first. A key/value
+        // row carries no other cross-record state, so skipping the SEND this
+        // late is free (positional parsers floor the send instead — see
+        // `ParserContext::since_ms`).
+        if let Some(floor) = ctx.since_ms {
+            if bubble_ms(&b.created_at).is_some_and(|ms| ms < floor) {
+                continue;
+            }
+        }
         // VERBATIM: redaction is the only transformation.
         let content_bytes = text.chars().count() as u64;
         let cleaned = redact(text, None).text;
@@ -167,6 +180,15 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
         },
         source_file: ctx.source_file.clone(),
     })
+}
+
+/// A bubble's ISO `createdAt` as epoch millis — the coordinate the scan's
+/// since-floor is expressed in. `None` when unparseable, which ships the row
+/// (re-sending is an upsert; dropping would be data loss).
+fn bubble_ms(created_at: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
 
 /// `bubbleId:<composerId>:<bubbleId>` → the two ids. `None` for any other key
@@ -236,5 +258,80 @@ mod tests {
         assert_eq!(split_bubble_key("composerData:comp-1"), None);
         assert_eq!(split_bubble_key("bubbleId:comp-only"), None);
         assert_eq!(split_bubble_key("bubbleId::bub-1"), None);
+    }
+}
+
+#[cfg(test)]
+mod since_floor_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn db_with(bubbles: &[(&str, i64, &str, &str)]) -> String {
+        let p = std::env::temp_dir().join(format!(
+            "modelstat-cursor-floor-{}-{}.vscdb",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let c = Connection::open(&p).unwrap();
+        c.execute(
+            "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        for (bid, kind, text, ts) in bubbles {
+            c.execute(
+                "INSERT INTO cursorDiskKV VALUES (?,?)",
+                rusqlite::params![
+                    format!("bubbleId:comp-1:{bid}"),
+                    format!(r#"{{"type":{kind},"text":"{text}","createdAt":"{ts}"}}"#)
+                ],
+            )
+            .unwrap();
+        }
+        drop(c);
+        p.to_string_lossy().into_owned()
+    }
+
+    const B: &[(&str, i64, &str, &str)] = &[
+        ("b1", 1, "first ask", "2026-06-20T10:00:00.000Z"),
+        ("b2", 2, "first reply", "2026-06-20T10:00:05.000Z"),
+        ("b3", 1, "second ask", "2026-06-20T11:00:00.000Z"),
+        ("b4", 2, "second reply", "2026-06-20T11:00:04.000Z"),
+    ];
+
+    #[test]
+    fn without_a_floor_every_message_ships() {
+        let path = db_with(B);
+        let r = parse_cursor_tracking_db(&ParserContext::new("dev_1", path.clone())).unwrap();
+        assert_eq!(r.events.len(), 4);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// The floor is what keeps a constantly-rewritten KV store from re-shipping
+    /// the user's whole chat history on every scan.
+    #[test]
+    fn a_floor_ships_only_what_came_after_it() {
+        let path = db_with(B);
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-06-20T10:30:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        let r = parse_cursor_tracking_db(
+            &ParserContext::new("dev_1", path.clone()).with_since_ms(Some(floor)),
+        )
+        .unwrap();
+        let texts: Vec<&str> = r
+            .events
+            .iter()
+            .map(|e| e.content_excerpt.as_deref().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["second ask", "second reply"]);
+        // Turn ordinals still come from the WHOLE conversation, so a resumed
+        // scan numbers turns exactly as a first scan did.
+        assert_eq!(
+            r.events[0].turn_index,
+            Some(1),
+            "not renumbered to 0 by the floor"
+        );
+        std::fs::remove_file(path).ok();
     }
 }
