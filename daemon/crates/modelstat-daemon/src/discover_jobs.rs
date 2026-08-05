@@ -78,7 +78,7 @@ fn is_rollout_jsonl(p: &Path) -> bool {
 /// local_<c>/.claude`); the cap keeps an unlucky root — a multi-GB app-data
 /// directory full of caches and VM images — from turning a scan into a full
 /// disk walk.
-const CLAUDE_SEARCH_MAX_DEPTH: usize = 6;
+const CLAUDE_SEARCH_MAX_DEPTH: usize = 5;
 
 /// Directory names never worth descending: vendor caches, blob stores and VM
 /// images that hold no transcripts and plenty of gigabytes.
@@ -105,9 +105,14 @@ const SKIP_DIRS: &[&str] = &[
 /// the human used **Claude Desktop**, and `agent` names the tool the human
 /// used. Merging them would destroy a distinction nothing can recover later;
 /// keeping them apart can always be summed at read time.
-fn claude_search_roots(home: &Path) -> Vec<(PathBuf, Option<&'static str>)> {
+fn claude_search_roots(home: &Path) -> Vec<(PathBuf, Option<&'static str>, usize)> {
     // The CLI's own home.
-    let mut roots: Vec<(PathBuf, Option<&'static str>)> = vec![(home.to_path_buf(), None)];
+    // Depth 0 for the homes: `<home>/.claude/projects` is an exact location, and
+    // descending from a home that happens to lack `.claude` would walk the
+    // user's entire disk — and rediscover, unlabelled, every hosted tree the
+    // app-data roots below already own.
+    let mut roots: Vec<(PathBuf, Option<&'static str>, usize)> =
+        vec![(home.to_path_buf(), None, 0)];
     // `CLAUDE_CONFIG_DIR` relocates that home; a user who set it would
     // otherwise report nothing at all. It points AT the `.claude` dir, so the
     // shape search starts at its parent.
@@ -116,18 +121,45 @@ fn claude_search_roots(home: &Path) -> Vec<(PathBuf, Option<&'static str>)> {
         .filter(|s| !s.trim().is_empty())
         .and_then(|c| Path::new(&c).parent().map(Path::to_path_buf))
     {
-        roots.push((parent, None));
+        roots.push((parent, None, 0));
     }
-    // Claude Desktop's application data, per platform (probed, not `cfg!`d).
-    for rel in [
-        "Library/Application Support/Claude",
-        ".config/Claude",
-        "AppData/Roaming/Claude",
+    // Every application's data directory, per platform — NOT a list of app
+    // names. An app's data dir is named after the app, and there is no way to
+    // know that name in advance: a second install is "Claude Second", a beta is
+    // "Claude Dev", a fork is anything at all. So each one is probed for the
+    // transcript shape, and whether it counts as a host is decided by what is
+    // INSIDE it, never by what it is called.
+    for app_data in [
+        home.join("Library/Application Support"),
+        home.join(".config"),
+        home.join("AppData/Roaming"),
     ] {
-        roots.push((home.join(rel), Some("claude_desktop")));
+        for app in child_paths(&app_data) {
+            let name = app.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || SKIP_DIRS.contains(&name) || !app.is_dir() {
+                continue;
+            }
+            let label = desktop_host_label(&app);
+            roots.push((app, label, CLAUDE_SEARCH_MAX_DEPTH));
+        }
     }
-    roots.retain(|(p, _)| p.is_dir());
+    roots.retain(|(p, _, _)| p.is_dir());
     roots
+}
+
+/// Does this application data directory belong to a Claude Desktop-style host?
+///
+/// Decided by ARTEFACTS, not by the directory's name: Desktop keeps its
+/// per-session sandboxes in `local-agent-mode-sessions` and its session index
+/// in `claude-code-sessions`. A second install under any name carries the same
+/// markers; something else that merely happens to host a Claude Code tree does
+/// not, and is left unlabelled — honestly reported as plain Claude Code rather
+/// than as a desktop app we only guessed at.
+fn desktop_host_label(app_data: &Path) -> Option<&'static str> {
+    ["local-agent-mode-sessions", "claude-code-sessions"]
+        .iter()
+        .any(|marker| app_data.join(marker).is_dir())
+        .then_some("claude_desktop")
 }
 
 /// Walk `root` (bounded) for `.claude/projects/<dir>/*.jsonl` transcripts.
@@ -187,9 +219,19 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
     // `<app-data>/local-agent-mode-sessions/<a>/<b>/local_<c>/.claude/projects/...`
     // and were invisible for as long as only `$HOME` was walked. Anything else
     // hosting Claude Code the same way is picked up for free.
-    for (root, agent) in claude_search_roots(home) {
-        collect_claude_projects(&root, CLAUDE_SEARCH_MAX_DEPTH, agent, &mut jobs);
+    for (root, agent, depth) in claude_search_roots(home) {
+        collect_claude_projects(&root, depth, agent, &mut jobs);
     }
+    // Belt and braces: one transcript, one job. Roots can overlap (a relocated
+    // CLAUDE_CONFIG_DIR living inside an app's data dir, say), and scanning a
+    // file twice would parse and upload it twice every cycle. A labelled job
+    // wins, being the more specific claim about who ran the session.
+    jobs.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| b.agent_label.is_some().cmp(&a.agent_label.is_some()))
+    });
+    jobs.dedup_by(|a, b| a.path == b.path);
 
     // Codex — ~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl
     for y in child_paths(&home.join(".codex/sessions")) {
@@ -426,6 +468,56 @@ mod cursor_discovery_tests {
             assert_eq!(cursor[0].since_ms, None, "discovery never sets the floor");
             std::fs::remove_dir_all(&home).ok();
         }
+    }
+
+    /// The app's data directory is named after the app, and there is no way to
+    /// know that name: a second install is "Claude Second", a beta is "Claude
+    /// Dev", a fork is anything at all. Discovery must key on ARTEFACTS.
+    #[test]
+    fn an_arbitrarily_named_app_hosting_claude_code_is_found_and_labelled() {
+        let home = std::env::temp_dir().join(format!("modelstat-host-{}", std::process::id()));
+        let app = home.join("Library/Application Support/Totally Unknown Name");
+        // The Desktop marker, plus a transcript nested exactly as Desktop nests it.
+        std::fs::create_dir_all(app.join("local-agent-mode-sessions")).unwrap();
+        let proj = app.join("local-agent-mode-sessions/a/b/local_c/.claude/projects/-enc");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("s1.jsonl"), b"{}").unwrap();
+        // The sibling audit log the Agent SDK writes — the same conversation,
+        // and taking it too would double every message.
+        std::fs::write(
+            app.join("local-agent-mode-sessions/a/b/local_c/audit.jsonl"),
+            b"{}",
+        )
+        .unwrap();
+
+        let jobs = discover_jobs_in(&home);
+        let hosted: Vec<_> = jobs.iter().filter(|j| j.agent_label.is_some()).collect();
+        assert_eq!(hosted.len(), 1, "found regardless of the app's name");
+        assert_eq!(hosted[0].agent_label.as_deref(), Some("claude_desktop"));
+        assert!(hosted[0].path.ends_with("s1.jsonl"));
+        assert!(
+            !jobs.iter().any(|j| j.path.ends_with("audit.jsonl")),
+            "the duplicate audit log is never walked"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// No Desktop artefacts → still discovered (it IS Claude Code), but not
+    /// labelled as a desktop app we only guessed at.
+    #[test]
+    fn a_hosted_tree_without_desktop_markers_stays_unlabelled() {
+        let home = std::env::temp_dir().join(format!("modelstat-host2-{}", std::process::id()));
+        let proj = home.join("Library/Application Support/Some Editor/.claude/projects/-enc");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("s1.jsonl"), b"{}").unwrap();
+
+        let jobs = discover_jobs_in(&home);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].agent_label, None,
+            "host unknown — reported as plain Claude Code"
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
