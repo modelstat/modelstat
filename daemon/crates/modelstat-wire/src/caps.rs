@@ -11,7 +11,9 @@ pub const MODEL_MAX: usize = 120;
 pub const SESSION_ID_MAX: usize = 120;
 pub const FILES_TOUCHED_ITEM_MAX: usize = 512;
 pub const FILES_TOUCHED_COUNT_MAX: usize = 256;
-pub const CONTENT_EXCERPT_MAX: usize = 320;
+// SPEC 0005: a real message body, not summarizer feed — verbatim typed text,
+// paste-elided, redacted on-device. Was 320 pre-capture.
+pub const CONTENT_EXCERPT_MAX: usize = 16_384;
 pub const SOURCE_FILE_MAX: usize = 1024;
 
 // --- Segment --------------------------------------------------------------

@@ -77,6 +77,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             tool_calls: std::collections::BTreeMap::new(),
             files_touched: Vec::new(),
             content_excerpt: None,
+            content_bytes: None,
             references: None,
             source_file: Some(ctx.source_file.clone()),
             source_byte_offset: None,

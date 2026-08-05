@@ -276,6 +276,7 @@ mod tests {
 
     fn ev(source_event_id: &str, excerpt: Option<&str>) -> RawEvent {
         RawEvent {
+            content_bytes: None,
             source_event_id: source_event_id.into(),
             ts: "2026-07-16T10:00:00.000Z".into(),
             kind: "message".into(),

@@ -250,6 +250,7 @@ mod tests {
 
     fn raw_event(id: &str, session: &str) -> RawEvent {
         RawEvent {
+            content_bytes: None,
             source_event_id: id.into(),
             ts: "2026-07-16T10:00:00.000Z".into(),
             kind: "message".into(),

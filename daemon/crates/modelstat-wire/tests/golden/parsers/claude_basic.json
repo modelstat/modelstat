@@ -10,7 +10,7 @@
       "provider": "anthropic",
       "model": null,
       "session_id": "11111111-1111-1111-1111-111111111111",
-      "turn_index": null,
+      "turn_index": 0,
       "parent_event_id": null,
       "cwd": "/Users/dev/projects/myrepo",
       "git": null,
@@ -19,6 +19,7 @@
       "tool_calls": {},
       "files_touched": [],
       "content_excerpt": "add a retry to the uploader",
+      "content_bytes": 27,
       "source_file": "/tmp/modelstat-fixtures/claude/11111111-1111-1111-1111-111111111111.jsonl",
       "source_byte_offset": 0,
       "pricing_mode": "subscription"
@@ -31,7 +32,7 @@
       "provider": "anthropic",
       "model": "claude-opus-4-7",
       "session_id": "11111111-1111-1111-1111-111111111111",
-      "turn_index": null,
+      "turn_index": 0,
       "parent_event_id": null,
       "cwd": "/Users/dev/projects/myrepo",
       "git": null,
@@ -48,6 +49,7 @@
       },
       "files_touched": [],
       "content_excerpt": "On it.",
+      "content_bytes": 6,
       "source_file": "/tmp/modelstat-fixtures/claude/11111111-1111-1111-1111-111111111111.jsonl",
       "source_byte_offset": 219,
       "pricing_mode": "subscription"
@@ -60,7 +62,7 @@
       "provider": "anthropic",
       "model": "claude-opus-4-7",
       "session_id": "11111111-1111-1111-1111-111111111111",
-      "turn_index": null,
+      "turn_index": 0,
       "parent_event_id": null,
       "cwd": "/Users/dev/projects/myrepo",
       "git": null,
@@ -81,7 +83,7 @@
       "agent": "claude_code",
       "server": "builtin",
       "name": "Bash",
-      "turn_index": null,
+      "turn_index": 0,
       "call_index": 0,
       "started_at": "2026-06-01T10:00:05.000Z",
       "ended_at": "2026-06-01T10:00:00.000Z",
@@ -102,7 +104,7 @@
         "abstract": null,
         "command_redacted": "npm test",
         "scripts": [],
-        "confidence": 0,
+        "confidence": 0.0,
         "extractor": "shell.v3"
       }
     }

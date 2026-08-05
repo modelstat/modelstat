@@ -26,7 +26,7 @@ use crate::references::detect_event_references;
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
-use crate::util::{collapse_ws, slice_utf16, strip_code};
+use crate::util::{cap_with_marker, elide_pastes, slice_utf16, strip_injected, tidy_verbatim};
 use modelstat_wire::tc_fallback_id;
 
 /// `<session-uuid>.jsonl` at the end of a path → the uuid.
@@ -50,21 +50,25 @@ pub fn decode_encoded_dir(encoded: &str) -> String {
     stripped.replace('-', "/")
 }
 
-/// Extract a redacted, ≤320-unit text excerpt from a message's content. Only
-/// `text` blocks contribute; code fences are stripped, whitespace collapsed, and
-/// the result is redacted before it leaves.
-fn extract_excerpt(content: &Value) -> Option<String> {
+/// Extract the message's redacted, paste-elided VERBATIM text (SPEC 0005) plus
+/// the cleaned pre-elision length in chars. Only `text` blocks contribute.
+/// Pipeline: drop platform-injected noise → measure (that's `content_bytes`) →
+/// elide pasted payload behind `[pasted: …]` markers → redact (L1 floor) → cap
+/// with a trailing `[+N chars]` marker. What the developer actually typed —
+/// including small code snippets — survives verbatim; payload never ships.
+fn extract_excerpt(content: &Value) -> Option<(String, u64)> {
     let text = join_text(content)?;
-    let text = collapse_ws(&strip_code(&text));
-    if text.is_empty() {
+    let typed = tidy_verbatim(&strip_injected(&text));
+    if typed.is_empty() {
         return None;
     }
-    let cleaned = redact(&text, None).text;
-    let truncated = slice_utf16(&cleaned, 320);
-    if truncated.is_empty() {
+    let pre_chars = typed.chars().count() as u64;
+    let cleaned = redact(&tidy_verbatim(&elide_pastes(&typed)), None).text;
+    let capped = cap_with_marker(&cleaned, modelstat_wire::caps::CONTENT_EXCERPT_MAX);
+    if capped.is_empty() {
         None
     } else {
-        Some(truncated)
+        Some((capped, pre_chars))
     }
 }
 
@@ -198,6 +202,12 @@ fn parse_inner(
     let mut cwd: Option<String> = None;
     let mut git_branch: Option<String> = None;
     let mut last_model: Option<String> = None;
+    // Conversation turn ordinal (SPEC 0005): a turn starts at each REAL user
+    // prompt (typed text — tool-result-only and injected-noise-only user lines
+    // don't start one). Assistant events and tool drafts inherit the current
+    // ordinal; events before the first prompt sit in turn 0.
+    let mut current_turn: u64 = 0;
+    let mut saw_user_prompt = false;
 
     let filename_session_id = derive_session_id_from_filename(&ctx.source_file);
     let mut ancestors = AncestorCache::new(&ctx.source_file);
@@ -293,7 +303,10 @@ fn parse_inner(
 
             let slug = guess_repo_slug_from_path(cwd.as_deref());
             let content = message.get("content").cloned().unwrap_or(Value::Null);
-            let excerpt = extract_excerpt(&content);
+            let (excerpt, content_bytes) = match extract_excerpt(&content) {
+                Some((text, chars)) => (Some(text), Some(chars)),
+                None => (None, None),
+            };
             let refs = detect_event_references(&collect_ref_text(&content));
 
             let mut aggregate: std::collections::BTreeMap<String, u64> =
@@ -325,6 +338,7 @@ fn parse_inner(
                         obj.get("timestamp").and_then(Value::as_str).unwrap_or(""),
                         model.as_deref(),
                         cwd.as_deref(),
+                        Some(current_turn),
                         &mut script_contexts,
                     );
                     let identity = tool_identity(&draft.server, &draft.name);
@@ -365,7 +379,7 @@ fn parse_inner(
                 provider: "anthropic".to_string(),
                 model,
                 session_id: session_id.clone().unwrap(),
-                turn_index: None,
+                turn_index: Some(current_turn),
                 parent_event_id: obj
                     .get("parentUuid")
                     .and_then(Value::as_str)
@@ -383,6 +397,7 @@ fn parse_inner(
                 tool_calls: aggregate,
                 files_touched: Vec::new(),
                 content_excerpt: excerpt,
+                content_bytes,
                 references: refs,
                 source_file: Some(ctx.source_file.clone()),
                 source_byte_offset: Some(offset),
@@ -428,7 +443,27 @@ fn parse_inner(
                     continue;
                 }
             };
-            let excerpt = extract_excerpt(&content);
+            let (excerpt, content_bytes) = match extract_excerpt(&content) {
+                Some((text, chars)) => (Some(text), Some(chars)),
+                None => (None, None),
+            };
+            // A REAL prompt (typed text survived the injected-noise strip)
+            // starts a new turn; tool-result-only and noise-only user lines
+            // stay in the current one.
+            if excerpt.is_some() {
+                if saw_user_prompt {
+                    current_turn += 1;
+                }
+                saw_user_prompt = true;
+            }
+            // Claude Code stamps its own measured duration on the line that
+            // carries a tool result — ship it as stated, never derived
+            // (SPEC 0005). Ambiguous multi-result lines share one number; the
+            // per-call truth stays ToolCallWire's started/ended pair.
+            let duration_ms = obj
+                .get("toolUseResult")
+                .and_then(|r| r.get("durationMs"))
+                .and_then(Value::as_u64);
             let refs = detect_event_references(&collect_ref_text(&content));
             sink.push(RawEvent {
                 source_event_id: event_id,
@@ -442,7 +477,7 @@ fn parse_inner(
                 provider: "anthropic".to_string(),
                 model: last_model.clone(),
                 session_id: session_id.clone().unwrap(),
-                turn_index: None,
+                turn_index: Some(current_turn),
                 parent_event_id: obj
                     .get("parentUuid")
                     .and_then(Value::as_str)
@@ -450,10 +485,11 @@ fn parse_inner(
                 cwd: cwd.clone(),
                 git: None,
                 tokens: None,
-                duration_ms: None,
+                duration_ms,
                 tool_calls: std::collections::BTreeMap::new(),
                 files_touched: Vec::new(),
                 content_excerpt: excerpt,
+                content_bytes,
                 references: refs,
                 source_file: Some(ctx.source_file.clone()),
                 source_byte_offset: Some(offset),
@@ -496,6 +532,7 @@ fn parse_inner(
                 ts.unwrap(),
                 last_model.as_deref(),
                 cwd.as_deref(),
+                Some(current_turn),
                 &mut script_contexts,
             );
             let call_id_opt = obj.get("id").and_then(Value::as_str).map(str::to_string);
@@ -532,6 +569,7 @@ fn build_tool_call_draft(
     started_at: &str,
     model: Option<&str>,
     cwd: Option<&str>,
+    turn_index: Option<u64>,
     contexts: &mut Vec<LocalToolContext>,
 ) -> ToolCallDraft {
     let (server, name) = split_observed_tool_name(observed_name);
@@ -565,7 +603,7 @@ fn build_tool_call_draft(
         agent: "claude_code".to_string(),
         server,
         name,
-        turn_index: None,
+        turn_index,
         call_index,
         started_at: started_at.to_string(),
         ended_at: None,

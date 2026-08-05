@@ -23,7 +23,7 @@ use crate::references::detect_event_references;
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
-use crate::util::{collapse_ws, slice_utf16, strip_code};
+use crate::util::{cap_with_marker, elide_pastes, slice_utf16, strip_injected, tidy_verbatim};
 
 /// Map pi's free-form provider string onto the closed PROVIDERS enum. Substring
 /// matches (not equality) — pi sometimes records a model name in the provider slot.
@@ -81,21 +81,24 @@ fn join_text_blocks(content: &Value) -> String {
     }
 }
 
-fn extract_excerpt(content: &Value) -> Option<String> {
+/// SPEC 0005: redacted, paste-elided VERBATIM text + cleaned pre-elision chars
+/// (mirrors `claude_code::extract_excerpt`; see there for the pipeline).
+fn extract_excerpt(content: &Value) -> Option<(String, u64)> {
     let text = join_text_blocks(content);
     if text.is_empty() {
         return None;
     }
-    let text = collapse_ws(&strip_code(&text));
-    if text.is_empty() {
+    let typed = tidy_verbatim(&strip_injected(&text));
+    if typed.is_empty() {
         return None;
     }
-    let cleaned = redact(&text, None).text;
-    let truncated = slice_utf16(&cleaned, 320);
-    if truncated.is_empty() {
+    let pre_chars = typed.chars().count() as u64;
+    let cleaned = redact(&tidy_verbatim(&elide_pastes(&typed)), None).text;
+    let capped = cap_with_marker(&cleaned, modelstat_wire::caps::CONTENT_EXCERPT_MAX);
+    if capped.is_empty() {
         None
     } else {
-        Some(truncated)
+        Some((capped, pre_chars))
     }
 }
 
@@ -151,6 +154,9 @@ fn parse_inner(
     let mut cwd: Option<String> = None;
     let mut last_provider: Option<String> = None;
     let mut last_model: Option<String> = None;
+    // Conversation turn ordinal (SPEC 0005) — see the claude_code parser.
+    let mut current_turn: u64 = 0;
+    let mut saw_user_prompt = false;
 
     while let Some((line, offset)) = lines.next_line()? {
         raw_lines += 1;
@@ -231,7 +237,10 @@ fn parse_inner(
                 },
             );
             let slug = guess_repo_slug_from_path(cwd.as_deref());
-            let excerpt = extract_excerpt(&content);
+            let (excerpt, content_bytes) = match extract_excerpt(&content) {
+                Some((text, chars)) => (Some(text), Some(chars)),
+                None => (None, None),
+            };
             let refs = detect_event_references(&collect_ref_text(&content));
 
             let mut aggregate: BTreeMap<String, u64> = BTreeMap::new();
@@ -284,7 +293,7 @@ fn parse_inner(
                         agent: "pi".to_string(),
                         server: server.clone(),
                         name: name.clone(),
-                        turn_index: None,
+                        turn_index: Some(current_turn),
                         call_index: index,
                         started_at: ml_timestamp.to_string(),
                         ended_at: None,
@@ -326,7 +335,7 @@ fn parse_inner(
                 provider: provider.to_string(),
                 model,
                 session_id: session_id.clone().unwrap(),
-                turn_index: None,
+                turn_index: Some(current_turn),
                 parent_event_id: None,
                 cwd: cwd.clone(),
                 git,
@@ -341,6 +350,7 @@ fn parse_inner(
                 tool_calls: aggregate,
                 files_touched: Vec::new(),
                 content_excerpt: excerpt,
+                content_bytes,
                 references: refs,
                 source_file: Some(ctx.source_file.clone()),
                 source_byte_offset: Some(offset),
@@ -366,7 +376,18 @@ fn parse_inner(
         }
 
         // user message
-        let excerpt = extract_excerpt(&content);
+        let (excerpt, content_bytes) = match extract_excerpt(&content) {
+            Some((text, chars)) => (Some(text), Some(chars)),
+            None => (None, None),
+        };
+        // A real (typed) prompt starts a new turn — SPEC 0005, mirroring the
+        // claude_code parser.
+        if excerpt.is_some() {
+            if saw_user_prompt {
+                current_turn += 1;
+            }
+            saw_user_prompt = true;
+        }
         let refs = detect_event_references(&collect_ref_text(&content));
         sink.push(RawEvent {
             source_event_id: source_event_id(
@@ -382,7 +403,7 @@ fn parse_inner(
             provider: map_provider(last_provider.as_deref()).to_string(),
             model: last_model.clone(),
             session_id: session_id.clone().unwrap(),
-            turn_index: None,
+            turn_index: Some(current_turn),
             parent_event_id: None,
             cwd: cwd.clone(),
             git: None,
@@ -391,6 +412,7 @@ fn parse_inner(
             tool_calls: BTreeMap::new(),
             files_touched: Vec::new(),
             content_excerpt: excerpt,
+            content_bytes,
             references: refs,
             source_file: Some(ctx.source_file.clone()),
             source_byte_offset: Some(offset),
