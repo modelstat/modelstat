@@ -883,7 +883,51 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
         }
     }
 
-    // Cursor — globalStorage/storage.json `cursorAuth/*`.
+    // Cursor — the signed-in account, from the SQLite store its editor actually
+    // writes. `storage.json` (probed below, kept for older builds) holds no
+    // auth keys on a current install: they live in `state.vscdb`'s ItemTable as
+    // plain values. Until this probe existed every Cursor session on the
+    // machine landed unattributed — measured on prod, 3,253 of 3,253 messages
+    // with no account.
+    for db in [
+        format!("{home}/Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+        format!("{home}/.config/Cursor/User/globalStorage/state.vscdb"),
+        format!(
+            "{}/Cursor/User/globalStorage/state.vscdb",
+            env_or("APPDATA", String::new)
+        ),
+    ] {
+        if !Path::new(&db).is_file() {
+            continue;
+        }
+        // Exactly these keys. `cursorAuth/accessToken` and `refreshToken` are
+        // neighbours in this table; nothing sweeps the prefix.
+        let vals = crate::cursor::read_item_table(
+            &db,
+            &["cursorAuth/cachedEmail", "cursorAuth/cachedSignUpType"],
+        );
+        let Some(email) = vals.get("cursorAuth/cachedEmail") else {
+            continue;
+        };
+        // The account id is the e-mail, lowercased. Cursor also stashes a
+        // numeric `dashboardUserId`, but only inside a 360 KB reactive-storage
+        // blob: if that field ever moves, the same account would come back
+        // under a second id and the identity would DUPLICATE. A dedicated
+        // top-level key cannot drift that way.
+        ids.push(DetectedIdentity {
+            provider: "cursor".into(),
+            provider_account_id: email.to_lowercase(),
+            provider_account_label: Some(email.clone()),
+            account_email: Some(email.clone()),
+            account_org: None,
+            display_name: vals.get("cursorAuth/cachedSignUpType").cloned(),
+            owner_scope: "unassigned".into(),
+            detection_source: "cursor_item_table".into(),
+        });
+        break;
+    }
+
+    // Cursor (legacy) — globalStorage/storage.json `cursorAuth/*`.
     for candidate in [
         format!("{home}/Library/Application Support/Cursor/User/globalStorage/storage.json"),
         format!("{home}/.config/Cursor/User/globalStorage/storage.json"),

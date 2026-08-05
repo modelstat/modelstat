@@ -65,27 +65,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
     // happened to be checkpointed, it is missing every conversation still
     // living in the log. Measured on a real install: main-file-only was
     // unreadable, while the three files together read 408 records.
-    let tmp = std::env::temp_dir().join(format!(
-        "modelstat-cursor-{}-{}.vscdb",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::write(&tmp, fs::read(&ctx.source_file)?)?;
-    // Best-effort: a checkpointed store has no sidecars, and the main file is
-    // then self-contained.
-    for suffix in ["-wal", "-shm"] {
-        let side = format!("{}{suffix}", ctx.source_file);
-        if let Ok(bytes) = fs::read(&side) {
-            let _ = fs::write(format!("{}{suffix}", tmp.to_string_lossy()), bytes);
-        }
-    }
-
-    let result = read_bubbles(&tmp);
-    // SQLite may have checkpointed the copy's log on open, so clear all three.
-    let _ = fs::remove_file(&tmp);
-    for suffix in ["-wal", "-shm"] {
-        let _ = fs::remove_file(format!("{}{suffix}", tmp.to_string_lossy()));
-    }
+    let result = with_snapshot(&ctx.source_file, read_bubbles)?;
     let mut bubbles = result.map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let raw_lines = bubbles.len() as u64;
@@ -208,6 +188,73 @@ fn bubble_ms(created_at: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(created_at)
         .ok()
         .map(|dt| dt.timestamp_millis())
+}
+
+/// Run `read` against a private byte-snapshot of a Cursor store.
+///
+/// The `-wal` and `-shm` sidecars come along. Cursor runs the store in WAL
+/// mode, so the main file alone is not a database: with a dirty write-ahead log
+/// a copy of it cannot be opened at all, and on the occasion it can — because
+/// the log happened to be checkpointed — it is missing everything still living
+/// in that log. The live file is never opened (plan D6), so Cursor's own lock
+/// is never contended.
+pub(crate) fn with_snapshot<T>(
+    source: &str,
+    read: impl FnOnce(&std::path::Path) -> rusqlite::Result<T>,
+) -> std::io::Result<rusqlite::Result<T>> {
+    let tmp = std::env::temp_dir().join(format!(
+        "modelstat-cursor-{}-{}.vscdb",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&tmp, fs::read(source)?)?;
+    // Best-effort: a checkpointed store has no sidecars and is self-contained.
+    for suffix in ["-wal", "-shm"] {
+        if let Ok(bytes) = fs::read(format!("{source}{suffix}")) {
+            let _ = fs::write(format!("{}{suffix}", tmp.to_string_lossy()), bytes);
+        }
+    }
+    let out = read(&tmp);
+    // SQLite may have checkpointed the copy's log on open, so clear all three.
+    let _ = fs::remove_file(&tmp);
+    for suffix in ["-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", tmp.to_string_lossy()));
+    }
+    Ok(out)
+}
+
+/// Read an ALLOWLISTED set of `ItemTable` keys from a Cursor store.
+///
+/// Allowlisted, never a prefix scan: `cursorAuth/accessToken` and
+/// `cursorAuth/refreshToken` sit in this very table, and a probe that swept
+/// `cursorAuth*` would pull live credentials into memory on its way past the
+/// one field it wanted. Only exactly-named keys are read.
+pub(crate) fn read_item_table(
+    source: &str,
+    keys: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let wanted: Vec<String> = keys.iter().map(|k| (*k).to_string()).collect();
+    with_snapshot(source, |db| {
+        let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut out = std::collections::BTreeMap::new();
+        for key in &wanted {
+            let got: rusqlite::Result<String> = conn.query_row(
+                "SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            );
+            if let Ok(v) = got {
+                let v = v.trim().trim_matches('"').to_string();
+                if !v.is_empty() {
+                    out.insert(key.clone(), v);
+                }
+            }
+        }
+        Ok(out)
+    })
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default()
 }
 
 /// `bubbleId:<composerId>:<bubbleId>` → the two ids. `None` for any other key
@@ -370,6 +417,60 @@ mod since_floor_tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.to_string_lossy()));
         }
+    }
+
+    /// The account probe reads this table, and live credentials are its
+    /// neighbours. Only exactly-named keys may come back — never a prefix sweep.
+    #[test]
+    fn the_item_table_reader_takes_only_the_keys_it_was_given() {
+        let path = std::env::temp_dir().join(format!(
+            "modelstat-cursor-items-{}-{}.vscdb",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("CREATE TABLE ItemTable (key TEXT UNIQUE, value BLOB)", [])
+            .unwrap();
+        for (k, v) in [
+            ("cursorAuth/cachedEmail", "dev@example.test"),
+            ("cursorAuth/cachedSignUpType", "Google"),
+            // The neighbour that must never be read.
+            (
+                "cursorAuth/accessToken",
+                "eyJhbGciOiJIUzI1NiJ9.secret.value",
+            ),
+            (
+                "cursorAuth/refreshToken",
+                "eyJhbGciOiJIUzI1NiJ9.other.value",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO ItemTable VALUES (?1,?2)",
+                rusqlite::params![k, v],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let got = read_item_table(
+            &path.to_string_lossy(),
+            &["cursorAuth/cachedEmail", "cursorAuth/cachedSignUpType"],
+        );
+        assert_eq!(
+            got.get("cursorAuth/cachedEmail").map(String::as_str),
+            Some("dev@example.test")
+        );
+        assert_eq!(got.len(), 2, "exactly the two keys asked for");
+        let dumped = format!("{got:?}");
+        assert!(
+            !dumped.contains("eyJ") && !dumped.contains("Token"),
+            "a token sitting in the same table never comes back: {dumped}"
+        );
+
+        // A key that does not exist is simply absent, not an error.
+        assert!(read_item_table(&path.to_string_lossy(), &["nope"]).is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
