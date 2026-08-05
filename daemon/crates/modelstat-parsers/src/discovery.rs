@@ -163,6 +163,7 @@ fn sources() -> &'static [SourceSpec] {
 pub enum Strategy {
     BinaryWalk,
     FileSignatures,
+    ProcessProbe,
 }
 
 /// Options for a discovery pass.
@@ -233,6 +234,14 @@ pub fn discover(options: &DiscoveryOptions) -> DiscoveryOutput {
         }
     }
 
+    // (2) process probe — what is RUNNING right now. The path strategies only
+    // find an agent where we thought to look; this one finds it wherever it
+    // actually lives, which is the whole point for a tool installed somewhere
+    // nobody enumerated.
+    if !options.skip.contains(&Strategy::ProcessProbe) {
+        installations.extend(probe_processes(os));
+    }
+
     // (3) binary walk.
     if !skip_binary_walk {
         let bin_dirs = binary_lookup_dirs(os);
@@ -266,6 +275,227 @@ pub fn discover(options: &DiscoveryOptions) -> DiscoveryOutput {
         installations: dedupe_installs(installations),
         identities: dedupe_identities(identities),
     }
+}
+
+/// One running process, reduced to what discovery may look at.
+///
+/// PRIVACY: `args` exists for the lifetime of this probe and NEVER leaves it.
+/// A command line routinely carries secrets — `--api-key sk-…`, a token, a
+/// database URL — so nothing derived from it reaches the wire except a
+/// directory path this module recognised and validated as a real directory.
+struct RunningProcess {
+    exe: String,
+    args: Vec<String>,
+}
+
+/// Interpreters that run an agent from a script rather than a binary. Only
+/// these are trusted to name their agent in argument one.
+const SCRIPT_RUNNERS: &[&str] = &[
+    "node", "bun", "deno", "python", "python3", "npx", "pnpm", "uv",
+];
+
+/// Command-line flags that relocate an agent's data directory. A tool started
+/// with one of these keeps its sessions somewhere no path list would guess.
+const DATA_DIR_FLAGS: &[&str] = &[
+    "--config-dir",
+    "--config-path",
+    "--data-dir",
+    "--home",
+    "--home-dir",
+    "--session-dir",
+    "--sessions-dir",
+    "--state-dir",
+    "--user-data-dir",
+];
+
+/// Enumerate this user's running processes. Best-effort: an unavailable or
+/// slow lister yields nothing rather than blocking a scan.
+fn running_processes(os: Os) -> Vec<RunningProcess> {
+    let out = match os {
+        // `args=` only, NOT `comm=`: macOS truncates `comm` to 16 characters
+        // (MAXCOMLEN), which turned every path into a stub like
+        // `/Applications/Cl`. The full command line carries the untruncated
+        // executable as its first token.
+        Os::Macos | Os::Linux => {
+            run_command("ps", &["-axo", "args="], None, Duration::from_secs(5))
+        }
+        // `wmic` is gone on current Windows; CIM is the supported route.
+        Os::Windows => run_command(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ExecutablePath) $($_.CommandLine)\" }",
+            ],
+            None,
+            Duration::from_secs(15),
+        ),
+    };
+    let Some(out) = out else {
+        return Vec::new();
+    };
+    out.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            // First token is the executable, the rest its arguments. A path
+            // containing spaces loses its tail here; that costs nothing,
+            // because matching is by file name and the interesting arguments
+            // (a relocated data dir) are later tokens either way.
+            let mut tokens = line.split_whitespace().map(str::to_string);
+            let exe = tokens.next()?;
+            Some(RunningProcess {
+                exe,
+                args: tokens.collect(),
+            })
+        })
+        .collect()
+}
+
+/// The file name of a path, lowercased, with a Windows `.exe` suffix removed —
+/// what a process's executable is matched by.
+fn exe_stem(path: &str) -> String {
+    // Split on BOTH separators rather than deferring to `Path`, which only
+    // understands the host's: a Windows command line read anywhere else keeps
+    // its whole `C:\\...\\` prefix as the "file name" and matches nothing.
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    name.strip_suffix(".exe").unwrap_or(&name).to_string()
+}
+
+/// A data directory named by the process's own command line, e.g.
+/// `--config-dir /somewhere/else`. Both `--flag value` and `--flag=value` are
+/// read. Only an existing directory is returned: an unrecognised flag value is
+/// dropped rather than guessed at, which also means no free-text argument can
+/// slip through as a "path".
+fn data_dir_from_args(args: &[String]) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) => (f, Some(v.to_string())),
+            None => (a.as_str(), None),
+        };
+        if !DATA_DIR_FLAGS.contains(&flag) {
+            continue;
+        }
+        let value = inline.or_else(|| args.get(i + 1).cloned())?;
+        let expanded = expand_path(&value);
+        if Path::new(&expanded).is_dir() {
+            return Some(expanded);
+        }
+    }
+    None
+}
+
+/// The application-support directory belonging to a macOS bundle, derived from
+/// the running executable's own path — `/Applications/Foo Bar.app/Contents/…`
+/// → `~/Library/Application Support/Foo Bar`. This is how a SECOND install
+/// under an unknown name ("Claude Second.app") is found: by following the
+/// binary that is actually running, never by guessing the app's name.
+fn bundle_data_dir(exe: &str) -> Option<String> {
+    let bundle = exe.split(".app/").next()?;
+    let name = Path::new(bundle)
+        .file_name()?
+        .to_string_lossy()
+        .into_owned();
+    if name.is_empty() || !exe.contains(".app/") {
+        return None;
+    }
+    let parent = expand_path("~/Library/Application Support");
+    // Case-SENSITIVE match on purpose. macOS filesystems are usually
+    // case-insensitive, so a bundle named `claude.app` living inside a second
+    // instance's tree would happily resolve to the FIRST install's `Claude`
+    // directory and report one install's sessions as another's.
+    std::fs::read_dir(&parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().to_string_lossy() == name && e.path().is_dir())
+        .map(|e| e.path().to_string_lossy().into_owned())
+}
+
+/// Data directories named by RUNNING agents, per agent — the scan's way to
+/// reach a relocated install (`--config-dir ~/.claude-instances/second`) that
+/// no path list could guess.
+///
+/// Cached for [`PROCESS_DIRS_TTL`]: a scan can fire on every file-system event,
+/// and enumerating processes once per keystroke would be absurd.
+#[must_use]
+pub fn agent_data_dirs_from_processes() -> Vec<(String, String)> {
+    /// `(agent, data_dir)` pairs, with the instant they were probed.
+    type CachedDirs = std::sync::Mutex<Option<(std::time::Instant, Vec<(String, String)>)>>;
+    static CACHE: std::sync::OnceLock<CachedDirs> = std::sync::OnceLock::new();
+    let cell = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cell
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, dirs)) = guard.as_ref() {
+        if at.elapsed() < PROCESS_DIRS_TTL {
+            return dirs.clone();
+        }
+    }
+    let dirs: Vec<(String, String)> = probe_processes(current_os())
+        .into_iter()
+        .filter_map(|i| i.data_dir.map(|d| (i.agent, d)))
+        .collect();
+    let mut deduped = dirs;
+    deduped.sort();
+    deduped.dedup();
+    *guard = Some((std::time::Instant::now(), deduped.clone()));
+    deduped
+}
+
+/// How long process-derived data dirs stay fresh.
+const PROCESS_DIRS_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// (2) Match running processes against the source registry.
+///
+/// Finds an agent installed where no path list looks — a bun/pnpm global, a
+/// checkout run from source, a second app bundle under any name — and reads a
+/// relocated data directory straight off the command line that relocated it.
+fn probe_processes(os: Os) -> Vec<DetectedInstallation> {
+    let procs = running_processes(os);
+    if procs.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for spec in sources() {
+        for p in &procs {
+            let stem = exe_stem(&p.exe);
+            // The executable itself, or a SCRIPT RUNNER whose first argument is
+            // the agent's entry point (`node …/claude/cli.js`). The runner check
+            // is deliberately narrow: matching any process whose first argument
+            // merely looks like the binary tagged an app's unrelated helper
+            // (`Claude.app/Contents/Helpers/disclaimer`) as the agent itself,
+            // because a GUI helper is passed its own app's path.
+            let via_runner = SCRIPT_RUNNERS.contains(&stem.as_str());
+            let matches = spec.binaries.iter().any(|b| {
+                stem == *b
+                    || (via_runner && p.args.first().map(|a| exe_stem(a) == *b).unwrap_or(false))
+            });
+            if !matches {
+                continue;
+            }
+            let binary_path = Path::new(&p.exe).is_absolute().then(|| p.exe.clone());
+            out.push(DetectedInstallation {
+                agent: spec.agent.to_string(),
+                install_method: binary_path
+                    .as_deref()
+                    .map_or_else(|| "manual".to_string(), |b| classify_install_method(b, os)),
+                binary_path,
+                // A relocated dir the flag named, else the bundle's own.
+                data_dir: data_dir_from_args(&p.args).or_else(|| bundle_data_dir(&p.exe)),
+                // Deliberately not probed: `--version` on a RUNNING agent's
+                // binary spawns a second copy of it.
+                version: None,
+                detected_via: vec!["process".to_string()],
+            });
+        }
+    }
+    out
 }
 
 fn os_dirs(spec: &SourceSpec, os: Os) -> &'static [&'static str] {
@@ -932,5 +1162,100 @@ mod tests {
         assert_eq!(out[0].account_email.as_deref(), Some("a@x.com"));
         assert_eq!(out[0].account_org.as_deref(), Some("goldsky"));
         assert_eq!(out[0].display_name.as_deref(), Some("Aram"));
+    }
+}
+
+#[cfg(test)]
+mod process_probe_tests {
+    use super::*;
+
+    #[test]
+    fn exe_stem_reads_the_file_name_case_folded_and_de_exed() {
+        assert_eq!(exe_stem("/opt/homebrew/bin/claude"), "claude");
+        assert_eq!(exe_stem("C:\\Program Files\\Codex\\codex.EXE"), "codex");
+        assert_eq!(
+            exe_stem("/Applications/Claude.app/Contents/MacOS/Claude"),
+            "claude"
+        );
+        assert_eq!(exe_stem(""), "");
+    }
+
+    #[test]
+    fn a_relocated_data_dir_is_read_off_the_command_line() {
+        let dir = std::env::temp_dir().join(format!("modelstat-relocated-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+
+        // `--flag value` and `--flag=value` both.
+        assert_eq!(
+            data_dir_from_args(&["--config-dir".into(), d.clone()]),
+            Some(d.clone())
+        );
+        assert_eq!(
+            data_dir_from_args(&[format!("--user-data-dir={d}")]),
+            Some(d.clone())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The probe reads command lines, which routinely carry secrets. Nothing
+    /// leaves it but a path it recognised AND resolved to a real directory.
+    #[test]
+    fn nothing_but_a_real_directory_escapes_the_command_line() {
+        // An unrecognised flag's value is never taken, however path-like.
+        assert_eq!(
+            data_dir_from_args(&["--api-key".into(), "sk-live-not-a-path".into()]),
+            None
+        );
+        // A recognised flag pointing nowhere is dropped, not guessed at.
+        assert_eq!(
+            data_dir_from_args(&["--config-dir".into(), "/no/such/directory".into()]),
+            None
+        );
+        // A secret sitting next to a recognised flag is not confused for one.
+        assert_eq!(
+            data_dir_from_args(&["--token".into(), "ghp_0123456789abcdef".into()]),
+            None
+        );
+        assert_eq!(data_dir_from_args(&[]), None);
+    }
+
+    #[test]
+    fn a_bundle_outside_application_support_resolves_to_nothing() {
+        // Nothing is installed under this name, so no directory is invented.
+        assert_eq!(
+            bundle_data_dir("/Applications/Definitely Not Installed.app/Contents/MacOS/x"),
+            None
+        );
+        // A plain binary is not a bundle at all.
+        assert_eq!(bundle_data_dir("/usr/local/bin/claude"), None);
+    }
+
+    /// Running the probe must never panic or hang, whatever this machine has
+    /// running, and it must never invent an install for an agent that owns no
+    /// binaries.
+    #[test]
+    fn probing_this_machine_is_safe_and_well_formed() {
+        for i in probe_processes(current_os()) {
+            assert_eq!(i.detected_via, vec!["process".to_string()]);
+            assert!(
+                sources().iter().any(|s| s.agent == i.agent),
+                "only registry agents are reported"
+            );
+            if let Some(d) = &i.data_dir {
+                assert!(Path::new(d).is_dir(), "a reported data dir exists: {d}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_cached_accessor_is_stable_and_returns_real_dirs() {
+        let a = agent_data_dirs_from_processes();
+        let b = agent_data_dirs_from_processes();
+        assert_eq!(a, b, "second call is served from the cache");
+        for (agent, dir) in a {
+            assert!(!agent.is_empty());
+            assert!(Path::new(&dir).is_dir(), "{dir} exists");
+        }
     }
 }
