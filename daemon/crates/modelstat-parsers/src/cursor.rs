@@ -156,6 +156,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             references: None,
             source_file: Some(ctx.source_file.clone()),
             source_byte_offset: None,
+            redactions: Default::default(),
             // Cursor bills its own flat plan; `provider` here is `cursor`,
             // not a model vendor, so there is no metered path to confuse it
             // with. These rows also carry no tokens, so the mode moves no money

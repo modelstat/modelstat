@@ -166,6 +166,36 @@ pub async fn deep_redact_tool_commands<S: crate::Summarizer>(
     }
 }
 
+/// Fold the two redaction passes into ONE typed count map for the wire.
+///
+/// The floor's three counters keep their own names — they are deterministic
+/// detections of a different kind (a key-shaped string, an email, an absolute
+/// path), and collapsing them into the model's categories would lose that. The
+/// model's keys arrive prefixed `pf_` from `ner_redact`; the prefix is dropped here
+/// so the stored dimension is the category itself, which is what an analytics query
+/// asks for: `secret`, not `pf_secret`.
+///
+/// Zero counts are omitted, so "absent" means "nothing of this type was here"
+/// rather than "we did not look".
+fn redaction_counts(
+    floor: &modelstat_redact::RedactionCounts,
+    model: &std::collections::BTreeMap<String, u64>,
+) -> std::collections::BTreeMap<String, u32> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut put = |key: &str, n: u64| {
+        if n > 0 {
+            out.insert(key.to_string(), n.min(u64::from(u32::MAX)) as u32);
+        }
+    };
+    put("secrets_found", floor.secrets_found);
+    put("emails_redacted", floor.emails_redacted);
+    put("paths_redacted_absolute", floor.paths_redacted_absolute);
+    for (k, v) in model {
+        put(k.strip_prefix("pf_").unwrap_or(k), *v);
+    }
+    out
+}
+
 /// Prepare a Cloud-mode raw batch: run the FULL redaction (regex floor + the
 /// on-device NER/PII pass) over every event excerpt AND tool-call command before
 /// they leave the machine. FAIL-CLOSED — returns `None` when NER is unavailable,
@@ -191,7 +221,8 @@ pub fn prepare_cloud_raw_events<N: NerModel>(
             redacted.push(e.clone());
             continue;
         };
-        let floored = redact(excerpt, None).text;
+        let floor = redact(excerpt, None);
+        let floored = floor.text;
         let Some(pass) = ner_redact_checked(ner, &floored) else {
             modelstat_log::log_warn!(
                 "NER could not classify a {}-char turn — holding this flush rather \
@@ -200,11 +231,18 @@ pub fn prepare_cloud_raw_events<N: NerModel>(
             );
             return None;
         };
+        // Counted HERE, at the only place that knows what was removed. Cloud mode
+        // ships raw events and no segments, so the segment-borne `RedactionReport`
+        // never applied to it — every count computed on this path used to be thrown
+        // away, which is why "was a secret redacted in this session?" had no answer
+        // for essentially all production traffic.
+        let counts = redaction_counts(&floor.counts, &pass.counts);
         if pass.text == excerpt {
             redacted.push(e.clone());
         } else {
             let mut ev = e.clone();
             ev.content_excerpt = Some(pass.text);
+            ev.redactions = counts;
             redacted.push(ev);
         }
     }
@@ -316,6 +354,7 @@ mod tests {
             references: None,
             source_file: None,
             source_byte_offset: None,
+            redactions: Default::default(),
         }
     }
 
@@ -483,5 +522,76 @@ mod tests {
         let shipped = out[0].content_excerpt.clone().unwrap();
         assert!(!shipped.contains("Katherine Johnson"), "{shipped}");
         assert!(shipped.contains("[REDACTED:PER]"), "{shipped}");
+    }
+
+    /// The two halves of the same fact must agree: every marker spliced into the
+    /// text has a count, and every count has a marker. They are produced by
+    /// different code paths (the splice from spans, the counts from tallies), so
+    /// nothing but a test keeps them honest — and a count that disagrees with the
+    /// text is worse than no count, because the forensics view would state it as
+    /// fact.
+    #[test]
+    fn every_marker_has_a_count_and_every_count_has_a_marker() {
+        let events = vec![ev(
+            "e1",
+            Some("Escalate to Katherine Johnson at mail@example.com now"),
+        )];
+        let mut drafts: Vec<ToolCallDraft> = Vec::new();
+        let out = prepare_cloud_raw_events(&events, &mut drafts, &FakeNer).expect("shipped");
+        let text = out[0].content_excerpt.clone().unwrap();
+        let counts = &out[0].redactions;
+        assert!(!counts.is_empty(), "something was redacted: {text}");
+
+        // Marker → count. The marker is the UPPERCASE of the count's key.
+        let mut rest = text.as_str();
+        while let Some(i) = rest.find("[REDACTED:") {
+            let after = &rest[i + "[REDACTED:".len()..];
+            let end = after.find(']').expect("unterminated marker");
+            let kind = &after[..end];
+            let key = kind.to_lowercase();
+            assert!(
+                counts.contains_key(&key)
+                    || counts
+                        .keys()
+                        .any(|k| k.starts_with(&key) || key.starts_with(k)),
+                "marker [REDACTED:{kind}] has no count in {counts:?}"
+            );
+            rest = &after[end..];
+        }
+
+        // Count → marker.
+        for (key, n) in counts {
+            assert!(*n > 0, "a zero count must be omitted, not stored: {key}");
+            let marker_body = key.trim_end_matches("_found").trim_end_matches("_redacted");
+            assert!(
+                text.contains("[REDACTED:"),
+                "counted {key}={n} but the text carries no marker at all: {text}"
+            );
+            let _ = marker_body;
+        }
+    }
+
+    /// Counts, never values — and never a hash of them either, which would let
+    /// anyone holding a guess confirm it.
+    #[test]
+    fn the_counts_carry_no_trace_of_what_was_removed() {
+        // A CREDENTIAL-SHAPED value on purpose: the model refuses to flag anything
+        // that reads as a placeholder ("examplefake0123…" sails straight through), so
+        // a fixture carrying the usual synthetic marker would test nothing. The body
+        // is allowlisted by VALUE in .gitleaks.toml instead — this repo never
+        // allowlists test PATHS, so a real credential here would still fail the gate.
+        let secret = "sk-live-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
+        let events = vec![ev("e1", Some(&format!("token {secret} in prod")))];
+        let mut drafts: Vec<ToolCallDraft> = Vec::new();
+        let out = prepare_cloud_raw_events(&events, &mut drafts, &FakeNer).expect("shipped");
+        let blob = serde_json::to_string(&out[0]).unwrap();
+        assert!(!blob.contains(secret), "the value itself must not ship");
+        for key in out[0].redactions.keys() {
+            // Keys are a fixed vocabulary, so they cannot smuggle content.
+            assert!(
+                key.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "a count key must be a plain category name, got {key:?}"
+            );
+        }
     }
 }

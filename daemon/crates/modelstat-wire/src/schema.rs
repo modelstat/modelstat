@@ -108,6 +108,26 @@ pub struct RawEvent {
     pub source_file: Option<String>,
     #[serde(default)]
     pub source_byte_offset: Option<u64>,
+    /// What the redactor REMOVED from this turn, counted by type — e.g.
+    /// `{"secret": 1, "private_email": 2}`. Absent when nothing was removed.
+    ///
+    /// COUNTS ONLY, and that is a hard rule, not a simplification: never the
+    /// values, and never a hash of them either. A hash would let anyone holding a
+    /// guess confirm it, which recreates exactly the exposure redaction exists to
+    /// prevent. The count says "a secret was here"; that is the whole feature.
+    ///
+    /// The markers in `content_excerpt` are the human-readable half of the same
+    /// fact (`[REDACTED:SECRET]`) and this is the machine-readable half — one
+    /// UPPERCASED key per marker, so the two can be checked against each other
+    /// rather than trusted separately.
+    ///
+    /// Keys are the redactor's own category names (`modelstat_redact`'s
+    /// `privacy_filter::CATEGORIES`) plus the deterministic floor's three
+    /// (`secrets_found`, `emails_redacted`, `paths_redacted_absolute`). One
+    /// vocabulary, defined by the model that produces it, so the stored dimension
+    /// cannot drift from what the daemon actually detected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub redactions: BTreeMap<String, u32>,
 }
 
 impl RawEvent {
@@ -445,6 +465,7 @@ mod tests {
             references: None,
             source_file: None,
             source_byte_offset: None,
+            redactions: Default::default(),
         };
         let v: Value = serde_json::to_value(&ev).unwrap();
         // nullable → present as null

@@ -590,6 +590,7 @@ fn parse_inner(
                     references: None,
                     source_file: Some(ctx.source_file.clone()),
                     source_byte_offset: Some(offset),
+                    redactions: Default::default(),
                 });
                 emitted += 1;
                 turn_index += 1;
@@ -655,6 +656,7 @@ fn parse_inner(
                     references: None,
                     source_file: Some(ctx.source_file.clone()),
                     source_byte_offset: Some(offset),
+                    redactions: Default::default(),
                 });
                 emitted += 1;
                 continue;

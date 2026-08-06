@@ -314,6 +314,7 @@ mod tests {
             references: None,
             source_file: None,
             source_byte_offset: None,
+            redactions: Default::default(),
         };
         ev.tool_calls.insert("Bash".into(), 2);
         let s = turn_surface(&ev);
