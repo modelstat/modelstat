@@ -20,9 +20,11 @@
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use modelstat_ingest::upload_gate::{MIN_CONCURRENCY, START_CONCURRENCY, WINS_TO_GROW};
 use modelstat_ingest::{save_identity, Config, DeviceApi, DeviceIdentity, UploadResult};
 use modelstat_wire::IngestBatch;
 use serde_json::{json, Value};
@@ -34,10 +36,13 @@ struct Recorder {
     last_path: String,
     last_auth: Option<String>,
     last_body: Option<Value>,
+    /// While set, the next request is answered `429` and the count decremented —
+    /// how the test makes the server push back exactly once.
+    throttle_next: usize,
 }
 type Shared = Arc<Mutex<Recorder>>;
 
-fn record(st: &Shared, path: &str, headers: &HeaderMap, body: Value) -> Json<Value> {
+fn record(st: &Shared, path: &str, headers: &HeaderMap, body: Value) -> Response {
     let mut s = st.lock().unwrap();
     s.last_path = path.to_string();
     s.last_auth = headers
@@ -45,6 +50,17 @@ fn record(st: &Shared, path: &str, headers: &HeaderMap, body: Value) -> Json<Val
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     s.last_body = Some(body);
+    if s.throttle_next > 0 {
+        s.throttle_next -= 1;
+        // `Retry-After: 0` so the retry costs only the backoff ladder's first
+        // rung, not a scripted wait on top of it.
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "0")],
+            Json(json!({ "error": "over fair share" })),
+        )
+            .into_response();
+    }
     Json(json!({
         "accepted": 3,
         "new_sessions": 1,
@@ -52,13 +68,14 @@ fn record(st: &Shared, path: &str, headers: &HeaderMap, body: Value) -> Json<Val
         "batch_id": "batch_srv",
         "raw_s3_key": null,
     }))
+    .into_response()
 }
 
 async fn h_ingest(
     State(st): State<Shared>,
     headers: HeaderMap,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> Response {
     record(&st, "/v1/ingest", &headers, body)
 }
 
@@ -66,7 +83,7 @@ async fn h_ingest_raw(
     State(st): State<Shared>,
     headers: HeaderMap,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> Response {
     record(&st, "/v1/ingest/raw", &headers, body)
 }
 
@@ -157,6 +174,39 @@ async fn upload_batch_commits_and_routes() {
         script.lock().unwrap().last_path,
         "/v1/ingest/raw",
         "raw path routes to /v1/ingest/raw"
+    );
+
+    // ── 3. 429 reaches the gate: shrink now, grow back on sustained commits ──
+    // Uploads are concurrent, so how many may be in flight has to come from the
+    // server rather than from a constant we picked. This proves the signal is
+    // actually plumbed: without it the limiter would sit at its start value
+    // forever and a saturated edge would keep getting the same load.
+    assert_eq!(
+        api.upload_limit(),
+        START_CONCURRENCY,
+        "starts where it starts"
+    );
+    script.lock().unwrap().throttle_next = 1;
+    // Still a Commit — a 429 is a retry, never a drop (feature §21.2). This is
+    // the one place the test pays the ladder's first rung (~1s) in wall clock.
+    assert!(
+        api.upload_batch(&batch, false).await.is_commit(),
+        "a throttled batch retries and commits, it does not drop"
+    );
+    assert_eq!(
+        api.upload_limit(),
+        MIN_CONCURRENCY,
+        "the server's 429 halved the in-flight limit"
+    );
+    // …and it recovers, so one bad minute doesn't pin the daemon at sequential
+    // uploads for the rest of its life. The retry above already banked one
+    // commit, so this run of them crosses the threshold.
+    for _ in 0..WINS_TO_GROW {
+        assert!(api.upload_batch(&batch, false).await.is_commit());
+    }
+    assert!(
+        api.upload_limit() > MIN_CONCURRENCY,
+        "sustained commits earn the concurrency back"
     );
 
     std::env::remove_var("MODELSTAT_HOME");

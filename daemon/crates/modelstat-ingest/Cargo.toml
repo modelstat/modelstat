@@ -19,7 +19,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 regex.workspace = true
-tokio.workspace = true
+# `sync` for the upload gate's Semaphore — do not rely on another crate
+# enabling it through feature unification.
+tokio = { workspace = true, features = ["sync"] }
 reqwest.workspace = true
 chrono.workspace = true
 hostname.workspace = true

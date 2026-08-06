@@ -407,7 +407,7 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         &mut correct,
         &exists,
         &read_file,
-        &mut uploader,
+        &uploader,
         &mut *guard as &mut (dyn CursorStore + Send),
         &mut observer,
         &accounts,

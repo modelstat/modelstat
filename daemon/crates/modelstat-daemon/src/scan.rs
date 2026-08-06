@@ -20,6 +20,8 @@ use modelstat_pipeline::{Embedder, LinkExtractor, ResilientSummarizer, Summarize
 use modelstat_redact::NerModel;
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
 
+use futures_util::StreamExt;
+
 use crate::discover_jobs::{ParserKind, ScanJob};
 use crate::flush::{build_flush_batches, FlushOutcome};
 
@@ -49,6 +51,12 @@ pub const MAX_FILES_PER_SCAN: usize = 12;
 /// half-written message forever. Re-sending a settled row is free — ids are
 /// deterministic and the server upserts — so a short overlap buys self-healing.
 const RESHIP_LAG_MS: i64 = 10 * 60 * 1000;
+
+/// Most upload futures alive at once. A ceiling, not a policy — the uploader's
+/// adaptive gate decides how many actually run, and it can never exceed its own
+/// `MAX_CONCURRENCY`. Matching that here keeps this from being the binding
+/// constraint while still bounding the futures a flush allocates.
+const UPLOAD_FANOUT: usize = modelstat_ingest::upload_gate::MAX_CONCURRENCY;
 
 const STREAM_CHANNEL_CAP: usize = 4;
 
@@ -110,7 +118,21 @@ pub struct Hold;
 /// `Ok(accepted)` = a CONFIRMED commit (cursor may advance); `Err(Hold)` = any
 /// non-commit (no token / reauth failed / retries exhausted / offline).
 pub trait BatchUploader {
-    async fn upload(&mut self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold>;
+    /// `&self`, not `&mut self`: a flush uploads its batches CONCURRENTLY, and
+    /// an exclusive borrow would make that impossible. Implementors keep any
+    /// mutable state behind interior mutability (the real one already did —
+    /// every `DeviceApi` method takes `&self`).
+    ///
+    /// Spelled as an explicit `impl Future + Send` rather than `async fn`
+    /// because the concurrent flush lives inside a boxed `Send` task: with a
+    /// bare `async fn` the compiler cannot promise the returned future is `Send`
+    /// for every lifetime, and the scan fails to compile with "implementation of
+    /// `Send` is not general enough".
+    fn upload(
+        &self,
+        batch: &IngestBatch,
+        raw: bool,
+    ) -> impl std::future::Future<Output = Result<u64, Hold>> + Send;
 }
 
 /// Progress sink for a scan — the daemon updates `last-status.json` + the tray
@@ -154,7 +176,7 @@ async fn flush_buffer<S, E, N, G, U, CE>(
     git: &mut G,
     extract_links: Option<&LinkExtractor<'_>>,
     correct_events: &mut CE,
-    uploader: &mut U,
+    uploader: &U,
     cursors: &mut (dyn CursorStore + Send),
     observer: &mut (dyn ScanObserver + Send),
     tallies: &mut ScanTallies,
@@ -164,7 +186,8 @@ where
     E: Embedder,
     N: NerModel,
     G: GitEnrichment + Send,
-    U: BatchUploader,
+    // `Sync` because the concurrent flush shares `&U` across in-flight uploads.
+    U: BatchUploader + Sync,
     CE: FnMut(Vec<RawEvent>) -> Vec<RawEvent>,
 {
     if buffer.is_empty() && tool_buffer.is_empty() {
@@ -208,15 +231,61 @@ where
         FlushOutcome::Held => return Err(Hold),
         FlushOutcome::Ready(b) => b,
     };
+    // Ship this flush's batches CONCURRENTLY, because in cloud mode each batch is
+    // one session and each POST makes the edge summarise it with an LLM — so a
+    // flush covering a dozen sessions used to be a dozen seconds-long round trips,
+    // one after another.
+    //
+    // The number actually in flight is NOT decided here: the uploader holds an
+    // adaptive gate fed by the server's own 429s (`modelstat_ingest::upload_gate`),
+    // so this only has to stop being the thing that serialises. The bound below
+    // is a ceiling on futures alive at once, not a concurrency policy.
+    //
+    // The memory ceiling this file promises is untouched: `batches` is the whole
+    // flush either way — the sequential loop held it too — so what is new is only
+    // the handful of request bodies in flight, each a slice of that same flush.
+    //
+    // The loss-proof contract is unchanged, and depends on it: the cursor
+    // advance sits AFTER this whole block, so a hold anywhere in the fan-out
+    // advances nothing and the same files re-parse next scan.
     for pb in &batches {
         observer.on_upload(pb.batch.events.len(), pb.segment_count);
-        // A non-commit HOLDS the whole flush: we never reach the cursor-advance
-        // below, so the next scan re-parses the same files and retries.
-        let accepted = uploader.upload(&pb.batch, pb.raw).await?;
-        tallies.batches_uploaded += 1;
-        tallies.events_uploaded += accepted;
-        tallies.segments_uploaded += pb.segment_count as u64;
-        observer.on_uploaded(accepted as usize, pb.segment_count);
+    }
+    // Built with a plain loop rather than `.map(|pb| async move { … })`: a
+    // closure returning a future that BORROWS its argument has to satisfy
+    // `FnOnce(&PreparedBatch)` for every lifetime, which it cannot, and the
+    // error surfaces far away as "implementation of `Send`/`FnOnce` is not
+    // general enough" where the daemon boxes this future. A loop gives each
+    // future one concrete borrow and no closure at all.
+    let up: &U = uploader;
+    let mut futures = Vec::with_capacity(batches.len());
+    for pb in &batches {
+        futures.push(async move { (pb, up.upload(&pb.batch, pb.raw).await) });
+    }
+    let mut inflight = futures_util::stream::iter(futures).buffer_unordered(UPLOAD_FANOUT);
+    let mut held: Option<Hold> = None;
+    while let Some((pb, result)) = inflight.next().await {
+        match result {
+            Ok(accepted) => {
+                tallies.batches_uploaded += 1;
+                tallies.events_uploaded += accepted;
+                tallies.segments_uploaded += pb.segment_count as u64;
+                observer.on_uploaded(accepted as usize, pb.segment_count);
+            }
+            // First hold wins and we stop: dropping the stream cancels what is
+            // still in flight and starts nothing new, which is what the
+            // sequential loop did by returning early. Anything already accepted
+            // server-side is re-sent next scan and deduped by id, because no
+            // cursor moved.
+            Err(h) => {
+                held = Some(h);
+                break;
+            }
+        }
+    }
+    drop(inflight);
+    if let Some(h) = held {
+        return Err(h);
     }
     // Every batch in this flush committed — persist the buffered files' cursors
     // once, atomically. Upserts are server-side idempotent, so a crash between
@@ -261,7 +330,7 @@ pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE>(
     // daemon's tokio-spawned single-flight task, whose future must be `Send`.
     exists: &(dyn Fn(&str) -> bool + Sync),
     read_file: &(dyn Fn(&str) -> Option<String> + Sync),
-    uploader: &mut U,
+    uploader: &U,
     // `+ Send` on the trait objects: the scan runs in the daemon's tokio-spawned
     // single-flight task, whose future must be `Send` — and a `dyn Trait` erases
     // the concrete type's Send-ness unless the bound is spelled out. Every real
@@ -278,7 +347,8 @@ where
     E: Embedder,
     N: NerModel,
     G: GitEnrichment + Send,
-    U: BatchUploader,
+    // `Sync` because the concurrent flush shares `&U` across in-flight uploads.
+    U: BatchUploader + Sync,
     // The streaming parse seam: emits events in bounded chunks (never a full
     // materialised `ParseResult.events`) + returns the tool-call/stats tail. `Fn +
     // Send + Sync + Clone + 'static` so the loop can run it on a `spawn_blocking`
@@ -329,7 +399,7 @@ where
                 &mut *git,
                 extract_links,
                 &mut correct_events,
-                &mut *uploader,
+                uploader,
                 &mut *cursors,
                 &mut *observer,
                 &mut tallies,
@@ -339,7 +409,13 @@ where
     }
 
     let total = ordered.len();
-    for (i, job) in ordered.iter().enumerate() {
+    // Consumed, not iterated by reference: holding a `&ScanJob` (and the slice
+    // iterator behind it) across the awaits below makes this future's `Send`-ness
+    // depend on a specific lifetime, and the daemon boxes it into a `Send` task —
+    // which fails to compile as "implementation of `Send` is not general enough"
+    // once the flush inside also holds borrowed futures. Owning each job sidesteps
+    // the whole question.
+    for (i, job) in ordered.into_iter().enumerate() {
         observer.on_file(&job.path, i, total);
         let cur = cursors.get_cursor(&job.path);
         let cs = checksum(&job.path);
@@ -377,7 +453,7 @@ where
         // timestamp watermark carried on the job, and the parser applies it
         // (its rows carry no cross-record state, unlike a transcript line).
         // Never on a force scan — that exists to re-upload on purpose.
-        let mut job = job.clone();
+        let mut job = job;
         job.since_ms = match (opts.force_read_all, job.kind, cur.as_ref()) {
             (false, ParserKind::Cursor, Some(cur)) => cur
                 .shipped_through_ms
@@ -532,6 +608,8 @@ mod tests {
     use modelstat_redact::UnavailableNer;
     use modelstat_sumclient::{CompleteRequest, SumError};
     use modelstat_wire::GitContext;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     // The scan's script-enrichment file seams. Every test here parses events with
@@ -581,19 +659,29 @@ mod tests {
     }
 
     // Records every committed batch, or holds every upload when `hold` is set.
+    // Records behind a `Mutex` because uploads overlap now — the real uploader
+    // takes `&self` for the same reason.
     #[derive(Default)]
     struct RecordingUploader {
         /// (event_count, raw) per committed batch.
-        uploaded: Vec<(usize, bool)>,
+        uploaded: Mutex<Vec<(usize, bool)>>,
         /// `source_event_id`s of EVERY upload attempt (held or committed) — lets a
         /// test prove a crash-held batch and its resend are byte-identical, so the
         /// server dedupes on id (no duplicates after a crash).
-        attempts: Vec<Vec<String>>,
+        attempts: Mutex<Vec<Vec<String>>>,
         hold: bool,
     }
+    impl RecordingUploader {
+        fn uploaded(&self) -> Vec<(usize, bool)> {
+            self.uploaded.lock().unwrap().clone()
+        }
+        fn attempts(&self) -> Vec<Vec<String>> {
+            self.attempts.lock().unwrap().clone()
+        }
+    }
     impl BatchUploader for RecordingUploader {
-        async fn upload(&mut self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold> {
-            self.attempts.push(
+        async fn upload(&self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold> {
+            self.attempts.lock().unwrap().push(
                 batch
                     .events
                     .iter()
@@ -604,7 +692,7 @@ mod tests {
                 return Err(Hold);
             }
             let n = batch.events.len();
-            self.uploaded.push((n, raw));
+            self.uploaded.lock().unwrap().push((n, raw));
             Ok(n as u64)
         }
     }
@@ -742,7 +830,7 @@ mod tests {
     async fn scans_files_uploads_and_advances_cursors() {
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let events = vec![
@@ -765,7 +853,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -777,7 +865,7 @@ mod tests {
         assert!(!t.held);
         assert!(t.batches_uploaded >= 1);
         // Local mode never ships raw.
-        assert!(uploader.uploaded.iter().all(|(_, raw)| !raw));
+        assert!(uploader.uploaded().iter().all(|(_, raw)| !raw));
         // Both files' cursors advanced only after their events committed.
         assert!(cursors.get_cursor("/a.jsonl").is_some());
         assert!(cursors.get_cursor("/b.jsonl").is_some());
@@ -787,7 +875,7 @@ mod tests {
     async fn skips_a_file_whose_size_and_tail_are_unchanged() {
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         // Pre-seed the cursor to EXACTLY what checksum() will report for /a.jsonl.
@@ -816,7 +904,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -826,14 +914,14 @@ mod tests {
         assert_eq!(t.files_unchanged, 1);
         assert_eq!(t.files_scanned, 0);
         assert_eq!(t.batches_uploaded, 0);
-        assert!(uploader.uploaded.is_empty());
+        assert!(uploader.uploaded().is_empty());
     }
 
     #[tokio::test]
     async fn force_read_all_bypasses_the_unchanged_skip() {
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         cursors.set_cursor(
@@ -861,7 +949,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -883,7 +971,7 @@ mod tests {
             Duration::ZERO,
         );
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let t = run_scan_over_jobs(
@@ -902,7 +990,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -913,7 +1001,7 @@ mod tests {
         assert_eq!(t.batches_uploaded, 0);
         // Never-drop: the file's cursor stays put so it re-parses next cycle.
         assert!(cursors.get_cursor("/a.jsonl").is_none());
-        assert!(uploader.uploaded.is_empty());
+        assert!(uploader.uploaded().is_empty());
     }
 
     #[tokio::test]
@@ -921,7 +1009,7 @@ mod tests {
         let resilient = healthy();
         let mut git = NoGit;
         // Engine is healthy (batches build), but every upload holds.
-        let mut uploader = RecordingUploader {
+        let uploader = RecordingUploader {
             hold: true,
             ..Default::default()
         };
@@ -943,7 +1031,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -994,7 +1082,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1024,7 +1112,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1038,10 +1126,15 @@ mod tests {
 
         // The held attempt and the successful resend carried the IDENTICAL events —
         // same source_event_ids, so the server dedupes: a crash never duplicates.
-        assert_eq!(uploader.attempts.len(), 2, "one held attempt + one resend");
-        assert!(!uploader.attempts[0].is_empty());
         assert_eq!(
-            uploader.attempts[0], uploader.attempts[1],
+            uploader.attempts().len(),
+            2,
+            "one held attempt + one resend"
+        );
+        assert!(!uploader.attempts()[0].is_empty());
+        assert_eq!(
+            uploader.attempts()[0],
+            uploader.attempts()[1],
             "resend must carry byte-identical event ids (server dedupes on id)"
         );
     }
@@ -1050,7 +1143,7 @@ mod tests {
     async fn file_cap_stops_early_and_sets_more_pending() {
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let t = run_scan_over_jobs(
@@ -1069,7 +1162,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1091,7 +1184,7 @@ mod tests {
         // straddle: cursor advances only after the LAST batch carrying the file.
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let mut events = Vec::with_capacity(1100);
@@ -1115,7 +1208,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1126,9 +1219,9 @@ mod tests {
         // Two batches: the 1000-event mid-file flush + the 100-event trailing one.
         assert_eq!(t.batches_uploaded, 2);
         assert_eq!(t.events_uploaded, 1100);
-        assert_eq!(uploader.uploaded.len(), 2);
-        assert_eq!(uploader.uploaded[0].0, 1000);
-        assert_eq!(uploader.uploaded[1].0, 100);
+        assert_eq!(uploader.uploaded().len(), 2);
+        assert_eq!(uploader.uploaded()[0].0, 1000);
+        assert_eq!(uploader.uploaded()[1].0, 100);
         // Cursor advanced exactly once, after the final batch.
         assert!(cursors.get_cursor("/big.jsonl").is_some());
     }
@@ -1142,7 +1235,7 @@ mod tests {
         // memory stays bounded even though the "file" is streamed piecemeal.
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let mut events = Vec::with_capacity(1100);
@@ -1166,7 +1259,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1175,9 +1268,9 @@ mod tests {
 
         assert!(!t.held);
         assert_eq!(t.events_uploaded, 1100);
-        assert_eq!(uploader.uploaded.len(), 2);
-        assert_eq!(uploader.uploaded[0].0, 1000);
-        assert_eq!(uploader.uploaded[1].0, 100);
+        assert_eq!(uploader.uploaded().len(), 2);
+        assert_eq!(uploader.uploaded()[0].0, 1000);
+        assert_eq!(uploader.uploaded()[1].0, 100);
         assert!(cursors.get_cursor("/big.jsonl").is_some());
     }
 
@@ -1190,7 +1283,7 @@ mod tests {
         // on "Uploading <BATCH_MAX_EVENTS> events" and never finished.
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         // 60 bytes confirmed-shipped; `checksum` reports the file is now 100.
@@ -1217,7 +1310,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1229,11 +1322,11 @@ mod tests {
         // already-confirmed events were dropped before the buffer.
         assert_eq!(t.files_scanned, 1);
         assert_eq!(t.events_uploaded, 2);
-        assert_eq!(uploader.uploaded.len(), 1);
-        assert_eq!(uploader.uploaded[0].0, 2);
+        assert_eq!(uploader.uploaded().len(), 1);
+        assert_eq!(uploader.uploaded()[0].0, 2);
         // Exactly the tail, by id — never the re-shipped head.
         assert_eq!(
-            uploader.attempts[0],
+            uploader.attempts()[0],
             vec![
                 "s1:2026-07-16T10:02:00.000Z".to_string(),
                 "s1:2026-07-16T10:03:00.000Z".to_string()
@@ -1251,7 +1344,7 @@ mod tests {
         // and it re-parses on every cycle for the rest of the daemon's life.
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         cursors.set_cursor("/quiet.jsonl", confirmed_through(60));
@@ -1275,7 +1368,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1284,7 +1377,7 @@ mod tests {
 
         assert!(!t.held);
         assert_eq!(t.events_uploaded, 0);
-        assert!(uploader.uploaded.is_empty()); // nothing on the wire
+        assert!(uploader.uploaded().is_empty()); // nothing on the wire
         assert_eq!(cursors.get_cursor("/quiet.jsonl").unwrap().size, 100);
     }
 
@@ -1295,7 +1388,7 @@ mod tests {
         // append-in-place growth (`cs.size >= cur.size`) earns a floor.
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         // Confirmed through 500 bytes, but `checksum` now reports only 100.
@@ -1320,7 +1413,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1336,7 +1429,7 @@ mod tests {
         // re-uploads on demand. A floor would make it ship nothing at all.
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader::default();
+        let uploader = RecordingUploader::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         cursors.set_cursor("/done.jsonl", confirmed_through(100));
@@ -1360,7 +1453,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &mut uploader,
+            &uploader,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1368,5 +1461,170 @@ mod tests {
         .await;
 
         assert_eq!(t.events_uploaded, 2);
+    }
+
+    /// A LIVE NER model, which a cloud test needs: cloud egress fail-closes on a
+    /// redactor that is missing OR ineffective, and `ner_active` decides which by
+    /// probing with a sentinel name and checking it really disappeared. So this
+    /// answers the probe and finds nothing in the test turns themselves.
+    struct LiveNer;
+    impl NerModel for LiveNer {
+        fn classify(&self, text: &str) -> Option<Vec<modelstat_redact::NerToken>> {
+            let mut out = Vec::new();
+            if let Some(i) = text.find("Katherine Johnson") {
+                let tok =
+                    |entity: &str, word: &str, a: usize, b: usize| modelstat_redact::NerToken {
+                        entity: entity.into(),
+                        word: word.into(),
+                        start: Some(a),
+                        end: Some(b),
+                    };
+                out.push(tok("B-PER", "Katherine", i, i + 9));
+                out.push(tok("I-PER", "Johnson", i + 10, i + 17));
+            }
+            Some(out)
+        }
+    }
+
+    /// Watches the fan-out: counts how many uploads are alive at the same
+    /// moment, and can hold one named session's batch.
+    #[derive(Default)]
+    struct ConcurrentUploader {
+        inflight: AtomicUsize,
+        peak: AtomicUsize,
+        /// The session whose batch holds — chosen by NAME, not by call order, so
+        /// the test does not depend on how the runtime interleaves.
+        hold_session: Option<&'static str>,
+    }
+    impl BatchUploader for ConcurrentUploader {
+        async fn upload(&self, batch: &IngestBatch, _raw: bool) -> Result<u64, Hold> {
+            let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            // Suspend, the way a real POST does while the server summarises. A
+            // sibling upload is polled meanwhile — if the loop were still
+            // sequential, `peak` could never exceed one.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+            let session = batch.events.first().map(|e| e.session_id.as_str());
+            if self.hold_session.is_some() && self.hold_session == session {
+                return Err(Hold);
+            }
+            Ok(batch.events.len() as u64)
+        }
+    }
+
+    /// Three sessions in one file, cloud mode ⇒ three batches from ONE flush
+    /// (cloud ships one session per raw batch). They must be in flight together;
+    /// uploading them one at a time is what made a backlog take hours, since each
+    /// POST waits on a server-side summarise.
+    #[tokio::test]
+    async fn uploads_in_one_flush_overlap_instead_of_queueing() {
+        let resilient = healthy();
+        let mut git = NoGit;
+        let uploader = ConcurrentUploader::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        let events = vec![
+            ev("s1", "2026-07-16T10:00:00.000Z"),
+            ev("s2", "2026-07-16T10:01:00.000Z"),
+            ev("s3", "2026-07-16T10:02:00.000Z"),
+        ];
+        let t = run_scan_over_jobs(
+            vec![job("/three.jsonl")],
+            "dev1",
+            "9.9.9",
+            "cloud",
+            opts(None, false),
+            &resilient,
+            &NoEmbedder,
+            &LiveNer,
+            &mut git,
+            None,
+            parse_with(events),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &uploader,
+            &mut cursors,
+            &mut obs,
+            &Accounts::new(),
+        )
+        .await;
+
+        assert!(!t.held);
+        assert_eq!(t.batches_uploaded, 3, "one batch per session");
+        assert_eq!(t.events_uploaded, 3);
+        assert!(
+            uploader.peak.load(Ordering::SeqCst) > 1,
+            "uploads must overlap, saw peak in-flight of {}",
+            uploader.peak.load(Ordering::SeqCst)
+        );
+        // Concurrency changes nothing about the cursor contract: all three
+        // committed, so the file advances exactly as before.
+        assert!(cursors.get_cursor("/three.jsonl").is_some());
+    }
+
+    /// The loss-proof half of the fan-out: ONE batch holding leaves the file's
+    /// cursor untouched, even though its siblings committed. The whole file
+    /// re-parses next cycle and the server dedupes the resends by event id —
+    /// which is exactly what the sequential loop did by returning early.
+    #[tokio::test]
+    async fn a_hold_anywhere_in_the_fanout_advances_no_cursor() {
+        let resilient = healthy();
+        let mut git = NoGit;
+        let uploader = ConcurrentUploader {
+            hold_session: Some("s2"),
+            ..Default::default()
+        };
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        let events = vec![
+            ev("s1", "2026-07-16T10:00:00.000Z"),
+            ev("s2", "2026-07-16T10:01:00.000Z"),
+            ev("s3", "2026-07-16T10:02:00.000Z"),
+        ];
+        let t = run_scan_over_jobs(
+            vec![job("/three.jsonl")],
+            "dev1",
+            "9.9.9",
+            "cloud",
+            opts(None, false),
+            &resilient,
+            &NoEmbedder,
+            &LiveNer,
+            &mut git,
+            None,
+            parse_with(events),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &uploader,
+            &mut cursors,
+            &mut obs,
+            &Accounts::new(),
+        )
+        .await;
+
+        assert!(t.held, "one held batch holds the flush");
+        assert!(
+            cursors.get_cursor("/three.jsonl").is_none(),
+            "never-drop: a held batch anywhere in the fan-out advances NO cursor"
+        );
+        // The drain stops at the hold: nothing after it is counted and nothing new
+        // is started. A sibling ALREADY in flight may still finish — harmless
+        // precisely because its receipt moves no cursor either.
+        assert!(
+            t.batches_uploaded < 3,
+            "the tally stops at the first hold, counted {}",
+            t.batches_uploaded
+        );
+        assert_eq!(
+            t.events_uploaded, t.batches_uploaded,
+            "one event per session, so counted events track counted batches"
+        );
     }
 }

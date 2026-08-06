@@ -22,6 +22,7 @@ modelstat-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "signal"] }
 # Filesystem watcher (feature §6): the recommended per-OS backend (FSEvents /
 # inotify / ReadDirectoryChangesW). The 1s debounce + scan-trigger glue is the
