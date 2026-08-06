@@ -198,7 +198,11 @@ jobs:
           - { os: macos-14, target: aarch64-apple-darwin, ext: tar.gz, mac: true }
           - { os: macos-14, target: x86_64-apple-darwin, ext: tar.gz, mac: true }
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, ext: tar.gz }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, ext: tar.gz, linker: gcc-aarch64-linux-gnu }
+          # `g++-…` as well as `gcc-…`: ONNX Runtime is C++, and linking it needs
+          # the cross libstdc++ DEV package. `gcc-aarch64-linux-gnu` pulls in
+          # `libstdc++6-arm64-cross` — the runtime — which is not the same thing and
+          # left the linker with `cannot find -lstdc++`.
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, ext: tar.gz, linker: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: zip }
           - { os: windows-latest, target: aarch64-pc-windows-msvc, ext: zip }
     runs-on: ${{ matrix.os }}
