@@ -106,6 +106,15 @@ struct LocalStatus: Decodable {
   /// The upload fan-out in flight right now, if any. Sessions leave together, so
   /// its `since_ms` also dates the longest one still running.
   let uploading: UploadingNow?
+  /// Where the sweep is in the file list it discovered — `done` counts files
+  /// VISITED (new + skipped), so `total - done` is the "N session files left"
+  /// the status line quotes.
+  let progress_done: Int?
+  let progress_total: Int?
+  /// What the sweep now running has got through, and when it started. nil
+  /// between sweeps — and on any daemon predating this block, which the row
+  /// below degrades around rather than going blank.
+  let run: RunProgress?
   let queue_size: Int?
   let last_event_at: String?
   let daemon_version: String?
@@ -126,6 +135,23 @@ struct UploadingNow: Decodable {
   /// Epoch ms the set started — a timestamp, so this menu ticks the elapsed
   /// clock on its own 1s beat without the daemon rewriting the mirror.
   let since_ms: Int64?
+}
+
+/// The sweep in progress. Scoped to THIS pass, unlike `stats`, which is
+/// cumulative since the daemon started and after a few days answers a question
+/// nobody asked.
+struct RunProgress: Decodable {
+  /// Epoch ms the sweep started. The one clock that spans the whole pass —
+  /// `busy_since_ms` restarts on every file, so it can only ever say how long
+  /// the current file has taken.
+  let since_ms: Int64?
+  /// Files that had new content and were parsed.
+  let files_new: Int?
+  /// Files skipped because their cursor says they're already shipped.
+  let files_unchanged: Int?
+  let events: Int?
+  /// 0 in cloud mode, which ships raw events and summarises server-side.
+  let segments: Int?
 }
 
 struct UpdateInfo: Decodable {
@@ -177,6 +203,11 @@ final class TrayController: NSObject {
 
   // Menu items we update on every poll
   private let statusMI = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
+  /// How far into the current sweep the daemon is — position, share done, the
+  /// split between new and already-shipped files, and the clock for the whole
+  /// pass. The row above says WHAT is happening; this one says how much of it is
+  /// left, which is the question a 655-file backlog actually raises.
+  private let progressMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   /// What is on the wire this second — the row that proves a long, quiet
   /// upload pass is working rather than wedged.
   private let uploadMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -267,7 +298,7 @@ final class TrayController: NSObject {
 
   /// The non-clickable info rows at the top of the menu, in order.
   private var infoItems: [NSMenuItem] {
-    [statusMI, uploadMI, deviceMI, analyzedMI, pipelineMI, detectedMI]
+    [statusMI, progressMI, uploadMI, deviceMI, analyzedMI, pipelineMI, detectedMI]
   }
 
   /// Set an info row's title, hiding the row when the title is empty.
@@ -502,7 +533,9 @@ final class TrayController: NSObject {
     let local = localLatest ?? s.local
     if s.paired == false {
       setInfo(statusMI, "Not paired — run `npx modelstat@latest`")
-      for mi in [uploadMI, deviceMI, analyzedMI, pipelineMI, detectedMI] { setInfo(mi, "") }
+      for mi in [progressMI, uploadMI, deviceMI, analyzedMI, pipelineMI, detectedMI] {
+        setInfo(mi, "")
+      }
       claimMI.title = "Open modelstat.ai"
       copyClaimMI.isHidden = true
       return
@@ -530,18 +563,18 @@ final class TrayController: NSObject {
     // menu reads as alive even on the rare beat where the numbers don't
     // change. Steady dot when idle/watching/offline.
     let dot = isActivePhase(phase) ? (spinnerTick % 2 == 0 ? "●" : "○") : "●"
-    // How long the current unit of work has been running, recomputed every
-    // beat. This is what tells a watcher the daemon is working rather than
-    // wedged on a line that happens not to change.
-    var busy = ""
-    if let since = local?.busy_since_ms, Self.mirrorIsFresh(local?.written_at), isActivePhase(phase) {
-      let secs = Int((Date().timeIntervalSince1970 * 1000 - Double(since)) / 1000)
-      if secs >= 0 { busy = " · \(Self.shortDuration(secs))" }
-    }
+
+    // The sweep detail row, recomputed every beat: how much work there is and
+    // how much of it is done. The phase line above carries NO clock — it names
+    // what is happening, not how long anything has taken. A duration only means
+    // something next to the thing it is timing, and the thing being timed is a
+    // file on the wire, which is the row below this one.
+    setInfo(progressMI, progressLine(local, phase: phase))
+
     if let m = phaseMsg, !m.isEmpty {
-      setInfo(statusMI, "\(dot) \(phase) — \(m)\(busy)")
+      setInfo(statusMI, "\(dot) \(phase) — \(m)")
     } else {
-      setInfo(statusMI, "\(dot) \(phase)\(busy)")
+      setInfo(statusMI, "\(dot) \(phase)")
     }
 
     // What is on the wire, and for how long. The row above counts FILES, which
@@ -614,7 +647,9 @@ final class TrayController: NSObject {
       if sending > 0 { bits.append("↑ \(sending) sending") }
       if sent > 0 { bits.append("\(fmtCount(sent)) segments sent") }
       if events > 0 { bits.append("\(fmtCount(events)) events") }
-      if scanned > 0 { bits.append("\(scanned) files") }
+      // "scanned", not bare "files": the sweep row above counts files too, and
+      // these are the lifetime total rather than this pass's.
+      if scanned > 0 { bits.append("\(scanned) files scanned") }
       if queue > 0 { bits.append("\(queue) in queue") }
       setInfo(pipelineMI, bits.joined(separator: " · "))
     } else {
@@ -635,6 +670,50 @@ final class TrayController: NSObject {
     } else {
       setInfo(detectedMI, "")
     }
+  }
+
+  /// The sweep detail row: how far into the current pass the daemon is and what
+  /// it has got through. Empty when nothing is sweeping, which is the caller's
+  /// signal to hide the row.
+  ///
+  /// Counts only, no clock. Elapsed time lives on the streaming row below,
+  /// against the files actually on the wire — that is the only place a duration
+  /// has a subject. A clock up here would be timing "the pass", which is not a
+  /// thing anyone is waiting on.
+  ///
+  /// Every number is scoped to THIS pass. The lifetime counters live further
+  /// down and answer a different question — after a few days they read in the
+  /// tens of thousands and say nothing about what is happening now.
+  private func progressLine(_ local: LocalStatus?, phase: String) -> String {
+    guard let ls = local, Self.mirrorIsFresh(ls.written_at), isActivePhase(phase) else {
+      return ""
+    }
+    var bits: [String] = []
+
+    // Position first — "how much is left" is the question a 655-file backlog
+    // raises, and the fraction answers it exactly where a percentage would round
+    // 15 of 655 down to a discouraging 2%.
+    if let total = ls.progress_total, total > 0 {
+      let done = min(max(ls.progress_done ?? 0, 0), total)
+      bits.append("\(done)/\(total) files")
+    }
+    // What those files actually cost. Most of a sweep is usually files the
+    // cursor already covers, so the split is what distinguishes a long pass
+    // doing real work from a cheap re-walk of a backlog already shipped.
+    if let run = ls.run {
+      var split: [String] = []
+      if let n = run.files_new, n > 0 { split.append("\(n) new") }
+      if let n = run.files_unchanged, n > 0 { split.append("\(n) skipped") }
+      if !split.isEmpty { bits.append(split.joined(separator: ", ")) }
+      if let n = run.events, n > 0 { bits.append("\(fmtCount(n)) events") }
+      if let n = run.segments, n > 0 { bits.append("\(fmtCount(n)) segments") }
+    }
+    // Segments on the wire RIGHT NOW — a gauge, not a total, so it only earns a
+    // slot while a batch is actually in flight. Always 0 in cloud mode, which
+    // ships raw events and summarises server-side.
+    if let n = ls.stats?.segments_sending, n > 0 { bits.append("↑ \(n) sending") }
+
+    return bits.joined(separator: " · ")
   }
 
   /// Reflect the daemon's auto-update setting + any pending update in the menu.

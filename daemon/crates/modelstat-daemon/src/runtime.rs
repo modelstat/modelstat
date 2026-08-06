@@ -202,11 +202,17 @@ impl ScanObserver for StatusObserver<'_> {
             s.set_phase(Phase::Uploading, line);
         });
     }
-    fn on_uploaded(&mut self, events: usize, _segments: usize) {
+    fn on_uploaded(&mut self, events: usize, segments: usize) {
         let iso = now_iso();
         self.with(|s| {
             s.bump_stat("events_uploaded", events as u64);
             s.bump_stat("batches_uploaded", 1);
+            // The same numbers again, scoped to THIS sweep — the lifetime
+            // counters above are in the tens of thousands after a few days and
+            // say nothing about the pass a watcher is currently looking at.
+            // Events + segments only: files land once the pass ends, so the two
+            // callers stay disjoint.
+            s.bump_run(0, 0, events as u64, segments as u64);
             s.set_stat("segments_sending", json!(0));
             s.finish_one_upload();
             s.note_event_at(iso);
@@ -447,6 +453,14 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     daemon.with_status(|s| {
         s.bump_stat("files_scanned", tallies.files_scanned as u64);
         s.bump_stat("files_unchanged", tallies.files_unchanged as u64);
+        // Files only: this sweep's events + segments were already folded in per
+        // batch by `on_uploaded`, and counting them twice would inflate the row.
+        s.bump_run(
+            tallies.files_scanned as u64,
+            tallies.files_unchanged as u64,
+            0,
+            0,
+        );
         s.set_stat("segments_sent", json!(segments_sent));
         s.set_stat("segments_sending", json!(0));
     });
@@ -463,6 +477,10 @@ pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
     daemon.with_status(|s| {
         s.set_phase(Phase::Scanning, format!("Scanning local JSONL ({reason})"));
         s.set_progress(0, 0);
+        // One run spans every cap-12 pass of this cycle, so the clock and the
+        // counters start here rather than inside `execute_scan` — a backlog
+        // draining over fifty passes is one sweep to the person watching it.
+        s.start_run();
     });
     let opts = RunScanOptions {
         max_files: Some(MAX_FILES_PER_SCAN),
@@ -509,12 +527,16 @@ pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
 /// file scan — both take the state lock, so they serialise. Port of
 /// `runEagerSessionScan` + `scanSession`.
 pub async fn scan_session(daemon: Arc<Daemon>, session_ids: Vec<String>, file: Option<String>) {
-    daemon.with_status(|s| s.set_phase(Phase::Scanning, "Eager scan (current session)"));
+    daemon.with_status(|s| {
+        s.set_phase(Phase::Scanning, "Eager scan (current session)");
+        s.start_run();
+    });
     let jobs = eager_target_jobs(&session_ids, file.as_deref());
     if jobs.is_empty() {
         daemon.with_status(|s| {
             s.set_phase(Phase::Watching, "Waiting for new events");
             s.set_message("Eager scan: no matching transcript");
+            s.clear_busy();
         });
         return;
     }
@@ -541,6 +563,10 @@ pub async fn scan_session(daemon: Arc<Daemon>, session_ids: Vec<String>, file: O
         } else {
             "Eager scan: nothing new".to_string()
         });
+        // The periodic sweep has always ended this way; the eager one never did,
+        // so it left `busy_since_ms` pointing at its last file and readers went on
+        // ticking an elapsed clock against a daemon that had gone back to idle.
+        s.clear_busy();
     });
 }
 
