@@ -28,6 +28,7 @@ pub mod machine_key;
 pub mod paths;
 pub mod state;
 pub mod timefmt;
+pub mod upload_gate;
 
 // Flat re-exports for the common (CLI + daemon) surface.
 pub use config::{Config, FreshIdentity};

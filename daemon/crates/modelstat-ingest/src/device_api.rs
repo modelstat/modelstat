@@ -109,6 +109,11 @@ pub struct DeviceApi {
     http: Client,
     config: std::sync::Arc<Config>,
     recover: Mutex<RecoverState>,
+    /// How many batch uploads may be in flight, adapted from the server's own
+    /// `429`s. SHARED across clones — unlike `recover`, whose backoff is
+    /// per-handle — because the capacity being rationed belongs to the server,
+    /// and two handles each believing they may send six would send twelve.
+    gate: std::sync::Arc<crate::upload_gate::UploadGate>,
 }
 
 impl Clone for DeviceApi {
@@ -125,6 +130,7 @@ impl Clone for DeviceApi {
         DeviceApi {
             http: self.http.clone(),
             config: self.config.clone(),
+            gate: self.gate.clone(),
             recover: Mutex::new(RecoverState {
                 backoff_until: None,
                 attempt: 0,
@@ -142,11 +148,19 @@ impl DeviceApi {
         DeviceApi {
             http,
             config,
+            gate: std::sync::Arc::new(crate::upload_gate::UploadGate::new()),
             recover: Mutex::new(RecoverState {
                 backoff_until: None,
                 attempt: 0,
             }),
         }
+    }
+
+    /// The uploads-in-flight limit currently in force — surfaced for the scan's
+    /// logs and tests, never a knob.
+    #[must_use]
+    pub fn upload_limit(&self) -> usize {
+        self.gate.limit()
     }
 
     pub fn config(&self) -> &std::sync::Arc<Config> {
@@ -421,6 +435,10 @@ impl DeviceApi {
         wire.summarizer_mode = Some(self.config.summarizer_mode());
         wire.clamp();
 
+        // One slot for the whole call, retries included: a retry is this same
+        // piece of work having another go, and re-queueing it behind newer
+        // batches would let a struggling one starve. Dropped on return.
+        let _slot = self.gate.acquire().await;
         let mut last_fetch_error: Option<String> = None;
         for attempt in 0..INGEST_MAX_ATTEMPTS {
             let Some(bearer) = self.config.bearer() else {
@@ -469,6 +487,8 @@ impl DeviceApi {
                     } else {
                         res.json::<IngestResponse>().await.unwrap_or_default()
                     };
+                    // A run of these earns one more upload in flight.
+                    self.gate.on_commit();
                     return UploadResult::Commit(receipt);
                 }
                 UploadDecision::Reauth => {
@@ -480,6 +500,13 @@ impl DeviceApi {
                     continue;
                 }
                 UploadDecision::Backoff(base) => {
+                    // 429 = over fair share, 503 = summariser at capacity. Both
+                    // mean "you are asking for more than exists", so halve what
+                    // we ask for. Other statuses are faults, not capacity, and
+                    // must not be read as a signal about concurrency.
+                    if status == 429 || status == 503 {
+                        self.gate.on_throttled();
+                    }
                     // Read `Retry-After` (a FLOOR) BEFORE the body consumes `res`;
                     // add jitter so a fleet doesn't retry in lockstep.
                     let delay = jitter(base.max(retry_after(res.headers())));

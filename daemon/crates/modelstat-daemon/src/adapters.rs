@@ -43,7 +43,7 @@ fn backfill_url(api_url: &str, day: Option<&str>) -> String {
 }
 
 impl BatchUploader for DeviceApi {
-    async fn upload(&mut self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold> {
+    async fn upload(&self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold> {
         upload_outcome(self.upload_batch(batch, raw).await)
     }
 }

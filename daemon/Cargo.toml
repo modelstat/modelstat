@@ -62,6 +62,7 @@ regex = "1"
 # Async runtime + HTTP client for the device API (plan D2). reqwest is pinned to
 # rustls — NO OpenSSL linkage — so the six-target cross-compile stays painless.
 # Versions match what core/rust already builds with (guaranteed in the cache).
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "net"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

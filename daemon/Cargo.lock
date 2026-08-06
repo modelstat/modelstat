@@ -1746,6 +1746,7 @@ name = "modelstat-daemon"
 version = "1.11.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "libc",
  "modelstat-download",
  "modelstat-ingest",
