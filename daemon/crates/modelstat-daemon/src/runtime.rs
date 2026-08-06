@@ -362,10 +362,10 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     let extractor = make_extract_links(daemon.resilient.engine());
     let mut correct = make_correct_events();
     let mut git = RealGitEnrichment::new();
-    // A cheap uploader handle (shares the HTTP pool) — the BatchUploader trait
-    // wants `&mut self`, but DeviceApi's methods are all `&self`, so an owned
-    // clone satisfies the borrow without blocking the shared `Arc<DeviceApi>`.
-    let mut uploader = (*daemon.api).clone();
+    // The shared handle itself, not a clone: uploading takes `&self` now, and the
+    // adaptive concurrency limit belongs to the server rather than to a handle —
+    // every clone shares it anyway.
+    let uploader = &*daemon.api;
     let mut observer = StatusObserver {
         status: &daemon.status,
     };
@@ -414,7 +414,7 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         &mut correct,
         &exists,
         &read_file,
-        &uploader,
+        uploader,
         &mut *guard as &mut (dyn CursorStore + Send),
         &mut observer,
         &accounts,

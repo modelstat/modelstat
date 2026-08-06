@@ -65,7 +65,17 @@ use modelstat_ingest::RuntimeState;
 ///       with per-conversation turn ordinals. Both are local-only facts, so a
 ///       re-scan is the only way sessions already uploaded gain their
 ///       transcripts.
-pub const PROCESSING_VERSION: i64 = 20;
+/// v21 — long turns are actually REDACTED. The on-device NER model carries 512
+///       learned positions and errors past them, `classify` mapped that error to
+///       "no model", and `ner_redact` reads "no model" as pass-through — so from
+///       v19 onward, when turns became verbatim, every turn over ~2,700 chars
+///       left the box UNSCRUBBED. (`ner_active` never caught it: it probes with
+///       one short sentinel, which always fits.) Inference is now WINDOWED —
+///       every token classified, in overlapping passes the model can take, no
+///       text shortened — and the cloud path holds per TURN when the model cannot
+///       answer, instead of shipping it. The re-scan is the cleanup: the wider
+///       rows upsert over the leaked ones by `(scope, source_event_id)`.
+pub const PROCESSING_VERSION: i64 = 21;
 
 /// The state a reconcile reads + mutates: the stored marker plus the cursors it
 /// wipes on a bump. Abstracted so the decision is unit-testable without touching
