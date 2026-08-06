@@ -46,3 +46,45 @@ fn a_long_turn_is_still_redacted() {
         "these turn sizes shipped the name UNREDACTED: {failures:?}"
     );
 }
+
+/// The real model over technical prose — the text that shipped mangled. Whatever
+/// it labels, no marker may end up inside a word.
+#[test]
+fn the_real_model_never_leaves_a_word_fragment() {
+    let dir =
+        PathBuf::from(std::env::var("HOME").unwrap()).join(".modelstat/models/hf/bert-base-NER");
+    if !dir.join("config.json").exists() {
+        eprintln!("SKIP: no weights at {}", dir.display());
+        return;
+    }
+    let model = modelstat_redact::ner::CandleNer::load(&dir).expect("load weights");
+    for text in [
+        "Error: eRPC Request failed.\nURL: http://erpc-proxy:4000",
+        "Reviewed by Cursor Bugbot commented 36 minutes ago",
+        "We're seeing a consistent failure in a Compose app (p2p-compliance-oracle)",
+        "Background command \"drive Bugbot to final green state\" completed",
+        "ping Katherine Johnson about the ClickHouse backfill",
+    ] {
+        let out = modelstat_redact::ner_redact(&model, text).text;
+        let chars: Vec<char> = out.chars().collect();
+        let open: Vec<char> = "[REDACTED:".chars().collect();
+        for i in 0..chars.len() {
+            if chars[i..].starts_with(&open) {
+                if i > 0 {
+                    assert!(
+                        !chars[i - 1].is_alphanumeric(),
+                        "marker starts inside a word:\n  {out}"
+                    );
+                }
+                let close = i + chars[i..].iter().position(|&c| c == ']').unwrap() + 1;
+                if close < chars.len() {
+                    assert!(
+                        !chars[close].is_alphanumeric(),
+                        "marker ends inside a word:\n  {out}"
+                    );
+                }
+            }
+        }
+        eprintln!("  {out}");
+    }
+}
