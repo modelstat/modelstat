@@ -189,6 +189,12 @@ impl ScanObserver for StatusObserver<'_> {
             s.set_busy_now();
         });
     }
+    fn on_upload_set(&mut self, uploads: usize, sessions: usize) {
+        // What is on the wire and since when. Uploads in a set leave together, so
+        // one clock dates the slowest of them — which is what a watcher staring at
+        // a line that hasn't moved actually wants to know.
+        self.with(|s| s.start_upload_set(uploads as u64, sessions as u64));
+    }
     fn on_upload(&mut self, events: usize, segments: usize) {
         self.with(|s| {
             s.set_stat("segments_sending", json!(segments));
@@ -202,6 +208,7 @@ impl ScanObserver for StatusObserver<'_> {
             s.bump_stat("events_uploaded", events as u64);
             s.bump_stat("batches_uploaded", 1);
             s.set_stat("segments_sending", json!(0));
+            s.finish_one_upload();
             s.note_event_at(iso);
             // Back to `Processing`: this batch is committed and the next one is
             // being parsed + summarised, which is where most of a cycle's wall
@@ -618,6 +625,39 @@ mod tests {
         assert_eq!(got.len(), MAX_SCRIPT_READ_BYTES);
         assert!(read_capped("/no/such/file").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_observer_reports_what_is_on_the_wire_and_clears_it_after() {
+        let status = StdMutex::new(Status::default());
+        let mut obs = StatusObserver { status: &status };
+        // Three sessions ship together — the count a watcher sees, plus a clock.
+        obs.on_upload_set(3, 3);
+        {
+            let s = status.lock().unwrap();
+            let u = s.uploading.clone().expect("in flight");
+            assert_eq!((u.uploads, u.sessions), (3, 3));
+        }
+        obs.on_uploaded(10, 0);
+        assert_eq!(
+            status.lock().unwrap().uploading.as_ref().unwrap().uploads,
+            2
+        );
+        obs.on_uploaded(10, 0);
+        obs.on_uploaded(10, 0);
+        assert!(
+            status.lock().unwrap().uploading.is_none(),
+            "the wire is quiet once the last one commits"
+        );
+
+        // A held fan-out: one commits, the rest never go out.
+        obs.on_upload_set(3, 3);
+        obs.on_uploaded(10, 0);
+        obs.on_upload_set(0, 0);
+        assert!(
+            status.lock().unwrap().uploading.is_none(),
+            "a hold must not leave the tray claiming an upload through the backoff"
+        );
     }
 
     #[test]

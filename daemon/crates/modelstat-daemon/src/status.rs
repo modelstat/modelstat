@@ -50,6 +50,26 @@ pub struct UpdateInfo {
     pub latest: Option<String>,
 }
 
+/// The upload fan-out happening RIGHT NOW: how many sessions are still on the
+/// wire, and when the set started. `None` when nothing is uploading.
+///
+/// Its own thing rather than two more `stats` counters, because the pair only
+/// means anything together — a count with no clock reads as frozen, and a clock
+/// with no count doesn't say what is taking that long. Uploads within a set go
+/// out together, so `since_ms` also dates the LONGEST one still running, which
+/// is the number a watcher wants: how long has the slowest session been going.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadingNow {
+    /// Sessions still in flight — counted down as each upload commits.
+    pub sessions: u64,
+    /// Uploads still in flight. Equals `sessions` in cloud mode (one session per
+    /// batch); a local-mode batch can carry several sessions, so both are kept.
+    pub uploads: u64,
+    /// Epoch ms the set started, for the same reason as
+    /// [`Status::busy_since_ms`]: the reader subtracts and ticks on its own beat.
+    pub since_ms: i64,
+}
+
 /// The mutable live status. Every field maps to a `snapshotBody` key.
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -70,6 +90,8 @@ pub struct Status {
     /// re-renders every second and subtracts, so the elapsed clock ticks live
     /// without the daemon rewriting this file once a second to animate it.
     pub busy_since_ms: Option<i64>,
+    /// The upload set in flight, or `None` when nothing is on the wire.
+    pub uploading: Option<UploadingNow>,
 }
 
 impl Default for Status {
@@ -85,6 +107,7 @@ impl Default for Status {
             update: None,
             auto_update: false,
             busy_since_ms: None,
+            uploading: None,
         }
     }
 }
@@ -108,6 +131,39 @@ impl Status {
     }
     pub fn clear_busy(&mut self) {
         self.busy_since_ms = None;
+        // A reader that shows "3 sessions uploading" against a stopped daemon is
+        // worse than showing nothing, so the two go idle together.
+        self.uploading = None;
+    }
+
+    /// A fan-out of `uploads` batches covering `sessions` sessions just started.
+    /// Restarts the clock: they go out together, so this dates all of them.
+    pub fn start_upload_set(&mut self, uploads: u64, sessions: u64) {
+        if uploads == 0 {
+            self.uploading = None;
+            return;
+        }
+        self.uploading = Some(UploadingNow {
+            sessions,
+            uploads,
+            since_ms: chrono::Utc::now().timestamp_millis(),
+        });
+    }
+
+    /// One upload of the current set committed (or held). Counts sessions down
+    /// proportionally when a batch carried several, and clears the whole thing
+    /// once the last one lands — never showing a stuck "1 session uploading"
+    /// after the wire went quiet.
+    pub fn finish_one_upload(&mut self) {
+        let Some(cur) = self.uploading.as_mut() else {
+            return;
+        };
+        let per_batch = (cur.sessions / cur.uploads.max(1)).max(1);
+        cur.uploads = cur.uploads.saturating_sub(1);
+        cur.sessions = cur.sessions.saturating_sub(per_batch);
+        if cur.uploads == 0 || cur.sessions == 0 {
+            self.uploading = None;
+        }
     }
     pub fn set_queue(&mut self, size: u64) {
         self.queue_size = size;
@@ -153,6 +209,11 @@ impl Status {
             "status": self.phase.as_str(),
             "message": self.message,
             "busy_since_ms": self.busy_since_ms,
+            "uploading": self.uploading.as_ref().map(|u| json!({
+                "sessions": u.sessions,
+                "uploads": u.uploads,
+                "since_ms": u.since_ms,
+            })),
             "progress_done": self.progress_done,
             "progress_total": self.progress_total,
             "queue_size": self.queue_size,
@@ -261,5 +322,64 @@ mod tests {
         assert_eq!(read["written_at"], json!("2026-07-16T10:00:00.000Z"));
         assert!(!path.with_extension("json.tmp").exists()); // tmp was renamed away
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_upload_gauge_counts_down_and_never_lingers() {
+        let mut s = Status::default();
+        assert!(s.uploading.is_none(), "quiet by default");
+
+        // Cloud shape: one session per batch.
+        s.start_upload_set(3, 3);
+        let now = chrono::Utc::now().timestamp_millis();
+        let u = s.uploading.clone().expect("in flight");
+        assert_eq!((u.uploads, u.sessions), (3, 3));
+        assert!(
+            (u.since_ms - now).abs() < 5_000,
+            "the clock starts with the set"
+        );
+
+        s.finish_one_upload();
+        let u = s.uploading.clone().unwrap();
+        assert_eq!((u.uploads, u.sessions), (2, 2));
+        assert_eq!(u.since_ms, s.uploading.as_ref().unwrap().since_ms);
+        s.finish_one_upload();
+        s.finish_one_upload();
+        assert!(
+            s.uploading.is_none(),
+            "the last commit clears it — a stuck '1 session uploading' is a lie"
+        );
+
+        // Local shape: one batch carrying several sessions.
+        s.start_upload_set(1, 7);
+        s.finish_one_upload();
+        assert!(s.uploading.is_none());
+
+        // A held fan-out says the remainder is not in flight.
+        s.start_upload_set(4, 4);
+        s.start_upload_set(0, 0);
+        assert!(s.uploading.is_none());
+
+        // Going idle takes the gauge with it.
+        s.start_upload_set(2, 2);
+        s.clear_busy();
+        assert!(s.uploading.is_none());
+    }
+
+    #[test]
+    fn snapshot_carries_the_upload_gauge_and_omits_it_when_quiet() {
+        let mut s = Status::default();
+        let body = s.snapshot_body(None, "daemon-1.0.0", "m1");
+        assert_eq!(
+            body["uploading"],
+            Value::Null,
+            "quiet → null, not a zero row"
+        );
+
+        s.start_upload_set(2, 5);
+        let body = s.snapshot_body(None, "daemon-1.0.0", "m1");
+        assert_eq!(body["uploading"]["uploads"], json!(2));
+        assert_eq!(body["uploading"]["sessions"], json!(5));
+        assert!(body["uploading"]["since_ms"].as_i64().unwrap() > 0);
     }
 }
