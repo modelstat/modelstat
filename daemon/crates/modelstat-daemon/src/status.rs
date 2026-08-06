@@ -70,6 +70,34 @@ pub struct UploadingNow {
     pub since_ms: i64,
 }
 
+/// What the sweep RUNNING RIGHT NOW has got through, and when it started.
+/// `None` between sweeps.
+///
+/// Separate from `stats`, which is cumulative since daemon start: after a few
+/// days those counters are in the tens of thousands and say nothing at all about
+/// the pass a watcher is staring at. "12 files" on the lifetime row and "12 new"
+/// on this one are different questions, and only this one answers "how far into
+/// *this* is it".
+///
+/// `since_ms` is the SWEEP clock, not [`Status::busy_since_ms`] — that one
+/// restarts on every file, so the tray's elapsed reading used to reset to zero
+/// hundreds of times per pass and could never say how long the pass had run.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunProgress {
+    /// Epoch ms the sweep started — a timestamp for the same reason as
+    /// [`Status::busy_since_ms`]: the reader subtracts and ticks on its own beat.
+    pub since_ms: i64,
+    /// Files that had new content and were parsed.
+    pub files_new: u64,
+    /// Files skipped because the cursor says they are already shipped.
+    pub files_unchanged: u64,
+    /// Events shipped so far this sweep.
+    pub events: u64,
+    /// Segments shipped so far this sweep (0 in cloud mode, which ships raw
+    /// events and summarises server-side).
+    pub segments: u64,
+}
+
 /// The mutable live status. Every field maps to a `snapshotBody` key.
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -92,6 +120,8 @@ pub struct Status {
     pub busy_since_ms: Option<i64>,
     /// The upload set in flight, or `None` when nothing is on the wire.
     pub uploading: Option<UploadingNow>,
+    /// The sweep in progress, or `None` between sweeps.
+    pub run: Option<RunProgress>,
 }
 
 impl Default for Status {
@@ -108,6 +138,7 @@ impl Default for Status {
             auto_update: false,
             busy_since_ms: None,
             uploading: None,
+            run: None,
         }
     }
 }
@@ -132,8 +163,36 @@ impl Status {
     pub fn clear_busy(&mut self) {
         self.busy_since_ms = None;
         // A reader that shows "3 sessions uploading" against a stopped daemon is
-        // worse than showing nothing, so the two go idle together.
+        // worse than showing nothing, so the two go idle together. Same for the
+        // sweep: a progress row that survives the pass reads as work still
+        // running, and its clock would keep counting up forever.
         self.uploading = None;
+        self.run = None;
+    }
+
+    /// A sweep starts NOW. Unconditional: each pass is its own run, so the
+    /// counters zero rather than carry a previous pass's totals into this one.
+    pub fn start_run(&mut self) {
+        self.run = Some(RunProgress {
+            since_ms: chrono::Utc::now().timestamp_millis(),
+            ..RunProgress::default()
+        });
+    }
+
+    /// Fold a slice of this sweep's work into the run counters. No-op when no
+    /// sweep is running, so a stray callback can't conjure a run out of nothing.
+    ///
+    /// Callers must keep the buckets DISJOINT — files come from the scan tallies
+    /// once a pass ends, events/segments from the per-batch upload callback as
+    /// they land — or a number double-counts.
+    pub fn bump_run(&mut self, files_new: u64, files_unchanged: u64, events: u64, segments: u64) {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        run.files_new += files_new;
+        run.files_unchanged += files_unchanged;
+        run.events += events;
+        run.segments += segments;
     }
 
     /// A fan-out of `uploads` batches covering `sessions` sessions just started.
@@ -213,6 +272,13 @@ impl Status {
                 "sessions": u.sessions,
                 "uploads": u.uploads,
                 "since_ms": u.since_ms,
+            })),
+            "run": self.run.as_ref().map(|r| json!({
+                "since_ms": r.since_ms,
+                "files_new": r.files_new,
+                "files_unchanged": r.files_unchanged,
+                "events": r.events,
+                "segments": r.segments,
             })),
             "progress_done": self.progress_done,
             "progress_total": self.progress_total,
@@ -381,5 +447,60 @@ mod tests {
         assert_eq!(body["uploading"]["uploads"], json!(2));
         assert_eq!(body["uploading"]["sessions"], json!(5));
         assert!(body["uploading"]["since_ms"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn the_run_counters_accumulate_within_a_sweep_and_zero_on_the_next() {
+        let mut s = Status::default();
+        s.bump_run(9, 9, 9, 9);
+        assert!(s.run.is_none(), "no sweep running → nothing to bump");
+
+        s.start_run();
+        let started = s.run.as_ref().unwrap().since_ms;
+        assert!(started > 0, "the sweep clock starts with the sweep");
+
+        // Disjoint callers: files land per pass, events/segments per batch.
+        s.bump_run(0, 0, 400, 3);
+        s.bump_run(0, 0, 600, 4);
+        s.bump_run(12, 3, 0, 0);
+        let run = s.run.clone().unwrap();
+        assert_eq!(
+            (run.files_new, run.files_unchanged, run.events, run.segments),
+            (12, 3, 1000, 7)
+        );
+        assert_eq!(
+            run.since_ms, started,
+            "the clock does not restart mid-sweep"
+        );
+
+        // The next sweep is its own run — carrying totals over would make the
+        // second pass look like it had already done the first pass's work.
+        s.start_run();
+        let run = s.run.clone().unwrap();
+        assert_eq!((run.files_new, run.events), (0, 0));
+
+        // Going idle takes the whole row with it, clock included.
+        s.clear_busy();
+        assert!(s.run.is_none());
+    }
+
+    #[test]
+    fn snapshot_carries_the_run_block_and_omits_it_between_sweeps() {
+        let mut s = Status::default();
+        let body = s.snapshot_body(None, "daemon-1.0.0", "m1");
+        assert_eq!(
+            body["run"],
+            Value::Null,
+            "between sweeps → null, not zeroes"
+        );
+
+        s.start_run();
+        s.bump_run(12, 3, 1000, 7);
+        let body = s.snapshot_body(None, "daemon-1.0.0", "m1");
+        assert_eq!(body["run"]["files_new"], json!(12));
+        assert_eq!(body["run"]["files_unchanged"], json!(3));
+        assert_eq!(body["run"]["events"], json!(1000));
+        assert_eq!(body["run"]["segments"], json!(7));
+        assert!(body["run"]["since_ms"].as_i64().unwrap() > 0);
     }
 }
