@@ -38,7 +38,7 @@ members = [
 #
 # Started past the TS daemon's 0.28.x line so the server never reads a Rust build
 # as out-of-date.
-version = "1.13.2"
+version = "1.14.0"
 edition = "2021"
 rust-version = "1.83"
 license = "MIT"
