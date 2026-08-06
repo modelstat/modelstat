@@ -33,9 +33,14 @@ serde.workspace = true
 serde_json.workspace = true
 
 [features]
-# Opt into the real on-device candle models (BGE embedder + BERT-NER) for a
+# Opt into the real on-device REDACTOR (OpenAI Privacy Filter over ONNX Runtime).
+# Its own switch, because it is a different runtime from the embedder's and the
+# release build names both explicitly: `--features candle,onnx`.
+onnx = ["modelstat-daemon/onnx"]
+
+# Opt into the real on-device candle model (the BGE embedder) for a
 # release/verified collector build. Forwards to modelstat-daemon. Still NO
-# llama.cpp in this binary (plan §3, D4) — candle is CPU embeddings + NER only.
+# llama.cpp in this binary (plan §3, D4) — candle is CPU embeddings only.
 candle = ["modelstat-daemon/candle"]
 
 [dev-dependencies]
