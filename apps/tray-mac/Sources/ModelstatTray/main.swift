@@ -564,29 +564,17 @@ final class TrayController: NSObject {
     // change. Steady dot when idle/watching/offline.
     let dot = isActivePhase(phase) ? (spinnerTick % 2 == 0 ? "●" : "○") : "●"
 
-    // The sweep detail row, recomputed every beat. Everything about HOW MUCH
-    // work is in flight lives here rather than on the phase line above, which
-    // had grown into "scanning — 651 session files left · 4m 10s" — three
-    // different facts, one of them (the clock) unlabelled and, because
-    // busy_since_ms restarts on every file, not measuring what it looked like
-    // it measured.
-    let progress = progressLine(local, phase: phase)
-    setInfo(progressMI, progress)
+    // The sweep detail row, recomputed every beat: how much work there is and
+    // how much of it is done. The phase line above carries NO clock — it names
+    // what is happening, not how long anything has taken. A duration only means
+    // something next to the thing it is timing, and the thing being timed is a
+    // file on the wire, which is the row below this one.
+    setInfo(progressMI, progressLine(local, phase: phase))
 
-    // The clock only falls back to the phase line when there is no detail row
-    // to carry it — early phases like `starting` have no sweep behind them, and
-    // a phase that sits there with no elapsed reading at all looks wedged.
-    var busy = ""
-    if progress.isEmpty, let since = local?.busy_since_ms, Self.mirrorIsFresh(local?.written_at),
-      isActivePhase(phase)
-    {
-      let secs = Int((Date().timeIntervalSince1970 * 1000 - Double(since)) / 1000)
-      if secs >= 0 { busy = " · \(Self.shortDuration(secs))" }
-    }
     if let m = phaseMsg, !m.isEmpty {
-      setInfo(statusMI, "\(dot) \(phase) — \(m)\(busy)")
+      setInfo(statusMI, "\(dot) \(phase) — \(m)")
     } else {
-      setInfo(statusMI, "\(dot) \(phase)\(busy)")
+      setInfo(statusMI, "\(dot) \(phase)")
     }
 
     // What is on the wire, and for how long. The row above counts FILES, which
@@ -684,19 +672,22 @@ final class TrayController: NSObject {
     }
   }
 
-  /// The sweep detail row: how far into the current pass the daemon is, what it
-  /// has got through, and how long it has been at it. Empty when nothing is
-  /// sweeping, which is the caller's signal to hide the row and put the clock
-  /// back on the phase line.
+  /// The sweep detail row: how far into the current pass the daemon is and what
+  /// it has got through. Empty when nothing is sweeping, which is the caller's
+  /// signal to hide the row.
   ///
-  /// Every number here is scoped to THIS pass. The lifetime counters live one
-  /// row further down and answer a different question — after a few days they
-  /// read in the tens of thousands and say nothing about what is happening now.
+  /// Counts only, no clock. Elapsed time lives on the streaming row below,
+  /// against the files actually on the wire — that is the only place a duration
+  /// has a subject. A clock up here would be timing "the pass", which is not a
+  /// thing anyone is waiting on.
+  ///
+  /// Every number is scoped to THIS pass. The lifetime counters live further
+  /// down and answer a different question — after a few days they read in the
+  /// tens of thousands and say nothing about what is happening now.
   private func progressLine(_ local: LocalStatus?, phase: String) -> String {
     guard let ls = local, Self.mirrorIsFresh(ls.written_at), isActivePhase(phase) else {
       return ""
     }
-    let nowMs = Date().timeIntervalSince1970 * 1000
     var bits: [String] = []
 
     // Position first — "how much is left" is the question a 655-file backlog
@@ -709,9 +700,7 @@ final class TrayController: NSObject {
     // What those files actually cost. Most of a sweep is usually files the
     // cursor already covers, so the split is what distinguishes a long pass
     // doing real work from a cheap re-walk of a backlog already shipped.
-    var sweepSince: Int64?
     if let run = ls.run {
-      sweepSince = run.since_ms
       var split: [String] = []
       if let n = run.files_new, n > 0 { split.append("\(n) new") }
       if let n = run.files_unchanged, n > 0 { split.append("\(n) skipped") }
@@ -724,24 +713,6 @@ final class TrayController: NSObject {
     // ships raw events and summarises server-side.
     if let n = ls.stats?.segments_sending, n > 0 { bits.append("↑ \(n) sending") }
 
-    // Nothing to say → no row, and the phase line keeps the clock it has always
-    // carried. A row holding only a duration reads as a stray number.
-    if bits.isEmpty { return "" }
-
-    // The sweep clock — or the per-file one against a daemon too old to report a
-    // sweep, because a row that took the clock off the phase line has to carry
-    // one.
-    if let since = sweepSince ?? ls.busy_since_ms {
-      let secs = Int((nowMs - Double(since)) / 1000)
-      if secs >= 0 { bits.append(Self.shortDuration(secs)) }
-    }
-    // One file grinding away for a minute-plus is the whole difference between
-    // "working" and "wedged", and the sweep clock alone cannot show it: the pass
-    // keeps counting up whether or not the file counter ever moves again.
-    if sweepSince != nil, let file = ls.busy_since_ms {
-      let secs = Int((nowMs - Double(file)) / 1000)
-      if secs >= 60 { bits.append("\(Self.shortDuration(secs)) on this file") }
-    }
     return bits.joined(separator: " · ")
   }
 
