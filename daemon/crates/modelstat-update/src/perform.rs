@@ -59,6 +59,13 @@ pub struct StagedRelease {
     pub engine: Option<PathBuf>,
     /// The staged `ModelstatTray.app` root. Only the mac archives carry one.
     pub tray_app: Option<PathBuf>,
+    /// Shared libraries that must land beside the binaries. Only the x86_64 macOS
+    /// archive carries one today (ONNX Runtime, linked dynamically there because
+    /// `ort` publishes no prebuilt static library for that target). Dropping these
+    /// on self-update would leave a NEW collector next to an absent library — an
+    /// install that worked until the first auto-update, then died at `dyld: Library
+    /// not loaded`, which is the worst possible time to find out.
+    pub sidecars: Vec<PathBuf>,
 }
 
 /// The outcome of an upgrade attempt — carries the loud user-facing note (§21.12:
@@ -118,6 +125,40 @@ fn swap_one(bin_dir: &Path, base: &str, staged: &Path) -> std::io::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755));
+    }
+    Ok(())
+}
+
+/// A shared library that must travel beside the binaries.
+///
+/// Matched on the loader's own extension rather than a per-target filename list:
+/// the archive decides what it carries, and there is exactly one place (here) that
+/// decides what "carry it along" means.
+fn is_sidecar(name: &str) -> bool {
+    name.ends_with(".dylib") || name.ends_with(".so") || name.ends_with(".dll")
+}
+
+/// Copy staged shared libraries into `bin_dir` BEFORE the binaries are swapped, so
+/// the new collector never goes live without the library it was linked against.
+///
+/// Additive on purpose — the filenames are version-stamped
+/// (`libonnxruntime.1.22.0.dylib`), so the previous library stays in place and the
+/// `.prev` binary a rollback restores still has its own. Best-effort: a failure here
+/// is reported by the caller's health probe, which is the thing that decides whether
+/// the upgrade holds.
+pub fn place_sidecars(bin_dir: &Path, staged: &[PathBuf]) -> std::io::Result<()> {
+    for src in staged {
+        let Some(name) = src.file_name() else {
+            continue;
+        };
+        let dst = bin_dir.join(name);
+        if src.as_path() == dst {
+            continue;
+        }
+        if std::fs::rename(src, &dst).is_err() {
+            std::fs::copy(src, &dst)?;
+            let _ = std::fs::remove_file(src);
+        }
     }
     Ok(())
 }
@@ -300,6 +341,12 @@ fn extract_release(archive: &Path, dir: &Path) -> std::io::Result<StagedRelease>
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if is_sidecar(&name) {
+            let out = dir.join(&name);
+            entry.unpack(&out)?;
+            staged.sidecars.push(out);
+            continue;
+        }
         let dest = if name == COLLECTOR_BIN {
             &mut staged.collector
         } else if name == ENGINE_BIN {
@@ -326,6 +373,13 @@ fn extract_release(archive: &Path, dir: &Path) -> std::io::Result<StagedRelease>
             .enclosed_name()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_default();
+        if is_sidecar(&name) {
+            let out = dir.join(&name);
+            let mut w = std::fs::File::create(&out)?;
+            std::io::copy(&mut file, &mut w)?;
+            staged.sidecars.push(out);
+            continue;
+        }
         let dest = if name == exe(COLLECTOR_BIN) {
             &mut staged.collector
         } else if name == exe(ENGINE_BIN) {
@@ -395,6 +449,12 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
         modelstat_service::Scope::User,
     );
 
+    // Libraries first: a collector that goes live before its dylib is a binary that
+    // cannot start, and the health probe would roll back an upgrade that was only
+    // ever mis-ordered.
+    let sidecar_note = place_sidecars(&bin_dir, &staged.sidecars)
+        .err()
+        .map(|e| format!(" — but a shared library could not be staged ({e}); the health probe below decides whether this upgrade holds"));
     if let Err(e) = swap_pair(
         &bin_dir,
         staged.collector.as_deref(),
@@ -438,7 +498,11 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
             UpgradeOutcome::Completed(format!(
                 "updated to {} — the service is running the new build{}",
                 bare_version(target),
-                tray_note.unwrap_or_default()
+                format!(
+                    "{}{}",
+                    sidecar_note.unwrap_or_default(),
+                    tray_note.unwrap_or_default()
+                )
             ))
         }
         Err(e) => {
