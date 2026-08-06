@@ -354,6 +354,20 @@ fn eager_target_jobs(session_ids: &[String], file: Option<&str>) -> Vec<ScanJob>
 /// mutate across awaits) — an `await`-safe tokio mutex, so reconcile +
 /// processing-version serialise against it.
 async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptions) -> ScanTallies {
+    // The redactor has to be one we can actually honour. `cloud` and `self-hosted`
+    // both mean raw text leaves so something else can scrub it, and neither exists
+    // yet — so scanning at all would either ship unscrubbed turns or build batches
+    // that can never be sent. `modelstat redactor` refuses to store those values,
+    // but MODELSTAT_REDACTOR_MODE can still name one, so the check belongs here too:
+    // at the door, where the decision is honest about doing nothing.
+    if !daemon.config.redacts_locally() {
+        modelstat_log::log_warn!(
+            "redactor is `{}`, which would send unscrubbed turns off this machine — \
+             nothing is being scanned or uploaded. Set `modelstat redactor local`.",
+            daemon.config.redactor_mode()
+        );
+        return ScanTallies::default();
+    }
     let device_id = daemon.device_id.as_str();
     let daemon_version = daemon.config.version();
 

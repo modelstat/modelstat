@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use modelstat_parsers::{detect_script_refs, resolve_script_path, LocalToolContext, ToolCallDraft};
 use modelstat_pipeline::passes::script_summary;
 use modelstat_pipeline::Summarizer;
-use modelstat_redact::{ner_redact, redact, NerModel};
+use modelstat_redact::{ner_redact_checked, redact, NerModel};
 use modelstat_wire::{ScriptSummary, ToolAction};
 
 /// Wire cap on `ToolAction.scripts` (`z.array(...).max(8)`).
@@ -159,7 +159,13 @@ async fn enrich_one_action<S, N>(
         // Regex floor first, then the optional NER pass, then cap.
         let mut summary_text = redact(&summary_raw, None).text;
         if let Some(ner) = model_redact {
-            summary_text = ner_redact(ner, &summary_text).text;
+            // Skip the summary entirely rather than ship one the redactor never
+            // read — this text is about a FILE's contents, so it is the last place
+            // to guess.
+            match ner_redact_checked(ner, &summary_text) {
+                Some(pass) => summary_text = pass.text,
+                None => continue,
+            }
         }
         let summary: String = summary_text
             .trim()

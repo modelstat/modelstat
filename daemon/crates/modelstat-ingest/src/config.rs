@@ -180,6 +180,25 @@ impl Config {
 
     // ── Summarizer mode / self-hosted URL ───────────────────────────────
 
+    /// The effective REDACTOR mode — where turns get scrubbed.
+    /// `MODELSTAT_REDACTOR_MODE` overrides the stored choice, like its summariser
+    /// twin. Independent on purpose: the common shape is scrub here, summarise
+    /// there, and one setting could not express it.
+    pub fn redactor_mode(&self) -> String {
+        if let Some(m) =
+            state::parse_redactor_mode(std::env::var("MODELSTAT_REDACTOR_MODE").ok().as_deref())
+        {
+            return m.to_string();
+        }
+        state::get_redactor_mode()
+    }
+
+    /// True when the redactor scrubs on THIS machine — the only mode where nothing
+    /// unscrubbed can leave, and the reason it is the default.
+    pub fn redacts_locally(&self) -> bool {
+        self.redactor_mode() == "local"
+    }
+
     /// The effective summarizer mode. `MODELSTAT_SUMMARIZER_MODE` overrides the
     /// persisted choice; an unset/garbage env value falls through. Port of TS
     /// `state.summarizerMode`.

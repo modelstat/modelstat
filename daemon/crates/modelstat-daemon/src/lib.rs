@@ -45,3 +45,34 @@ pub use processing_version::{
     reconcile_processing_version, ProcessingState, VersionReconcile, PROCESSING_VERSION,
 };
 pub use single_flight::CoalescingRunner;
+
+/// Test-only redactor fakes, shared by the scan/flush/adapter test modules.
+///
+/// They exist because a redactor that cannot answer now HOLDS in every mode — an
+/// uploaded abstract is egress too — so a test that wants a working pipeline has
+/// to hand it a working redactor, exactly like production does.
+#[cfg(test)]
+pub(crate) mod testing {
+    use modelstat_redact::{NerModel, NerToken};
+
+    /// Answers for any text, and redacts the liveness sentinel's name so
+    /// `ner_active` reads the layer as UP.
+    pub struct AnsweringNer;
+
+    impl NerModel for AnsweringNer {
+        fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+            let mut out = Vec::new();
+            if let Some(i) = text.find("Katherine Johnson") {
+                let tok = |entity: &str, word: &str, a: usize, b: usize| NerToken {
+                    entity: entity.into(),
+                    word: word.into(),
+                    start: Some(a),
+                    end: Some(b),
+                };
+                out.push(tok("B-PER", "Katherine", i, i + 9));
+                out.push(tok("I-PER", "Johnson", i + 10, i + 17));
+            }
+            Some(out)
+        }
+    }
+}

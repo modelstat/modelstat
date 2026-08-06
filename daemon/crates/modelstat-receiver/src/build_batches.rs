@@ -231,6 +231,7 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
             serde_json::to_value(&session_metadata).ok()
         },
         summarizer_mode: None,
+        redactor_mode: None,
     })
 }
 

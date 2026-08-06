@@ -193,6 +193,7 @@ where
                             .get(&sid)
                             .and_then(|m| serde_json::to_value(BTreeMap::from([(&sid, m)])).ok()),
                         summarizer_mode: None,
+                        redactor_mode: None,
                     },
                     raw: true,
                     segment_count: 0,
@@ -295,6 +296,7 @@ where
         },
         session_metadata: session_metadata_value,
         summarizer_mode: None,
+        redactor_mode: None,
     };
     FlushOutcome::Ready(vec![PreparedBatch {
         batch,
@@ -306,6 +308,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::AnsweringNer;
     use modelstat_pipeline::NoEmbedder;
     use modelstat_redact::UnavailableNer;
     use modelstat_sumclient::CompleteRequest;
@@ -410,7 +413,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             None,
             None,
             &mut acc,
@@ -464,7 +467,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             None,
             None,
             &mut acc,
@@ -504,7 +507,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             None,
             None,
             &mut acc,
@@ -545,7 +548,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             None,
             None,
             &mut acc,
@@ -763,7 +766,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             None,
             None,
             &mut acc,

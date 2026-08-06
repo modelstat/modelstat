@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use modelstat_parsers::ToolCallDraft;
-use modelstat_redact::{ner_active, ner_redact, ner_redact_checked, redact, NerModel};
+use modelstat_redact::{ner_active, ner_redact_checked, redact, NerModel};
 use modelstat_wire::{RawEvent, Segment, ToolCallWire};
 
 /// Crockford base32 — the ULID alphabet.
@@ -102,7 +102,11 @@ pub fn attach_segment_ids_by_map(
 /// shipped command is the most sensitive field, previously regex-floor only.
 /// Deduped per distinct command, best-effort, mutates drafts in place. Port of
 /// `enrichToolCallRedaction` (here the redactor is the NER Privacy Filter).
-pub fn enrich_tool_call_redaction<N: NerModel>(drafts: &mut [ToolCallDraft], ner: &N) {
+/// Returns `false` when the redactor could not classify some command, so the
+/// caller can hold. A tool command is shipped text like any other — a command line
+/// carries paths, hostnames and the occasional pasted token — so "could not read
+/// it" cannot mean "send it as-is".
+pub fn enrich_tool_call_redaction<N: NerModel>(drafts: &mut [ToolCallDraft], ner: &N) -> bool {
     let mut cache: HashMap<String, String> = HashMap::new();
     for draft in drafts.iter_mut() {
         let Some(action) = draft.action.as_mut() else {
@@ -115,12 +119,19 @@ pub fn enrich_tool_call_redaction<N: NerModel>(drafts: &mut [ToolCallDraft], ner
         let deep = if let Some(hit) = cache.get(&cmd) {
             hit.clone()
         } else {
-            let d = ner_redact(ner, &cmd).text;
-            cache.insert(cmd, d.clone());
-            d
+            let Some(pass) = ner_redact_checked(ner, &cmd) else {
+                modelstat_log::log_warn!(
+                    "redactor could not classify a {}-char tool command — holding",
+                    cmd.len()
+                );
+                return false;
+            };
+            cache.insert(cmd, pass.text.clone());
+            pass.text
         };
         action.command_redacted = Some(deep);
     }
+    true
 }
 
 /// LAYER-3 deep redaction of the SHIPPED tool commands (§9.5/§21.13) — LOCAL mode
@@ -197,8 +208,8 @@ pub fn prepare_cloud_raw_events<N: NerModel>(
             redacted.push(ev);
         }
     }
-    if !drafts.is_empty() {
-        enrich_tool_call_redaction(drafts, ner);
+    if !drafts.is_empty() && !enrich_tool_call_redaction(drafts, ner) {
+        return None; // hold — a command went unscrubbed
     }
     Some(redacted)
 }

@@ -19,6 +19,7 @@ use serde::Serialize;
 mod cmd_admin;
 mod cmd_connect;
 mod cmd_mode;
+mod cmd_redactor;
 mod cmd_status;
 mod cmd_update;
 mod util;
@@ -72,6 +73,11 @@ fn main() -> ExitCode {
         }
         Some("jobs") => block_on(|api| async move { cmd_status::cmd_jobs(&api, &args[1..]).await }),
         // Show/change the summarizer mode (§9); interactive set = the consent gate.
+        // Where turns get SCRUBBED — separate from `mode`, which is where they
+        // get SUMMARISED.
+        Some("redactor") => {
+            block_on_config(|config| async move { cmd_redactor::cmd_redactor(&config, &args[1..]) })
+        }
         Some("mode") => {
             block_on_config(|config| async move { cmd_mode::cmd_mode(config, &args[1..]).await })
         }
@@ -169,6 +175,7 @@ fn print_usage() {
     eprintln!("  token [--json]                 print the device bearer\n");
     eprintln!("Control");
     eprintln!("  mode [cloud|local|self-hosted] show/change where sessions summarise");
+    eprintln!("  redactor [local]               show/change where turns are scrubbed");
     eprintln!("  sync --session <id> [--wait]   force-scan one session now");
     eprintln!("  discover                       list detected AI tools + accounts");
     eprintln!("  watch                          foreground watcher (dev)");

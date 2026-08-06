@@ -433,6 +433,7 @@ impl DeviceApi {
         // inherently well-formed UTF-8, so TS's `wellFormedStringify` is a no-op.
         let mut wire = batch.clone();
         wire.summarizer_mode = Some(self.config.summarizer_mode());
+        wire.redactor_mode = Some(self.config.redactor_mode());
         wire.clamp();
 
         // One slot for the whole call, retries included: a retry is this same

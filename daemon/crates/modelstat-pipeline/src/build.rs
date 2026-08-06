@@ -17,12 +17,12 @@
 //!
 //! Abstract redaction is layer 1 (the compiled-in [`redact`] floor, ALWAYS) +
 //! layer 2 (the injected [`NerModel`] seam, best-effort — the daemon wires the
-//! candle BERT-NER, tests pass `UnavailableNer`). Layer 3 (the LLM backstop) is
+//! candle BERT-NER; tests pass a fake that answers). Layer 3 (the LLM backstop) is
 //! command-only (§9.5), never applied to abstracts.
 
 use std::collections::{BTreeMap, HashSet};
 
-use modelstat_redact::{ner_redact, redact, NerModel};
+use modelstat_redact::{ner_redact_checked, redact, NerModel};
 use modelstat_sumclient::CompleteRequest;
 use modelstat_wire::{
     segment_id, RawEvent, RedactionReport, Segment, SegmentBehavior, TaxonomyHintRooted, TokenUsage,
@@ -256,9 +256,23 @@ where
         SummarizeOutcome::Held => return SliceOutcome::Held,
     };
 
-    // Redact the abstract: layer-1 floor (always) + layer-2 NER (best-effort).
+    // Redact the abstract: layer-1 floor (always) + layer-2 NER, FAIL-CLOSED.
+    //
+    // The abstract is uploaded in every mode — that is the whole point of local
+    // mode — so "the raw turns never leave this machine" is only true if what the
+    // summariser read was scrubbed. A turn the redactor could not classify has not
+    // been scrubbed, so this holds the session rather than shipping a summary of
+    // text nobody checked. Same rule the cloud path already follows; local and
+    // self-hosted egress are no less egress.
     let floor = redact(&raw_abstract, None);
-    let ner_pass = ner_redact(ner, &floor.text);
+    let Some(ner_pass) = ner_redact_checked(ner, &floor.text) else {
+        modelstat_log::log_warn!(
+            "redactor could not classify a {}-char abstract — holding this session \
+             rather than uploading an unscrubbed summary",
+            floor.text.len()
+        );
+        return SliceOutcome::Held;
+    };
     let redacted_text = ner_pass.text;
     let redaction = RedactionReport {
         secrets_found: floor.counts.secrets_found,
@@ -472,7 +486,9 @@ where
         _ => return None,
     };
     let floored = redact(&raw, None).text;
-    let scrubbed = ner_redact(ner, &floored).text;
+    // Fail-closed like everywhere else: no scrub, no user_intent. Dropping the
+    // field costs one nicety; shipping an unscrubbed one costs a person's name.
+    let scrubbed = ner_redact_checked(ner, &floored)?.text;
     let trimmed = take_chars(scrubbed.trim(), USER_INTENT_MAX_CHARS);
     if trimmed.is_empty() {
         None
@@ -644,7 +660,18 @@ fn collapse_ws(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::embed::NoEmbedder;
-    use modelstat_redact::UnavailableNer;
+    use modelstat_redact::{NerToken, UnavailableNer};
+
+    /// A redactor that ANSWERS and finds nothing. Needed now that every egress
+    /// path — including the uploaded abstract — holds when the redactor cannot
+    /// read a turn. `UnavailableNer` still means "no redactor", and the hold test
+    /// below uses it for exactly that.
+    struct AnsweringNer;
+    impl NerModel for AnsweringNer {
+        fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
+            Some(Vec::new())
+        }
+    }
     use modelstat_sumclient::SumError;
     use modelstat_wire::GitContext;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -743,7 +770,7 @@ mod tests {
             ),
         ];
         let r = resilient(Fake::reply("Fixed a null deref in the auth middleware"));
-        match build_for_one_session(&events, &r, &NoEmbedder, &UnavailableNer).await {
+        match build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await {
             BuildOutcome::Ready(segs) => {
                 assert_eq!(segs.len(), 1);
                 let s = &segs[0];
@@ -787,7 +814,7 @@ mod tests {
         )];
         let r = resilient(Fake::failing());
         assert_eq!(
-            build_for_one_session(&events, &r, &NoEmbedder, &UnavailableNer).await,
+            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await,
             BuildOutcome::Held
         );
     }
@@ -802,7 +829,7 @@ mod tests {
         ];
         let f = Fake::reply("unused");
         let r = resilient(f);
-        match build_for_one_session(&events, &r, &NoEmbedder, &UnavailableNer).await {
+        match build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await {
             BuildOutcome::Ready(segs) => assert!(segs.is_empty()),
             BuildOutcome::Held => panic!("0 excerpts must skip, never hold"),
         }
@@ -830,7 +857,7 @@ mod tests {
             .collect();
         let r = resilient(Fake::reply("Cut a release of acme/web"));
         let BuildOutcome::Ready(segs) =
-            build_for_one_session(&[e], &r, &NoEmbedder, &UnavailableNer).await
+            build_for_one_session(&[e], &r, &NoEmbedder, &AnsweringNer).await
         else {
             panic!("expected Ready");
         };
@@ -885,7 +912,7 @@ mod tests {
         ];
         let r = resilient(Fake::reply("Iterated on X then Y"));
         let BuildOutcome::Ready(segs) =
-            build_for_one_session(&events, &r, &NoEmbedder, &UnavailableNer).await
+            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await
         else {
             panic!("expected Ready");
         };
@@ -905,7 +932,7 @@ mod tests {
         )];
         let r = resilient(Fake::reply("Did the embeddable work"));
         let BuildOutcome::Ready(segs) =
-            build_for_one_session(&events, &r, &FixedEmbedder, &UnavailableNer).await
+            build_for_one_session(&events, &r, &FixedEmbedder, &AnsweringNer).await
         else {
             panic!("expected Ready");
         };
@@ -1047,5 +1074,42 @@ mod tests {
         let segs = vec![seg("s1", "2026-06-01T10:00:00Z", "", None)];
         let engine = Fake::reply("won't be used");
         assert!(build_session_titles(&segs, &engine).await.is_empty());
+    }
+
+    /// Every mode has a REDACTOR, and none of them ship without it. Local mode was
+    /// the quiet exception: it redacts best-effort, summarises on this machine, and
+    /// then uploads the abstract — so a turn the redactor could not read became a
+    /// summary of unscrubbed text, sent anyway. It holds now, like cloud does.
+    #[tokio::test]
+    async fn local_mode_holds_when_the_redactor_cannot_answer() {
+        let events = vec![
+            ev(
+                "e1",
+                "2026-07-16T10:00:00.000Z",
+                "message",
+                Some("ship the thing"),
+            ),
+            ev(
+                "e2",
+                "2026-07-16T10:01:00.000Z",
+                "message",
+                Some("shipped it"),
+            ),
+        ];
+        let r = ResilientSummarizer::with_cooldown(Fake::reply("did the thing"), Duration::ZERO);
+        // The engine is healthy; only the redactor is missing.
+        assert!(
+            matches!(
+                build_for_one_session(&events, &r, &NoEmbedder, &UnavailableNer).await,
+                BuildOutcome::Held
+            ),
+            "an abstract is egress too — no scrub, no upload"
+        );
+
+        // With a redactor that answers, the same session builds.
+        assert!(matches!(
+            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await,
+            BuildOutcome::Ready(_)
+        ));
     }
 }
