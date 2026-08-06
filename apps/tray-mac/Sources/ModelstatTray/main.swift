@@ -99,6 +99,10 @@ struct AnalyzedInfo: Decodable {
 struct LocalStatus: Decodable {
   let status: String?
   let message: String?
+  /// Epoch ms when the work now in progress started, or nil when idle. A
+  /// timestamp rather than a duration so this menu can tick the elapsed clock
+  /// on its own 1s beat — the daemon does not rewrite its mirror to animate it.
+  let busy_since_ms: Int64?
   let queue_size: Int?
   let last_event_at: String?
   let daemon_version: String?
@@ -512,10 +516,18 @@ final class TrayController: NSObject {
     // menu reads as alive even on the rare beat where the numbers don't
     // change. Steady dot when idle/watching/offline.
     let dot = isActivePhase(phase) ? (spinnerTick % 2 == 0 ? "●" : "○") : "●"
+    // How long the current unit of work has been running, recomputed every
+    // beat. This is what tells a watcher the daemon is working rather than
+    // wedged on a line that happens not to change.
+    var busy = ""
+    if let since = local?.busy_since_ms, Self.mirrorIsFresh(local?.written_at), isActivePhase(phase) {
+      let secs = Int((Date().timeIntervalSince1970 * 1000 - Double(since)) / 1000)
+      if secs >= 0 { busy = " · \(Self.shortDuration(secs))" }
+    }
     if let m = phaseMsg, !m.isEmpty {
-      setInfo(statusMI, "\(dot) \(phase) — \(m)")
+      setInfo(statusMI, "\(dot) \(phase) — \(m)\(busy)")
     } else {
-      setInfo(statusMI, "\(dot) \(phase)")
+      setInfo(statusMI, "\(dot) \(phase)\(busy)")
     }
 
     if s.claimed == true {
@@ -727,6 +739,13 @@ final class TrayController: NSObject {
   /// Phases where the agent is doing visible work right now — drives the
   /// pulsing status dot. "watching"/"idle" are healthy-but-quiet (steady
   /// dot); "offline"/"error" are problems (steady dot, not a busy pulse).
+  /// `9s`, `1m 04s`, `1h 02m` — compact enough for one menu line.
+  static func shortDuration(_ secs: Int) -> String {
+    if secs < 60 { return "\(secs)s" }
+    if secs < 3600 { return String(format: "%dm %02ds", secs / 60, secs % 60) }
+    return String(format: "%dh %02dm", secs / 3600, (secs % 3600) / 60)
+  }
+
   private func isActivePhase(_ phase: String) -> Bool {
     switch phase {
     case "starting", "discovering", "scanning", "processing", "uploading":
