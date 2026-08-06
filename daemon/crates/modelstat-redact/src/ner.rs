@@ -23,6 +23,47 @@ pub struct NerToken {
     pub end: Option<usize>,
 }
 
+// Consumed by the `candle` runtime below; without that feature there is no
+// inference to window, and the tests still hold the arithmetic honest.
+#[cfg_attr(not(feature = "candle"), allow(dead_code))]
+/// Learned positions in a BERT-base checkpoint. Not a tuning knob — ask for
+/// position 512 and the embedding lookup errors out, which is exactly how long
+/// turns came back unclassified.
+const MAX_POSITIONS: usize = 512;
+/// Tokens per forward pass. Two positions go to the `[CLS]`/`[SEP]` frame.
+#[cfg_attr(not(feature = "candle"), allow(dead_code))]
+const WINDOW: usize = MAX_POSITIONS - 2;
+/// Tokens two neighbouring windows share, so an entity sitting on a seam is whole
+/// inside at least one window. 64 wordpieces is far more than any person or
+/// organisation name needs, and costs ~13% more passes.
+#[cfg_attr(not(feature = "candle"), allow(dead_code))]
+const OVERLAP: usize = 64;
+
+/// The windows a `len`-token sequence gets classified in — `(start, end)` halves
+/// of a range each.
+///
+/// Pure and always compiled, because the property that matters is arithmetic, not
+/// inference: every token must land in some window. A gap here means a silently
+/// unscrubbed stretch of a turn, which is the whole bug this replaced, so it is
+/// tested where the model is not.
+#[cfg_attr(not(feature = "candle"), allow(dead_code))]
+fn plan_windows(len: usize, window: usize, overlap: usize) -> Vec<(usize, usize)> {
+    if len == 0 || window == 0 {
+        return Vec::new();
+    }
+    let stride = window.saturating_sub(overlap).max(1);
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    loop {
+        let end = (start + window).min(len);
+        out.push((start, end));
+        if end == len {
+            return out;
+        }
+        start += stride;
+    }
+}
+
 /// A token-classification model. `classify` returns None when the model is
 /// unavailable (missing/loading) — the caller latches pass-through, and
 /// [`ner_active`] then reports the layer as down (fail-closed for egress).
@@ -86,23 +127,39 @@ struct Span<'a> {
     tokens: Vec<&'a NerToken>,
 }
 
-/// Run the layer-2 NER redactor. On an unavailable/erroring model the text is
-/// returned unchanged (the floor already redacted it). Port of
-/// `redactWithPrivacyFilter`.
-pub fn ner_redact<M: NerModel>(model: &M, text: &str) -> NerRedaction {
+/// Run the layer-2 NER redactor, or `None` when the model did not answer for
+/// THIS text. Egress paths must use this one: a turn the model couldn't classify
+/// has not been scrubbed, and the only safe thing to do with it is hold.
+///
+/// [`ner_active`] is not enough on its own — it probes with one short sentinel,
+/// so it says the layer is up while individual turns still fail. That gap shipped
+/// long turns unredacted once turns became verbatim, which is why the answer is
+/// now per text.
+pub fn ner_redact_checked<M: NerModel>(model: &M, text: &str) -> Option<NerRedaction> {
     if text.is_empty() {
-        return NerRedaction {
+        return Some(NerRedaction {
             text: text.to_string(),
             counts: BTreeMap::new(),
-        };
+        });
     }
-    let Some(tokens) = model.classify(text) else {
-        return NerRedaction {
-            text: text.to_string(),
-            counts: BTreeMap::new(),
-        };
-    };
+    model
+        .classify(text)
+        .map(|tokens| redact_spans(text, tokens))
+}
 
+/// Run the layer-2 NER redactor. On an unavailable/erroring model the text is
+/// returned unchanged (the floor already redacted it) — fine for LOCAL use, where
+/// nothing leaves the machine. Anything that ships must use
+/// [`ner_redact_checked`] and hold instead. Port of `redactWithPrivacyFilter`.
+pub fn ner_redact<M: NerModel>(model: &M, text: &str) -> NerRedaction {
+    ner_redact_checked(model, text).unwrap_or_else(|| NerRedaction {
+        text: text.to_string(),
+        counts: BTreeMap::new(),
+    })
+}
+
+/// Splice `[REDACTED:<TYPE>]` over every entity span the model named.
+fn redact_spans(text: &str, tokens: Vec<NerToken>) -> NerRedaction {
     // Decode BIO tags into entity spans.
     let mut spans: Vec<Span> = Vec::new();
     for t in &tokens {
@@ -246,6 +303,8 @@ mod candle_ner {
 
     use super::{NerModel, NerToken};
 
+    use super::{plan_windows, OVERLAP, WINDOW};
+
     /// A BERT token-classification model (dslim/bert-base-NER class) over candle
     /// (CPU). Loaded from a model dir with `config.json`, `tokenizer.json`,
     /// `model.safetensors` (HF keys `bert.*` + `classifier.*`).
@@ -255,6 +314,11 @@ mod candle_ner {
         tokenizer: Tokenizer,
         id2label: HashMap<usize, String>,
         device: Device,
+        /// The framing token ids, resolved once at load. Each window is framed
+        /// itself, because the text is tokenized without them (see
+        /// [`CandleNer::try_classify`]).
+        cls_id: u32,
+        sep_id: u32,
     }
 
     impl CandleNer {
@@ -278,25 +342,33 @@ mod candle_ner {
             let model = BertModel::load(vb.pp("bert"), &config).map_err(|e| e.to_string())?;
             let classifier = candle_nn::linear(config.hidden_size, num_labels, vb.pp("classifier"))
                 .map_err(|e| e.to_string())?;
+            // Loud rather than defaulted: a checkpoint whose vocabulary lacks the
+            // framing tokens would label every window off by one position.
+            let cls_id = tokenizer
+                .token_to_id("[CLS]")
+                .ok_or("tokenizer has no [CLS] token")?;
+            let sep_id = tokenizer
+                .token_to_id("[SEP]")
+                .ok_or("tokenizer has no [SEP] token")?;
             Ok(Self {
                 model,
                 classifier,
                 tokenizer,
                 id2label,
                 device,
+                cls_id,
+                sep_id,
             })
         }
 
-        fn try_classify(&self, text: &str) -> Result<Vec<NerToken>, String> {
-            let enc = self
-                .tokenizer
-                .encode(text, true)
-                .map_err(|e| e.to_string())?;
-            let ids: Vec<u32> = enc.get_ids().to_vec();
-            if ids.is_empty() {
-                return Ok(Vec::new());
-            }
-            let input_ids = Tensor::new(ids.as_slice(), &self.device)
+        /// One forward pass over `[CLS] + window + [SEP]`, labelling the window's
+        /// tokens. Returns one entity label per token, in window order.
+        fn label_window(&self, ids: &[u32]) -> Result<Vec<String>, String> {
+            let mut framed = Vec::with_capacity(ids.len() + 2);
+            framed.push(self.cls_id);
+            framed.extend_from_slice(ids);
+            framed.push(self.sep_id);
+            let input_ids = Tensor::new(framed.as_slice(), &self.device)
                 .and_then(|t| t.unsqueeze(0))
                 .map_err(|e| e.to_string())?;
             let token_type_ids = input_ids.zeros_like().map_err(|e| e.to_string())?;
@@ -313,16 +385,53 @@ mod candle_ner {
                 .argmax(D::Minus1)
                 .and_then(|a| a.to_vec1::<u32>())
                 .map_err(|e| e.to_string())?;
+            // Drop the two framing positions; what's left lines up with `ids`.
+            Ok(label_ids
+                .iter()
+                .skip(1)
+                .take(ids.len())
+                .map(|lid| {
+                    self.id2label
+                        .get(&(*lid as usize))
+                        .cloned()
+                        .unwrap_or_else(|| "O".to_string())
+                })
+                .collect())
+        }
 
+        fn try_classify(&self, text: &str) -> Result<Vec<NerToken>, String> {
+            // Tokenized ONCE, without the framing tokens, so every token keeps a
+            // byte offset into the whole `text` no matter which window labels it.
+            let enc = self
+                .tokenizer
+                .encode(text, false)
+                .map_err(|e| e.to_string())?;
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
             let offsets = enc.get_offsets(); // BYTE offsets into `text`
             let words = enc.get_tokens();
-            let mut out = Vec::with_capacity(label_ids.len());
-            for (i, &lid) in label_ids.iter().enumerate() {
-                let entity = self
-                    .id2label
-                    .get(&(lid as usize))
-                    .cloned()
-                    .unwrap_or_else(|| "O".to_string());
+
+            // WINDOWED, because BERT carries exactly `MAX_POSITIONS` learned
+            // positions and asking it for more is an error, not a slower answer.
+            // Before turns were captured verbatim this never bit — an abstract fit
+            // in one pass — and the failure mode was the worst kind: `classify`
+            // returned `None`, which `ner_redact` reads as "no model", so a long
+            // turn passed through UNREDACTED. Windowing is not truncation: every
+            // token is labelled, just not all in one pass.
+            let mut labels: Vec<String> = Vec::with_capacity(ids.len());
+            for (start, end) in plan_windows(ids.len(), WINDOW, OVERLAP) {
+                let window = self.label_window(&ids[start..end])?;
+                // Keep the EARLIER window's answer for the overlap: it saw those
+                // tokens with more left context, and an entity that straddles a
+                // seam is whole in exactly that window.
+                let fresh = labels.len().saturating_sub(start);
+                labels.extend(window.into_iter().skip(fresh));
+            }
+
+            let mut out = Vec::with_capacity(labels.len());
+            for (i, entity) in labels.into_iter().enumerate() {
                 let (sb, eb) = offsets.get(i).copied().unwrap_or((0, 0));
                 out.push(NerToken {
                     entity,
@@ -449,5 +558,84 @@ mod tests {
             reconstruct_surface(&["Kath", "##erine", "Johnson"]),
             "Katherine Johnson"
         );
+    }
+
+    /// The property the leak came down to: EVERY token has to be classified by
+    /// some window. A gap is a silently unscrubbed stretch of a turn.
+    #[test]
+    fn every_token_lands_in_a_window() {
+        for len in [0usize, 1, 5, 509, 510, 511, 1_020, 4_097, 65_537] {
+            let plan = plan_windows(len, WINDOW, OVERLAP);
+            if len == 0 {
+                assert!(plan.is_empty());
+                continue;
+            }
+            let mut covered = vec![false; len];
+            for &(a, b) in &plan {
+                assert!(b > a && b <= len, "bad window {a}..{b} for len {len}");
+                assert!(
+                    b - a <= WINDOW,
+                    "window {a}..{b} exceeds what the model can take"
+                );
+                for c in covered[a..b].iter_mut() {
+                    *c = true;
+                }
+            }
+            assert!(
+                covered.iter().all(|c| *c),
+                "len {len} left tokens unclassified: {plan:?}"
+            );
+            // Neighbours must actually overlap, or a name on the seam is half a
+            // name to both of them.
+            for pair in plan.windows(2) {
+                let (prev, next) = (pair[0], pair[1]);
+                assert!(
+                    next.0 < prev.1,
+                    "windows {prev:?} and {next:?} do not overlap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_sequence_is_one_window_and_a_long_one_is_many() {
+        assert_eq!(plan_windows(10, WINDOW, OVERLAP), vec![(0, 10)]);
+        assert_eq!(plan_windows(WINDOW, WINDOW, OVERLAP), vec![(0, WINDOW)]);
+        // One token past the limit is the case that used to error out entirely.
+        let plan = plan_windows(WINDOW + 1, WINDOW, OVERLAP);
+        assert_eq!(plan.len(), 2, "{plan:?}");
+        assert_eq!(plan[0], (0, WINDOW));
+        assert_eq!(plan[1].1, WINDOW + 1);
+    }
+
+    #[test]
+    fn a_pathological_overlap_still_makes_progress() {
+        // overlap >= window would stride by zero and loop forever; the plan
+        // clamps instead, because a hang here would stall the whole pipeline.
+        let plan = plan_windows(2_000, 100, 100);
+        assert!(plan.len() < 3_000);
+        assert_eq!(plan.last().unwrap().1, 2_000);
+    }
+
+    #[test]
+    fn a_failed_classification_is_distinguishable_from_a_clean_one() {
+        // The distinction the leak turned on: "nothing to redact" and "could not
+        // read this" both used to come back as unchanged text.
+        assert!(ner_redact_checked(&UnavailableNer, "Katherine Johnson").is_none());
+        let clean = ner_redact_checked(&NoEntities, "Katherine Johnson").expect("answered");
+        assert_eq!(clean.text, "Katherine Johnson");
+        // The lossy wrapper still exists for LOCAL use, and still passes through.
+        assert_eq!(
+            ner_redact(&UnavailableNer, "Katherine Johnson").text,
+            "Katherine Johnson"
+        );
+    }
+
+    /// Answers, finds nothing.
+    struct NoEntities;
+    impl NerModel for NoEntities {
+        fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
+            Some(Vec::new())
+        }
     }
 }

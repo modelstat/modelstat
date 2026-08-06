@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use modelstat_parsers::ToolCallDraft;
-use modelstat_redact::{ner_active, ner_redact, redact, NerModel};
+use modelstat_redact::{ner_active, ner_redact, ner_redact_checked, redact, NerModel};
 use modelstat_wire::{RawEvent, Segment, ToolCallWire};
 
 /// Crockford base32 — the ULID alphabet.
@@ -169,25 +169,34 @@ pub fn prepare_cloud_raw_events<N: NerModel>(
     if !ner_active(ner) {
         return None; // fail-closed — the caller holds / keeps data local
     }
-    let redacted = events
-        .iter()
-        .map(
-            |e| match e.content_excerpt.as_deref().filter(|x| !x.is_empty()) {
-                None => e.clone(),
-                Some(excerpt) => {
-                    let floored = redact(excerpt, None).text;
-                    let scrubbed = ner_redact(ner, &floored).text;
-                    if scrubbed == excerpt {
-                        e.clone()
-                    } else {
-                        let mut ev = e.clone();
-                        ev.content_excerpt = Some(scrubbed);
-                        ev
-                    }
-                }
-            },
-        )
-        .collect();
+    // Per TURN, not just once up front: `ner_active` probes with a short sentinel,
+    // so it can say the layer is up while a particular turn fails to classify. A
+    // turn that failed has NOT been scrubbed, and shipping it would be exactly the
+    // egress the fail-closed rule exists to prevent — so the whole flush holds and
+    // retries, and nothing is lost.
+    let mut redacted = Vec::with_capacity(events.len());
+    for e in events {
+        let Some(excerpt) = e.content_excerpt.as_deref().filter(|x| !x.is_empty()) else {
+            redacted.push(e.clone());
+            continue;
+        };
+        let floored = redact(excerpt, None).text;
+        let Some(pass) = ner_redact_checked(ner, &floored) else {
+            modelstat_log::log_warn!(
+                "NER could not classify a {}-char turn — holding this flush rather \
+                 than shipping it unscrubbed",
+                floored.len()
+            );
+            return None;
+        };
+        if pass.text == excerpt {
+            redacted.push(e.clone());
+        } else {
+            let mut ev = e.clone();
+            ev.content_excerpt = Some(pass.text);
+            redacted.push(ev);
+        }
+    }
     if !drafts.is_empty() {
         enrich_tool_call_redaction(drafts, ner);
     }
@@ -412,5 +421,56 @@ mod tests {
             "L3 must redact the named secret: {cmd}"
         );
         assert!(!cmd.contains("sk_live_abcdef123456"));
+    }
+
+    /// A model that answers for short text and FAILS on long text — the real
+    /// shape of the bug this guards: `ner_active`'s sentinel passes, then a long
+    /// verbatim turn cannot be classified.
+    struct FailsOnLongText;
+    impl NerModel for FailsOnLongText {
+        fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+            if text.len() > 200 {
+                return None; // "couldn't classify this one"
+            }
+            // Answer the liveness sentinel so the layer reads as UP.
+            let mut out = Vec::new();
+            if let Some(i) = text.find("Katherine Johnson") {
+                out.push(NerToken {
+                    entity: "B-PER".into(),
+                    word: "Katherine".into(),
+                    start: Some(i),
+                    end: Some(i + 9),
+                });
+                out.push(NerToken {
+                    entity: "I-PER".into(),
+                    word: "Johnson".into(),
+                    start: Some(i + 10),
+                    end: Some(i + 17),
+                });
+            }
+            Some(out)
+        }
+    }
+
+    #[test]
+    fn a_turn_the_model_cannot_classify_holds_instead_of_shipping() {
+        let long = "x".repeat(5_000);
+        let events = vec![ev("e1", Some(&long))];
+        let mut drafts: Vec<ToolCallDraft> = Vec::new();
+        // The layer is UP by the sentinel probe…
+        assert!(modelstat_redact::ner_active(&FailsOnLongText));
+        // …and the flush still holds, because THIS turn was never scrubbed.
+        assert!(
+            prepare_cloud_raw_events(&events, &mut drafts, &FailsOnLongText).is_none(),
+            "an unclassifiable turn must never leave the box"
+        );
+
+        // A turn it CAN classify still ships.
+        let ok = vec![ev("e2", Some("Escalate to Katherine Johnson please"))];
+        let out = prepare_cloud_raw_events(&ok, &mut drafts, &FailsOnLongText)
+            .expect("a classifiable turn ships");
+        let shipped = out[0].content_excerpt.clone().unwrap();
+        assert!(!shipped.contains("Katherine Johnson"), "{shipped}");
+        assert!(shipped.contains("[REDACTED:PER]"), "{shipped}");
     }
 }
