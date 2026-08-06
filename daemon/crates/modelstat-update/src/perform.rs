@@ -470,7 +470,13 @@ fn swap_tray_if_installed(staged: &StagedRelease) -> Option<String> {
         return None;
     }
     match swap_tray(&live, staged_app) {
-        Ok(()) => None,
+        Ok(()) => {
+            // The bundle on disk is new; the PROCESS is not until it is
+            // relaunched. Skipping this is why a tray fix could sit installed and
+            // unseen for days.
+            modelstat_service::tray::restart_tray();
+            None
+        }
         Err(e) => Some(format!(
             " — but the menu-bar tray could not be updated ({e}); it is still running the previous build, reinstall to refresh it"
         )),
@@ -488,6 +494,9 @@ fn swap_tray_if_installed(_staged: &StagedRelease) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn rollback_tray_if_installed() {
     rollback_tray(&modelstat_service::tray::tray_app_path());
+    // Symmetric with the swap: the restored bundle is only what the user sees
+    // once the process running the rolled-back build is replaced too.
+    modelstat_service::tray::restart_tray();
 }
 
 #[cfg(not(target_os = "macos"))]

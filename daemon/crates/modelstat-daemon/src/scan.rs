@@ -143,6 +143,17 @@ pub trait ScanObserver {
     fn on_file(&mut self, path: &str, index: usize, total: usize) {
         let _ = (path, index, total);
     }
+    /// A whole fan-out is going out together: `uploads` batches covering
+    /// `sessions` distinct sessions. Called ONCE, before any of them starts, so a
+    /// reader can say how much is on the wire and time it — the per-batch hooks
+    /// can't, because they no longer happen one at a time.
+    ///
+    /// `uploads == 0` means the wire is quiet again. The all-committed case is
+    /// implicit in [`ScanObserver::on_uploaded`] counting the set down, so this is
+    /// how a HELD fan-out says its unsent remainder is no longer in flight.
+    fn on_upload_set(&mut self, uploads: usize, sessions: usize) {
+        let _ = (uploads, sessions);
+    }
     /// Right before a batch POSTs — these records are now in-flight.
     fn on_upload(&mut self, events: usize, segments: usize) {
         let _ = (events, segments);
@@ -248,6 +259,11 @@ where
     // The loss-proof contract is unchanged, and depends on it: the cursor
     // advance sits AFTER this whole block, so a hold anywhere in the fan-out
     // advances nothing and the same files re-parse next scan.
+    let sessions: std::collections::BTreeSet<&str> = batches
+        .iter()
+        .flat_map(|pb| pb.batch.events.iter().map(|e| e.session_id.as_str()))
+        .collect();
+    observer.on_upload_set(batches.len(), sessions.len());
     for pb in &batches {
         observer.on_upload(pb.batch.events.len(), pb.segment_count);
     }
@@ -285,6 +301,9 @@ where
     }
     drop(inflight);
     if let Some(h) = held {
+        // The unsent remainder never went anywhere — say so, or a reader keeps
+        // claiming "3 sessions uploading" through the whole backoff.
+        observer.on_upload_set(0, 0);
         return Err(h);
     }
     // Every batch in this flush committed — persist the buffered files' cursors

@@ -103,6 +103,9 @@ struct LocalStatus: Decodable {
   /// timestamp rather than a duration so this menu can tick the elapsed clock
   /// on its own 1s beat — the daemon does not rewrite its mirror to animate it.
   let busy_since_ms: Int64?
+  /// The upload fan-out in flight right now, if any. Sessions leave together, so
+  /// its `since_ms` also dates the longest one still running.
+  let uploading: UploadingNow?
   let queue_size: Int?
   let last_event_at: String?
   let daemon_version: String?
@@ -115,6 +118,14 @@ struct LocalStatus: Decodable {
   let update: UpdateInfo?
   /// Effective auto-update setting — drives the tray's checkbox.
   let auto_update: Bool?
+}
+
+struct UploadingNow: Decodable {
+  let sessions: Int?
+  let uploads: Int?
+  /// Epoch ms the set started — a timestamp, so this menu ticks the elapsed
+  /// clock on its own 1s beat without the daemon rewriting the mirror.
+  let since_ms: Int64?
 }
 
 struct UpdateInfo: Decodable {
@@ -166,6 +177,9 @@ final class TrayController: NSObject {
 
   // Menu items we update on every poll
   private let statusMI = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
+  /// What is on the wire this second — the row that proves a long, quiet
+  /// upload pass is working rather than wedged.
+  private let uploadMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let deviceMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let analyzedMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   /// Pipeline activity — sessions processing/finished + events uploaded.
@@ -251,9 +265,9 @@ final class TrayController: NSObject {
     statusItem.button?.toolTip = "modelstat"
   }
 
-  /// The five non-clickable info rows at the top of the menu, in order.
+  /// The non-clickable info rows at the top of the menu, in order.
   private var infoItems: [NSMenuItem] {
-    [statusMI, deviceMI, analyzedMI, pipelineMI, detectedMI]
+    [statusMI, uploadMI, deviceMI, analyzedMI, pipelineMI, detectedMI]
   }
 
   /// Set an info row's title, hiding the row when the title is empty.
@@ -488,7 +502,7 @@ final class TrayController: NSObject {
     let local = localLatest ?? s.local
     if s.paired == false {
       setInfo(statusMI, "Not paired — run `npx modelstat@latest`")
-      for mi in [deviceMI, analyzedMI, pipelineMI, detectedMI] { setInfo(mi, "") }
+      for mi in [uploadMI, deviceMI, analyzedMI, pipelineMI, detectedMI] { setInfo(mi, "") }
       claimMI.title = "Open modelstat.ai"
       copyClaimMI.isHidden = true
       return
@@ -528,6 +542,24 @@ final class TrayController: NSObject {
       setInfo(statusMI, "\(dot) \(phase) — \(m)\(busy)")
     } else {
       setInfo(statusMI, "\(dot) \(phase)\(busy)")
+    }
+
+    // What is on the wire, and for how long. The row above counts FILES, which
+    // can sit on one number for minutes while several sessions upload behind it —
+    // that is the line that read as wedged. Sessions in a fan-out leave together,
+    // so this clock is the longest one still running.
+    if let up = local?.uploading, Self.mirrorIsFresh(local?.written_at),
+      let n = up.sessions, n > 0
+    {
+      let noun = n == 1 ? "session" : "sessions"
+      var line = "⇡ \(n) \(noun) uploading"
+      if let since = up.since_ms {
+        let secs = Int((Date().timeIntervalSince1970 * 1000 - Double(since)) / 1000)
+        if secs >= 0 { line += " · \(Self.shortDuration(secs))" }
+      }
+      setInfo(uploadMI, line)
+    } else {
+      setInfo(uploadMI, "")
     }
 
     if s.claimed == true {

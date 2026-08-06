@@ -121,6 +121,25 @@ pub fn install_tray_autostart() -> std::io::Result<Option<PathBuf>> {
     }
 }
 
+/// Restart the running tray so a freshly swapped bundle is what the user is
+/// looking at. Without this a self-update replaces the binary on disk while the
+/// OLD process keeps running until the next login — the tray on screen was four
+/// days behind its own build, which is indistinguishable from a tray fix that
+/// never shipped.
+///
+/// `kickstart -k` kills and relaunches in one step, and only touches an agent
+/// that is actually loaded, so this is a no-op on a machine with no tray. Silent
+/// (`Ok`/nothing) by design: the update itself already succeeded, and a failure
+/// here costs a stale menu bar until the next login, not data.
+pub fn restart_tray() {
+    #[cfg(target_os = "macos")]
+    {
+        let uid = unsafe { libc::getuid() };
+        let target = format!("gui/{uid}/{TRAY_LABEL}");
+        let _ = crate::run("launchctl", &["kickstart", "-k", &target]);
+    }
+}
+
 /// Remove the tray launchd agent. No-op off macOS.
 pub fn uninstall_tray_autostart() {
     #[cfg(target_os = "macos")]
