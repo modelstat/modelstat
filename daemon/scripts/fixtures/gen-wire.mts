@@ -45,13 +45,10 @@ const fullRawEvent = {
   references: { repos: [], pull_requests: [], issues: [] },
   source_file: "/data/session.jsonl",
   source_byte_offset: 4096,
-  pricing_mode: "subscription",
 };
 
 // Minimal: required + nullable-as-null; defaulted + optional fields omitted so
 // the fixture also pins default materialization (tool_calls {}, files_touched []).
-// `pricing_mode` is REQUIRED, so it appears even here — the minimal event is
-// exactly the shape that used to omit it and get billed at list price.
 const minimalRawEvent = {
   source_event_id: "evt_min",
   ts: TS,
@@ -68,7 +65,6 @@ const minimalRawEvent = {
   duration_ms: null,
   source_file: null,
   source_byte_offset: null,
-  pricing_mode: "subscription",
 };
 
 const toolAction = {
