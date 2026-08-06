@@ -23,7 +23,7 @@ use modelstat_wire::{IngestBatch, RawEvent, Segment};
 use futures_util::StreamExt;
 
 use crate::discover_jobs::{ParserKind, ScanJob};
-use crate::flush::{build_flush_batches, FlushOutcome};
+use crate::flush::{build_flush_batches, FlushOutcome, PreparedBatch};
 
 /// Ship a batch the moment the event buffer reaches this many events — mirrors
 /// `INGEST_BATCH_MAX_EVENTS` (daemon-core/config). Because the check runs after
@@ -57,6 +57,15 @@ const RESHIP_LAG_MS: i64 = 10 * 60 * 1000;
 /// `MAX_CONCURRENCY`. Matching that here keeps this from being the binding
 /// constraint while still bounding the futures a flush allocates.
 const UPLOAD_FANOUT: usize = modelstat_ingest::upload_gate::MAX_CONCURRENCY;
+
+/// Flushes allowed on the wire at once while the parser keeps reading.
+///
+/// This is the memory dial. A flush is bounded by [`BATCH_MAX_EVENTS`], so the
+/// scan now holds up to this many batches' worth of prepared events instead of
+/// one — the price of never leaving the wire idle during a parse. Matched to the
+/// upload gate's ceiling because that is the most the server will accept
+/// concurrently anyway; more in flight here would only queue.
+const MAX_INFLIGHT_FLUSHES: usize = modelstat_ingest::upload_gate::MAX_CONCURRENCY;
 
 const STREAM_CHANNEL_CAP: usize = 4;
 
@@ -165,13 +174,43 @@ pub trait ScanObserver {
 }
 impl ScanObserver for () {}
 
-/// Assemble + ship whatever is buffered, then (on full success) advance the
-/// buffered files' cursors. Empties `buffer`/`tool_buffer`/`pending_cursors` on a
-/// confirmed commit; on `Err(Hold)` the caller stops the scan and the un-advanced
-/// files retry next cycle. Shared by the mid-scan (buffer-full) and trailing
-/// flushes. Port of the `flushBatch` + `commitBatch` closures.
+/// One flush's shippable output, fully OWNED — which is the entire point. It
+/// borrows none of the scan's exclusive state (`git`, the run-long per-session
+/// accumulators, the cursor store, the observer), so it can sit on the wire while
+/// the parser is already building the next one.
+struct PreparedFlush {
+    /// Position in the flush order. The cursor rule below is a prefix rule, and a
+    /// prefix needs an order.
+    seq: u64,
+    batches: Vec<PreparedBatch>,
+    /// Files fully parsed as of this flush. They advance only once this flush AND
+    /// every flush before it has committed — see `advance_prefix` in the scan
+    /// driver for why that "and every flush before it" is load-bearing.
+    cursors: Vec<(String, FileCursor)>,
+}
+
+/// What a shipped flush came back with. Deliberately inert data: the driver owns
+/// the tallies, the observer and the cursor store, so a ship future touches none
+/// of them and the scan's `&mut` state never has to be shared across the several
+/// flushes now in flight at once.
+struct ShipOutcome {
+    seq: u64,
+    cursors: Vec<(String, FileCursor)>,
+    /// `(segment_count, events_accepted)` for each batch that committed.
+    committed: Vec<(usize, u64)>,
+    /// Set when a batch could not commit — the whole flush is held, and with it
+    /// every cursor from this flush onwards.
+    held: Option<Hold>,
+}
+
+/// Assemble whatever is buffered into shippable batches. Everything that needs
+/// the scan's exclusive state happens HERE, sequentially, so that the shipping
+/// half can be owned and concurrent. Empties `buffer`/`tool_buffer` and takes the
+/// pending cursors; on `Err(Hold)` the caller stops the scan and the un-advanced
+/// files retry next cycle.
 #[allow(clippy::too_many_arguments)]
-async fn flush_buffer<S, E, N, G, U, CE>(
+async fn prepare_flush<S, E, N, G, CE>(
+    seq: u64,
     device_id: &str,
     daemon_version: &str,
     mode: &str,
@@ -187,29 +226,26 @@ async fn flush_buffer<S, E, N, G, U, CE>(
     git: &mut G,
     extract_links: Option<&LinkExtractor<'_>>,
     correct_events: &mut CE,
-    uploader: &U,
-    cursors: &mut (dyn CursorStore + Send),
-    observer: &mut (dyn ScanObserver + Send),
-    tallies: &mut ScanTallies,
-) -> Result<(), Hold>
+) -> Result<PreparedFlush, Hold>
 where
     S: Summarizer,
     E: Embedder,
     N: NerModel,
     G: GitEnrichment + Send,
-    // `Sync` because the concurrent flush shares `&U` across in-flight uploads.
-    U: BatchUploader + Sync,
     CE: FnMut(Vec<RawEvent>) -> Vec<RawEvent>,
 {
+    // The cursors queued so far travel WITH this flush, even when there is
+    // nothing to ship: a file that parsed clean but produced only events already
+    // below its `shipped_below` floor still has to advance, or it re-parses every
+    // cycle forever. It rides the prefix rule like any other, because an earlier
+    // flush may still be on the wire.
+    let cursors = std::mem::take(pending_cursors);
     if buffer.is_empty() && tool_buffer.is_empty() {
-        // Nothing to ship — but the files that got here ARE fully processed: they
-        // parsed clean and every event they produced was already below the
-        // `shipped_below` floor. Their cursors still have to advance, or a file
-        // that grew without yielding anything new re-parses on every cycle forever.
-        for (path, cursor) in pending_cursors.drain(..) {
-            cursors.set_cursor(&path, cursor);
-        }
-        return Ok(());
+        return Ok(PreparedFlush {
+            seq,
+            batches: Vec::new(),
+            cursors,
+        });
     }
     // Correct each event's repo identity to the AUTHORITATIVE on-disk git remote
     // BEFORE segmentation (so `projects` keys on the real owner/repo, not a
@@ -236,83 +272,70 @@ where
         accounts,
     )
     .await;
-    let batches = match outcome {
+    match outcome {
         // Engine down / cloud NER unavailable → hold the whole flush, never a
         // partial batch (that would advance the cursor past un-summarised events).
-        FlushOutcome::Held => return Err(Hold),
-        FlushOutcome::Ready(b) => b,
-    };
-    // Ship this flush's batches CONCURRENTLY, because in cloud mode each batch is
-    // one session and each POST makes the edge summarise it with an LLM — so a
-    // flush covering a dozen sessions used to be a dozen seconds-long round trips,
-    // one after another.
-    //
-    // The number actually in flight is NOT decided here: the uploader holds an
-    // adaptive gate fed by the server's own 429s (`modelstat_ingest::upload_gate`),
-    // so this only has to stop being the thing that serialises. The bound below
-    // is a ceiling on futures alive at once, not a concurrency policy.
-    //
-    // The memory ceiling this file promises is untouched: `batches` is the whole
-    // flush either way — the sequential loop held it too — so what is new is only
-    // the handful of request bodies in flight, each a slice of that same flush.
-    //
-    // The loss-proof contract is unchanged, and depends on it: the cursor
-    // advance sits AFTER this whole block, so a hold anywhere in the fan-out
-    // advances nothing and the same files re-parse next scan.
-    let sessions: std::collections::BTreeSet<&str> = batches
-        .iter()
-        .flat_map(|pb| pb.batch.events.iter().map(|e| e.session_id.as_str()))
-        .collect();
-    observer.on_upload_set(batches.len(), sessions.len());
-    for pb in &batches {
-        observer.on_upload(pb.batch.events.len(), pb.segment_count);
+        FlushOutcome::Held => Err(Hold),
+        FlushOutcome::Ready(batches) => Ok(PreparedFlush {
+            seq,
+            batches,
+            cursors,
+        }),
     }
-    // Built with a plain loop rather than `.map(|pb| async move { … })`: a
-    // closure returning a future that BORROWS its argument has to satisfy
-    // `FnOnce(&PreparedBatch)` for every lifetime, which it cannot, and the
-    // error surfaces far away as "implementation of `Send`/`FnOnce` is not
-    // general enough" where the daemon boxes this future. A loop gives each
-    // future one concrete borrow and no closure at all.
-    let up: &U = uploader;
-    let mut futures = Vec::with_capacity(batches.len());
-    for pb in &batches {
-        futures.push(async move { (pb, up.upload(&pb.batch, pb.raw).await) });
-    }
-    let mut inflight = futures_util::stream::iter(futures).buffer_unordered(UPLOAD_FANOUT);
+}
+
+/// POST one prepared flush's batches, as many at once as the uploader's adaptive
+/// gate allows.
+///
+/// Borrows only `&U`, never the scan's `&mut` state, which is what lets the
+/// caller hold several of these at once and keep parsing while they run. Before
+/// this split the parser sat idle for the whole of every upload and the wire sat
+/// idle for the whole of every parse, so a backlog of big transcripts moved at
+/// parse-then-send speed with at most one session ever in flight.
+async fn ship_flush<U>(flush: PreparedFlush, uploader: &U) -> ShipOutcome
+where
+    U: BatchUploader + Sync,
+{
+    let PreparedFlush {
+        seq,
+        batches,
+        cursors,
+    } = flush;
+    let mut committed = Vec::with_capacity(batches.len());
     let mut held: Option<Hold> = None;
-    while let Some((pb, result)) = inflight.next().await {
-        match result {
-            Ok(accepted) => {
-                tallies.batches_uploaded += 1;
-                tallies.events_uploaded += accepted;
-                tallies.segments_uploaded += pb.segment_count as u64;
-                observer.on_uploaded(accepted as usize, pb.segment_count);
-            }
-            // First hold wins and we stop: dropping the stream cancels what is
-            // still in flight and starts nothing new, which is what the
-            // sequential loop did by returning early. Anything already accepted
-            // server-side is re-sent next scan and deduped by id, because no
-            // cursor moved.
-            Err(h) => {
-                held = Some(h);
-                break;
+    if !batches.is_empty() {
+        // Built with a plain loop rather than `.map(|pb| async move { … })`: a
+        // closure returning a future that BORROWS its argument has to satisfy
+        // `FnOnce(&PreparedBatch)` for every lifetime, which it cannot, and the
+        // error surfaces far away as "implementation of `Send`/`FnOnce` is not
+        // general enough" where the daemon boxes this future. A loop gives each
+        // future one concrete borrow and no closure at all.
+        let up: &U = uploader;
+        let mut futures = Vec::with_capacity(batches.len());
+        for pb in &batches {
+            futures.push(async move { (pb, up.upload(&pb.batch, pb.raw).await) });
+        }
+        let mut inflight = futures_util::stream::iter(futures).buffer_unordered(UPLOAD_FANOUT);
+        while let Some((pb, result)) = inflight.next().await {
+            match result {
+                Ok(accepted) => committed.push((pb.segment_count, accepted)),
+                // First hold wins and we stop: dropping the stream cancels what
+                // is still in flight and starts nothing new. Anything already
+                // accepted server-side is re-sent next scan and deduped by id,
+                // because no cursor moved.
+                Err(h) => {
+                    held = Some(h);
+                    break;
+                }
             }
         }
     }
-    drop(inflight);
-    if let Some(h) = held {
-        // The unsent remainder never went anywhere — say so, or a reader keeps
-        // claiming "3 sessions uploading" through the whole backoff.
-        observer.on_upload_set(0, 0);
-        return Err(h);
+    ShipOutcome {
+        seq,
+        cursors,
+        committed,
+        held,
     }
-    // Every batch in this flush committed — persist the buffered files' cursors
-    // once, atomically. Upserts are server-side idempotent, so a crash between
-    // here and the next scan just re-sends the same events safely.
-    for (path, cursor) in pending_cursors.drain(..) {
-        cursors.set_cursor(&path, cursor);
-    }
-    Ok(())
 }
 
 /// The shared parse → summarise → upload loop over an ordered job list. Holds at
@@ -397,34 +420,124 @@ where
     // later flush's partial view can't overwrite a richer earlier one.
     let mut run_events: BTreeMap<String, Vec<RawEvent>> = BTreeMap::new();
 
-    // `flush!()` ships + clears the buffers and advances cursors on success;
-    // `Err(Hold)` means the caller must stop (engine down / offline). Each
-    // expansion reborrows the shared state for exactly one flush.
+    // ── The upload pipeline ────────────────────────────────────────────────
+    //
+    // Flushes are PREPARED in order (that half owns `git` + the run-long
+    // accumulators, so it cannot overlap itself) and SHIPPED concurrently. The
+    // parser keeps reading while earlier flushes are still on the wire, which is
+    // what puts more than one session in flight: a real transcript blows past
+    // BATCH_MAX_EVENTS inside a single file, so every flush it triggers carries
+    // exactly one session, and awaiting each one inline meant the fan-out below
+    // never had more than one batch to spread over its slots.
+    let mut inflight = futures_util::stream::FuturesUnordered::new();
+    // Ship outcomes that landed out of order, parked until their turn comes up.
+    let mut settled: BTreeMap<u64, ShipOutcome> = BTreeMap::new();
+    let mut next_seq: u64 = 0;
+    // Every flush with `seq < committed_prefix` has committed. Cursors advance
+    // only up to here.
+    let mut committed_prefix: u64 = 0;
+    // The first hold seen. Once set we start nothing new and drain what is left.
+    let mut hold: Option<Hold> = None;
+
+    // Fold one landed flush into the tallies + observer, then advance the cursor
+    // prefix as far as the newly-contiguous run of commits allows.
+    //
+    // THE PREFIX RULE, which is the whole correctness story of this change: a
+    // flush's cursors advance only when it AND every flush before it committed.
+    // It matters because a big file's events span several flushes while its
+    // cursor is queued just once, after parsing — so without the rule a late
+    // success could advance a cursor past an earlier flush's un-landed events and
+    // those events would never be sent again. Sequentially this was implicit (a
+    // hold returned immediately, so there was never a later success to mis-apply);
+    // concurrently it has to be spelled out. Strictly a generalisation of the old
+    // behaviour, never a loosening.
+    macro_rules! absorb {
+        ($outcome:expr) => {{
+            let out: ShipOutcome = $outcome;
+            for (segments, accepted) in &out.committed {
+                tallies.batches_uploaded += 1;
+                tallies.events_uploaded += *accepted;
+                tallies.segments_uploaded += *segments as u64;
+                observer.on_uploaded(*accepted as usize, *segments);
+            }
+            if hold.is_none() {
+                hold = out.held.as_ref().map(|_| Hold);
+            }
+            settled.insert(out.seq, out);
+            while let Some(next) = settled.get(&committed_prefix) {
+                if next.held.is_some() {
+                    break;
+                }
+                let done = settled.remove(&committed_prefix).expect("just probed");
+                // Upserts are server-side idempotent, so a crash between here and
+                // the next scan just re-sends the same events safely.
+                for (path, cursor) in done.cursors {
+                    cursors.set_cursor(&path, cursor);
+                }
+                committed_prefix += 1;
+            }
+        }};
+    }
+
+    // Prepare the buffered events into a flush and put it on the wire, first
+    // making room by landing an older one if the pipeline is already full.
+    // Evaluates to `Result<(), Hold>` so the call sites read as they used to.
     macro_rules! flush {
-        () => {
-            flush_buffer(
-                device_id,
-                daemon_version,
-                mode,
-                &mut buffer,
-                &mut tool_buffer,
-                &mut pending_cursors,
-                &mut run_segments,
-                &mut run_events,
-                accounts,
-                resilient,
-                embedder,
-                ner,
-                &mut *git,
-                extract_links,
-                &mut correct_events,
-                uploader,
-                &mut *cursors,
-                &mut *observer,
-                &mut tallies,
-            )
-            .await
-        };
+        () => {{
+            while inflight.len() >= MAX_INFLIGHT_FLUSHES {
+                match inflight.next().await {
+                    Some(out) => absorb!(out),
+                    None => break,
+                }
+            }
+            match hold {
+                // Already holding: prepare nothing further, the scan is stopping.
+                Some(_) => Err(Hold),
+                None => {
+                    let seq = next_seq;
+                    let prepared = prepare_flush(
+                        seq,
+                        device_id,
+                        daemon_version,
+                        mode,
+                        &mut buffer,
+                        &mut tool_buffer,
+                        &mut pending_cursors,
+                        &mut run_segments,
+                        &mut run_events,
+                        accounts,
+                        resilient,
+                        embedder,
+                        ner,
+                        &mut *git,
+                        extract_links,
+                        &mut correct_events,
+                    )
+                    .await;
+                    match prepared {
+                        Err(Hold) => Err(Hold),
+                        Ok(prepared) => {
+                            next_seq += 1;
+                            let batches = prepared.batches.len();
+                            let sessions: std::collections::BTreeSet<&str> = prepared
+                                .batches
+                                .iter()
+                                .flat_map(|pb| {
+                                    pb.batch.events.iter().map(|e| e.session_id.as_str())
+                                })
+                                .collect();
+                            let sessions = sessions.len();
+                            for pb in &prepared.batches {
+                                observer.on_upload(pb.batch.events.len(), pb.segment_count);
+                            }
+                            observer.on_upload_set(batches, sessions);
+                            inflight.push(ship_flush(prepared, uploader));
+                            Ok(())
+                        }
+                    }
+                }
+            }
+        }};
     }
 
     let total = ordered.len();
@@ -613,6 +726,20 @@ where
     // Ship the trailing partial batch. A hold here just leaves it for next cycle.
     if flush!().is_err() {
         tallies.held = true;
+    }
+    // Drain the pipeline. Every flush still on the wire has to land before the
+    // scan can report, because its cursors are what say the work is durable —
+    // returning early would drop them and re-send the same events next cycle.
+    while let Some(out) = inflight.next().await {
+        absorb!(out);
+    }
+    if hold.is_some() {
+        tallies.held = true;
+    }
+    if tallies.held {
+        // The unsent remainder never went anywhere — say so, or a reader keeps
+        // claiming "3 sessions uploading" through the whole backoff.
+        observer.on_upload_set(0, 0);
     }
     tallies
 }

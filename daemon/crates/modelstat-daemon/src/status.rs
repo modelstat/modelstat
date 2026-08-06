@@ -202,10 +202,19 @@ impl Status {
             self.uploading = None;
             return;
         }
+        // The clock dates the OLDEST thing still on the wire, so it only starts
+        // when the wire goes from quiet to busy. Several flushes are in flight at
+        // once now and each one announces itself; restarting the clock on every
+        // announcement would peg the reading near zero forever and hide exactly
+        // the stall it exists to reveal.
+        let since_ms = match self.uploading.as_ref() {
+            Some(cur) => cur.since_ms,
+            None => chrono::Utc::now().timestamp_millis(),
+        };
         self.uploading = Some(UploadingNow {
             sessions,
             uploads,
-            since_ms: chrono::Utc::now().timestamp_millis(),
+            since_ms,
         });
     }
 
@@ -430,6 +439,31 @@ mod tests {
         s.start_upload_set(2, 2);
         s.clear_busy();
         assert!(s.uploading.is_none());
+    }
+
+    #[test]
+    fn the_upload_clock_dates_the_oldest_thing_on_the_wire() {
+        let mut s = Status::default();
+        s.start_upload_set(2, 2);
+        let first = s.uploading.as_ref().unwrap().since_ms;
+
+        // A second flush joining an already-busy wire re-states the totals but
+        // must NOT restart the clock — several are in flight at once now, and a
+        // clock that resets on every announcement would sit near zero forever and
+        // hide the stall it exists to reveal.
+        s.start_upload_set(5, 5);
+        let u = s.uploading.as_ref().unwrap();
+        assert_eq!(u.since_ms, first, "the clock dates the OLDEST upload");
+        assert_eq!((u.uploads, u.sessions), (5, 5), "totals still update");
+
+        // Quiet, then busy again → a genuinely new clock.
+        s.start_upload_set(0, 0);
+        s.start_upload_set(1, 1);
+        assert_ne!(
+            s.uploading.as_ref().unwrap().since_ms,
+            0,
+            "an idle wire starts a fresh clock"
+        );
     }
 
     #[test]
