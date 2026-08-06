@@ -57,6 +57,14 @@ jobs:
       - name: cargo test (all crates, all targets)
         run: cargo test --workspace --all-targets --locked
 
+      # The REDACTOR is behind `--features onnx`, so the default build above never
+      # compiles it — a break there would surface only at release, on the one job
+      # that gates a version going out. Built and unit-tested here instead. The
+      # real-weights tests in the same crate skip without a model cache, so this
+      # proves the code, not the model.
+      - name: cargo test (redactor, --features onnx)
+        run: cargo test -p modelstat-redact --features onnx --all-targets --locked
+
   # ---- Cross-compile the remaining three targets (compile-only, plan §6) ---
   cross-build:
     name: build (${{ matrix.target }})

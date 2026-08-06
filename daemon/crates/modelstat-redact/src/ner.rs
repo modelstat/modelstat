@@ -23,47 +23,6 @@ pub struct NerToken {
     pub end: Option<usize>,
 }
 
-// Consumed by the `candle` runtime below; without that feature there is no
-// inference to window, and the tests still hold the arithmetic honest.
-#[cfg_attr(not(feature = "candle"), allow(dead_code))]
-/// Learned positions in a BERT-base checkpoint. Not a tuning knob — ask for
-/// position 512 and the embedding lookup errors out, which is exactly how long
-/// turns came back unclassified.
-const MAX_POSITIONS: usize = 512;
-/// Tokens per forward pass. Two positions go to the `[CLS]`/`[SEP]` frame.
-#[cfg_attr(not(feature = "candle"), allow(dead_code))]
-const WINDOW: usize = MAX_POSITIONS - 2;
-/// Tokens two neighbouring windows share, so an entity sitting on a seam is whole
-/// inside at least one window. 64 wordpieces is far more than any person or
-/// organisation name needs, and costs ~13% more passes.
-#[cfg_attr(not(feature = "candle"), allow(dead_code))]
-const OVERLAP: usize = 64;
-
-/// The windows a `len`-token sequence gets classified in — `(start, end)` halves
-/// of a range each.
-///
-/// Pure and always compiled, because the property that matters is arithmetic, not
-/// inference: every token must land in some window. A gap here means a silently
-/// unscrubbed stretch of a turn, which is the whole bug this replaced, so it is
-/// tested where the model is not.
-#[cfg_attr(not(feature = "candle"), allow(dead_code))]
-fn plan_windows(len: usize, window: usize, overlap: usize) -> Vec<(usize, usize)> {
-    if len == 0 || window == 0 {
-        return Vec::new();
-    }
-    let stride = window.saturating_sub(overlap).max(1);
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    loop {
-        let end = (start + window).min(len);
-        out.push((start, end));
-        if end == len {
-            return out;
-        }
-        start += stride;
-    }
-}
-
 /// A token-classification model. `classify` returns None when the model is
 /// unavailable (missing/loading) — the caller latches pass-through, and
 /// [`ner_active`] then reports the layer as down (fail-closed for egress).
@@ -90,19 +49,27 @@ pub struct NerRedaction {
     pub counts: BTreeMap<String, u64>,
 }
 
-/// Strip a leading `[BILUE]-` tag prefix (uppercase, as the model emits it).
+/// Strip a leading `[BILUES]-` tag prefix (uppercase, as the model emits it).
+///
+/// `S` is the BIOES single — one token that is a whole entity. Privacy Filter emits
+/// it constantly (`S-private_email`, `S-secret`), and without it here the prefix
+/// survives into the marker: `[REDACTED:S-PRIVATE_EMAIL]`, and every single-token
+/// entity reads as a different type from its multi-token twin.
 fn strip_bio_prefix(ent: &str) -> &str {
     let b = ent.as_bytes();
-    if b.len() >= 2 && matches!(b[0], b'B' | b'I' | b'L' | b'U' | b'E') && b[1] == b'-' {
+    if b.len() >= 2 && matches!(b[0], b'B' | b'I' | b'L' | b'U' | b'E' | b'S') && b[1] == b'-' {
         &ent[2..]
     } else {
         ent
     }
 }
 
+/// True for a tag that STARTS a span — `B-` and, for BIOES, `S-` (a single-token
+/// entity). Without `S-` here, two neighbouring singles of the same type merge into
+/// one span covering the gap between them, redacting whatever sat in between.
 fn is_b_tag(ent: &str) -> bool {
     let b = ent.as_bytes();
-    b.len() >= 2 && (b[0] == b'B' || b[0] == b'b') && b[1] == b'-'
+    b.len() >= 2 && matches!(b[0], b'B' | b'b' | b'S' | b's') && b[1] == b'-'
 }
 
 /// Reconstruct an entity's surface text from its subwords (`##` continuations
@@ -256,6 +223,14 @@ fn redact_spans(text: &str, tokens: Vec<NerToken>) -> NerRedaction {
     }
 }
 
+/// Char index for a byte offset — both tokenizer runtimes report byte offsets, and
+/// the splice is char-based.
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+pub(crate) fn byte_to_char(text: &str, byte: usize) -> usize {
+    let b = byte.min(text.len());
+    text[..b].chars().count()
+}
+
 /// Grow each range outward until neither edge sits inside a word.
 ///
 /// "Inside a word" is decided by the neighbouring character being alphanumeric —
@@ -343,191 +318,6 @@ pub fn ner_active<M: NerModel>(model: &M) -> bool {
 // downloaded dslim/bert-base-NER weights. Exact-span parity vs transformers.js is
 // not required — PROCESSING_VERSION 16 absorbs the runtime swap (plan R2/D13);
 // the fail-closed liveness gate (`ner_active`) keeps egress safe regardless.
-#[cfg(feature = "candle")]
-mod candle_ner {
-    use std::collections::HashMap;
-    use std::path::Path;
-
-    use candle_core::{Device, Tensor, D};
-    use candle_nn::{Linear, Module, VarBuilder};
-    use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-    use tokenizers::Tokenizer;
-
-    use super::{NerModel, NerToken};
-
-    use super::{plan_windows, OVERLAP, WINDOW};
-
-    /// A BERT token-classification model (dslim/bert-base-NER class) over candle
-    /// (CPU). Loaded from a model dir with `config.json`, `tokenizer.json`,
-    /// `model.safetensors` (HF keys `bert.*` + `classifier.*`).
-    pub struct CandleNer {
-        model: BertModel,
-        classifier: Linear,
-        tokenizer: Tokenizer,
-        id2label: HashMap<usize, String>,
-        device: Device,
-        /// The framing token ids, resolved once at load. Each window is framed
-        /// itself, because the text is tokenized without them (see
-        /// [`CandleNer::try_classify`]).
-        cls_id: u32,
-        sep_id: u32,
-    }
-
-    impl CandleNer {
-        pub fn load(model_dir: &Path) -> Result<Self, String> {
-            let device = Device::Cpu;
-            let cfg_bytes =
-                std::fs::read(model_dir.join("config.json")).map_err(|e| e.to_string())?;
-            let config: Config = serde_json::from_slice(&cfg_bytes).map_err(|e| e.to_string())?;
-            let raw: serde_json::Value =
-                serde_json::from_slice(&cfg_bytes).map_err(|e| e.to_string())?;
-            let id2label = parse_id2label(&raw)?;
-            let num_labels = id2label.len();
-            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
-                .map_err(|e| e.to_string())?;
-            let weights = model_dir.join("model.safetensors");
-            // SAFETY: mmap of a trusted, checksum-verified model file we downloaded.
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&[weights], DTYPE, &device)
-                    .map_err(|e| e.to_string())?
-            };
-            let model = BertModel::load(vb.pp("bert"), &config).map_err(|e| e.to_string())?;
-            let classifier = candle_nn::linear(config.hidden_size, num_labels, vb.pp("classifier"))
-                .map_err(|e| e.to_string())?;
-            // Loud rather than defaulted: a checkpoint whose vocabulary lacks the
-            // framing tokens would label every window off by one position.
-            let cls_id = tokenizer
-                .token_to_id("[CLS]")
-                .ok_or("tokenizer has no [CLS] token")?;
-            let sep_id = tokenizer
-                .token_to_id("[SEP]")
-                .ok_or("tokenizer has no [SEP] token")?;
-            Ok(Self {
-                model,
-                classifier,
-                tokenizer,
-                id2label,
-                device,
-                cls_id,
-                sep_id,
-            })
-        }
-
-        /// One forward pass over `[CLS] + window + [SEP]`, labelling the window's
-        /// tokens. Returns one entity label per token, in window order.
-        fn label_window(&self, ids: &[u32]) -> Result<Vec<String>, String> {
-            let mut framed = Vec::with_capacity(ids.len() + 2);
-            framed.push(self.cls_id);
-            framed.extend_from_slice(ids);
-            framed.push(self.sep_id);
-            let input_ids = Tensor::new(framed.as_slice(), &self.device)
-                .and_then(|t| t.unsqueeze(0))
-                .map_err(|e| e.to_string())?;
-            let token_type_ids = input_ids.zeros_like().map_err(|e| e.to_string())?;
-            let hidden = self
-                .model
-                .forward(&input_ids, &token_type_ids, None)
-                .and_then(|h| h.squeeze(0)) // [seq, hidden]
-                .map_err(|e| e.to_string())?;
-            let logits = self
-                .classifier
-                .forward(&hidden)
-                .map_err(|e| e.to_string())?; // [seq, labels]
-            let label_ids: Vec<u32> = logits
-                .argmax(D::Minus1)
-                .and_then(|a| a.to_vec1::<u32>())
-                .map_err(|e| e.to_string())?;
-            // Drop the two framing positions; what's left lines up with `ids`.
-            Ok(label_ids
-                .iter()
-                .skip(1)
-                .take(ids.len())
-                .map(|lid| {
-                    self.id2label
-                        .get(&(*lid as usize))
-                        .cloned()
-                        .unwrap_or_else(|| "O".to_string())
-                })
-                .collect())
-        }
-
-        fn try_classify(&self, text: &str) -> Result<Vec<NerToken>, String> {
-            // Tokenized ONCE, without the framing tokens, so every token keeps a
-            // byte offset into the whole `text` no matter which window labels it.
-            let enc = self
-                .tokenizer
-                .encode(text, false)
-                .map_err(|e| e.to_string())?;
-            let ids: Vec<u32> = enc.get_ids().to_vec();
-            if ids.is_empty() {
-                return Ok(Vec::new());
-            }
-            let offsets = enc.get_offsets(); // BYTE offsets into `text`
-            let words = enc.get_tokens();
-
-            // WINDOWED, because BERT carries exactly `MAX_POSITIONS` learned
-            // positions and asking it for more is an error, not a slower answer.
-            // Before turns were captured verbatim this never bit — an abstract fit
-            // in one pass — and the failure mode was the worst kind: `classify`
-            // returned `None`, which `ner_redact` reads as "no model", so a long
-            // turn passed through UNREDACTED. Windowing is not truncation: every
-            // token is labelled, just not all in one pass.
-            let mut labels: Vec<String> = Vec::with_capacity(ids.len());
-            for (start, end) in plan_windows(ids.len(), WINDOW, OVERLAP) {
-                let window = self.label_window(&ids[start..end])?;
-                // Keep the EARLIER window's answer for the overlap: it saw those
-                // tokens with more left context, and an entity that straddles a
-                // seam is whole in exactly that window.
-                let fresh = labels.len().saturating_sub(start);
-                labels.extend(window.into_iter().skip(fresh));
-            }
-
-            let mut out = Vec::with_capacity(labels.len());
-            for (i, entity) in labels.into_iter().enumerate() {
-                let (sb, eb) = offsets.get(i).copied().unwrap_or((0, 0));
-                out.push(NerToken {
-                    entity,
-                    word: words.get(i).cloned().unwrap_or_default(),
-                    start: Some(byte_to_char(text, sb)),
-                    end: Some(byte_to_char(text, eb)),
-                });
-            }
-            Ok(out)
-        }
-    }
-
-    impl NerModel for CandleNer {
-        fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
-            self.try_classify(text).ok()
-        }
-    }
-
-    /// Char index for a byte offset (the NER splice is char-based; candle
-    /// tokenizers report byte offsets).
-    fn byte_to_char(text: &str, byte: usize) -> usize {
-        let b = byte.min(text.len());
-        text[..b].chars().count()
-    }
-
-    fn parse_id2label(raw: &serde_json::Value) -> Result<HashMap<usize, String>, String> {
-        let map = raw
-            .get("id2label")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| "config.json missing id2label".to_string())?;
-        let mut out = HashMap::new();
-        for (k, v) in map {
-            let id: usize = k
-                .parse()
-                .map_err(|_| "non-numeric id2label key".to_string())?;
-            let label = v.as_str().unwrap_or("O").to_string();
-            out.insert(id, label);
-        }
-        Ok(out)
-    }
-}
-
-#[cfg(feature = "candle")]
-pub use candle_ner::CandleNer;
 
 #[cfg(test)]
 mod tests {
@@ -614,60 +404,6 @@ mod tests {
 
     /// The property the leak came down to: EVERY token has to be classified by
     /// some window. A gap is a silently unscrubbed stretch of a turn.
-    #[test]
-    fn every_token_lands_in_a_window() {
-        for len in [0usize, 1, 5, 509, 510, 511, 1_020, 4_097, 65_537] {
-            let plan = plan_windows(len, WINDOW, OVERLAP);
-            if len == 0 {
-                assert!(plan.is_empty());
-                continue;
-            }
-            let mut covered = vec![false; len];
-            for &(a, b) in &plan {
-                assert!(b > a && b <= len, "bad window {a}..{b} for len {len}");
-                assert!(
-                    b - a <= WINDOW,
-                    "window {a}..{b} exceeds what the model can take"
-                );
-                for c in covered[a..b].iter_mut() {
-                    *c = true;
-                }
-            }
-            assert!(
-                covered.iter().all(|c| *c),
-                "len {len} left tokens unclassified: {plan:?}"
-            );
-            // Neighbours must actually overlap, or a name on the seam is half a
-            // name to both of them.
-            for pair in plan.windows(2) {
-                let (prev, next) = (pair[0], pair[1]);
-                assert!(
-                    next.0 < prev.1,
-                    "windows {prev:?} and {next:?} do not overlap"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_short_sequence_is_one_window_and_a_long_one_is_many() {
-        assert_eq!(plan_windows(10, WINDOW, OVERLAP), vec![(0, 10)]);
-        assert_eq!(plan_windows(WINDOW, WINDOW, OVERLAP), vec![(0, WINDOW)]);
-        // One token past the limit is the case that used to error out entirely.
-        let plan = plan_windows(WINDOW + 1, WINDOW, OVERLAP);
-        assert_eq!(plan.len(), 2, "{plan:?}");
-        assert_eq!(plan[0], (0, WINDOW));
-        assert_eq!(plan[1].1, WINDOW + 1);
-    }
-
-    #[test]
-    fn a_pathological_overlap_still_makes_progress() {
-        // overlap >= window would stride by zero and loop forever; the plan
-        // clamps instead, because a hang here would stall the whole pipeline.
-        let plan = plan_windows(2_000, 100, 100);
-        assert!(plan.len() < 3_000);
-        assert_eq!(plan.last().unwrap().1, 2_000);
-    }
 
     #[test]
     fn a_failed_classification_is_distinguishable_from_a_clean_one() {
@@ -797,5 +533,46 @@ mod tests {
         let out = ner_redact(&TwoFragments, "ping Katherine today").text;
         no_marker_touches_a_word(&out);
         assert_eq!(out, "ping [REDACTED:PER] today");
+    }
+
+    #[test]
+    fn bioes_singles_are_whole_entities_not_a_type_called_s() {
+        assert_eq!(strip_bio_prefix("S-private_email"), "private_email");
+        assert_eq!(strip_bio_prefix("E-secret"), "secret");
+        assert_eq!(strip_bio_prefix("private_email"), "private_email");
+        assert!(is_b_tag("S-secret"), "a single starts its own span");
+        assert!(is_b_tag("B-secret"));
+        assert!(!is_b_tag("I-secret"));
+        assert!(!is_b_tag("E-secret"));
+    }
+
+    /// Two single-token entities of the same type, with text between them. They must
+    /// stay two spans — merging would redact the words in the gap.
+    #[test]
+    fn two_adjacent_singles_do_not_swallow_what_sits_between_them() {
+        struct TwoSingles;
+        impl NerModel for TwoSingles {
+            fn classify(&self, _t: &str) -> Option<Vec<NerToken>> {
+                Some(vec![
+                    NerToken {
+                        entity: "S-private_person".into(),
+                        word: "Ada".into(),
+                        start: Some(0),
+                        end: Some(3),
+                    },
+                    NerToken {
+                        entity: "S-private_person".into(),
+                        word: "Grace".into(),
+                        start: Some(12),
+                        end: Some(17),
+                    },
+                ])
+            }
+        }
+        let out = ner_redact(&TwoSingles, "Ada told me Grace shipped it").text;
+        assert_eq!(
+            out, "[REDACTED:PRIVATE_PERSON] told me [REDACTED:PRIVATE_PERSON] shipped it",
+            "the words between two singles must survive"
+        );
     }
 }

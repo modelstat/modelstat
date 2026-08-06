@@ -262,17 +262,34 @@ jobs:
             daemon/Cargo.lock
           if-no-files-found: error
 
+      # `ort` downloads a prebuilt ONNX Runtime for five of our six targets, but
+      # publishes none for x86_64-apple-darwin. Microsoft does, so fetch theirs and
+      # point `ort` at it with ORT_LIB_LOCATION — without this the Intel-Mac build
+      # fails at link time, which is the whole release.
+      - name: Fetch ONNX Runtime (Intel macOS only)
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORT_VERSION=1.22.0
+          curl -fsSL -o /tmp/ort.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-x86_64-${ORT_VERSION}.tgz"
+          mkdir -p /tmp/ort && tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1
+          echo "ORT_LIB_LOCATION=/tmp/ort" >> "$GITHUB_ENV"
+          ls -la /tmp/ort/lib
+
       - name: Build both binaries (release)
         shell: bash
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          # Collector: opt into the on-device candle models (BGE embedder + BERT-NER,
-          # §9.5). WITHOUT `--features candle` the redactor is compiled out to a stub,
-          # so cloud/self-hosted flushes hold forever and nothing ever ships. Candle
-          # is pure-Rust CPU; the collector still links NO llama.cpp (plan D4).
+          # Collector: opt into BOTH on-device models — `candle` is the BGE embedder,
+          # `onnx` is the redactor (OpenAI Privacy Filter). WITHOUT `onnx` the
+          # redactor compiles out to a stub, and since EVERY mode now fail-closes on
+          # an unscrubbed turn, flushes would hold forever and nothing would ever
+          # ship. Both are CPU-only; the collector still links NO llama.cpp (plan D4).
           cargo build --release --locked --target ${{ matrix.target }} \
-            -p modelstat-cli --features candle
+            -p modelstat-cli --features candle,onnx
           # Summariser engine built separately — it has no `candle` feature; its
           # llama.cpp backend is its own, env-gated switch.
           cargo build --release --locked --target ${{ matrix.target }} \

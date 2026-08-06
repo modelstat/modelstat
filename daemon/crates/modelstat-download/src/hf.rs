@@ -59,24 +59,34 @@ pub const BGE_SMALL: HfModel = HfModel {
     ],
 };
 
-/// dslim/bert-base-NER — the layer-2 token-classification model (§9.5). Its fast
-/// tokenizer only exists under `onnx/` (no root `tokenizer.json`).
-pub const BERT_NER: HfModel = HfModel {
-    repo: "dslim/bert-base-NER",
-    dir_name: "bert-base-NER",
-    weights_size_label: "~430 MB",
+/// openai/privacy-filter — the layer-2 PII detector (§9.5). Shipped as ONNX
+/// because the checkpoint is a 128-expert MoE with banded attention, which ONNX
+/// Runtime already implements and our candle pin does not. The int4 export is the
+/// one we load: ~900 MB against 2.8 GB for bf16, with the accuracy we measured.
+///
+/// `model_q4.onnx` is a 156 KB graph whose weights live in the `.onnx_data`
+/// sidecar; ONNX Runtime resolves that by name from the same directory, so BOTH
+/// files must land or the load fails.
+pub const PRIVACY_FILTER: HfModel = HfModel {
+    repo: "openai/privacy-filter",
+    dir_name: "privacy-filter",
+    weights_size_label: "~900 MB",
     files: &[
         HfFile {
             remote: "config.json",
             local: "config.json",
         },
         HfFile {
-            remote: "onnx/tokenizer.json",
+            remote: "tokenizer.json",
             local: "tokenizer.json",
         },
         HfFile {
-            remote: "model.safetensors",
-            local: "model.safetensors",
+            remote: "onnx/model_q4.onnx",
+            local: "onnx/model_q4.onnx",
+        },
+        HfFile {
+            remote: "onnx/model_q4.onnx_data",
+            local: "onnx/model_q4.onnx_data",
         },
     ],
 };
@@ -169,15 +179,23 @@ mod tests {
             PathBuf::from("/m/hf/bge-small-en-v1.5/model.safetensors")
         );
 
-        // NER's tokenizer comes from onnx/ but lands as tokenizer.json.
-        let ner = BERT_NER.specs(Path::new("/m"));
+        // The redactor's weights live under onnx/ and STAY there: ONNX Runtime
+        // resolves the `.onnx_data` sidecar by name from the graph's own directory,
+        // so flattening the path would break the load.
+        let pf = PRIVACY_FILTER.specs(Path::new("/m"));
+        assert_eq!(pf.len(), 4);
         assert_eq!(
-            ner[1].url,
-            "https://huggingface.co/dslim/bert-base-NER/resolve/main/onnx/tokenizer.json"
+            pf[2].url,
+            "https://huggingface.co/openai/privacy-filter/resolve/main/onnx/model_q4.onnx"
         );
         assert_eq!(
-            ner[1].dest,
-            PathBuf::from("/m/hf/bert-base-NER/tokenizer.json")
+            pf[2].dest,
+            PathBuf::from("/m/hf/privacy-filter/onnx/model_q4.onnx")
+        );
+        assert_eq!(
+            pf[3].dest,
+            PathBuf::from("/m/hf/privacy-filter/onnx/model_q4.onnx_data"),
+            "the sidecar must land beside the graph"
         );
     }
 }

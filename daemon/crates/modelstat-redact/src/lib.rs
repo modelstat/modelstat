@@ -14,6 +14,8 @@ mod floor;
 pub mod ner;
 mod paths;
 pub mod policy;
+#[cfg(feature = "onnx")]
+pub mod privacy_filter;
 mod redact;
 
 pub use floor::FLOOR_REPLACEMENT_TEMPLATES;
