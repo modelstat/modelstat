@@ -318,6 +318,25 @@ fn cmd_setup_runtime(args: &[String]) -> ExitCode {
         }
         println!("\x1b[32m✓\x1b[0m staged {}", dst.display());
     }
+    // Any shared library the archive carried beside the binaries travels WITH them.
+    // The collector on x86_64 macOS is linked against ONNX Runtime dynamically and
+    // resolves it from its own directory, so a dylib left behind in the extracted
+    // archive would install fine and then die at `dyld: Library not loaded` on the
+    // next launch. Discovered by shape, so no target list to keep in sync.
+    for src in modelstat_service::sidecar_libraries(src_dir) {
+        let Some(name) = src.file_name() else {
+            continue;
+        };
+        let dst = bin_dir.join(name);
+        if src == dst {
+            continue;
+        }
+        if let Err(e) = stage_file(&src, &dst) {
+            eprintln!("modelstat: couldn't stage {}: {e}", name.to_string_lossy());
+            return ExitCode::FAILURE;
+        }
+        println!("\x1b[32m✓\x1b[0m staged {}", dst.display());
+    }
     // macOS: stage the prebuilt tray bundle where `connect` installs it from.
     #[cfg(target_os = "macos")]
     {

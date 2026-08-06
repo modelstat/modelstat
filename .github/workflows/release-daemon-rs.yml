@@ -262,10 +262,25 @@ jobs:
             daemon/Cargo.lock
           if-no-files-found: error
 
-      # `ort` downloads a prebuilt ONNX Runtime for five of our six targets, but
-      # publishes none for x86_64-apple-darwin. Microsoft does, so fetch theirs and
-      # point `ort` at it with ORT_LIB_LOCATION — without this the Intel-Mac build
-      # fails at link time, which is the whole release.
+      # `ort` downloads and STATICALLY links a prebuilt ONNX Runtime on five of our
+      # six targets, but publishes none for x86_64-apple-darwin. Microsoft ships a
+      # macOS x86_64 build — dylibs only, no static archive — so that one target
+      # links DYNAMICALLY against theirs and the dylib ships beside the binary.
+      #
+      # Three things all have to be right, and each was wrong at some point while
+      # working this out:
+      #   · ORT_LIB_LOCATION is used verbatim as the link search path, so it must be
+      #     the tarball's `lib/` DIRECTORY, not its root (`library 'onnxruntime' not
+      #     found` otherwise);
+      #   · without ORT_PREFER_DYNAMIC_LINK, ort hunts for `libonnxruntime.a`, does
+      #     not find one, and merely LOGS — emitting no link directives at all, so
+      #     the failure surfaces as undefined symbols much later;
+      #   · the binary needs an `@executable_path` rpath, because the dylib will sit
+      #     beside it in `~/.modelstat/bin` rather than in a system library path.
+      #
+      # `_setup-runtime` and the self-updater both carry any sidecar library found
+      # beside the binaries (see `modelstat_service::sidecar_libraries`), so the
+      # dylib survives installation AND every later auto-update.
       - name: Fetch ONNX Runtime (Intel macOS only)
         if: matrix.target == 'x86_64-apple-darwin'
         shell: bash
@@ -275,7 +290,10 @@ jobs:
           curl -fsSL -o /tmp/ort.tgz \
             "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-x86_64-${ORT_VERSION}.tgz"
           mkdir -p /tmp/ort && tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1
-          echo "ORT_LIB_LOCATION=/tmp/ort" >> "$GITHUB_ENV"
+          test -f /tmp/ort/lib/libonnxruntime.dylib || { echo "no dylib in the tarball"; exit 1; }
+          echo "ORT_LIB_LOCATION=/tmp/ort/lib" >> "$GITHUB_ENV"
+          echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@executable_path" >> "$GITHUB_ENV"
           ls -la /tmp/ort/lib
 
       - name: Build both binaries (release)
@@ -352,6 +370,18 @@ jobs:
           fi
           if [ "${{ matrix.mac }}" = "true" ] && [ -d "../apps/tray-mac/build/ModelstatTray.app" ]; then
             cp -R "../apps/tray-mac/build/ModelstatTray.app" "$STAGE/"
+          fi
+          # Intel macOS links ONNX Runtime dynamically (see the fetch step), so the
+          # dylib travels in the archive and lands beside the binaries. Copied by the
+          # name the binary actually asks for — `otool -L` shows the VERSIONED name —
+          # and verified, because a silently-absent dylib is an install that dies at
+          # first launch with `dyld: Library not loaded`.
+          if [ "$T" = "x86_64-apple-darwin" ]; then
+            cp /tmp/ort/lib/libonnxruntime*.dylib "$STAGE/" 2>/dev/null || true
+            NEEDED="$(otool -L "${BIN}/modelstat" | awk '/libonnxruntime/ {print $1}' | sed 's|@rpath/||')"
+            test -n "$NEEDED" || { echo "the collector is not linked against ONNX Runtime"; exit 1; }
+            test -f "$STAGE/$NEEDED" || { echo "archive is missing $NEEDED"; exit 1; }
+            echo "shipping $NEEDED beside the binaries"
           fi
           mkdir -p dist
           if [ "${{ matrix.ext }}" = "zip" ]; then

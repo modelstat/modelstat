@@ -14,7 +14,7 @@ pub mod path_env;
 pub mod spec;
 pub mod tray;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use modelstat_ingest::{home_path, modelstat_home};
@@ -43,6 +43,44 @@ pub fn bin_dir() -> PathBuf {
     home_path("bin")
 }
 
+/// Shared libraries that must travel WITH the binaries — a dylib the collector was
+/// linked against dynamically, which the loader resolves from the executable's own
+/// directory (`@executable_path`).
+///
+/// Only one target needs this today: `ort` links ONNX Runtime statically from its
+/// own prebuilt distribution on five of our six release targets, but publishes none
+/// for x86_64 macOS, so that build links against Microsoft's dylib instead and the
+/// dylib ships beside the binary.
+///
+/// Deliberately discovered by SHAPE rather than named per target: whatever sidecars
+/// the archive carried land next to the binary, and the installer and the
+/// self-updater both call this. A per-target list here would be a second place to
+/// forget — and forgetting means an Intel Mac that installs fine and then dies at
+/// `dyld: Library not loaded` on the next launch.
+pub fn sidecar_libraries(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_sidecar_library(p))
+        .collect();
+    out.sort();
+    out
+}
+
+/// True for a filename that is a shared library rather than one of our binaries.
+/// Matched on the extension the platform's loader actually uses, so a stray
+/// `.dylib.dSYM` directory or a README never travels.
+fn is_sidecar_library(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    // `libonnxruntime.1.22.0.dylib` — the version sits BEFORE the extension, so
+    // matching on a trailing extension alone would miss it.
+    name.ends_with(".dylib") || name.ends_with(".so") || name.ends_with(".dll")
+}
 /// `MODELSTAT_HOME` for a scope: `~/.modelstat` (user) or `/var/lib/modelstat`
 /// (system, §16).
 fn scope_home(scope: Scope) -> PathBuf {
@@ -568,5 +606,46 @@ mod tests {
         let d = service_file_path(&service_def(Component::Daemon, Scope::User));
         let s = service_file_path(&service_def(Component::Summarizer, Scope::User));
         assert_ne!(d, s);
+    }
+
+    /// A shared library beside the binaries must travel with them; nothing else in
+    /// that directory should. The list is discovered by shape, so this is the test
+    /// that keeps the shape honest.
+    #[test]
+    fn sidecar_discovery_takes_libraries_and_leaves_everything_else() {
+        let dir = std::env::temp_dir().join(format!("modelstat-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "libonnxruntime.1.22.0.dylib", // the real one: version BEFORE the extension
+            "libonnxruntime.dylib",
+            "libfoo.so",
+            "bar.dll",
+            "modelstat", // our binary — staged separately
+            "modelstat-summarizer",
+            "README.md",
+            "libonnxruntime.dylib.dSYM", // a debug BUNDLE, not a library
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let found: Vec<String> = sidecar_libraries(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                "bar.dll".to_string(),
+                "libfoo.so".to_string(),
+                "libonnxruntime.1.22.0.dylib".to_string(),
+                "libonnxruntime.dylib".to_string(),
+            ],
+            "binaries, docs and debug bundles must not travel as libraries"
+        );
+        assert!(
+            sidecar_libraries(&dir.join("does-not-exist")).is_empty(),
+            "a missing directory is empty, not a panic"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
