@@ -48,7 +48,6 @@ from .redact import Redacted, redact
 from .transport import FakeTransport, HttpTransport, Transport, TransportError
 from .wrap import wrap
 from .wire import (
-    PricingMode,
     EventKind,
     GitContext,
     IngestBatch,
@@ -99,7 +98,6 @@ __all__ = [
     "TokenUsage",
     "GitContext",
     "EventKind",
-    "PricingMode",
     "ToolCallStatus",
     "content_hash",
     "source_event_id",

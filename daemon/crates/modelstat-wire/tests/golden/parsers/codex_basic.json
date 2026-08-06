@@ -21,8 +21,7 @@
       "content_excerpt": "Read uploader.js and tell me in one sentence what it does.",
       "content_bytes": 58,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 7771,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 7771
     },
     {
       "source_event_id": "evt_14p55gfv1e4x",
@@ -51,8 +50,7 @@
       "content_excerpt": "I’ll inspect `uploader.js` and summarize its behavior in one sentence.",
       "content_bytes": 70,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 11142,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 11142
     },
     {
       "source_event_id": "evt_14p55gfv23kt",
@@ -79,8 +77,7 @@
       "content_excerpt": "`uploader.js` exports an `upload` function that POSTs its input to the `/widgets` endpoint.",
       "content_bytes": 91,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 12697,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 12697
     }
   ],
   "toolCalls": [

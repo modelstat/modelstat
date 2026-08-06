@@ -13,7 +13,6 @@
 pub(crate) mod line_reader;
 pub(crate) mod util;
 
-pub mod auth_mode;
 pub mod references;
 pub mod tool_action;
 pub mod tool_hash;

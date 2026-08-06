@@ -21,8 +21,7 @@
       "content_excerpt": "new work in resumed session",
       "content_bytes": 27,
       "source_file": "/tmp/modelstat-fixtures/claude-resume/projects/myproj/44444444-4444-4444-4444-444444444444.jsonl",
-      "source_byte_offset": 204,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 204
     }
   ],
   "toolCalls": [],

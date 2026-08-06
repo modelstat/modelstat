@@ -9,8 +9,8 @@
 use crate::config::{Config, RedactionPolicy};
 use crate::redact;
 use crate::wire::{
-    self, cap_metadata, EventKind, GitContext, IngestBatch, PricingMode, RawEvent, TokenUsage,
-    ToolCallStatus, ToolCallWire,
+    self, cap_metadata, EventKind, GitContext, IngestBatch, RawEvent, TokenUsage, ToolCallStatus,
+    ToolCallWire,
 };
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -72,10 +72,6 @@ pub struct LlmCall {
     pub completion: Option<String>,
     pub cwd: Option<String>,
     pub git: Option<GitContext>,
-    /// How this call was billed. Set it — [`PricingMode::Unknown`] is the
-    /// honest value when the caller cannot tell, and is reported as
-    /// unattributed usage rather than silently priced.
-    pub pricing_mode: PricingMode,
     pub tool_calls: Vec<ToolCallInput>,
     /// Per-call attribution tags. Highest-priority layer: these override
     /// `Config::metadata` for any shared key. Capped before send.
@@ -101,7 +97,6 @@ impl LlmCall {
             // Unknown until the caller says otherwise: an SDK user who never
             // touches this field has not told us how they pay, and guessing is
             // what put $39.65 of imaginary spend on a subscription account.
-            pricing_mode: PricingMode::Unknown,
             tool_calls: Vec::new(),
             metadata: BTreeMap::new(),
         }
@@ -212,7 +207,6 @@ fn event_from_call(cfg: &Config, call: &LlmCall, seq: u64) -> (RawEvent, Vec<Too
         cwd: call.cwd.clone(),
         git: call.git.clone(),
         duration_ms: call.duration.map(|d| d.as_millis() as u64),
-        pricing_mode: call.pricing_mode,
         content_excerpt,
         metadata,
     };

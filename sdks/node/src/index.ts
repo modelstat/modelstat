@@ -72,7 +72,6 @@ export {
   totalTokens,
   zeroTokens,
   type Metadata,
-  type PricingMode,
   type EventKind,
   type GitContext,
   type IngestBatch,

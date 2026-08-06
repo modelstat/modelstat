@@ -53,22 +53,6 @@ pub enum EventKind {
     Summary,
 }
 
-/// How the provider billed the call.
-///
-/// Stated by the caller, never guessed downstream: the SDK is the only place
-/// that knows whether the credential behind this call was a flat plan or a
-/// metered key. [`PricingMode::Unknown`] is a legal answer for a caller that
-/// genuinely cannot tell — it prices to $0 and is reported as unattributed
-/// usage, which is the honest outcome. There is no default, because the default
-/// the server used to apply (`Api`) billed subscription usage at list price.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PricingMode {
-    Subscription,
-    Api,
-    Unknown,
-}
-
 /// Outcome of a tool invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,8 +96,6 @@ pub struct RawEvent {
     pub git: Option<GitContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// REQUIRED — always serialized. The server has no default for it.
-    pub pricing_mode: PricingMode,
     /// Redacted excerpt used to build summaries downstream. Capped at 320 chars
     /// in the standard (floor-redacted) path; carries the full redacted turns in
     /// remote-raw mode, where the server summarizes.
@@ -310,14 +292,12 @@ mod tests {
             cwd: None,
             git: None,
             duration_ms: Some(1200),
-            pricing_mode: Some(PricingMode::Api),
             content_excerpt: Some("hello".into()),
             metadata: None,
         };
         let j: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(j["kind"], "assistant_message");
         assert_eq!(j["agent"], "raw_sdk_openai");
-        assert_eq!(j["pricing_mode"], "api");
         assert_eq!(j["tokens"]["input"], 10);
         // Absent optionals must not serialize (additive wire contract).
         assert!(j.get("cwd").is_none());
@@ -340,7 +320,6 @@ mod tests {
             cwd: None,
             git: None,
             duration_ms: None,
-            pricing_mode: None,
             content_excerpt: None,
             metadata: None,
         };

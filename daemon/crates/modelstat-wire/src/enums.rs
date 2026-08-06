@@ -126,11 +126,6 @@ pub const CLASSIFICATION_CONFIDENCE: &[&str] = &["hard", "high", "medium", "low"
 /// Summarizer modes, in menu order (cloud is the install default). Feature §9.
 pub const SUMMARIZER_MODES: &[&str] = &["cloud", "local", "self-hosted"];
 
-/// `pricing_mode` values. `unknown` is a real answer — a client stating that it
-/// looked at the auth material and could not tell — not the absence of one; the
-/// field itself is required on every event.
-pub const PRICING_MODES: &[&str] = &["subscription", "api", "unknown"];
-
 macro_rules! validator {
     ($fn:ident, $arr:ident) => {
         #[doc = concat!("True if `v` is a member of [`", stringify!($arr), "`].")]

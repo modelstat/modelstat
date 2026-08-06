@@ -540,7 +540,6 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
           files_touched: [],
           source_file: ctx.sourceFile,
           source_byte_offset: offsetAtLineStart,
-          pricing_mode: ctx.pricingMode ?? "unknown",
         });
         pendingToolAggregate = {};
         turnIndex += 1;
@@ -569,7 +568,6 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
           files_touched: [],
           source_file: ctx.sourceFile,
           source_byte_offset: offsetAtLineStart,
-          pricing_mode: ctx.pricingMode ?? "unknown",
         });
         continue;
       }

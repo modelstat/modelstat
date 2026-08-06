@@ -220,7 +220,6 @@ mod tests {
             references: None,
             source_file: None,
             source_byte_offset: None,
-            pricing_mode: "subscription".to_string(),
         };
         let events = vec![
             mk("2026-06-01T10:00:00.000Z"),

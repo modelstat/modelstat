@@ -344,8 +344,7 @@ mod tests {
     fn ok_event(id: &str) -> serde_json::Value {
         json!({
             "source_event_id": id, "ts": "2026-07-16T10:00:00.000Z", "kind": "message",
-            "agent": "claude_code", "provider": "anthropic", "session_id": "s1",
-            "pricing_mode": "api"
+            "agent": "claude_code", "provider": "anthropic", "session_id": "s1"
         })
     }
 

@@ -1,4 +1,4 @@
-import type { PricingMode, RawEvent, ToolCallWire } from "@modelstat/core";
+import type { RawEvent, ToolCallWire } from "@modelstat/core";
 
 /** One extracted tool invocation, before segment attribution.
  *
@@ -70,8 +70,6 @@ export interface ParserContext {
    * syscall waste.
    *
    * Defaults to `"unknown"` when the caller has not resolved it: a caller
-   * that does not know must not have a billable answer invented for it. */
-  pricingMode?: PricingMode;
   /** Streaming sink. When set, the parser delivers events in chunks of
    * at most PARSER_EVENT_CHUNK as it reads the file and does NOT
    * accumulate them in `ParseResult.events`. The parser awaits the sink

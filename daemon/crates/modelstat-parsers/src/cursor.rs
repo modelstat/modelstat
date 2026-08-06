@@ -34,7 +34,6 @@ use modelstat_redact::redact;
 use modelstat_wire::{source_event_id, EventSource, RawEvent};
 use rusqlite::{Connection, OpenFlags};
 
-use crate::auth_mode;
 use crate::types::{ParseResult, ParseStats, ParserContext};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -161,7 +160,6 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             // not a model vendor, so there is no metered path to confuse it
             // with. These rows also carry no tokens, so the mode moves no money
             // either way — it is stated for the contract, not for the maths.
-            pricing_mode: auth_mode::PRICING_MODE_SUBSCRIPTION.to_string(),
         });
     }
 

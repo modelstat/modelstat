@@ -52,9 +52,8 @@ pub use config::{Config, Mode, RedactionPolicy};
 pub use redact::{redact, Redacted};
 pub use transport::{FakeTransport, HttpTransport, Transport, TransportError};
 pub use wire::{
-    cap_metadata, EventKind, GitContext, IngestBatch, PricingMode, RawEvent, TokenUsage,
-    ToolCallStatus, ToolCallWire, METADATA_MAX_ENTRIES, METADATA_MAX_KEY_CHARS,
-    METADATA_MAX_VALUE_CHARS,
+    cap_metadata, EventKind, GitContext, IngestBatch, RawEvent, TokenUsage, ToolCallStatus,
+    ToolCallWire, METADATA_MAX_ENTRIES, METADATA_MAX_KEY_CHARS, METADATA_MAX_VALUE_CHARS,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};

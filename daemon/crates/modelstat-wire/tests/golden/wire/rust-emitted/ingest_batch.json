@@ -43,8 +43,7 @@
         "issues": []
       },
       "source_file": "/data/session.jsonl",
-      "source_byte_offset": 4096,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 4096
     },
     {
       "source_event_id": "evt_min",
@@ -63,8 +62,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": null,
-      "source_byte_offset": null,
-      "pricing_mode": "subscription"
+      "source_byte_offset": null
     }
   ],
   "segments": [

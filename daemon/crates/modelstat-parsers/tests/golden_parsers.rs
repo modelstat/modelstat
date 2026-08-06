@@ -72,19 +72,12 @@ fn tool_calls_of(g: &Value) -> Vec<ToolCallDraft> {
 
 /// A parse context for a machine whose agent is logged in with a flat plan.
 ///
-/// Stated explicitly because the parsers no longer decide this: they stamp
-/// whatever the scan resolved from the machine's own auth material. The
-/// fixtures encode a subscription login, so the context must say so — a test
-/// that left it at the `unknown` floor would be pinning the wrong contract.
 fn ctx(source_file: &str) -> ParserContext {
     ParserContext::new("dev_1", source_file)
-        .with_pricing_mode(modelstat_parsers::auth_mode::PRICING_MODE_SUBSCRIPTION)
 }
 
-/// Same, for the pi fixtures — pi has no subscription path, it bills a key.
 fn ctx_api(source_file: &str) -> ParserContext {
     ParserContext::new("dev_1", source_file)
-        .with_pricing_mode(modelstat_parsers::auth_mode::PRICING_MODE_API)
 }
 
 #[derive(Deserialize, PartialEq, Debug)]
