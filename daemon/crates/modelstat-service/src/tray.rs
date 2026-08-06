@@ -127,13 +127,28 @@ pub fn install_tray_autostart() -> std::io::Result<Option<PathBuf>> {
 /// days behind its own build, which is indistinguishable from a tray fix that
 /// never shipped.
 ///
-/// `kickstart -k` kills and relaunches in one step, and only touches an agent
-/// that is actually loaded, so this is a no-op on a machine with no tray. Silent
-/// (`Ok`/nothing) by design: the update itself already succeeded, and a failure
-/// here costs a stale menu bar until the next login, not data.
+/// `kickstart -k` alone is NOT enough, which took a live machine to notice. The
+/// tray is single-instance by design (it asks Launch Services whether another copy
+/// of its bundle is running and exits if so), and `-k` only kills the process the
+/// JOB owns. An older install can leave an ORPHAN behind — observed here at PPID
+/// 1, four days old, outliving the job that started it — and every relaunch then
+/// politely defers to that orphan. The bundle updates, the menu bar never does.
+///
+/// So: kill anything running OUR tray binary by its exact path, then let launchd
+/// bring it back. Precise (the path is this install's bundle, nobody else's) and
+/// safe (a menu-bar app relaunching is invisible). A machine with no tray has
+/// nothing to match and no agent to kickstart, so this stays a no-op there.
+///
+/// Silent by design: the update itself already succeeded, and a failure here costs
+/// a stale menu bar until the next login, not data.
 pub fn restart_tray() {
     #[cfg(target_os = "macos")]
     {
+        let bin = tray_binary();
+        if !bin.exists() {
+            return;
+        }
+        let _ = crate::run("pkill", &["-f", &bin.to_string_lossy()]);
         let uid = unsafe { libc::getuid() };
         let target = format!("gui/{uid}/{TRAY_LABEL}");
         let _ = crate::run("launchctl", &["kickstart", "-k", &target]);
