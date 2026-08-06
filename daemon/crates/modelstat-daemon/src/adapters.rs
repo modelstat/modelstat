@@ -100,9 +100,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::AnsweringNer;
     use modelstat_ingest::IngestResponse;
     use modelstat_pipeline::NoEmbedder;
-    use modelstat_redact::UnavailableNer;
     use modelstat_sumclient::{CompleteRequest, SumError};
     use std::time::Duration;
 
@@ -153,14 +153,14 @@ mod tests {
         ];
         // Healthy → Some(segments).
         let healthy = ResilientSummarizer::with_cooldown(Fake { failing: false }, Duration::ZERO);
-        let runner = EnginePipeline::new(&healthy, &NoEmbedder, &UnavailableNer);
+        let runner = EnginePipeline::new(&healthy, &NoEmbedder, &AnsweringNer);
         let segs = runner.run(&events).await;
         assert!(segs.is_some());
         assert!(!segs.unwrap().is_empty());
 
         // Engine down → None (HOLD, no degraded batch).
         let down = ResilientSummarizer::with_cooldown(Fake { failing: true }, Duration::ZERO);
-        let runner = EnginePipeline::new(&down, &NoEmbedder, &UnavailableNer);
+        let runner = EnginePipeline::new(&down, &NoEmbedder, &AnsweringNer);
         assert!(runner.run(&events).await.is_none());
     }
 

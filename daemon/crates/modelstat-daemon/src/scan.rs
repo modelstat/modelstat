@@ -621,10 +621,10 @@ where
 mod tests {
     use super::*;
     use crate::discover_jobs::ParserKind;
+    use crate::testing::AnsweringNer;
     use modelstat_ingest::RuntimeState;
     use modelstat_parsers::{FileChange, ParseStats, PrOutcome};
     use modelstat_pipeline::NoEmbedder;
-    use modelstat_redact::UnavailableNer;
     use modelstat_sumclient::{CompleteRequest, SumError};
     use modelstat_wire::GitContext;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -863,7 +863,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(events),
@@ -914,7 +914,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -959,7 +959,7 @@ mod tests {
             opts(None, true), // force_read_all
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -1000,7 +1000,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -1041,7 +1041,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -1092,7 +1092,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(events.clone()),
@@ -1122,7 +1122,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(events),
@@ -1172,7 +1172,7 @@ mod tests {
             opts(Some(1), false), // cap at ONE changed file
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -1218,7 +1218,7 @@ mod tests {
             opts(None, false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(events),
@@ -1269,7 +1269,7 @@ mod tests {
             opts(None, false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_in_chunks(events, 100),
@@ -1320,7 +1320,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(events),
@@ -1378,7 +1378,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(events),
@@ -1423,7 +1423,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(events),
@@ -1463,7 +1463,7 @@ mod tests {
             opts(None, true), // force_read_all
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &AnsweringNer,
             &mut git,
             None,
             parse_with(events),

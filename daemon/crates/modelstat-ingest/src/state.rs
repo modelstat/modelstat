@@ -20,11 +20,25 @@ use crate::paths::{ensure_home, home_path};
 /// in EVERY mode; only the summarisation LOCATION differs.
 pub const SUMMARIZER_MODES: [&str; 3] = ["cloud", "local", "self-hosted"];
 
+/// Where REDACTION runs — a separate axis from where summarisation runs, because
+/// the two questions are separate: most people want their turns scrubbed on their
+/// own machine and summarised by us. Same three values, different default.
+pub const REDACTOR_MODES: [&str; 3] = ["local", "cloud", "self-hosted"];
+
+/// On THIS machine, always. Scrubbing is the one step whose whole value is that it
+/// happens before anything leaves, so the default cannot be anywhere else.
+pub const DEFAULT_REDACTOR_MODE: &str = "local";
+
 /// The install default: cloud (no local model, server-side summarisation).
 pub const DEFAULT_SUMMARIZER_MODE: &str = "cloud";
 
 /// Narrow an arbitrary string to a valid summarizer mode (trim + lowercase +
 /// membership), else `None`. Port of TS `parseSummarizerMode`.
+pub fn parse_redactor_mode(v: Option<&str>) -> Option<&'static str> {
+    let s = v?.trim();
+    REDACTOR_MODES.into_iter().find(|m| *m == s)
+}
+
 pub fn parse_summarizer_mode(v: Option<&str>) -> Option<&'static str> {
     let s = v.unwrap_or("").trim().to_lowercase();
     SUMMARIZER_MODES.into_iter().find(|m| *m == s)
@@ -63,6 +77,11 @@ pub struct RuntimeState {
     pub summariser_recovery_at: i64,
     pub reship_state: Value,
     pub summarizer_mode: String,
+    /// Written only once someone moves OFF the default, so a state file from an
+    /// older daemon still re-serializes byte-identically (the v16 golden proves
+    /// it). Absent means `local`, which is what absent has always meant here.
+    #[serde(skip_serializing_if = "is_default_redactor")]
+    pub redactor_mode: String,
     pub self_hosted_url: String,
 }
 
@@ -78,6 +97,7 @@ impl Default for RuntimeState {
             summariser_recovery_at: 0,
             reship_state: json!({}),
             summarizer_mode: DEFAULT_SUMMARIZER_MODE.to_string(),
+            redactor_mode: DEFAULT_REDACTOR_MODE.to_string(),
             self_hosted_url: String::new(),
         }
     }
@@ -99,6 +119,7 @@ struct PartialState {
     summariser_recovery_at: Option<i64>,
     reship_state: Option<Value>,
     summarizer_mode: Option<String>,
+    redactor_mode: Option<String>,
     self_hosted_url: Option<String>,
 }
 
@@ -130,6 +151,9 @@ pub fn load_state() -> RuntimeState {
             .summariser_recovery_at
             .unwrap_or(d.summariser_recovery_at),
         reship_state: obj.reship_state.unwrap_or(d.reship_state),
+        redactor_mode: parse_redactor_mode(obj.redactor_mode.as_deref())
+            .unwrap_or(DEFAULT_REDACTOR_MODE)
+            .to_string(),
         summarizer_mode: parse_summarizer_mode(obj.summarizer_mode.as_deref())
             .unwrap_or(DEFAULT_SUMMARIZER_MODE)
             .to_string(),
@@ -166,6 +190,19 @@ pub fn set_api_url(v: &str) -> std::io::Result<()> {
 }
 
 /// The persisted summarizer mode (always a valid value — `load_state` validates).
+fn is_default_redactor(m: &String) -> bool {
+    m == DEFAULT_REDACTOR_MODE
+}
+
+pub fn get_redactor_mode() -> String {
+    load_state().redactor_mode
+}
+pub fn set_redactor_mode(v: &str) -> std::io::Result<()> {
+    let mut s = load_state();
+    s.redactor_mode = v.to_string();
+    save_state(&s)
+}
+
 pub fn get_summarizer_mode() -> String {
     load_state().summarizer_mode
 }

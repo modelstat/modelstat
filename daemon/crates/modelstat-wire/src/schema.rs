@@ -316,6 +316,13 @@ pub struct IngestBatch {
     pub session_metadata: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summarizer_mode: Option<String>,
+    /// Where this batch was REDACTED — `local` (on the device, the default and the
+    /// only mode where nothing unscrubbed can leave), `cloud`, or `self-hosted`.
+    /// Separate from `summarizer_mode` because the two are separate questions, and
+    /// recorded per batch so "was this scrubbed on the box?" is answerable later
+    /// rather than inferred from a setting that may since have changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redactor_mode: Option<String>,
 }
 
 impl IngestBatch {
