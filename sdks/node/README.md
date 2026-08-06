@@ -163,7 +163,7 @@ Source-event and batch ids are derived with **blake3** (via `@noble/hashes`), ex
 ## API surface
 
 - `new Config(ingestKey, agent)` — `.withRemote(baseUrl, raw)`, `.withDeviceId(id)`; public fields `mode`, `redaction`, `bufferCapacity`, `flushIntervalMs`, `flushMaxBatch`, `deviceId`, `version`, `autoTaxonomy` (default `false`), `metadata` (default `{}`).
-- `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`, `.metadata({…})`; public fields `kind`, `startedAt`, `durationMs`, `cwd`, `git`, `pricing_mode` (`"subscription"` | `"api"` | `"unknown"`, default `"unknown"` — set it, or your spend is reported as unattributed rather than billed), `toolCalls`, `metadataTags`.
+- `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`, `.metadata({…})`; public fields `kind`, `startedAt`, `durationMs`, `cwd`, `git`, `toolCalls`, `metadataTags`.
 - `new Client(cfg)` / `Client.withTransport(cfg, transport)` — `record(call)`, `await flush()`, `await shutdown()`, `dropped()`.
 - `wrap(providerClient, { client, metadata?, sessionId? })` — auto-record an `openai` / `@anthropic-ai/sdk` client (returns a transparent proxy).
 - `withMetadata(tags, fn)` — run `fn` with ambient attribution tags in scope.

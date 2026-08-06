@@ -38,6 +38,5 @@
     "issues": []
   },
   "source_file": "/data/session.jsonl",
-  "source_byte_offset": 4096,
-  "pricing_mode": "subscription"
+  "source_byte_offset": 4096
 }

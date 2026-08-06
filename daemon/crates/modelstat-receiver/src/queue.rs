@@ -299,7 +299,6 @@ mod tests {
             references: None,
             source_file: None,
             source_byte_offset: None,
-            pricing_mode: "subscription".to_string(),
         }
     }
 

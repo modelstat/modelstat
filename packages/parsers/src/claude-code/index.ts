@@ -466,7 +466,6 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         // means the Claude Code app — true for most people, and silently
         // wrong for anyone running it on an ANTHROPIC_API_KEY, whose real
         // spend was then reported as $0.
-        pricing_mode: ctx.pricingMode ?? "unknown",
       });
     } else if (obj.type === "user") {
       const u = obj as ClaudeUserLine;
@@ -522,7 +521,6 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         ...(refs ? { references: refs } : {}),
         source_file: ctx.sourceFile,
         source_byte_offset: offsetAtLineStart,
-        pricing_mode: ctx.pricingMode ?? "unknown",
       });
     } else if (obj.type === "tool_use") {
       // Top-level `type:'tool_use'` line form (see the header comment) —

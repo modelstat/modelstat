@@ -7,7 +7,6 @@ import unittest
 from datetime import datetime, timezone
 
 from modelstat.wire import (
-    PricingMode,
     EventKind,
     RawEvent,
     TokenUsage,
@@ -57,13 +56,11 @@ class TestSerialization(unittest.TestCase):
             tokens=TokenUsage(input=10, output=5),
             model="gpt-x",
             duration_ms=1200,
-            pricing_mode=PricingMode.API,
             content_excerpt="hello",
         )
         j = ev.to_dict()
         self.assertEqual(j["kind"], "assistant_message")
         self.assertEqual(j["agent"], "raw_sdk_openai")
-        self.assertEqual(j["pricing_mode"], "api")
         self.assertEqual(j["tokens"]["input"], 10)
         # Tokens object always carries all five classes.
         self.assertEqual(

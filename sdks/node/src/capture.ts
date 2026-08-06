@@ -20,7 +20,6 @@ import {
   sourceEventId,
   zeroTokens,
   type Metadata,
-  type PricingMode,
   type EventKind,
   type GitContext,
   type IngestBatch,
@@ -82,13 +81,6 @@ export class LlmCall {
   completion?: string;
   cwd?: string;
   git?: GitContext;
-  /**
-   * How this call was billed. Defaults to `"unknown"` — the honest value for a
-   * caller who has not said, and one that prices to $0 and is reported as
-   * unattributed usage. It is NOT guessed into `"api"`: that guess is what
-   * billed a subscription account at full list price.
-   */
-  pricing_mode: PricingMode = "unknown";
   toolCalls: ToolCallInput[] = [];
   /**
    * Per-call attribution tags. The highest-priority layer: these override the
@@ -290,8 +282,6 @@ function eventFromCall(
     provider: call.provider,
     session_id: call.sessionId,
     tokens: call.tokenUsage,
-    // Required on the wire, so it is set here rather than via `setIfPresent`.
-    pricing_mode: call.pricing_mode,
   };
   setIfPresent(event, "model", call.modelName);
   setIfPresent(event, "cwd", call.cwd);

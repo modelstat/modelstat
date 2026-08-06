@@ -21,8 +21,7 @@
       "content_excerpt": "let's install Slack, Groundcover MCPs for my claude desktop",
       "content_bytes": 59,
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 350,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 350
     },
     {
       "source_event_id": "evt_qxpi62hkyzgv",
@@ -52,8 +51,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 10522,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 10522
     },
     {
       "source_event_id": "evt_qxpi62hkxeh6",
@@ -85,8 +83,7 @@
       "content_excerpt": "I'll find these connectors in the registry and suggest them for installation.",
       "content_bytes": 77,
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 12345,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 12345
     },
     {
       "source_event_id": "evt_qxpi62hkzpdz",
@@ -118,8 +115,7 @@
       },
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 13790,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 13790
     },
     {
       "source_event_id": "evt_qxpi62hl455a",
@@ -138,8 +134,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 15357,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 15357
     },
     {
       "source_event_id": "evt_qxpi62hl0cx2",
@@ -171,8 +166,7 @@
       },
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 16497,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 16497
     },
     {
       "source_event_id": "evt_qxpi62hksrac",
@@ -191,8 +185,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 18053,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 18053
     },
     {
       "source_event_id": "evt_qxpi62hkv411",
@@ -224,8 +217,7 @@
       },
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 19402,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 19402
     },
     {
       "source_event_id": "evt_qxpi62hivzu5",
@@ -244,8 +236,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 20958,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 20958
     },
     {
       "source_event_id": "evt_qxpi62hixo5r",
@@ -277,8 +268,7 @@
       },
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 22307,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 22307
     },
     {
       "source_event_id": "evt_qxpi62hiy8lf",
@@ -297,8 +287,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 23898,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 23898
     },
     {
       "source_event_id": "evt_qxpi62hjnmkp",
@@ -330,8 +319,7 @@
       },
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 33938,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 33938
     },
     {
       "source_event_id": "evt_qxpi62hjp9ka",
@@ -350,8 +338,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 35546,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 35546
     },
     {
       "source_event_id": "evt_qxpi62hn5ap9",
@@ -381,8 +368,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 41407,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 41407
     },
     {
       "source_event_id": "evt_qxpi62hn3nxr",
@@ -414,8 +400,7 @@
       },
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 43829,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 43829
     },
     {
       "source_event_id": "evt_qxpi62hn2edo",
@@ -434,8 +419,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 45457,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 45457
     },
     {
       "source_event_id": "evt_qxpi62hmzuwy",
@@ -465,8 +449,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 46821,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 46821
     },
     {
       "source_event_id": "evt_qxpi62hmyppj",
@@ -498,8 +481,7 @@
       "content_excerpt": "**Slack** — suggested above, click Connect to authenticate.\n\n**Groundcover** — not in Claude's connector registry, so it needs manual setup as a custom connector. Groundcover ships its own MCP server. To add it:\n\n1. Get your Groundcover MCP endpoint + API key from your Groundcover account (Settings → API keys, and the MCP/remote endpoint URL).\n2. In Claude Desktop: **Settings → Connectors → Add custom connector**.\n3. Enter the Groundcover MCP server URL and auth (API key / header) as provided by Groundcover.\n\nWant me to look up Groundcover's exact MCP endpoint and config format so you can paste it in?",
       "content_bytes": 608,
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 48918,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 48918
     },
     {
       "source_event_id": "evt_qxpi62hnunbc",
@@ -520,8 +502,7 @@
       "content_excerpt": "```\n/plugin marketplace add cloudflare/skills\n```",
       "content_bytes": 49,
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 51755,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 51755
     },
     {
       "source_event_id": "evt_qxpi62hnmc1u",
@@ -551,8 +532,7 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 58466,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 58466
     },
     {
       "source_event_id": "evt_qxpi62hlqfq9",
@@ -584,8 +564,7 @@
       "content_excerpt": "Both **Slack** and **Groundcover** are now connected — their tools are live.\n\nOn `/plugin marketplace add cloudflare/skills`: that's a **Claude Code CLI** command, not something I can run here in the desktop Cowork app. The two environments manage plugins separately.\n\nTo add that marketplace you have two options:\n\n- **In Claude Code (terminal):** run `/plugin marketplace add cloudflare/skills` directly there, then `/plugin install <name>@cloudflare`.\n- **In Claude Desktop:** plugin marketplaces are managed through **Settings → Plugins** (or the plugin/marketplace UI), not via slash commands typed into chat.\n\nWhich environment are you trying to set this up in — the terminal (Claude Code) or the desktop app?",
       "content_bytes": 715,
       "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
-      "source_byte_offset": 61926,
-      "pricing_mode": "subscription"
+      "source_byte_offset": 61926
     }
   ],
   "toolCalls": [

@@ -99,15 +99,6 @@ pub struct ParserContext {
     pub source_file: String,
     /// For incremental parsers: skip bytes before this offset.
     pub byte_offset_start: u64,
-    /// How this agent authenticates to its provider on this machine — one of
-    /// [`modelstat_wire::enums::PRICING_MODES`], resolved once per scan by
-    /// [`crate::auth_mode`] and stamped onto every event the parse emits.
-    ///
-    /// Lives on the context rather than being read per event because it is a
-    /// property of the machine's login, not of a transcript line, and reading
-    /// `auth.json` once per token_count line would be thousands of syscalls per
-    /// file.
-    pub pricing_mode: String,
     /// For non-positional sources (Cursor's key/value chat store): skip records
     /// older than this instant, which the scan already shipped. `None` reads
     /// everything. Positional parsers ignore it — their floor is a byte offset
@@ -122,13 +113,6 @@ pub struct ParserContext {
 }
 
 impl ParserContext {
-    /// A context whose pricing mode is `unknown`.
-    ///
-    /// Deliberately the floor, not a convenience: a caller that has not
-    /// resolved the machine's auth mode does not know it, and the whole point
-    /// of this field is that "not known" travels as itself instead of being
-    /// rounded to a billable answer. Real scans go through
-    /// [`Self::with_pricing_mode`].
     pub fn new(device_id: impl Into<String>, source_file: impl Into<String>) -> Self {
         Self {
             device_id: device_id.into(),
@@ -136,15 +120,7 @@ impl ParserContext {
             byte_offset_start: 0,
             since_ms: None,
             agent_label: None,
-            pricing_mode: crate::auth_mode::PRICING_MODE_UNKNOWN.to_string(),
         }
-    }
-
-    /// Same, with the machine's observed auth mode attached.
-    #[must_use]
-    pub fn with_pricing_mode(mut self, mode: impl Into<String>) -> Self {
-        self.pricing_mode = mode.into();
-        self
     }
 
     /// See [`ParserContext::since_ms`].

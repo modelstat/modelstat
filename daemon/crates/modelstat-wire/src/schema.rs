@@ -108,12 +108,6 @@ pub struct RawEvent {
     pub source_file: Option<String>,
     #[serde(default)]
     pub source_byte_offset: Option<u64>,
-    /// How this call was billed, as observed on THIS machine — one of
-    /// [`crate::enums::PRICING_MODES`]. Required, and always serialized: the
-    /// server has no default for it, because the default it used to have
-    /// (`api`) billed subscription usage at full list price. A parser that
-    /// cannot observe the auth material sends `unknown`.
-    pub pricing_mode: String,
 }
 
 impl RawEvent {
@@ -444,7 +438,6 @@ mod tests {
             references: None,
             source_file: None,
             source_byte_offset: None,
-            pricing_mode: "subscription".to_string(),
         };
         let v: Value = serde_json::to_value(&ev).unwrap();
         // nullable → present as null
@@ -454,7 +447,6 @@ mod tests {
         assert!(v.get("content_excerpt").is_none());
         assert!(v.get("content_bytes").is_none());
         // required → always present, even at its most conservative value
-        assert_eq!(v.get("pricing_mode").unwrap(), "subscription");
         // default → materialized
         assert!(v.get("tool_calls").unwrap().is_object());
         assert!(v.get("files_touched").unwrap().is_array());

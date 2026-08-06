@@ -64,7 +64,6 @@ function rawEventFromStored(typed: StoredEvent): RawEvent {
     // are not talking to them at all. There is no `OPENAI_API_KEY` route
     // through chatgpt.com, so unlike the CLI parsers there is nothing here to
     // observe and nothing to be uncertain about.
-    pricing_mode: "subscription",
   };
 }
 

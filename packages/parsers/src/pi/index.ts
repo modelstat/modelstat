@@ -327,7 +327,6 @@ export async function parsePiSession(ctx: ParserContext): Promise<ParseResult> {
         ...(refs ? { references: refs } : {}),
         source_file: ctx.sourceFile,
         source_byte_offset: offsetAtLineStart,
-        pricing_mode: ctx.pricingMode ?? "unknown",
       });
       continue;
     }
@@ -372,7 +371,6 @@ export async function parsePiSession(ctx: ParserContext): Promise<ParseResult> {
       ...(refs ? { references: refs } : {}),
       source_file: ctx.sourceFile,
       source_byte_offset: offsetAtLineStart,
-      pricing_mode: ctx.pricingMode ?? "unknown",
     });
   }
 

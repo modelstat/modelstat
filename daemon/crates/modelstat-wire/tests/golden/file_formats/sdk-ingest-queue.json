@@ -28,8 +28,7 @@
         "tool_calls": {},
         "files_touched": [],
         "source_file": null,
-        "source_byte_offset": null,
-        "pricing_mode": "unknown"
+        "source_byte_offset": null
       },
       "last_event_ts_ms": 1782518000000,
       "synced": false,

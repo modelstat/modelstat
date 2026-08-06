@@ -19,7 +19,6 @@ from . import wire
 from .config import Config, RedactionPolicy
 from .redact import redact
 from .wire import (
-    PricingMode,
     EventKind,
     GitContext,
     IngestBatch,
@@ -84,7 +83,6 @@ class LlmCall:
     completion: Optional[str] = None
     cwd: Optional[str] = None
     git: Optional[GitContext] = None
-    pricing_mode: Optional[PricingMode] = None
     tool_calls: List[ToolCallInput] = field(default_factory=list)
     # Per-call attribution tags. The highest-priority layer: these override the
     # ambient context layer and ``Config`` defaults on shared keys. Pass via the
@@ -226,7 +224,6 @@ def _event_from_call(
         cwd=call.cwd,
         git=call.git,
         duration_ms=call.duration_ms,
-        pricing_mode=call.pricing_mode,
         content_excerpt=_build_excerpt(cfg, call),
         metadata=_resolve_metadata(cfg, call),
     )
