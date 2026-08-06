@@ -196,7 +196,8 @@ fn redact_spans(text: &str, tokens: Vec<NerToken>) -> NerRedaction {
     if have_offsets {
         // Precise: redact exactly the detected span, right-to-left so each splice
         // keeps the remaining offsets valid.
-        let mut ranges: Vec<(String, usize, usize)> = spans
+        let chars_in: Vec<char> = text.chars().collect();
+        let ranges: Vec<(String, usize, usize)> = spans
             .iter()
             .map(|s| {
                 let start = s.tokens.iter().map(|t| t.start.unwrap()).min().unwrap();
@@ -204,8 +205,17 @@ fn redact_spans(text: &str, tokens: Vec<NerToken>) -> NerRedaction {
                 (s.type_.clone(), start, end)
             })
             .collect();
+        // Snapped OUTWARD to whole words, then merged. A model labels SUBWORDS, and
+        // splicing one of them leaves the rest of the word sitting in the output:
+        // prod shipped `eRPC` as `[REDACTED:ORG]PC` and `Bugbot` as
+        // `[REDACTED:ORG]ugbot`. That reads as corruption, but the privacy version
+        // is worse — a half-redacted name leaks the other half, e.g. `Katherine` →
+        // `[REDACTED:PER]erine`. Redacting the whole word is both honest and safe:
+        // over-redacting a few extra characters costs nothing, leaving a fragment
+        // costs the thing redaction exists to prevent.
+        let mut ranges = merge_ranges(snap_ranges(&chars_in, ranges));
         ranges.sort_by_key(|r| std::cmp::Reverse(r.1));
-        let mut chars: Vec<char> = text.chars().collect();
+        let mut chars = chars_in;
         for (type_, start, end) in ranges {
             if end > chars.len() || start > end {
                 continue; // defensive: a bad offset never panics
@@ -244,6 +254,48 @@ fn redact_spans(text: &str, tokens: Vec<NerToken>) -> NerRedaction {
         }
         NerRedaction { text: out, counts }
     }
+}
+
+/// Grow each range outward until neither edge sits inside a word.
+///
+/// "Inside a word" is decided by the neighbouring character being alphanumeric —
+/// a plain `char` test, not a pattern language. Underscores and hyphens are left
+/// as boundaries on purpose: `sk_live_x` and `first-last` are compounds a reader
+/// still recognises once the sensitive part is gone.
+fn snap_ranges(chars: &[char], ranges: Vec<(String, usize, usize)>) -> Vec<(String, usize, usize)> {
+    ranges
+        .into_iter()
+        .map(|(type_, mut start, mut end)| {
+            end = end.min(chars.len());
+            start = start.min(end);
+            while start > 0 && chars[start - 1].is_alphanumeric() {
+                start -= 1;
+            }
+            while end < chars.len() && chars[end].is_alphanumeric() {
+                end += 1;
+            }
+            (type_, start, end)
+        })
+        .collect()
+}
+
+/// Fuse ranges that touch or overlap after snapping.
+///
+/// Snapping can make two spans meet — two subwords of one word, or a person and
+/// an org inside one token. Splicing both would corrupt the text a second way
+/// (the first splice invalidates the second's offsets), so they become one range.
+/// The earlier span's type wins: it is the one the model was most confident began
+/// there, and the marker only has room to name one.
+fn merge_ranges(mut ranges: Vec<(String, usize, usize)>) -> Vec<(String, usize, usize)> {
+    ranges.sort_by_key(|r| (r.1, r.2));
+    let mut out: Vec<(String, usize, usize)> = Vec::with_capacity(ranges.len());
+    for (type_, start, end) in ranges {
+        match out.last_mut() {
+            Some(last) if start <= last.2 => last.2 = last.2.max(end),
+            _ => out.push((type_, start, end)),
+        }
+    }
+    out
 }
 
 /// Replace every word-boundary occurrence of `surface` (not flanked by a
@@ -637,5 +689,113 @@ mod tests {
         fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
             Some(Vec::new())
         }
+    }
+
+    /// A model that labels only PART of a word — exactly what wordpiece models do,
+    /// and what shipped mangled text to production.
+    struct LabelsSubword {
+        /// Char range of the fragment it "detects", and the type it calls it.
+        range: (usize, usize),
+    }
+    impl NerModel for LabelsSubword {
+        fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
+            Some(vec![NerToken {
+                entity: "B-ORG".into(),
+                word: "frag".into(),
+                start: Some(self.range.0),
+                end: Some(self.range.1),
+            }])
+        }
+    }
+
+    /// The invariant: a marker never sits against an alphanumeric character. If it
+    /// does, part of the word survived — cosmetically wrong, and for a name it
+    /// leaks the remainder.
+    fn no_marker_touches_a_word(out: &str) {
+        let chars: Vec<char> = out.chars().collect();
+        let marker: Vec<char> = "[REDACTED:".chars().collect();
+        for i in 0..chars.len() {
+            if chars[i..].starts_with(&marker) {
+                if i > 0 {
+                    assert!(
+                        !chars[i - 1].is_alphanumeric(),
+                        "marker starts inside a word: {out}"
+                    );
+                }
+                if let Some(close) = chars[i..].iter().position(|&c| c == ']') {
+                    let after = i + close + 1;
+                    if after < chars.len() {
+                        assert!(
+                            !chars[after].is_alphanumeric(),
+                            "marker ends inside a word: {out}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_subword_hit_redacts_the_whole_word_never_a_fragment() {
+        // The three real cases from production, with the model labelling only the
+        // leading fragment the way BERT did.
+        for (text, frag) in [
+            ("Error: eRPC Request failed", (7usize, 9usize)), // "eR" of eRPC
+            ("Reviewed by Bugbot now", (12, 13)),             // "B" of Bugbot
+            ("a Compose app is up", (2, 4)),                  // "Co" of Compose
+            ("ping Katherine today", (5, 9)),                 // "Kath" of Katherine
+        ] {
+            let out = ner_redact(&LabelsSubword { range: frag }, text).text;
+            no_marker_touches_a_word(&out);
+            assert!(
+                !out.contains("PC Request") && !out.contains("ugbot") && !out.contains("mpose"),
+                "a word fragment survived: {out}"
+            );
+            assert!(!out.contains("erine"), "half a name survived: {out}");
+        }
+
+        // And the whole word really is gone, not just the fragment.
+        let out = ner_redact(
+            &LabelsSubword { range: (7, 9) },
+            "Error: eRPC Request failed",
+        )
+        .text;
+        assert_eq!(out, "Error: [REDACTED:ORG] Request failed");
+    }
+
+    #[test]
+    fn snapping_stops_at_punctuation_and_whitespace() {
+        // It must not swallow the sentence: a span already on word boundaries is
+        // left exactly where it was.
+        let out = ner_redact(
+            &LabelsSubword { range: (7, 11) },
+            "Error: eRPC Request failed",
+        )
+        .text;
+        assert_eq!(out, "Error: [REDACTED:ORG] Request failed");
+        // Underscore and hyphen stay boundaries, so compounds keep their shape.
+        let out = ner_redact(&LabelsSubword { range: (0, 2) }, "abc_def and x").text;
+        assert_eq!(out, "[REDACTED:ORG]_def and x");
+    }
+
+    #[test]
+    fn overlapping_snapped_ranges_fuse_instead_of_corrupting() {
+        // Two subwords of ONE word: splicing both would use offsets the first
+        // splice already invalidated.
+        struct TwoFragments;
+        impl NerModel for TwoFragments {
+            fn classify(&self, _t: &str) -> Option<Vec<NerToken>> {
+                let tok = |a, b| NerToken {
+                    entity: "B-PER".into(),
+                    word: "f".into(),
+                    start: Some(a),
+                    end: Some(b),
+                };
+                Some(vec![tok(5, 7), tok(8, 10)])
+            }
+        }
+        let out = ner_redact(&TwoFragments, "ping Katherine today").text;
+        no_marker_touches_a_word(&out);
+        assert_eq!(out, "ping [REDACTED:PER] today");
     }
 }

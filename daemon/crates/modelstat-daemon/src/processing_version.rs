@@ -75,7 +75,17 @@ use modelstat_ingest::RuntimeState;
 ///       text shortened — and the cloud path holds per TURN when the model cannot
 ///       answer, instead of shipping it. The re-scan is the cleanup: the wider
 ///       rows upsert over the leaked ones by `(scope, source_event_id)`.
-pub const PROCESSING_VERSION: i64 = 21;
+/// v22 — redaction never splices mid-word. A model labels SUBWORDS, and the
+///       precise-offset splice took the label at face value, so production shipped
+///       `eRPC` as `[REDACTED:ORG]PC`, `Bugbot` as `[REDACTED:ORG]ugbot` and
+///       `Compose` as `[REDACTED:ORG]mpose` — 27,130 messages carry an ORG marker,
+///       almost all of them technical product names rather than anything private.
+///       Reads as corruption of the verbatim text SPEC 0005 exists to keep, and the
+///       privacy version is worse: a half-redacted name leaks its other half
+///       (`Katherine` → `[REDACTED:PER]erine`). Spans now snap OUTWARD to whole
+///       words and fuse when they meet, so a marker never sits against an
+///       alphanumeric character. The re-scan is the repair.
+pub const PROCESSING_VERSION: i64 = 22;
 
 /// The state a reconcile reads + mutates: the stored marker plus the cursors it
 /// wipes on a bump. Abstracted so the decision is unit-testable without touching
