@@ -43,14 +43,14 @@ tokenizers = { version = "0.20", default-features = false, features = ["onig"], 
 
 [features]
 default = []
-# One switch turns on BOTH candle models the collector uses — the BGE embedder
-# here and the BERT-NER in modelstat-redact.
+# The BGE embedder. Only this now: the redactor moved to ONNX Runtime
+# (`modelstat-redact/onnx`), so the two on-device models have separate switches
+# and a build can want one without the other.
 candle = [
   "dep:candle-core",
   "dep:candle-nn",
   "dep:candle-transformers",
   "dep:tokenizers",
-  "modelstat-redact/candle",
 ]
 
 [dev-dependencies]

@@ -85,7 +85,16 @@ use modelstat_ingest::RuntimeState;
 ///       (`Katherine` → `[REDACTED:PER]erine`). Spans now snap OUTWARD to whole
 ///       words and fuse when they meet, so a marker never sits against an
 ///       alphanumeric character. The re-scan is the repair.
-pub const PROCESSING_VERSION: i64 = 22;
+/// v23 — the redactor is OpenAI Privacy Filter (ONNX), not a general-purpose NER
+///       model. What changes in the DATA: emails, phone numbers, addresses,
+///       account numbers and API keys are now caught by the model rather than by
+///       the deterministic floor alone; organisations and locations are no longer
+///       redacted at all, because an org is not private information and redacting
+///       `ClickHouse` cost the prompt analytics for nothing (27,130 of 162,159
+///       stored messages carried an ORG marker). Re-ships so history is scrubbed by
+///       the model that can actually see secrets, and un-marked where the old one
+///       was only ever guessing.
+pub const PROCESSING_VERSION: i64 = 23;
 
 /// The state a reconcile reads + mutates: the stored marker plus the cursors it
 /// wipes on a bump. Abstracted so the decision is unit-testable without touching

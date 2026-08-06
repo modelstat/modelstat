@@ -8,21 +8,30 @@ repository.workspace = true
 description = "modelstat redaction floor: SECRET_FLOOR + entropy pass + additive policy bundle."
 
 [dependencies]
+modelstat-log.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-# The candle BERT-NER runtime (feature §9.5 / plan D5), OFF by default (heavy,
-# CPU-cross-build unproven). The default uses the fail-closed UnavailableNer;
-# release/verified builds opt in with `--features candle`.
-candle-core = { version = "0.8", optional = true }
-candle-nn = { version = "0.8", optional = true }
-candle-transformers = { version = "0.8", optional = true }
 tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+
+# The OpenAI Privacy Filter runtime (§9.5) — a PII token classifier run through
+# ONNX Runtime. Pinned to an rc because there is no stable `ort` 2.x on crates.io
+# and 1.x cannot load this graph's int4 `MatMulNBits` kernels.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+  "std",
+  "ndarray",
+  "download-binaries",
+  # `download-binaries` fetches the runtime at BUILD time and needs its own TLS.
+  # rustls, so the build does not depend on whatever OpenSSL a cross-build host
+  # happens to have — this crate compiles for six targets.
+  "tls-rustls",
+], optional = true }
+ndarray = { version = "0.16", optional = true }
 
 [features]
 default = []
-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+onnx = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
 
 [dev-dependencies]
 serde_json.workspace = true

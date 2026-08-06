@@ -121,7 +121,7 @@ pub struct OnDeviceModel {
 /// ever called it. Anything that downloads, heals, or reports models walks this.
 pub const ON_DEVICE_MODELS: [OnDeviceModel; 2] = [
     OnDeviceModel {
-        model: &modelstat_download::BERT_NER,
+        model: &modelstat_download::PRIVACY_FILTER,
         key: "redactor",
         label: "PII redactor",
         slot: ModelSlot::Ner,
@@ -149,7 +149,7 @@ pub fn missing_models() -> Vec<&'static OnDeviceModel> {
 /// full redaction quality; the bounded [`RetryPolicy::interactive`] keeps a human
 /// from waiting forever, and the daemon's self-heal finishes what this can't.
 pub async fn ensure_ner_model() -> bool {
-    ensure_model(&modelstat_download::BERT_NER, "PII redactor").await
+    ensure_model(&modelstat_download::PRIVACY_FILTER, "PII redactor").await
 }
 
 /// Pre-warm the BGE embedder (§9.5) — segmentation's topic-shift boundary.
@@ -317,38 +317,41 @@ pub enum DaemonNer {
     /// NER inactive — only the deterministic regex floor (layer 1) applies. In
     /// cloud/self-hosted this makes the flush fail-closed (holds, no egress).
     Unavailable(UnavailableNer),
-    /// The candle BERT-base-NER model, loaded from the cache.
-    #[cfg(feature = "candle")]
-    Candle(modelstat_redact::ner::CandleNer),
+    /// OpenAI Privacy Filter over ONNX Runtime — the PII detector (§9.5).
+    #[cfg(feature = "onnx")]
+    PrivacyFilter(modelstat_redact::privacy_filter::PrivacyFilter),
 }
 
 impl NerModel for DaemonNer {
     fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
         match self {
             DaemonNer::Unavailable(n) => n.classify(text),
-            #[cfg(feature = "candle")]
-            DaemonNer::Candle(n) => n.classify(text),
+            #[cfg(feature = "onnx")]
+            DaemonNer::PrivacyFilter(n) => n.classify(text),
         }
     }
 }
 
-/// Build the NER redactor for this process. Loads the candle BERT-NER model from
-/// the shared cache when built `--features candle` and its weights are present;
+/// Build the redactor for this process. Loads OpenAI Privacy Filter from the
+/// shared cache when built `--features onnx` and its weights are present;
 /// otherwise (or on a load failure) uses [`UnavailableNer`] — which the redaction
-/// floor still backstops, and which keeps cloud/self-hosted fail-closed.
+/// floor still backstops, and which keeps EVERY mode fail-closed, since an
+/// uploaded abstract is egress too.
 pub fn build_ner() -> DaemonNer {
-    #[cfg(feature = "candle")]
+    #[cfg(feature = "onnx")]
     {
-        let dir = model_dir("MODELSTAT_NER_MODEL_DIR", "bert-base-NER");
-        match modelstat_redact::ner::CandleNer::load(&dir) {
+        let dir = model_dir("MODELSTAT_REDACTOR_MODEL_DIR", "privacy-filter");
+        match modelstat_redact::privacy_filter::PrivacyFilter::load(&dir) {
             Ok(n) => {
-                modelstat_log::log_info!("NER (redaction layer 2): candle BERT-NER loaded");
-                return DaemonNer::Candle(n);
+                modelstat_log::log_info!(
+                    "redactor (layer 2): OpenAI Privacy Filter loaded (PII spans, on-device)"
+                );
+                return DaemonNer::PrivacyFilter(n);
             }
             Err(err) => {
                 modelstat_log::log_warn!(
-                    "NER (redaction layer 2): model not loadable at {} ({err}) — \
-                     redaction floor (layer 1) still applies; cloud/self-hosted flushes HOLD \
+                    "redactor (layer 2): model not loadable at {} ({err}) — \
+                     redaction floor (layer 1) still applies; flushes HOLD \
                      (fail-closed) until the background download lands",
                     dir.display()
                 );
@@ -420,15 +423,25 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!entry.model.is_present(&tmp), "empty dir is not present");
 
+        // Parents created explicitly: a model's local path can be NESTED
+        // (`onnx/model_q4.onnx`), which the real downloader handles and this fake
+        // must too.
+        let touch = |rel: &str| {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"x").unwrap();
+        };
         let files: Vec<_> = entry.model.files.iter().collect();
         for f in &files[..files.len() - 1] {
-            std::fs::write(dir.join(f.local), b"x").unwrap();
+            touch(f.local);
         }
         assert!(
             !entry.model.is_present(&tmp),
             "a half-downloaded model must not read as present"
         );
-        std::fs::write(dir.join(files[files.len() - 1].local), b"x").unwrap();
+        touch(files[files.len() - 1].local);
         assert!(entry.model.is_present(&tmp));
         let _ = std::fs::remove_dir_all(&tmp);
     }

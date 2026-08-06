@@ -29,7 +29,7 @@ use tokio::io::AsyncWriteExt;
 
 pub mod hf;
 mod progress;
-pub use hf::{download_hf_model, ensure_hf_model, HfModel, BERT_NER, BGE_SMALL};
+pub use hf::{download_hf_model, ensure_hf_model, HfModel, BGE_SMALL, PRIVACY_FILTER};
 
 pub use progress::{ProgressSink, SilentSink, TtyProgress};
 

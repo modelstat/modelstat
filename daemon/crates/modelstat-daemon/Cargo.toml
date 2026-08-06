@@ -35,7 +35,12 @@ notify = "6"
 # pipeline + redact candle features so `build_embedder`/`build_ner` compile the
 # real loaders. The collector still links NO llama.cpp (plan D4) — candle is
 # pure-Rust CPU inference for embeddings + NER only.
-candle = ["modelstat-pipeline/candle", "modelstat-redact/candle"]
+candle = ["modelstat-pipeline/candle"]
+
+# The on-device REDACTOR (OpenAI Privacy Filter over ONNX Runtime). Separate from
+# `candle`, which now only carries the BGE embedder: the two models have different
+# runtimes, and a build can want one without the other.
+onnx = ["modelstat-redact/onnx"]
 
 # Singleton-lock process-liveness probe (kill(pid,0) / OpenProcess). Both already
 # in the tree via tokio; the daemon only needs OpenProcess/CloseHandle on Windows.
