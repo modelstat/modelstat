@@ -166,16 +166,27 @@ impl StatusObserver<'_> {
 }
 impl ScanObserver for StatusObserver<'_> {
     fn on_file(&mut self, path: &str, index: usize, total: usize) {
-        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        let _ = path;
+        // How much is LEFT, including the one starting now — the number that
+        // answers "how long until this is done". A file's NAME is noise: it is a
+        // uuid the reader cannot act on, and it made the line too long to read.
+        let left = total.saturating_sub(index);
         self.with(|s| {
             s.set_progress(index as u64 + 1, total as u64);
             // The PHASE too, not just the message: the previous file left it on
             // `Uploading`, and a bare message change renders as the contradictory
-            // "uploading — File 4/71: …".
+            // "uploading — 12 sessions left".
             s.set_phase(
                 Phase::Scanning,
-                format!("File {}/{total}: {name}", index + 1),
+                match left {
+                    0 | 1 => "last session file".to_string(),
+                    n => format!("{n} session files left"),
+                },
             );
+            // Restarts the elapsed clock the tray ticks each second, so a file
+            // that takes a while visibly shows work happening rather than a
+            // frozen line.
+            s.set_busy_now();
         });
     }
     fn on_upload(&mut self, events: usize, segments: usize) {
@@ -451,6 +462,7 @@ pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
                     "Summariser/engine unavailable — work held, retrying",
                 );
                 s.set_stat("segments_sending", json!(0));
+                s.clear_busy();
             });
             return;
         }
@@ -465,6 +477,7 @@ pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
     daemon.with_status(|s| {
         s.set_phase(Phase::Watching, "Waiting for new events");
         s.set_progress(0, 0);
+        s.clear_busy();
     });
 }
 
@@ -635,9 +648,17 @@ mod tests {
 
         obs.on_file("/a/b/c.jsonl", 0, 3);
         assert_eq!(status.lock().unwrap().phase, Phase::Scanning);
+        // What is LEFT, and no file name: the name is a uuid the reader cannot
+        // act on, and it pushed the line past the width of the menu.
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("File 1/3: c.jsonl")
+            Some("3 session files left")
+        );
+        // A clock the reader can watch tick — the difference between "working"
+        // and "wedged" on a line that happens not to change.
+        assert!(
+            status.lock().unwrap().busy_since_ms.is_some(),
+            "starting a file starts the elapsed clock"
         );
 
         obs.on_upload(10, 4);
@@ -645,6 +666,20 @@ mod tests {
 
         obs.on_uploaded(10, 4);
         assert_eq!(status.lock().unwrap().phase, Phase::Processing);
+    }
+
+    #[test]
+    fn the_remaining_count_counts_down_and_names_the_last_one() {
+        let status = StdMutex::new(Status::default());
+        let mut obs = StatusObserver { status: &status };
+        let msg = || status.lock().unwrap().message.clone().unwrap_or_default();
+
+        obs.on_file("/x/1.jsonl", 0, 652);
+        assert_eq!(msg(), "652 session files left");
+        obs.on_file("/x/2.jsonl", 82, 652);
+        assert_eq!(msg(), "570 session files left", "counts down, never up");
+        obs.on_file("/x/3.jsonl", 651, 652);
+        assert_eq!(msg(), "last session file", "no '1 session files left'");
     }
 
     #[test]

@@ -63,6 +63,13 @@ pub struct Status {
     pub last_event_at: Option<String>,
     pub update: Option<UpdateInfo>,
     pub auto_update: bool,
+    /// When the unit of work now in progress started, epoch ms — `None` when
+    /// nothing is being processed.
+    ///
+    /// A TIMESTAMP rather than a duration on purpose: the reader (tray, CLI)
+    /// re-renders every second and subtracts, so the elapsed clock ticks live
+    /// without the daemon rewriting this file once a second to animate it.
+    pub busy_since_ms: Option<i64>,
 }
 
 impl Default for Status {
@@ -77,6 +84,7 @@ impl Default for Status {
             last_event_at: None,
             update: None,
             auto_update: false,
+            busy_since_ms: None,
         }
     }
 }
@@ -92,6 +100,14 @@ impl Status {
     pub fn set_progress(&mut self, done: u64, total: u64) {
         self.progress_done = done;
         self.progress_total = total;
+    }
+    /// Mark work as started NOW, so readers can show how long it has been
+    /// running. Idle again → [`Status::clear_busy`].
+    pub fn set_busy_now(&mut self) {
+        self.busy_since_ms = Some(chrono::Utc::now().timestamp_millis());
+    }
+    pub fn clear_busy(&mut self) {
+        self.busy_since_ms = None;
     }
     pub fn set_queue(&mut self, size: u64) {
         self.queue_size = size;
@@ -136,6 +152,7 @@ impl Status {
             "device_id": device_id,
             "status": self.phase.as_str(),
             "message": self.message,
+            "busy_since_ms": self.busy_since_ms,
             "progress_done": self.progress_done,
             "progress_total": self.progress_total,
             "queue_size": self.queue_size,
