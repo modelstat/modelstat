@@ -37,4 +37,14 @@ regexes = [
   '''SflKxwRJSMeKKF2QT4''',                     # textbook jwt.io signature (python SDK fake JWT)
   '''dozjgNryP4J3''',                           # node SDK fake JWT signature
   '''abcdef123456''',                           # fake stripe-key body in the redaction test (sk_live_abcdef123456, passes.rs)
+  '''A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6''',       # see below — the credential-shaped redactor fixture
 ]
+
+# The layer-2 redactor's own fixture, and the one case where an obviously-synthetic
+# body will not do. OpenAI Privacy Filter judges whether a string READS as a
+# credential, so `examplefake0123…` sails straight through it — measured — and a
+# fixture the model ignores tests nothing. So the value is credential-SHAPED and
+# allowlisted here by value, keeping the rule that no test PATH is ever exempt: a
+# real key committed to these files would still fail the gate. The body is a
+# textbook alternating pattern (A1b2C3d4…) that no generator produces.
+
