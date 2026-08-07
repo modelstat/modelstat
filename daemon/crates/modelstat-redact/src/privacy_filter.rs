@@ -160,7 +160,32 @@ impl PrivacyFilter {
     }
 
     /// Label one window: `[1, T]` ids in, one label id per token out.
+    ///
+    /// The forward pass runs inside [`tokio::task::block_in_place`] when a
+    /// multi-thread runtime is present. Inference is SYNCHRONOUS CPU work —
+    /// hundreds of milliseconds per window, minutes across a giant session — and
+    /// `classify` is reached from async code (the flush path), so without this
+    /// it pins a runtime worker for the whole redaction pass. On this machine
+    /// that starved the daemon's status writer past the supervisor's 120s
+    /// staleness bound, which KILLED the daemon mid-scan; the replacement
+    /// rescanned, hit the same file, and died the same way — a crash-loop that
+    /// kept the whole backlog stuck on one big session all day. `block_in_place`
+    /// tells tokio to move other tasks off this worker first, so heartbeats keep
+    /// writing while the model runs. Outside a multi-thread runtime (one-shot
+    /// CLI commands, unit tests) it would panic, so fall back to running inline
+    /// — blocking is harmless where nothing else shares the thread.
     fn label_window(&self, ids: &[i64]) -> Result<Vec<usize>, String> {
+        let on_multithread_runtime = tokio::runtime::Handle::try_current()
+            .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+            .unwrap_or(false);
+        if on_multithread_runtime {
+            tokio::task::block_in_place(|| self.label_window_blocking(ids))
+        } else {
+            self.label_window_blocking(ids)
+        }
+    }
+
+    fn label_window_blocking(&self, ids: &[i64]) -> Result<Vec<usize>, String> {
         let shape = [1usize, ids.len()];
         let input = Tensor::from_array((shape, ids.to_vec())).map_err(|e| e.to_string())?;
         let mask = Tensor::from_array((shape, vec![1i64; ids.len()])).map_err(|e| e.to_string())?;
