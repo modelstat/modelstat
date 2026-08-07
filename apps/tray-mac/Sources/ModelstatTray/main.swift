@@ -203,10 +203,10 @@ final class TrayController: NSObject {
 
   // Menu items we update on every poll
   private let statusMI = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
-  /// How far into the current sweep the daemon is — position, share done, the
-  /// split between new and already-shipped files, and the clock for the whole
-  /// pass. The row above says WHAT is happening; this one says how much of it is
-  /// left, which is the question a 655-file backlog actually raises.
+  /// What the current sweep is COSTING — the split between new and
+  /// already-shipped files, and the events/segments they produced. Deliberately
+  /// not the position: the row above already says how many files are left, and
+  /// repeating it as a fraction is the same fact wearing a different hat.
   private let progressMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   /// What is on the wire this second — the row that proves a long, quiet
   /// upload pass is working rather than wedged.
@@ -690,13 +690,12 @@ final class TrayController: NSObject {
     }
     var bits: [String] = []
 
-    // Position first — "how much is left" is the question a 655-file backlog
-    // raises, and the fraction answers it exactly where a percentage would round
-    // 15 of 655 down to a discouraging 2%.
-    if let total = ls.progress_total, total > 0 {
-      let done = min(max(ls.progress_done ?? 0, 0), total)
-      bits.append("\(done)/\(total) files")
-    }
+    // NO position fraction here. The status row above already says "N session
+    // files left", and "2/655 files" is the same sentence with the subtraction
+    // left undone — two lines saying one thing, which reads as more information
+    // than it is. This row earns its slot only by saying what the sweep is
+    // COSTING, which the row above cannot.
+    //
     // What those files actually cost. Most of a sweep is usually files the
     // cursor already covers, so the split is what distinguishes a long pass
     // doing real work from a cheap re-walk of a backlog already shipped.
