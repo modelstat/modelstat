@@ -139,10 +139,28 @@ impl Clone for DeviceApi {
     }
 }
 
+/// Timeout for small control-plane requests (register, heartbeat, rotate,
+/// authed GETs) — the old blanket value, now scoped to the requests it fit.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for one batch-upload attempt. Generous by design: the server acks on
+/// durability now (core#631), so this bounds BODY TRANSFER of a large verbatim
+/// session over a slow uplink, not LLM work. The never-drop hold/retry loop is
+/// the real safety net; this only reaps genuinely dead sockets.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 impl DeviceApi {
     pub fn new(config: std::sync::Arc<Config>) -> Self {
+        // No BLANKET request timeout. The old `.timeout(30s)` applied to every
+        // request INCLUDING batch uploads, whose bodies are verbatim sessions —
+        // multi-MB on a home uplink — and (pre core#631) whose server side spent
+        // up to its own 30s summarising inside the same window. A big batch could
+        // NEVER fit: it timed out at 30s, held, and retried forever — the scan sat
+        // on the same file all day while err.log filled with "operation timed
+        // out (attempt 0)". Control-plane calls set their own 30s per request
+        // (`CONTROL_TIMEOUT`); uploads get time proportional to what they are
+        // doing (`UPLOAD_TIMEOUT`), with connect failures still failing fast.
         let http = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| Client::new());
         DeviceApi {
@@ -195,6 +213,7 @@ impl DeviceApi {
         let res = self
             .http
             .post(&url)
+            .timeout(CONTROL_TIMEOUT)
             .json(&req)
             .send()
             .await
@@ -219,6 +238,7 @@ impl DeviceApi {
         let res = self
             .http
             .get(&url)
+            .timeout(CONTROL_TIMEOUT)
             .bearer_auth(secret)
             .send()
             .await
@@ -248,6 +268,7 @@ impl DeviceApi {
         let res = self
             .http
             .post(&url)
+            .timeout(CONTROL_TIMEOUT)
             .bearer_auth(current_secret)
             .send()
             .await
@@ -323,7 +344,11 @@ impl DeviceApi {
                 }
                 continue;
             };
-            let mut req = self.http.request(method.clone(), url).bearer_auth(&bearer);
+            let mut req = self
+                .http
+                .request(method.clone(), url)
+                .timeout(CONTROL_TIMEOUT)
+                .bearer_auth(&bearer);
             if let Some(b) = body {
                 req = req.json(b);
             }
@@ -453,6 +478,7 @@ impl DeviceApi {
             let res = match self
                 .http
                 .post(&url)
+                .timeout(UPLOAD_TIMEOUT)
                 .bearer_auth(&bearer)
                 .json(&wire)
                 .send()

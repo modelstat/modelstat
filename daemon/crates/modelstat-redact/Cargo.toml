@@ -28,10 +28,13 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
   "tls-rustls",
 ], optional = true }
 ndarray = { version = "0.16", optional = true }
+# `rt` + `rt-multi-thread` for `block_in_place`: inference must not pin a runtime
+# worker (see `privacy_filter::label_window`).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"], optional = true }
 
 [features]
 default = []
-onnx = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+onnx = ["dep:ort", "dep:ndarray", "dep:tokenizers", "dep:tokio"]
 
 [dev-dependencies]
 serde_json.workspace = true
