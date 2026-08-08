@@ -20,6 +20,38 @@ Homebrew) and the macOS tray app (`apps/tray-mac`). The server
 (ingest/pipeline/dashboard, modelstat.ai) is a separate private service
 (closed-source) and is out of scope for this repo.
 
+## Design principle: the weakest sufficient hypothesis
+
+Among all designs that **exactly fit the cases actually observed**, prefer the
+one that commits to the least beyond them — it is the most likely to survive
+unseen tools, schemas, and formats. (Bennett, AGI-23,
+[arXiv:2301.12987](https://arxiv.org/abs/2301.12987): a hypothesis generalises
+in proportion to its *extension* — how much it stays correct for — not its
+brevity; provably, shorter is neither necessary nor sufficient, and a compact
+rule can be maximally overcommitted.)
+
+This repo already runs on it — keep new code on the same line:
+
+- **Parsers emit raw events verbatim and never interpret** — the server
+  decides. An interpretation baked into the daemon is a commitment about every
+  future version of every tool.
+- **Discovery probes by artefact shape** (a directory that *looks like* agent
+  data), never by app-name or install-path allowlists — new and relocated
+  tools are found without a release.
+- **No allowlists for open-ended sets found in the data** (model names, tool
+  names, metadata categories) — pass strings through; bounded rosters exist
+  only where code must exist per case (e.g. the parser set).
+- **The flip side — known contracts are commitments to keep, made explicitly:**
+  the redaction floor and the wire schema are deliberate, validated, and live
+  irreducibly where they're enforced; they are data about the world, not
+  overreach. And a weak design still has to decide every observed case
+  exactly — fit all real fixtures.
+
+Review test: *what unseen-but-plausible input would this code silently
+mishandle, and what in today's data forces that commitment?* If nothing forces
+it, weaken the design — usually by deleting structure (a pass-through, a
+shape-probe, a string) rather than adding speculative abstraction.
+
 ## Naming: daemon, not agent/companion
 
 Our local long-running process is the **daemon** (what `curl -fsSL https://modelstat.ai/install.sh | sh` installs; the native `modelstat` binary built from `daemon/`). Never call it "agent" or "companion".
