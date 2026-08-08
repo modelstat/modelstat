@@ -107,22 +107,30 @@ fn claude_search_roots(
     // Every place this agent's data can live — the known paths, the env vars
     // that relocate them (`CLAUDE_HOME`), and the directory a RUNNING instance
     // names on its command line, which is the only way to reach a second Claude
-    // started with `--config-dir ~/.claude-instances/second`. Each points AT a
-    // `.claude` dir, so the shape search starts one level up.
+    // started with `--config-dir ~/.claude-instances/second`.
     //
     // Both agents, because the same format under a Desktop host is still a
-    // relocated install; the label is decided by artefacts below, never here.
+    // relocated install; the label is decided by artefacts, never here.
+    //
+    // Each candidate contributes TWO roots, and the depths are the point:
+    //
+    //   * its PARENT at depth 0, because a candidate names a `.claude`-style
+    //     dir exactly, so `<parent>/.claude/projects` is a location and not a
+    //     search. Depth 0 is load-bearing — `~/.claude`'s parent is `$HOME`, and
+    //     descending five levels from there would walk the user's entire disk
+    //     and rediscover, unlabelled, every hosted tree the app-data sweep below
+    //     already owns.
+    //   * ITSELF at full depth, because a relocated install is a whole copy of
+    //     the layout, and a Desktop instance nests its transcripts four levels
+    //     down inside its own data dir.
     for agent in ["claude_code", "claude_desktop"] {
         for dir in data_dir_candidates_from(home, agent, process_dirs) {
             let path = PathBuf::from(&dir);
+            let label = desktop_host_label(&path);
             if let Some(parent) = path.parent().map(Path::to_path_buf) {
-                let label = desktop_host_label(&path).or_else(|| desktop_host_label(&parent));
-                // Searched as deeply as an application's own data dir: a
-                // relocated install is a full copy of the layout, so a Desktop
-                // instance nests its transcripts exactly as far down as the
-                // original.
-                roots.push((parent, label, CLAUDE_SEARCH_MAX_DEPTH));
+                roots.push((parent, label, 0));
             }
+            roots.push((path, label, CLAUDE_SEARCH_MAX_DEPTH));
         }
     }
 
@@ -553,7 +561,12 @@ mod cursor_discovery_tests {
                 .filter(|j| j.kind == ParserKind::Cursor)
                 .collect();
             assert_eq!(cursor.len(), 1, "exactly one cursor job for {rel}");
-            assert_eq!(cursor[0].path, db.to_string_lossy());
+            // Compared as PATHS: the test writes its tree with `/` and discovery
+            // emits the platform's separators.
+            assert_eq!(
+                PathBuf::from(&cursor[0].path),
+                db.components().collect::<PathBuf>()
+            );
             assert_eq!(cursor[0].since_ms, None, "discovery never sets the floor");
             std::fs::remove_dir_all(&home).ok();
         }

@@ -35,11 +35,22 @@ fn tree_dir() -> String {
     format!("{}/tests/fixtures/tree", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Recreate `/tmp/modelstat-fixtures` byte-for-byte from the committed inputs.
+/// Recreate `/tmp/modelstat-fixtures` byte-for-byte from the committed inputs,
+/// ONCE per process.
+///
+/// The fixed base path is shared by every test in this binary and `cargo test`
+/// runs them on several threads, so a per-test wipe-and-copy has one test
+/// deleting the tree another is mid-copy into — an `fs::copy` that fails on a
+/// path that existed a microsecond ago. Doing it once behind a `OnceLock` keeps
+/// the single-owner property the fixed path needs while letting any number of
+/// tests depend on the tree.
 fn materialize_tree() {
-    let src_root = tree_dir();
-    let _ = std::fs::remove_dir_all(BASE);
-    copy_tree(Path::new(&src_root), Path::new(BASE));
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let src_root = tree_dir();
+        let _ = std::fs::remove_dir_all(BASE);
+        copy_tree(Path::new(&src_root), Path::new(BASE));
+    });
 }
 
 fn copy_tree(src: &Path, dst: &Path) {

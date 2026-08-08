@@ -786,13 +786,23 @@ fn expand_path_with_home(home: &Path, p: &str) -> String {
     }
     // Resolve to absolute (relative to cwd) without requiring existence.
     let path = PathBuf::from(&s);
-    if path.is_absolute() {
-        s
+    let path = if path.is_absolute() {
+        path
     } else {
-        std::env::current_dir()
-            .map(|c| c.join(&path).to_string_lossy().into_owned())
-            .unwrap_or(s)
-    }
+        std::env::current_dir().map_or(path.clone(), |c| c.join(&path))
+    };
+    // Re-collect through `components()` so the separators are the platform's.
+    //
+    // The templates above are written with `/`, which Windows accepts but does
+    // not produce — and callers join onto these with `PathBuf`, which does. Two
+    // spellings of one directory then read as two: the same transcript is
+    // discovered under both, deduped under neither, and parsed and uploaded
+    // several times a cycle. Its scan cursor is keyed by that string too, so the
+    // second spelling never sees the first's progress.
+    path.components()
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn binary_lookup_dirs(os: Os) -> Vec<String> {
@@ -1467,18 +1477,20 @@ mod tests {
     /// invisible on macOS and Linux where the variable is usually unset.
     #[test]
     fn platform_base_dirs_follow_the_home_they_are_given() {
-        let root = Path::new("/tmp/modelstat-not-a-real-home");
+        let root = std::env::temp_dir().join("modelstat-not-a-real-home");
         for (raw, tail) in [
-            ("$APPDATA/Cursor", "/AppData/Roaming/Cursor"),
-            ("$LOCALAPPDATA/Cursor", "/AppData/Local/Cursor"),
-            ("$XDG_CONFIG_HOME/codex", "/.config/codex"),
-            ("$XDG_DATA_HOME/codex", "/.local/share/codex"),
-            ("~/.claude", "/.claude"),
-            ("$HOME/.claude", "/.claude"),
+            ("$APPDATA/Cursor", "AppData/Roaming/Cursor"),
+            ("$LOCALAPPDATA/Cursor", "AppData/Local/Cursor"),
+            ("$XDG_CONFIG_HOME/codex", ".config/codex"),
+            ("$XDG_DATA_HOME/codex", ".local/share/codex"),
+            ("~/.claude", ".claude"),
+            ("$HOME/.claude", ".claude"),
         ] {
+            // Compared as PATHS: the expansion emits the platform's separators,
+            // which is the whole point of the normalisation it ends with.
             assert_eq!(
-                expand_path_with_home(root, raw),
-                format!("{}{tail}", root.display()),
+                PathBuf::from(expand_path_with_home(&root, raw)),
+                root.join(tail).components().collect::<PathBuf>(),
                 "{raw} escaped the home it was given"
             );
         }
