@@ -1744,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-cli"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "modelstat-daemon",
  "modelstat-ingest",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-daemon"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "chrono",
  "futures-util",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-download"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "axum 0.7.9",
  "futures-util",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-ingest"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "axum 0.8.9",
  "chrono",
@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-llm"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "encoding_rs",
  "llama-cpp-2",
@@ -1836,14 +1836,14 @@ dependencies = [
 
 [[package]]
 name = "modelstat-log"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "chrono",
 ]
 
 [[package]]
 name = "modelstat-mcp"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "modelstat-ingest",
  "modelstat-log",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-parsers"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "chrono",
  "modelstat-redact",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-pipeline"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -1897,7 +1897,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-receiver"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-redact"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "modelstat-log",
  "ndarray 0.16.1",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-service"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "libc",
  "modelstat-ingest",
@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-sumclient"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "axum 0.7.9",
  "modelstat-log",
@@ -1951,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-summarizer"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "axum 0.7.9",
  "modelstat-download",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-update"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "flate2",
  "libc",
@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat-wire"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "serde",
  "serde_json",
