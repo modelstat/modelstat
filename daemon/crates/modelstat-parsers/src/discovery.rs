@@ -148,6 +148,14 @@ fn sources() -> &'static [SourceSpec] {
             binaries: &["pi", "omp"],
         },
         SourceSpec {
+            agent: "bb",
+            macos: &["~/.bb"],
+            linux: &["~/.bb"],
+            windows: &["~/.bb"],
+            data_dir_env: &[],
+            binaries: &["bb"],
+        },
+        SourceSpec {
             agent: "openclaw",
             macos: &["~/.openclaw", "~/.claw"],
             linux: &["~/.openclaw", "~/.claw"],

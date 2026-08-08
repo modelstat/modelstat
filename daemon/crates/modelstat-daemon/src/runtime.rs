@@ -457,12 +457,18 @@ fn eager_target_jobs(session_ids: &[String], file: Option<&str>) -> Vec<ScanJob>
     if let Some(f) = file {
         return match all.iter().find(|j| j.path == f) {
             Some(j) => vec![j.clone()],
-            None => vec![ScanJob {
-                agent_label: None,
-                since_ms: None,
-                path: f.to_string(),
-                kind: kind_for_path(f),
-            }],
+            None => {
+                let mut adhoc = vec![ScanJob {
+                    agent_label: None,
+                    since_ms: None,
+                    path: f.to_string(),
+                    kind: kind_for_path(f),
+                }];
+                // Discovered jobs carry their harness label already; an
+                // ad-hoc target earns it the same way.
+                crate::discover_jobs::apply_harness_labels(&mut adhoc);
+                adhoc
+            }
         };
     }
     if !session_ids.is_empty() {
