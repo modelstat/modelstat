@@ -118,8 +118,26 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///
 /// To bump: raise ONE aspect's number and document the why here, exactly as
 /// the v1–v23 history did.
+///
+/// capture v24 — the weakest-hypothesis wave (#108–#112), batched to ONE
+///       re-scan on purpose. What history gains by re-reading: unknown record
+///       types become visible events (kind verbatim, structural fields only —
+///       Desktop's `attachment` rows existed in every transcript and shipped
+///       never); codex token-schema drift ships numeric leaves instead of
+///       looping a hard-fail forever; pi's absent counters stay absent instead
+///       of fabricated zeros, and its providers ship VERBATIM (zhipu was
+///       "unknown", which no identity join could ever match); refs carry
+///       `ambiguous` instead of two confidence-weighted guesses; path-guessed
+///       git slugs stop fabricating `remote_host: "github.com"` and carry
+///       `slug_source`; PR outcomes carry the commit + method they were read
+///       from; CJK/Cyrillic cognition tags survive; segments carry
+///       `local_time`; `mcp.`/`mcp:` tool spellings split correctly (their
+///       aggregate keys move). Cross-parser by construction, so the CAPTURE
+///       aspect carries the whole wave and the parser aspects stay put — one
+///       fleet re-scan, mostly served by the span cache and the cloud
+///       classifier.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
-    ("capture", LEGACY_WORLD_VERSION),
+    ("capture", LEGACY_WORLD_VERSION + 1),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION),
     ("codex", LEGACY_WORLD_VERSION),
