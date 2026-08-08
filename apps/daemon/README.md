@@ -2,6 +2,15 @@
 
 > ⚠️ **This TypeScript daemon is retired** — replaced by the native Rust daemon in [`daemon/`](../../daemon/). Install the current version with `curl -fsSL https://modelstat.ai/install.sh | sh` (Windows: `irm https://modelstat.ai/install.ps1 | iex`); the installer cleanly replaces this version and keeps your device identity. This directory is kept for history only.
 
+> **It is also `private: true`, and must stay that way.** The code below has
+> diverged from the shipping line (no process probe, no key-identity probe,
+> stale discovery), and it publishes under the same `modelstat` name and cuts
+> GitHub Releases from the same repo as the Rust `daemon-X.Y.Z` tags — so one
+> publish from here takes `releases/latest` away from the real daemon and breaks
+> `install.sh` for everyone. Nothing in this tree is a release input any more.
+> Delete the directory once the Rust line has parity sign-off; until then the
+> parity docs still reference it as the port source.
+
 > **Know exactly what your AI coding spend bought.** modelstat turns the session logs Claude Code, Codex, and Cursor already write into dollar-precise spend & ROI — broken down by the real work it went to, by project, and by model.
 
 <!-- dashboard screenshot: drop assets/activities-screenshot.png here when available -->

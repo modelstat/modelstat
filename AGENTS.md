@@ -14,11 +14,14 @@ Nobody uses this service yet — there's no data or behaviour to preserve. Every
 
 ## What this repo is
 
-The modelstat **daemon** — everything that runs on a user's machine and
-feeds the server: the Node CLI/daemon (`packages/*`, published to npm +
-Homebrew) and the macOS tray app (`apps/tray-mac`). The server
-(ingest/pipeline/dashboard, modelstat.ai) is a separate private service
-(closed-source) and is out of scope for this repo.
+The modelstat **daemon** — everything that runs on a user's machine and feeds
+the server: the native Rust daemon in `daemon/` (what `install.sh` installs and
+what ships), the macOS tray app (`apps/tray-mac`), the MCP server
+(`packages/mcp`), and the standalone SDKs (`sdks/*`). The TypeScript daemon
+(`apps/daemon`, `packages/daemon-core`, …) is the RETIRED line, kept only as the
+port source — never publish it. The server (ingest/pipeline/dashboard,
+modelstat.ai) is a separate private service (closed-source) and is out of scope
+for this repo.
 
 ## Design principle: the weakest sufficient hypothesis
 
@@ -120,19 +123,27 @@ Things to know:
   (honouring `Retry-After`) and send `max_completion_tokens` (no `temperature`)
   to o-series/gpt-5 reasoning models. The legacy `ollama.ts` adapter remains
   exported but is unwired in the daemon.
-- Redaction has **one floor**. The secret-pattern catalogue lives in
-  `@modelstat/core/redact-floor` (dependency-free) and is the single source of
-  truth for the wire redactor (`@modelstat/core/redact`) and the daemon — add a
-  newly-leaked credential format there, once. (The standalone `@modelstat/sdk`
-  in `sdks/node` keeps its own copy.) The server can *augment* it at runtime via
-  a signed, additive `policies` config: the floor always applies and a signed
-  bundle can only ever
-  add patterns, never remove or weaken them.
-- `@modelstat/remote-config` is the shared signed-config loader (fetch → verify
-  Ed25519 over raw bytes → disk-cache under `~/.modelstat/config/` → fall back
-  memory→disk→bundled). The long-lived daemon refreshes the `policies` kind on a
-  timer; new server-delivered config kinds ride this loader instead of forcing a
-  release.
+- Redaction has **one floor**, and it is compiled in. In the Rust daemon it is
+  `modelstat-redact` (`floor.rs` is the catalogue — add a newly-leaked credential
+  format there, once); the TS line's copy lives in `@modelstat/core/redact-floor`
+  and the standalone `@modelstat/sdk` keeps its own. The server can *augment* it
+  at runtime via the additive `policies` config: the floor always applies, and a
+  bundle can only ever add patterns, never remove or weaken them. The compiled
+  augment is installed process-wide in `modelstat-redact` rather than passed to
+  each caller, so every floor call site gets it and no new one can miss it by
+  omission.
+- **Server-delivered config** rides `modelstat-ingest::remote_config`: fetch
+  `GET {api}/v1/config/{kind}` → shape-validate with the kind's own validator →
+  version-gate (strictly newer only, so nothing can roll a device back) →
+  disk-cache under `~/.modelstat/config/` → resolve memory → disk → compiled-in
+  default. The daemon refreshes every kind at boot and every 6h; a new kind is a
+  validator plus one install line, and needs no change to the channel.
+  **Trust is the TLS connection to the api origin — there is no payload
+  signature and no request signing.** What makes a bad payload harmless is the
+  shape of each kind (`policies` can only ADD redaction; `calibration`'s values
+  are clamped to a tenth-to-ten-times their compiled defaults), not a key.
+  Ed25519 was specified for this on the TS line and deliberately dropped; don't
+  reintroduce it.
 
 ## Test fixtures & examples — ALWAYS fictional
 
@@ -162,63 +173,47 @@ markers by VALUE (`examplefake`, `EXAMPLE`, sequential `0123…`) — never by f
 path, so a real secret in a test file still fails. Enable the local hook once
 with `pipx install pre-commit && pre-commit install`.
 
-## Releasing (npm + Homebrew)
+## Releasing
 
-Releases are **zero-touch**. Every push to main runs `release`
-(`.github/workflows/release-daemon.yml`), which decides which publishable packages
-changed and what version each gets, then publishes to npm, tags, bumps main,
-and cuts a GitHub Release. No `release_type` input, no OTP, no two-phase split.
+Two workflows ship things, and **neither one publishes the daemon to npm** —
+that line is retired (see below).
 
-**How the version is chosen** — `.github/scripts/release-plan.mjs` reads the
-Conventional Commits since each package's last tag (the **tag** is the source
-of truth for the last released version, not `package.json`):
+**The daemon** — `.github/workflows/release-daemon-rs.yml`. Zero-touch: merging
+any commit that touches `daemon/` builds both binaries for all six targets,
+bakes the prebuilt macOS tray into the mac archives, checksums (+ minisigns,
+when the key is configured) everything, cuts a GitHub Release, tags
+`daemon-<version>`, and commits the stamped version back to main. The version
+comes from the Conventional Commits since the last `daemon-*` tag — `feat:` →
+minor, `fix:`/`perf:`/`refactor:`/`revert:` → patch, `type!:` or
+`BREAKING CHANGE` → major, `chore`/`docs`/`ci`/`test` → **no release**. The last
+released version is read from the **tag**, never from `daemon/Cargo.toml` (which
+is CI-written output, not input). `releases/latest` is what `install.sh` and the
+self-updater read, so nothing else in this repo may cut a release.
 
-- `feat:` → minor · `fix:`/`perf:`/`refactor:`/`revert:` → patch ·
-  `!`/`BREAKING CHANGE` → major. `chore`/`docs`/`ci`/`test`/`style`/`build`
-  alone → **no release**.
-- **Pre-1.0 clamp**: while a package is `0.x`, a breaking change bumps the
-  minor (`0.1.3` → `0.2.0`), never auto-jumping to `1.0.0`.
-- **Dependency-aware**: a package is "changed" if its own dir *or any of its
-  transitive workspace deps* changed. A `fix(core):` in `packages/core`
-  therefore republishes `modelstat` (which depends on it) but not
-  `@modelstat/mcp` (no workspace deps).
-- The publishable set is every workspace package with `private !== true`, so a
-  new public package is picked up automatically. The tag prefix derives from the
-  package's unscoped name (`modelstat` → `modelstat-v`, `@modelstat/mcp` →
-  `mcp-v`); the only hand-maintained list is `SKIP_PUBLISH` (currently empty —
-  every public package auto-publishes).
+**The standalone SDKs** — `.github/workflows/release-sdks.yml` publishes
+`sdks/{rust,node,python}` to crates.io / PyPI / npm via OIDC Trusted Publishing
+(no long-lived tokens), each only when the manifest version isn't already on the
+registry. To cut one: bump the version in the manifest and merge. A brand-new
+package needs a one-time Trusted Publisher set up on the registry's website
+before the OIDC flow works.
 
-**Auth — npm Trusted Publishing (OIDC), no token.** The runner mints a
-short-lived OIDC token (`id-token: write`) that npm exchanges for a publish
-credential, and every publish carries provenance. There is **no `NPM_TOKEN`**.
-This requires a **one-time setup per package** on npmjs.com:
-
-> Package → Settings → **Trusted Publisher** → GitHub Actions →
-> org `modelstat`, repo `modelstat`, workflow `release-daemon.yml`.
-
-A brand-new package that isn't on npm yet needs **one bootstrap publish** (a
-manual `npm publish` from a maintainer, or org-level trusted publishing) before
-the OIDC flow can take over; after that it's hands-off.
-
-**Runners** — the daemon (`modelstat`) builds on macOS (it bakes a universal,
-ad-hoc-signed `ModelstatTray.app` into its tarball, which needs full Xcode);
-the pure-JS packages build on ubuntu. The plan step picks the runner per
-package, so a merge that doesn't touch the daemon never spins a macOS runner.
-
-To **skip** a release, use a non-releasing commit type (`chore:`, `docs:`, …).
-To **force** one, merge a `fix:`/`feat:` that touches the package (or trigger
-the workflow manually: GitHub → Actions → release → Run workflow).
+**The retired npm daemon.** `apps/daemon` (the TypeScript daemon, npm name
+`modelstat`) is superseded by the Rust one and is `private: true`. Its
+auto-publisher is deleted. Keep it that way: it publishes under the same name
+and from the same repo as the Rust release, so one publish out of that tree
+takes `releases/latest` and breaks installs. `@modelstat/mcp` in `packages/mcp`
+stays publishable — `npx @modelstat/mcp` is the MCP runner.
 
 ### Observing a release
 
 ```sh
-gh run list --workflow=release-daemon.yml --limit 3
+gh run list --workflow=release-daemon-rs.yml --limit 3
 gh run watch <run-id> --exit-status
 ```
 
-The plan step prints a "Release plan" summary (what's shipping at what
-version). Verify the artifact landed: `npm view modelstat version` and the
-`<pkg>-v<version>` tag + GitHub Release exist.
+The gate step prints the resolved version and whether anything is shipping.
+Verify the `daemon-<version>` tag + GitHub Release exist and that
+`releases/latest` points at it.
 
 ### When a release fails
 
@@ -226,20 +221,11 @@ version). Verify the artifact landed: `npm view modelstat version` and the
 gh run view <run-id> --log-failed
 ```
 
-The whole flow is **idempotent** — re-running (push an empty commit, or
-re-run the job) converges:
-
-- npm publish skips a version already on npm, so nothing double-publishes.
-- The planner reads the **tag**, so if a run died after `npm publish` but
-  before tagging, the re-run recomputes the same version, skips the (already
-  published) npm step, and just finishes the tag/bump/release.
-- `403` / "Trusted Publisher" errors → the per-package trusted publisher above
-  isn't configured yet (or the package doesn't exist on npm — do the one
-  bootstrap publish).
-- The npm publish runs BEFORE anything touches main, so a failed publish leaves
-  main untouched.
-- The Homebrew tap bump no-ops when `HOMEBREW_TAP_DISPATCH_TOKEN` is
-  absent — a missing tap update with a green run usually means that.
+The flow is **idempotent** — re-running (push an empty commit, or re-run the
+job) converges: the gate reads the tag, so a run that died before tagging
+recomputes the same version, and one that died after it skips entirely. The
+Homebrew tap bump no-ops when `HOMEBREW_TAP_DISPATCH_TOKEN` is absent — a
+missing tap update with a green run usually means that.
 
 ## CRITICAL — read last (repeated from the top)
 

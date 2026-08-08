@@ -6,7 +6,8 @@
 //!
 //! The baseline floor is unconditional and can never be removed or disabled by
 //! remote config (feature §21.6); the additive `remote` patterns run AFTER it
-//! and can only ADD redactions.
+//! and can only ADD redactions. [`redact`] reads that additive set from the
+//! process ([`crate::policy`]) so no call site can opt out of it by omission.
 
 use regex::{Captures, Regex};
 use std::sync::OnceLock;
@@ -39,13 +40,21 @@ fn email() -> &'static Regex {
     })
 }
 
-/// Redact with the baseline floor only (the common call; matches TS `redact()`
-/// with no remote augment loaded).
+/// Redact with the baseline floor plus whatever additive augment this process
+/// has installed ([`crate::policy::install_policy_patterns`]) — the call every
+/// egress path makes. With nothing installed (no config fetched yet, or an empty
+/// bundle) it is exactly the floor.
 pub fn redact(text: &str, repo_root_abs: Option<&str>) -> RedactionResult {
-    redact_with_remote(text, repo_root_abs, &[])
+    redact_with_remote(
+        text,
+        repo_root_abs,
+        &crate::policy::installed_policy_patterns(),
+    )
 }
 
-/// Redact with the baseline floor plus a verified additive `remote` set.
+/// Redact with the baseline floor plus an explicitly supplied additive set —
+/// the same pipeline [`redact`] runs, with the augment passed rather than read
+/// from the process. Tests use it to pin behaviour against an exact bundle.
 pub fn redact_with_remote(
     text: &str,
     repo_root_abs: Option<&str>,
@@ -70,7 +79,7 @@ pub fn redact_with_remote(
     out = aws_out;
     counts.secrets_found += aws_n as u64;
 
-    // 2. Additive signed augment — runs after the floor, can only ADD.
+    // 2. Additive server-delivered augment — runs after the floor, can only ADD.
     for pat in remote {
         let name = &pat.name;
         out = pat

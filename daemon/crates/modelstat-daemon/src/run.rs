@@ -48,6 +48,11 @@ const DISCOVERY_BACKSTOP: Duration = Duration::from_secs(5 * 60);
 const LOCAL_DRAIN_INTERVAL: Duration = Duration::from_secs(5);
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const RECONCILE_FIRST_DELAY: Duration = Duration::from_secs(60);
+/// How often server-delivered config is re-fetched. Slow on purpose: these are
+/// policy and calibration payloads that change a few times a year, the daemon is
+/// already correct on the cached copy, and a device that missed a push is at
+/// most one interval behind (a restart picks it up immediately).
+const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const WATCH_DEBOUNCE: Duration = Duration::from_secs(1);
 const LOCAL_FLUSH_THROTTLE: Duration = Duration::from_millis(400);
 /// Rewrite the last-status mirror at least this often even when nothing changed,
@@ -178,6 +183,12 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     // on the overwhelmingly common path (models present) it costs two `stat`s.
     let heal_task = tokio::spawn(heal_models(daemon.clone()));
 
+    // ── Server-delivered config (background) ────────────────────────────────
+    // Backgrounded like the heal: the daemon already booted on the cached (or
+    // bundled) payload, so nothing waits on this. A push therefore reaches a
+    // running device without a release — and never at the cost of a scan.
+    let config_task = tokio::spawn(config_refresh_loop(daemon.clone()));
+
     // ── Preflight the summariser (never throws, never stops the daemon) ──────
     preflight(&daemon).await;
 
@@ -250,6 +261,8 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
             // The winner runs its own heal; two processes downloading into the
             // same cache dir would race on the `.partial` files.
             heal_task.abort();
+            // Likewise the config refresh: the winner owns `~/.modelstat/config`.
+            config_task.abort();
             // Likewise the spool: it is a shared directory, and the winner is
             // already draining it. Two uploaders would double-POST every batch.
             upload_task.abort();
@@ -298,6 +311,7 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     heartbeat_task.abort();
     mirror_task.abort();
     heal_task.abort();
+    config_task.abort();
     // The uploader ran throughout the drain above, so the last scan's batches had
     // their chance to go out. Whatever is still spooled stays spooled: it is
     // fsynced, and the next boot ships it without re-redacting a single turn.
@@ -358,6 +372,21 @@ async fn heal_models(daemon: Arc<Daemon>) {
             }
         }
         modelstat_log::log_info!("{} loaded — no restart needed", entry.label);
+    }
+}
+
+/// Re-fetch the server-delivered config kinds at boot and every
+/// [`CONFIG_REFRESH_INTERVAL`] thereafter.
+///
+/// Best-effort by contract: the daemon already holds a usable payload for every
+/// kind (disk cache, else the compiled-in default), so a failed pass changes
+/// nothing and is logged once rather than every six hours. Nothing awaits this
+/// loop — a device that never reaches the config endpoint runs on its defaults
+/// forever, correctly.
+async fn config_refresh_loop(daemon: Arc<Daemon>) {
+    loop {
+        daemon.remote_config.refresh(&daemon.config.api_url()).await;
+        tokio::time::sleep(CONFIG_REFRESH_INTERVAL).await;
     }
 }
 

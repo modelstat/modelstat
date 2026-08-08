@@ -15,14 +15,25 @@
 //!      which keeps every egress path correctly FAIL-CLOSED (detector
 //!      unavailable ⇒ the flush holds, never floor-only egress).
 //!
+//!   3. [`RemoteConfig`] — the server-delivered config kinds (`policies`,
+//!      `calibration`) and what adopting one means. Same shape as the model
+//!      handles: a value the daemon holds, swapped in place when a newer one
+//!      lands, never blocking anything when the server can't be reached.
+//!
 //! The engine binary itself (llama.cpp) is NEVER linked here — the collector only
 //! ever speaks the HTTP protocol to it (plan D4). No `modelstat-llm` dependency.
 
 use std::path::PathBuf;
 
+use modelstat_ingest::remote_config::{ConfigChannel, Versioned};
 use modelstat_ingest::{home_path, Config};
-use modelstat_pipeline::{Embedder, NoEmbedder};
-use modelstat_redact::{PiiModel, PiiToken, UnavailableRedactor};
+use modelstat_pipeline::{
+    install_calibration, Calibration, Embedder, NoEmbedder, CALIBRATION_CONFIG_KIND,
+};
+use modelstat_redact::{
+    compile_policy_patterns, install_policy_patterns, PiiModel, PiiToken, RedactionPolicyBundle,
+    UnavailableRedactor, POLICIES_BUNDLED_FALLBACK, POLICIES_CONFIG_KIND,
+};
 
 /// The loopback engine's default port — must match `modelstat-llm`'s
 /// `DEFAULT_PORT` (kept in sync by hand, since the collector can't link that
@@ -577,6 +588,118 @@ fn build_local_redactor() -> DaemonRedactor {
         }
     }
     DaemonRedactor::Unavailable(UnavailableRedactor)
+}
+
+// ── Server-delivered config ──────────────────────────────────────────────────
+
+/// The config kinds this daemon knows, and what adopting one MEANS.
+///
+/// The channel itself ([`modelstat_ingest::remote_config`]) is vocabulary-free:
+/// it fetches, shape-validates, version-gates and caches JSON. Everything
+/// specific to a kind lives here — the validator, and the one call that puts a
+/// new payload into force. Each kind installs into the crate that owns the
+/// semantics rather than being threaded down through the scan:
+///
+///   - `policies` → [`modelstat_redact`]'s process-wide additive augment, so
+///     EVERY floor call site gets it and no future one can miss it by omission.
+///     Additive by construction, so a wrong payload can only redact more.
+///   - `calibration` → [`modelstat_pipeline`]'s segmentation thresholds,
+///     clamped on parse, applied to the next scan.
+///
+/// A third kind is a validator plus an install line; nothing below this changes.
+pub struct RemoteConfig {
+    policies: ConfigChannel<RedactionPolicyBundle>,
+    calibration: ConfigChannel<Calibration>,
+}
+
+fn validate_policies(raw: &str) -> Option<Versioned<RedactionPolicyBundle>> {
+    let bundle: RedactionPolicyBundle = serde_json::from_str(raw).ok()?;
+    Some(Versioned {
+        version: bundle.version,
+        value: bundle,
+    })
+}
+
+fn validate_calibration(raw: &str) -> Option<Versioned<Calibration>> {
+    Calibration::from_payload(raw).map(|(version, value)| Versioned { version, value })
+}
+
+impl RemoteConfig {
+    /// Seed every kind from its disk cache (or the compiled-in default) and put
+    /// it into force. No network: this runs on the boot path, and a daemon that
+    /// starts offline must come back on the last config it saw.
+    pub fn load() -> Self {
+        let this = RemoteConfig {
+            policies: ConfigChannel::new(
+                POLICIES_CONFIG_KIND,
+                validate_policies,
+                Versioned {
+                    version: POLICIES_BUNDLED_FALLBACK.version,
+                    value: POLICIES_BUNDLED_FALLBACK,
+                },
+            ),
+            calibration: ConfigChannel::new(
+                CALIBRATION_CONFIG_KIND,
+                validate_calibration,
+                Versioned {
+                    version: 0,
+                    value: Calibration::default(),
+                },
+            ),
+        };
+        this.apply_policies();
+        this.apply_calibration();
+        this
+    }
+
+    /// Fetch every kind once and put whatever moved into force. Best-effort by
+    /// contract: a failure keeps the cached (or bundled) payload, so this can
+    /// run on a timer and be ignored.
+    pub async fn refresh(&self, api_url: &str) {
+        if self.policies.refresh(api_url).await.is_some() {
+            self.apply_policies();
+        }
+        if self.calibration.refresh(api_url).await.is_some() {
+            self.apply_calibration();
+        }
+    }
+
+    fn apply_policies(&self) {
+        let held = self.policies.current();
+        let compiled = compile_policy_patterns(&held.value);
+        let skipped = held.value.patterns.len() - compiled.len();
+        if skipped > 0 {
+            // Never fatal: one unusable pattern must not cost the other twenty.
+            modelstat_log::log_warn!(
+                "policies v{}: {skipped} pattern(s) unusable and skipped — \
+                 the floor plus the remaining {} still apply",
+                held.version,
+                compiled.len()
+            );
+        }
+        modelstat_log::log_info!(
+            "redaction augment: {} additive pattern(s) from {} v{} (the floor always applies)",
+            compiled.len(),
+            self.policies.kind(),
+            held.version
+        );
+        install_policy_patterns(compiled);
+    }
+
+    fn apply_calibration(&self) {
+        let held = self.calibration.current();
+        modelstat_log::log_info!(
+            "segmentation thresholds: {} v{} ({} min gap, {} turns, {} min, {} chars, topic > {})",
+            self.calibration.kind(),
+            held.version,
+            held.value.time_gap_ms / 60_000,
+            held.value.max_turns,
+            held.value.max_duration_ms / 60_000,
+            held.value.max_content_chars,
+            held.value.topic_threshold
+        );
+        install_calibration(held.value.clone());
+    }
 }
 
 #[cfg(test)]

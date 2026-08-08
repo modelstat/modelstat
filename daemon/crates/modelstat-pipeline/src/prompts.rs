@@ -73,6 +73,10 @@ pub const REDACT_TEMPERATURE: f64 = 0.0;
 
 // ── Segmentation constants (pipeline/index.ts, feature §18) ───────────────────
 
+// The five segmentation thresholds. These are the compiled-in DEFAULTS, not the
+// last word: the `calibration` config kind can move each of them within bounds
+// at runtime, so a boundary that turns out to be miscalibrated on real corpora
+// is a config push rather than a daemon release. See [`crate::segment::Calibration`].
 pub const SEGMENT_TIME_GAP_MS: i64 = 15 * 60_000;
 pub const SEGMENT_TOPIC_THRESHOLD: f64 = 0.35;
 pub const SEGMENT_MAX_TURNS: usize = 100;
