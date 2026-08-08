@@ -14,6 +14,7 @@ pub(crate) mod line_reader;
 pub(crate) mod util;
 
 pub mod references;
+pub mod skips;
 pub mod tool_action;
 pub mod tool_hash;
 pub mod types;
@@ -31,6 +32,7 @@ pub mod pi;
 pub mod discovery;
 
 // Flat re-exports for the common surface.
+pub use skips::{unknown_record_event, SkipLedger, UnknownRecord};
 pub use tool_action::{
     detect_script_refs, extract_local_tool_context, extract_tool_action, resolve_script_path,
     script_candidates, ToolActionInput, OTHER_BUCKET,

@@ -18,38 +18,80 @@ use serde_json::Value;
 use crate::git::{guess_repo_slug_from_path, path_guessed_git_context};
 use crate::line_reader::OffsetLines;
 use crate::references::detect_event_references;
+use crate::skips::{numeric_leaves, unknown_record_event, SkipLedger, UnknownRecord};
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
 use crate::util::slice_utf16;
 
-/// Map pi's free-form provider string onto the closed PROVIDERS enum. Substring
-/// matches (not equality) — pi sometimes records a model name in the provider slot.
-fn map_provider(raw: Option<&str>) -> &'static str {
-    let p = match raw {
-        Some(s) if !s.is_empty() => s.to_lowercase(),
-        _ => return "unknown",
-    };
-    let has = |needle: &str| p.contains(needle);
-    if has("anthropic") || has("claude") {
-        "anthropic"
-    } else if has("openai") || has("gpt") || has("codex") {
-        "openai"
-    } else if has("google") || has("gemini") {
-        "google"
-    } else if has("deepseek") {
-        "deepseek"
-    } else if has("moonshot") || has("kimi") {
-        "moonshot"
-    } else if has("mistral") {
-        "mistral"
-    } else if has("xai") || has("grok") {
-        "xai"
-    } else if has("ollama") {
-        "ollama_local"
-    } else {
-        "unknown"
+/// The provider string the transcript states, lowercased, or `"unknown"` when it
+/// states none.
+///
+/// pi is a multi-vendor harness: the set of provider names it can write is
+/// whatever its config file lists, which is open and grows without us. This used
+/// to run through a fixed table that folded every unlisted vendor to `"unknown"`
+/// — so a pi user on zhipu had every event stamped `unknown`, while the identity
+/// probe that reads the very same config emitted the key under `zhipu`, and the
+/// join that pairs a session with the account that paid for it could never
+/// match. A closed table over an open set does not merely lose detail here; it
+/// severs the two halves of the record from each other.
+///
+/// Lowercasing is the one normalisation kept, and it is forced: the identity
+/// probe lowercases the config's provider keys, and the two strings have to be
+/// comparable. `"unknown"` survives for the genuinely-absent case only — the
+/// wire's `provider` is required, so silence needs a word, and that word is not
+/// a claim about any vendor.
+fn provider_of(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// One assistant message's token counters, or an honest statement that they
+/// could not be read.
+///
+/// Three cases, and only the first two were previously distinguishable:
+///
+///   * no `usage` object at all → `(None, empty)`. The message states no usage,
+///     so the event states none either. It used to ship `{0,0,0,0,0}`, which is
+///     a claim — that this round trip cost nothing — and it is indistinguishable
+///     from a real zero. That fabricated zero is the v17 bug, and it cost a full
+///     fleet re-scan to undo.
+///   * all four counters present and numeric → `(Some, empty)`, the observed case.
+///   * a counter missing or non-numeric → `(None, numeric leaves)`. The wire's
+///     five buckets always materialise, so there is no way to say "this one
+///     field is unknown" inside them; the whole reading is withheld and every
+///     number `usage` did state rides `tokens_unmapped` instead, where it can be
+///     re-bucketed later rather than being lost behind a zero.
+///
+/// `totalTokens` is deliberately never mapped: pi's total is INCLUSIVE of the
+/// other counters and our buckets are disjoint, so adding it would double-bill.
+fn pi_token_usage(usage: &Value) -> (Option<TokenUsage>, BTreeMap<String, u64>) {
+    if usage.is_null() {
+        return (None, BTreeMap::new());
     }
+    let field = |name: &str| usage.get(name).and_then(Value::as_u64);
+    let (Some(input), Some(output), Some(cache_creation), Some(cache_read)) = (
+        field("input"),
+        field("output"),
+        field("cacheWrite"),
+        field("cacheRead"),
+    ) else {
+        return (None, numeric_leaves(usage));
+    };
+    (
+        Some(TokenUsage {
+            input,
+            output,
+            cache_creation,
+            cache_read,
+            // pi records no separate reasoning counter; 0 is the true value here,
+            // not a default for something it stated and we failed to read.
+            reasoning: 0,
+        }),
+        BTreeMap::new(),
+    )
 }
 
 /// pi session filename is `<ISO-ish-TS>_<session-uuid>.jsonl`.
@@ -103,13 +145,14 @@ fn collect_ref_text(content: &Value) -> String {
 
 pub fn parse_pi_session(ctx: &ParserContext) -> std::io::Result<ParseResult> {
     let mut sink = Sink::collect();
-    let (tool_calls, script_contexts, stats) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: sink.take_collected(),
         tool_calls,
         script_contexts,
         stats,
+        skipped_kinds: skips.into_counts(),
         source_file: ctx.source_file.clone(),
     })
 }
@@ -119,13 +162,14 @@ pub fn parse_pi_session_streaming(
     emit: &mut dyn FnMut(Vec<RawEvent>),
 ) -> std::io::Result<ParseResult> {
     let mut sink = Sink::stream(emit);
-    let (tool_calls, script_contexts, stats) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: Vec::new(),
         tool_calls,
         script_contexts,
         stats,
+        skipped_kinds: skips.into_counts(),
         source_file: ctx.source_file.clone(),
     })
 }
@@ -133,7 +177,12 @@ pub fn parse_pi_session_streaming(
 fn parse_inner(
     ctx: &ParserContext,
     sink: &mut Sink,
-) -> std::io::Result<(Vec<ToolCallDraft>, Vec<LocalToolContext>, ParseStats)> {
+) -> std::io::Result<(
+    Vec<ToolCallDraft>,
+    Vec<LocalToolContext>,
+    ParseStats,
+    SkipLedger,
+)> {
     let mut tool_calls: Vec<ToolCallDraft> = Vec::new();
     let mut script_contexts: Vec<LocalToolContext> = Vec::new();
     let mut pending_by_call_id: HashMap<String, usize> = HashMap::new();
@@ -141,6 +190,7 @@ fn parse_inner(
     let mut raw_lines: u64 = 0;
     let mut emitted: u64 = 0;
     let mut skipped: u64 = 0;
+    let mut skips = SkipLedger::default();
 
     let file = File::open(&ctx.source_file)?;
     let mut lines = OffsetLines::new(BufReader::new(file), ctx.byte_offset_start);
@@ -190,8 +240,36 @@ fn parse_inner(
             continue;
         }
 
+        // A top-level `type` nothing here models — `session` and `model_change`
+        // are handled above and `message` below.
         if kind != "message" {
-            skipped += 1;
+            skips.drop_record(&ctx.source_file, kind);
+            match (
+                session_id.clone(),
+                obj.get("timestamp").and_then(Value::as_str),
+            ) {
+                (Some(sid), Some(ts)) => {
+                    sink.push(unknown_record_event(UnknownRecord {
+                        kind,
+                        source_event_id: source_event_id(
+                            &ctx.device_id,
+                            &EventSource::File {
+                                file: &ctx.source_file,
+                                byte_offset: offset,
+                            },
+                        ),
+                        agent: "pi",
+                        provider: &provider_of(last_provider.as_deref()),
+                        session_id: sid,
+                        ts: ts.to_string(),
+                        turn_index: Some(current_turn),
+                        source_file: &ctx.source_file,
+                        source_byte_offset: Some(offset),
+                    }));
+                    emitted += 1;
+                }
+                _ => skipped += 1,
+            }
             continue;
         }
 
@@ -199,7 +277,10 @@ fn parse_inner(
         let role = message.get("role").and_then(Value::as_str);
         let ml_timestamp = obj.get("timestamp").and_then(Value::as_str);
         if role.is_none() || ml_timestamp.is_none() || session_id.is_none() {
+            // A kind we DO model, without the fields it is defined by — the same
+            // silent failure as an unknown kind, wearing a familiar label.
             skipped += 1;
+            skips.drop_record(&ctx.source_file, kind);
             continue;
         }
         let role = role.unwrap();
@@ -213,7 +294,7 @@ fn parse_inner(
             if let Some(p) = message.get("provider").and_then(Value::as_str) {
                 last_provider = Some(p.to_string());
             }
-            let provider = map_provider(
+            let provider = provider_of(
                 message
                     .get("provider")
                     .and_then(Value::as_str)
@@ -312,6 +393,10 @@ fn parse_inner(
             }
 
             let usage = message.get("usage").cloned().unwrap_or(Value::Null);
+            let (tokens, tokens_unmapped) = pi_token_usage(&usage);
+            if tokens.is_none() && !tokens_unmapped.is_empty() {
+                skips.drop_record(&ctx.source_file, "message/assistant/usage");
+            }
             let git = path_guessed_git_context(slug.clone(), None);
             sink.push(RawEvent {
                 source_event_id: event_id,
@@ -325,13 +410,8 @@ fn parse_inner(
                 parent_event_id: None,
                 cwd: cwd.clone(),
                 git,
-                tokens: Some(TokenUsage {
-                    input: usage.get("input").and_then(Value::as_u64).unwrap_or(0),
-                    output: usage.get("output").and_then(Value::as_u64).unwrap_or(0),
-                    cache_creation: usage.get("cacheWrite").and_then(Value::as_u64).unwrap_or(0),
-                    cache_read: usage.get("cacheRead").and_then(Value::as_u64).unwrap_or(0),
-                    reasoning: 0,
-                }),
+                tokens,
+                tokens_unmapped,
                 duration_ms: None,
                 tool_calls: aggregate,
                 files_touched: Vec::new(),
@@ -361,7 +441,33 @@ fn parse_inner(
             continue;
         }
 
-        // user message
+        // A role nothing here models. It used to fall into the user-message path
+        // below, which stamped `kind: "user_message"` on whatever it was — a
+        // system or tool-status role would have been filed as something a human
+        // typed, and nothing downstream could tell.
+        if role != "user" {
+            skips.drop_record(&ctx.source_file, &format!("message/{role}"));
+            sink.push(unknown_record_event(UnknownRecord {
+                kind: role,
+                source_event_id: source_event_id(
+                    &ctx.device_id,
+                    &EventSource::File {
+                        file: &ctx.source_file,
+                        byte_offset: offset,
+                    },
+                ),
+                agent: "pi",
+                provider: &provider_of(last_provider.as_deref()),
+                session_id: session_id.clone().unwrap(),
+                ts: ml_timestamp.to_string(),
+                turn_index: Some(current_turn),
+                source_file: &ctx.source_file,
+                source_byte_offset: Some(offset),
+            }));
+            emitted += 1;
+            continue;
+        }
+
         let (excerpt, content_bytes) = match extract_excerpt(&content) {
             Some((text, chars)) => (Some(text), Some(chars)),
             None => (None, None),
@@ -386,7 +492,7 @@ fn parse_inner(
             ts: ml_timestamp.to_string(),
             kind: "user_message".to_string(),
             agent: "pi".to_string(),
-            provider: map_provider(last_provider.as_deref()).to_string(),
+            provider: provider_of(last_provider.as_deref()),
             model: last_model.clone(),
             session_id: session_id.clone().unwrap(),
             turn_index: Some(current_turn),
@@ -394,6 +500,7 @@ fn parse_inner(
             cwd: cwd.clone(),
             git: None,
             tokens: None,
+            tokens_unmapped: BTreeMap::new(),
             duration_ms: None,
             tool_calls: BTreeMap::new(),
             files_touched: Vec::new(),
@@ -415,5 +522,6 @@ fn parse_inner(
             emitted_events: emitted,
             skipped,
         },
+        skips,
     ))
 }

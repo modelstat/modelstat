@@ -23,6 +23,7 @@ use sha1::{Digest, Sha1};
 use crate::git::{guess_repo_slug_from_path, path_guessed_git_context};
 use crate::line_reader::OffsetLines;
 use crate::references::detect_event_references;
+use crate::skips::{unknown_record_event, SkipLedger, UnknownRecord};
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
@@ -157,13 +158,14 @@ impl AncestorCache {
 /// Parse a Claude Code transcript, collecting events.
 pub fn parse_claude_code_jsonl(ctx: &ParserContext) -> std::io::Result<ParseResult> {
     let mut sink = Sink::collect();
-    let (tool_calls, script_contexts, stats) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: sink.take_collected(),
         tool_calls,
         script_contexts,
         stats,
+        skipped_kinds: skips.into_counts(),
         source_file: ctx.source_file.clone(),
     })
 }
@@ -174,13 +176,14 @@ pub fn parse_claude_code_jsonl_streaming(
     emit: &mut dyn FnMut(Vec<RawEvent>),
 ) -> std::io::Result<ParseResult> {
     let mut sink = Sink::stream(emit);
-    let (tool_calls, script_contexts, stats) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: Vec::new(),
         tool_calls,
         script_contexts,
         stats,
+        skipped_kinds: skips.into_counts(),
         source_file: ctx.source_file.clone(),
     })
 }
@@ -188,7 +191,12 @@ pub fn parse_claude_code_jsonl_streaming(
 fn parse_inner(
     ctx: &ParserContext,
     sink: &mut Sink,
-) -> std::io::Result<(Vec<ToolCallDraft>, Vec<LocalToolContext>, ParseStats)> {
+) -> std::io::Result<(
+    Vec<ToolCallDraft>,
+    Vec<LocalToolContext>,
+    ParseStats,
+    SkipLedger,
+)> {
     let mut tool_calls: Vec<ToolCallDraft> = Vec::new();
     let mut script_contexts: Vec<LocalToolContext> = Vec::new();
     let mut pending_by_call_id: HashMap<String, usize> = HashMap::new();
@@ -196,6 +204,7 @@ fn parse_inner(
     let mut raw_lines: u64 = 0;
     let mut emitted: u64 = 0;
     let mut skipped: u64 = 0;
+    let mut skips = SkipLedger::default();
 
     let file = File::open(&ctx.source_file)?;
     let mut lines = OffsetLines::new(BufReader::new(file), ctx.byte_offset_start);
@@ -264,6 +273,9 @@ fn parse_inner(
         };
         let kind = obj.get("type").and_then(Value::as_str).unwrap_or("");
 
+        // Modelled and declined on purpose: a queue operation is the CLI's own
+        // bookkeeping, not a turn. A DECISION, not a failure to read, so it stays
+        // out of the skip ledger — see `crate::skips`.
         if kind == "queue-operation" {
             skipped += 1;
             continue;
@@ -295,7 +307,12 @@ fn parse_inner(
             }
             let uuid = obj.get("uuid").and_then(Value::as_str);
             if uuid.is_none() || session_id.is_none() {
+                // A kind we DO model, arriving without the fields it is defined
+                // by. Ledgered under its own name: rename `uuid` upstream and
+                // every turn lands here, which is the same silent-zero-output
+                // failure as an unknown kind wearing a familiar label.
                 skipped += 1;
+                skips.drop_record(&ctx.source_file, kind);
                 continue;
             }
             let uuid = uuid.unwrap().to_string();
@@ -388,6 +405,7 @@ fn parse_inner(
                     cache_read: usage_u64(&usage, "cache_read_input_tokens"),
                     reasoning: 0,
                 }),
+                tokens_unmapped: std::collections::BTreeMap::new(),
                 duration_ms: None,
                 tool_calls: aggregate,
                 files_touched: Vec::new(),
@@ -427,7 +445,12 @@ fn parse_inner(
 
             let uuid = obj.get("uuid").and_then(Value::as_str);
             if uuid.is_none() || session_id.is_none() {
+                // A kind we DO model, arriving without the fields it is defined
+                // by. Ledgered under its own name: rename `uuid` upstream and
+                // every turn lands here, which is the same silent-zero-output
+                // failure as an unknown kind wearing a familiar label.
                 skipped += 1;
+                skips.drop_record(&ctx.source_file, kind);
                 continue;
             }
             let uuid = uuid.unwrap().to_string();
@@ -480,6 +503,7 @@ fn parse_inner(
                 cwd: cwd.clone(),
                 git: None,
                 tokens: None,
+                tokens_unmapped: std::collections::BTreeMap::new(),
                 duration_ms,
                 tool_calls: std::collections::BTreeMap::new(),
                 files_touched: Vec::new(),
@@ -539,7 +563,50 @@ fn parse_inner(
                 }
             }
         } else {
-            skipped += 1;
+            // A `type` no arm above matches. Counted AND surfaced as a minimal
+            // event, so the record is visible server-side instead of vanishing
+            // the way Cursor's moved schema did. Content stays behind — see
+            // `skips::UnknownRecord`.
+            skips.drop_record(&ctx.source_file, kind);
+            // An event needs a session and an instant, and both must be STATED
+            // rather than assumed: a record that dates itself can be placed in
+            // the conversation, and one that does not cannot. Claude Desktop's
+            // `ai-title` / `last-prompt` / `mode` lines carry no timestamp and so
+            // report only through the ledger — which is the gate working, not a
+            // gap in it.
+            let sid = session_id.clone().or_else(|| filename_session_id.clone());
+            let ts = obj.get("timestamp").and_then(Value::as_str);
+            // Resume copies duplicate every line of their ancestor, unknown ones
+            // included, so they take the same dedupe as a turn: keyed by line
+            // uuid when the ancestor is gone, dropped when it is still on disk.
+            // Without this an `attachment` would double on every `--resume`.
+            let event_id = match obj.get("uuid").and_then(Value::as_str) {
+                Some(uuid) => dedupe_id_for(&session_id, uuid, offset, &mut ancestors),
+                None => Some(source_event_id(
+                    &ctx.device_id,
+                    &EventSource::File {
+                        file: &ctx.source_file,
+                        byte_offset: offset,
+                    },
+                )),
+            };
+            match (sid, ts, event_id) {
+                (Some(sid), Some(ts), Some(event_id)) => {
+                    sink.push(unknown_record_event(UnknownRecord {
+                        kind,
+                        source_event_id: event_id,
+                        agent: &agent_name,
+                        provider: "anthropic",
+                        session_id: sid,
+                        ts: ts.to_string(),
+                        turn_index: Some(current_turn),
+                        source_file: &ctx.source_file,
+                        source_byte_offset: Some(offset),
+                    }));
+                    emitted += 1;
+                }
+                _ => skipped += 1,
+            }
         }
     }
 
@@ -551,6 +618,7 @@ fn parse_inner(
             emitted_events: emitted,
             skipped,
         },
+        skips,
     ))
 }
 

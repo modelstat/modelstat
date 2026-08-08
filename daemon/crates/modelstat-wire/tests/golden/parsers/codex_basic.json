@@ -3,6 +3,25 @@
   "sourceFile": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
   "events": [
     {
+      "source_event_id": "evt_2owq0qzhz2o1c",
+      "ts": "2026-08-05T11:58:57.508Z",
+      "kind": "task_started",
+      "agent": "codex_cli",
+      "provider": "openai",
+      "model": null,
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
+      "source_byte_offset": 503
+    },
+    {
       "source_event_id": "evt_36pa237q80av4",
       "ts": "2026-08-05T11:58:59.076Z",
       "kind": "user_message",
@@ -78,6 +97,25 @@
       "content_bytes": 91,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
       "source_byte_offset": 12697
+    },
+    {
+      "source_event_id": "evt_14p55gfuzrir",
+      "ts": "2026-08-05T11:59:04.063Z",
+      "kind": "task_complete",
+      "agent": "codex_cli",
+      "provider": "openai",
+      "model": null,
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+      "turn_index": 2,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
+      "source_byte_offset": 13546
     }
   ],
   "toolCalls": [
@@ -123,7 +161,7 @@
   ],
   "stats": {
     "rawLines": 18,
-    "emittedEvents": 3,
-    "skipped": 11
+    "emittedEvents": 5,
+    "skipped": 9
   }
 }

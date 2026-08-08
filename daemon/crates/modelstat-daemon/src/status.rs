@@ -127,6 +127,15 @@ pub struct Status {
     /// to keep it to itself, which is why the tray could count three kinds of
     /// "events" and still not answer "is anything running right now?".
     pub live: BTreeMap<String, LiveSession>,
+    /// Records no parser arm could read since daemon start, by the kind string
+    /// the source states about itself.
+    ///
+    /// Its own field rather than a `stats` counter because it is a MAP, and
+    /// because the whole point is where it goes: the heartbeat carries it, so
+    /// "kind X appeared N times" is answerable across a fleet without opening
+    /// anyone's laptop. Cursor's moved schema was findable only by ssh-ing into a
+    /// machine and reading a log, which is why it took weeks.
+    pub skipped_kinds: BTreeMap<String, u64>,
 }
 
 /// One recently-active session, as the scan observed it.
@@ -147,6 +156,13 @@ const LIVE_CAP: usize = 8;
 /// Activity older than this drops out of the ledger — "live" means minutes,
 /// not this morning.
 pub const LIVE_WINDOW_MS: i64 = 15 * 60 * 1000;
+/// How many kinds the heartbeat carries, highest count first.
+///
+/// A cap on TELEMETRY KEYS, and only that. Nothing captured is bounded by it:
+/// a transcript with hundreds of distinct unknown kinds is a pathological source,
+/// and the twenty loudest name the problem as well as all of them would while
+/// keeping the heartbeat body a fixed size.
+const HEARTBEAT_SKIPPED_KINDS_MAX: usize = 20;
 
 impl Default for Status {
     fn default() -> Self {
@@ -164,6 +180,7 @@ impl Default for Status {
             uploading: None,
             run: None,
             live: BTreeMap::new(),
+            skipped_kinds: BTreeMap::new(),
         }
     }
 }
@@ -315,6 +332,28 @@ impl Status {
         self.queue_size = size;
     }
     /// Increment a numeric stat by `n` (missing/non-numeric → starts at 0).
+    /// Fold one scan's unreadable-record tally into the lifetime one.
+    pub fn bump_skipped_kinds(&mut self, kinds: impl IntoIterator<Item = (String, u64)>) {
+        for (kind, n) in kinds {
+            *self.skipped_kinds.entry(kind).or_insert(0) += n;
+        }
+    }
+
+    /// The kinds the heartbeat carries — the loudest [`HEARTBEAT_SKIPPED_KINDS_MAX`],
+    /// highest count first, ties broken by name so the body is deterministic.
+    fn top_skipped_kinds(&self) -> BTreeMap<String, u64> {
+        if self.skipped_kinds.len() <= HEARTBEAT_SKIPPED_KINDS_MAX {
+            return self.skipped_kinds.clone();
+        }
+        let mut ranked: Vec<(&String, &u64)> = self.skipped_kinds.iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        ranked
+            .into_iter()
+            .take(HEARTBEAT_SKIPPED_KINDS_MAX)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
     pub fn bump_stat(&mut self, key: &str, n: u64) -> u64 {
         let cur = self.stats.get(key).and_then(Value::as_u64).unwrap_or(0);
         let next = cur + n;
@@ -376,6 +415,9 @@ impl Status {
             "progress_total": self.progress_total,
             "queue_size": self.queue_size,
             "stats": self.stats,
+            // Fleet-wide schema-drift telemetry: which record kinds this device
+            // could not read, and how often. See `Status::skipped_kinds`.
+            "skipped_kinds": self.top_skipped_kinds(),
             "last_event_at": self.last_event_at,
             "daemon_version": daemon_version,
             "machine_id": machine_id,
@@ -483,6 +525,40 @@ mod tests {
         let wire = heartbeat_wire_body(&snap);
         assert!(wire.get("device_id").is_none()); // heartbeat strips it
         assert_eq!(wire["status"], json!("starting"));
+    }
+
+    /// The whole point of the field: a record kind nobody modelled has to reach
+    /// the server, or finding it means ssh-ing into a laptop — which is how
+    /// Cursor's moved schema stayed invisible for weeks.
+    #[test]
+    fn the_heartbeat_carries_unreadable_record_kinds() {
+        let mut s = Status::default();
+        s.bump_skipped_kinds([("attachment".to_string(), 4), ("ai-title".to_string(), 5)]);
+        s.bump_skipped_kinds([("attachment".to_string(), 2)]);
+        let wire = heartbeat_wire_body(&s.snapshot_body(Some("dev-1"), "9.9.9", "m"));
+        assert_eq!(wire["skipped_kinds"]["attachment"], json!(6));
+        assert_eq!(wire["skipped_kinds"]["ai-title"], json!(5));
+    }
+
+    /// The cap bounds TELEMETRY KEYS, never captured data — and it keeps the
+    /// loudest kinds, which are the ones that name the problem.
+    #[test]
+    fn only_the_loudest_kinds_ride_the_heartbeat() {
+        let mut s = Status::default();
+        // 25 distinct kinds, counts 1..=25 — only the top 20 may ship.
+        for i in 1..=25u64 {
+            s.bump_skipped_kinds([(format!("kind_{i:02}"), i)]);
+        }
+        let body = s.snapshot_body(None, "9.9.9", "m");
+        let kinds = body["skipped_kinds"].as_object().unwrap();
+        assert_eq!(kinds.len(), HEARTBEAT_SKIPPED_KINDS_MAX);
+        assert_eq!(kinds["kind_25"], json!(25), "the loudest is kept");
+        assert!(
+            !kinds.contains_key("kind_05"),
+            "the quietest is dropped, not an arbitrary alphabetical slice"
+        );
+        // Nothing was lost locally — the cap is a serialization concern only.
+        assert_eq!(s.skipped_kinds.len(), 25);
     }
 
     #[test]

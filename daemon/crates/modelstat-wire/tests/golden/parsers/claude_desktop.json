@@ -24,6 +24,44 @@
       "source_byte_offset": 350
     },
     {
+      "source_event_id": "evt_1k0ynv5al2gc2",
+      "ts": "2026-06-01T12:20:19.102Z",
+      "kind": "attachment",
+      "agent": "claude_desktop",
+      "provider": "anthropic",
+      "model": null,
+      "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
+      "source_byte_offset": 1008
+    },
+    {
+      "source_event_id": "evt_1k0ynv5al5jvj",
+      "ts": "2026-06-01T12:20:19.102Z",
+      "kind": "attachment",
+      "agent": "claude_desktop",
+      "provider": "anthropic",
+      "model": null,
+      "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
+      "source_byte_offset": 5357
+    },
+    {
       "source_event_id": "evt_qxpi62hkyzgv",
       "ts": "2026-06-01T12:20:21.321Z",
       "kind": "assistant_message",
@@ -505,6 +543,44 @@
       "source_byte_offset": 51755
     },
     {
+      "source_event_id": "evt_qxpi62hnqyhu",
+      "ts": "2026-06-01T12:29:02.942Z",
+      "kind": "attachment",
+      "agent": "claude_desktop",
+      "provider": "anthropic",
+      "model": null,
+      "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
+      "turn_index": 1,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
+      "source_byte_offset": 52439
+    },
+    {
+      "source_event_id": "evt_qxpi62hnq8fj",
+      "ts": "2026-06-01T12:29:02.942Z",
+      "kind": "attachment",
+      "agent": "claude_desktop",
+      "provider": "anthropic",
+      "model": null,
+      "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
+      "turn_index": 1,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
+      "source_byte_offset": 57024
+    },
+    {
       "source_event_id": "evt_qxpi62hnmc1u",
       "ts": "2026-06-01T12:29:09.959Z",
       "kind": "assistant_message",
@@ -764,7 +840,7 @@
   "scriptContexts": [],
   "stats": {
     "rawLines": 38,
-    "emittedEvents": 21,
-    "skipped": 17
+    "emittedEvents": 25,
+    "skipped": 13
   }
 }
