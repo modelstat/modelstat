@@ -14,6 +14,8 @@
 //! - [`config`] — the mutable config/identity context (TS `state`).
 //! - [`device_api`] — register / devices-me / recover / heartbeat + the shared
 //!   retry matrix.
+//! - [`remote_config`] — the server-delivered config channel (`GET
+//!   /v1/config/{kind}`), version-gated and disk-cached.
 //!
 //! Everything is a byte-for-byte port of the TS `apps/daemon/src/*` sources so
 //! existing devices never re-enroll (feature §4, §21.9). See daemon/PARITY.md.
@@ -27,6 +29,7 @@ pub mod ingest;
 pub mod machine_key;
 pub mod paths;
 pub mod redactor_client;
+pub mod remote_config;
 pub mod state;
 pub mod timefmt;
 pub mod upload_gate;

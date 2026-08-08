@@ -1,10 +1,16 @@
-//! The `policies` config kind — a signed, ADDITIVE redaction augment layered
-//! over the compiled-in floor. Port of `packages/core/src/policies.ts`.
+//! The `policies` config kind — an ADDITIVE redaction augment layered over the
+//! compiled-in floor. Port of `packages/core/src/policies.ts`.
 //!
 //! Hard invariant, enforced by construction: a bundle can only ADD patterns.
 //! There is no field that removes, disables, or replaces the floor — the worst a
-//! validly-signed bundle can do is cause MORE redaction (feature §21.6). The
+//! bundle from the server can do is cause MORE redaction (feature §21.6). The
 //! floor in [`crate::floor`] is applied unconditionally regardless of any bundle.
+//!
+//! Trust is the TLS connection to the configured api origin, nothing more: the
+//! payload is pure data, and the only authority it has is "redact this too".
+//! That is why it needs no signature — see `modelstat_ingest::remote_config`.
+
+use std::sync::{Arc, OnceLock, RwLock};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -55,7 +61,7 @@ pub const POLICIES_BUNDLED_FALLBACK: RedactionPolicyBundle = RedactionPolicyBund
     patterns: Vec::new(),
 };
 
-/// The config-kind name (`@modelstat/remote-config` loader; feature §17.1).
+/// The config-kind name — `GET /v1/config/policies` (feature §17.1).
 pub const POLICIES_CONFIG_KIND: &str = "policies";
 
 /// A compiled additive pattern ready to run in [`crate::redact_with_remote`].
@@ -96,6 +102,45 @@ pub fn compile_policy_patterns(bundle: &RedactionPolicyBundle) -> Vec<CompiledPa
         }
     }
     out
+}
+
+// ── The process-wide augment ─────────────────────────────────────────────────
+
+/// The additive set THIS PROCESS redacts with, held next to the floor it
+/// augments rather than threaded through every caller.
+///
+/// Threading it would be the same value passed down a dozen call chains
+/// (parsers, the cloud flush, abstracts, script summaries, tool commands), and
+/// the first site that forgot the argument would ship text scrubbed by less than
+/// the policy says — a silent weakening, discoverable only by reading the
+/// leaked bytes. The floor is already process-wide state ([`crate::floor`]); the
+/// augment is part of the same commitment, so it lives in the same place and
+/// every floor call gets it for free.
+///
+/// Safe as a global precisely because it is ADDITIVE: whatever is installed, the
+/// floor still runs first and unconditionally, so the worst a wrong value can do
+/// is redact more than needed.
+fn installed() -> &'static RwLock<Arc<Vec<CompiledPattern>>> {
+    static CELL: OnceLock<RwLock<Arc<Vec<CompiledPattern>>>> = OnceLock::new();
+    CELL.get_or_init(|| RwLock::new(Arc::new(Vec::new())))
+}
+
+/// Install a compiled bundle as this process's augment. The refresh loop calls
+/// this every time a newer bundle lands; in-flight redactions keep the snapshot
+/// they started with and the next one sees the new set (the same swap semantics
+/// the daemon's model handles use).
+pub fn install_policy_patterns(patterns: Vec<CompiledPattern>) {
+    // Poison-safe: a panicked writer must not wedge every future redaction.
+    *installed().write().unwrap_or_else(|e| e.into_inner()) = Arc::new(patterns);
+}
+
+/// This process's augment. Cheap (a read lock long enough to clone an `Arc`),
+/// which is what lets [`crate::redact`] consult it per call.
+pub fn installed_policy_patterns() -> Arc<Vec<CompiledPattern>> {
+    installed()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 #[cfg(test)]
@@ -144,5 +189,100 @@ mod tests {
         let compiled = compile_policy_patterns(&bundle);
         assert_eq!(compiled.len(), 1);
         assert_eq!(compiled[0].name, "good");
+    }
+
+    // ── The additive-only proof ──────────────────────────────────────────────
+    // A bundle is data from the server. These tests are the standing evidence
+    // that the worst it can do is cause MORE redaction — that no payload,
+    // however hostile, can put a secret back on the wire.
+
+    /// A synthetic key that the compiled floor catches on its own. Split so the
+    /// committed source matches no secret scanner.
+    fn floored_secret() -> String {
+        concat!("use sk-ant-", "api03-abcdefghijklmnopqrstuvwxyz0123456789").to_string()
+    }
+
+    fn bundle(patterns: Vec<RedactionPattern>) -> RedactionPolicyBundle {
+        RedactionPolicyBundle {
+            version: 99,
+            patterns,
+        }
+    }
+
+    fn pattern(name: &str, regex: &str) -> RedactionPattern {
+        RedactionPattern {
+            name: name.into(),
+            regex: regex.into(),
+            flags: None,
+        }
+    }
+
+    #[test]
+    fn no_bundle_can_weaken_the_floor() {
+        let secret = floored_secret();
+        // Every shape of "make the floor stop working" a payload could attempt:
+        // say nothing; try to match the whole text away; try to rewrite the
+        // placeholder the floor just wrote; claim the floor's own pattern name.
+        for hostile in [
+            vec![],
+            vec![pattern("swallow_everything", "[\\s\\S]*")],
+            vec![pattern("unredact", "\\[REDACTED:anthropic_key\\]")],
+            vec![pattern("anthropic_key", "nothing_of_the_sort")],
+        ] {
+            let compiled = compile_policy_patterns(&bundle(hostile));
+            let out = crate::redact_with_remote(&secret, None, &compiled);
+            assert!(
+                !out.text.contains("sk-ant-"),
+                "the floor must still fire: {}",
+                out.text
+            );
+            assert!(out.counts.secrets_found >= 1);
+        }
+    }
+
+    #[test]
+    fn a_bundle_only_ever_adds() {
+        // Text the floor alone leaves untouched, plus a pattern for it.
+        let text = "deploy token acme_0123456789abcdefghij";
+        let plain = crate::redact_with_remote(text, None, &[]);
+        assert_eq!(plain.text, text);
+        assert_eq!(plain.counts.secrets_found, 0);
+
+        let compiled =
+            compile_policy_patterns(&bundle(vec![pattern("acme_token", "acme_[a-z0-9]{20}")]));
+        let augmented = crate::redact_with_remote(text, None, &compiled);
+        assert!(augmented.text.contains("[REDACTED:acme_token]"));
+        assert_eq!(augmented.counts.secrets_found, 1);
+    }
+
+    #[test]
+    fn the_installed_set_is_what_redact_applies() {
+        let _g = crate::test_policy_lock();
+        // The installed set is process-wide, and this crate's other tests call
+        // `redact()` on their own threads. A probe pattern that matches nothing
+        // but this test's own text keeps that harmless — which is itself the
+        // additive property under test.
+        let text = "probe zzprobe_000111222333";
+        install_policy_patterns(Vec::new());
+        assert_eq!(crate::redact(text, None).text, text);
+
+        install_policy_patterns(compile_policy_patterns(&bundle(vec![pattern(
+            "zzprobe",
+            "zzprobe_[0-9]{12}",
+        )])));
+        assert!(crate::redact(text, None)
+            .text
+            .contains("[REDACTED:zzprobe]"));
+        // The floor is untouched by having an augment installed.
+        assert!(!crate::redact(&floored_secret(), None)
+            .text
+            .contains("sk-ant-"));
+
+        // …and uninstalling leaves the floor exactly as it was.
+        install_policy_patterns(Vec::new());
+        assert_eq!(crate::redact(text, None).text, text);
+        assert!(!crate::redact(&floored_secret(), None)
+            .text
+            .contains("sk-ant-"));
     }
 }
