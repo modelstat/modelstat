@@ -28,6 +28,17 @@ pub struct NerToken {
 /// [`ner_active`] then reports the layer as down (fail-closed for egress).
 pub trait NerModel {
     fn classify(&self, text: &str) -> Option<Vec<NerToken>>;
+
+    /// One answer per text — or `None` if ANY text could not be answered,
+    /// because the callers that batch (a flush's worth of turns) hold
+    /// all-or-nothing anyway: a flush with one unclassifiable turn does not
+    /// ship its other turns around it.
+    ///
+    /// The default is the sequential loop every in-process model wants;
+    /// network-backed models override it to put many texts in one request.
+    fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<NerToken>>> {
+        texts.iter().map(|t| self.classify(t)).collect()
+    }
 }
 
 /// The fail-closed default: no NER model. Redaction is a pass-through and
@@ -123,6 +134,33 @@ pub fn ner_redact<M: NerModel>(model: &M, text: &str) -> NerRedaction {
         text: text.to_string(),
         counts: BTreeMap::new(),
     })
+}
+
+/// [`ner_redact_checked`] over a batch: one redaction per text, or `None` when
+/// any text went unanswered. Empty texts skip the model (as the single-text
+/// path does), so a batch's answers are element-for-element identical to the
+/// per-text ones — only the number of model round-trips changes.
+pub fn ner_redact_checked_many<M: NerModel>(
+    model: &M,
+    texts: &[String],
+) -> Option<Vec<NerRedaction>> {
+    let ask: Vec<String> = texts.iter().filter(|t| !t.is_empty()).cloned().collect();
+    let mut answers = model.classify_many(&ask)?.into_iter();
+    let out = texts
+        .iter()
+        .map(|t| {
+            if t.is_empty() {
+                NerRedaction {
+                    text: String::new(),
+                    counts: BTreeMap::new(),
+                }
+            } else {
+                // classify_many answered every asked text (its contract), in order.
+                redact_spans(t, answers.next().expect("one answer per asked text"))
+            }
+        })
+        .collect();
+    Some(out)
 }
 
 /// Splice `[REDACTED:<TYPE>]` over every entity span the model named.

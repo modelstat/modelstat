@@ -20,14 +20,19 @@ use crate::paths::{ensure_home, home_path};
 /// in EVERY mode; only the summarisation LOCATION differs.
 pub const SUMMARIZER_MODES: [&str; 3] = ["cloud", "local", "self-hosted"];
 
-/// Where REDACTION runs — a separate axis from where summarisation runs, because
-/// the two questions are separate: most people want their turns scrubbed on their
-/// own machine and summarised by us. Same three values, different default.
+/// Where layer-2 REDACTION (PII span classification) runs — a separate axis from
+/// where summarisation runs, because the two questions are separate. The layer-1
+/// secret floor is NOT on this axis: it runs on this machine in every mode and
+/// nothing can move it.
 pub const REDACTOR_MODES: [&str; 3] = ["local", "cloud", "self-hosted"];
 
-/// On THIS machine, always. Scrubbing is the one step whose whole value is that it
-/// happens before anything leaves, so the default cannot be anywhere else.
-pub const DEFAULT_REDACTOR_MODE: &str = "local";
+/// Cloud, like the summariser: the install default trades the on-device model
+/// (~900 MB download, hours of CPU on a backfill) for classifying floor-scrubbed
+/// text on modelstat's servers. What leaves the box in cloud mode has already
+/// been through the deterministic floor — secrets, emails, key-shaped blobs and
+/// home paths are gone before any bytes move. `modelstat redactor local` opts a
+/// device out entirely; that explicit choice persists (the default does not).
+pub const DEFAULT_REDACTOR_MODE: &str = "cloud";
 
 /// The install default: cloud (no local model, server-side summarisation).
 pub const DEFAULT_SUMMARIZER_MODE: &str = "cloud";
@@ -79,9 +84,14 @@ pub struct RuntimeState {
     pub summarizer_mode: String,
     /// Written only once someone moves OFF the default, so a state file from an
     /// older daemon still re-serializes byte-identically (the v16 golden proves
-    /// it). Absent means `local`, which is what absent has always meant here.
+    /// it). Absent means the DEFAULT — which is `cloud` now; an explicit `local`
+    /// is the choice that must survive every upgrade, and it always serializes.
     #[serde(skip_serializing_if = "is_default_redactor")]
     pub redactor_mode: String,
+    /// The self-hosted redactor endpoint (empty unless someone set one) — the
+    /// redactor twin of `self_hosted_url`, which stays the SUMMARISER's.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub redactor_url: String,
     pub self_hosted_url: String,
 }
 
@@ -98,6 +108,7 @@ impl Default for RuntimeState {
             reship_state: json!({}),
             summarizer_mode: DEFAULT_SUMMARIZER_MODE.to_string(),
             redactor_mode: DEFAULT_REDACTOR_MODE.to_string(),
+            redactor_url: String::new(),
             self_hosted_url: String::new(),
         }
     }
@@ -120,6 +131,7 @@ struct PartialState {
     reship_state: Option<Value>,
     summarizer_mode: Option<String>,
     redactor_mode: Option<String>,
+    redactor_url: Option<String>,
     self_hosted_url: Option<String>,
 }
 
@@ -154,6 +166,7 @@ pub fn load_state() -> RuntimeState {
         redactor_mode: parse_redactor_mode(obj.redactor_mode.as_deref())
             .unwrap_or(DEFAULT_REDACTOR_MODE)
             .to_string(),
+        redactor_url: obj.redactor_url.unwrap_or(d.redactor_url),
         summarizer_mode: parse_summarizer_mode(obj.summarizer_mode.as_deref())
             .unwrap_or(DEFAULT_SUMMARIZER_MODE)
             .to_string(),
@@ -200,6 +213,16 @@ pub fn get_redactor_mode() -> String {
 pub fn set_redactor_mode(v: &str) -> std::io::Result<()> {
     let mut s = load_state();
     s.redactor_mode = v.to_string();
+    save_state(&s)
+}
+
+/// The stored self-hosted REDACTOR endpoint (empty unless someone set one).
+pub fn get_redactor_url() -> String {
+    load_state().redactor_url
+}
+pub fn set_redactor_url(url: &str) -> std::io::Result<()> {
+    let mut s = load_state();
+    s.redactor_url = url.to_string();
     save_state(&s)
 }
 

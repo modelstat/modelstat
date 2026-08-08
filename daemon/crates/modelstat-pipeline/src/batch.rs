@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use modelstat_parsers::ToolCallDraft;
-use modelstat_redact::{ner_active, ner_redact_checked, redact, NerModel};
+use modelstat_redact::{ner_active, ner_redact_checked_many, redact, NerModel};
 use modelstat_wire::{RawEvent, Segment, ToolCallWire};
 
 /// Crockford base32 — the ULID alphabet.
@@ -107,29 +107,50 @@ pub fn attach_segment_ids_by_map(
 /// carries paths, hostnames and the occasional pasted token — so "could not read
 /// it" cannot mean "send it as-is".
 pub fn enrich_tool_call_redaction<N: NerModel>(drafts: &mut [ToolCallDraft], ner: &N) -> bool {
-    let mut cache: HashMap<String, String> = HashMap::new();
+    // Distinct commands first, classified as ONE batch: a repeated command is
+    // classified once (as before), and a remote redactor sees one request per
+    // flush instead of one per command.
+    let mut distinct: Vec<String> = Vec::new();
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    for draft in drafts.iter() {
+        let Some(cmd) = draft
+            .action
+            .as_ref()
+            .and_then(|a| a.command_redacted.as_deref())
+            .filter(|c| !c.is_empty())
+        else {
+            continue;
+        };
+        if seen.insert(cmd.to_string(), ()).is_none() {
+            distinct.push(cmd.to_string());
+        }
+    }
+    if distinct.is_empty() {
+        return true;
+    }
+    let Some(passes) = ner_redact_checked_many(ner, &distinct) else {
+        modelstat_log::log_warn!(
+            "redactor could not classify {} distinct tool commands — holding",
+            distinct.len()
+        );
+        return false;
+    };
+    let deep: HashMap<&str, &str> = distinct
+        .iter()
+        .zip(&passes)
+        .map(|(cmd, pass)| (cmd.as_str(), pass.text.as_str()))
+        .collect();
     for draft in drafts.iter_mut() {
         let Some(action) = draft.action.as_mut() else {
             continue;
         };
-        let cmd = match action.command_redacted.as_deref().filter(|c| !c.is_empty()) {
-            Some(c) => c.to_string(),
-            None => continue,
-        };
-        let deep = if let Some(hit) = cache.get(&cmd) {
-            hit.clone()
-        } else {
-            let Some(pass) = ner_redact_checked(ner, &cmd) else {
-                modelstat_log::log_warn!(
-                    "redactor could not classify a {}-char tool command — holding",
-                    cmd.len()
-                );
-                return false;
-            };
-            cache.insert(cmd, pass.text.clone());
-            pass.text
-        };
-        action.command_redacted = Some(deep);
+        if let Some(hit) = action
+            .command_redacted
+            .as_deref()
+            .and_then(|c| deep.get(c).copied())
+        {
+            action.command_redacted = Some(hit.to_string());
+        }
     }
     true
 }
@@ -215,35 +236,47 @@ pub fn prepare_cloud_raw_events<N: NerModel>(
     // turn that failed has NOT been scrubbed, and shipping it would be exactly the
     // egress the fail-closed rule exists to prevent — so the whole flush holds and
     // retries, and nothing is lost.
-    let mut redacted = Vec::with_capacity(events.len());
-    for e in events {
+    //
+    // The floor runs turn by turn; classification runs as ONE batch over the
+    // floored texts (`ner_redact_checked_many`). Element-for-element the answers
+    // are identical to the per-turn calls — batching only changes how many
+    // round-trips a remote redactor pays.
+    let mut floored_texts: Vec<String> = Vec::new();
+    let mut pending: Vec<(usize, modelstat_redact::RedactionCounts)> = Vec::new();
+    for (i, e) in events.iter().enumerate() {
         let Some(excerpt) = e.content_excerpt.as_deref().filter(|x| !x.is_empty()) else {
-            redacted.push(e.clone());
             continue;
         };
         let floor = redact(excerpt, None);
-        let floored = floor.text;
-        let Some(pass) = ner_redact_checked(ner, &floored) else {
+        floored_texts.push(floor.text);
+        pending.push((i, floor.counts));
+    }
+    let passes = if floored_texts.is_empty() {
+        Vec::new()
+    } else {
+        let Some(p) = ner_redact_checked_many(ner, &floored_texts) else {
             modelstat_log::log_warn!(
-                "NER could not classify a {}-char turn — holding this flush rather \
-                 than shipping it unscrubbed",
-                floored.len()
+                "NER could not classify a flush of {} turns ({} chars) — holding \
+                 rather than shipping anything unscrubbed",
+                floored_texts.len(),
+                floored_texts.iter().map(|t| t.len()).sum::<usize>()
             );
             return None;
         };
+        p
+    };
+    let mut redacted: Vec<RawEvent> = events.to_vec();
+    for ((i, floor_counts), pass) in pending.into_iter().zip(passes) {
         // Counted HERE, at the only place that knows what was removed. Cloud mode
         // ships raw events and no segments, so the segment-borne `RedactionReport`
         // never applied to it — every count computed on this path used to be thrown
         // away, which is why "was a secret redacted in this session?" had no answer
         // for essentially all production traffic.
-        let counts = redaction_counts(&floor.counts, &pass.counts);
-        if pass.text == excerpt {
-            redacted.push(e.clone());
-        } else {
-            let mut ev = e.clone();
-            ev.content_excerpt = Some(pass.text);
-            ev.redactions = counts;
-            redacted.push(ev);
+        let counts = redaction_counts(&floor_counts, &pass.counts);
+        let unchanged = events[i].content_excerpt.as_deref() == Some(pass.text.as_str());
+        if !unchanged {
+            redacted[i].content_excerpt = Some(pass.text);
+            redacted[i].redactions = counts;
         }
     }
     if !drafts.is_empty() && !enrich_tool_call_redaction(drafts, ner) {

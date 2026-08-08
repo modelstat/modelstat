@@ -180,10 +180,10 @@ impl Config {
 
     // ── Summarizer mode / self-hosted URL ───────────────────────────────
 
-    /// The effective REDACTOR mode — where turns get scrubbed.
+    /// The effective REDACTOR mode — where layer-2 span classification runs.
     /// `MODELSTAT_REDACTOR_MODE` overrides the stored choice, like its summariser
-    /// twin. Independent on purpose: the common shape is scrub here, summarise
-    /// there, and one setting could not express it.
+    /// twin. Independent on purpose: the two questions are separate, and one
+    /// setting could not express scrub-here-summarise-there.
     pub fn redactor_mode(&self) -> String {
         if let Some(m) =
             state::parse_redactor_mode(std::env::var("MODELSTAT_REDACTOR_MODE").ok().as_deref())
@@ -193,10 +193,32 @@ impl Config {
         state::get_redactor_mode()
     }
 
-    /// True when the redactor scrubs on THIS machine — the only mode where nothing
-    /// unscrubbed can leave, and the reason it is the default.
+    /// True when `MODELSTAT_REDACTOR_MODE` is masking the stored choice — lets
+    /// `redactor`/`status` warn about it, like the summariser twin.
+    pub fn redactor_mode_is_env_overridden(&self) -> bool {
+        state::parse_redactor_mode(std::env::var("MODELSTAT_REDACTOR_MODE").ok().as_deref())
+            .is_some()
+    }
+
+    /// True when layer-2 span classification runs on THIS machine. The privacy
+    /// opt-out, not the default: in every mode the layer-1 floor has already
+    /// scrubbed secrets on-device, but only `local` keeps even the floor-scrubbed
+    /// text from leaving the box before it is fully redacted.
     pub fn redacts_locally(&self) -> bool {
         self.redactor_mode() == "local"
+    }
+
+    /// The self-hosted REDACTOR endpoint: `MODELSTAT_REDACTOR_URL` overrides the
+    /// stored value. Separate from [`Self::self_hosted_url`], which names the
+    /// summariser engine — one org may host either, or both, on different boxes.
+    pub fn redactor_url(&self) -> String {
+        if let Ok(v) = std::env::var("MODELSTAT_REDACTOR_URL") {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        state::get_redactor_url()
     }
 
     /// The effective summarizer mode. `MODELSTAT_SUMMARIZER_MODE` overrides the

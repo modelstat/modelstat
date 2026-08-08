@@ -17,12 +17,14 @@ pub mod policy;
 #[cfg(feature = "onnx")]
 pub mod privacy_filter;
 mod redact;
+pub mod remote;
 #[cfg(feature = "cache")]
 pub mod span_cache;
 
 pub use floor::FLOOR_REPLACEMENT_TEMPLATES;
 pub use ner::{
-    ner_active, ner_redact, ner_redact_checked, NerModel, NerRedaction, NerToken, UnavailableNer,
+    ner_active, ner_redact, ner_redact_checked, ner_redact_checked_many, NerModel, NerRedaction,
+    NerToken, UnavailableNer,
 };
 pub use policy::{
     compile_policy_patterns, CompiledPattern, RedactionPattern, RedactionPolicyBundle,
