@@ -77,6 +77,10 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     // stray line lands in `out.log` undated and unattributable.
     modelstat_log::init_service();
 
+    // ── Stand aside for whatever the user is actually doing ─────────────────
+    // Before any work is scheduled, so the very first backfill is already polite.
+    crate::priority::run_in_background();
+
     // ── Enrollment guard ────────────────────────────────────────────────────
     let (Some(_bearer), Some(device_id)) = (config.bearer(), config.device_id()) else {
         modelstat_log::log_error!(
@@ -117,7 +121,22 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
 
     // ── Boot ────────────────────────────────────────────────────────────────
     let machine_id = modelstat_ingest::intended_device_uuid();
-    let daemon = Daemon::build(config.clone(), device_id.clone(), machine_id);
+    let daemon = match Daemon::build(config.clone(), device_id.clone(), machine_id) {
+        Ok(d) => d,
+        // No spool means nowhere durable to put a redacted batch. Refusing to
+        // start is the honest outcome: running would either drop data or redo the
+        // expensive redaction pass forever.
+        Err(e) => {
+            modelstat_log::log_error!(
+                "could not open the upload spool at {}: {e} — the daemon cannot run \
+                 without somewhere durable to queue redacted batches. Check the \
+                 directory's permissions and free disk space.",
+                home_path("spool").display()
+            );
+            remove_lock_if_owned(&lock_path, std::process::id() as i64);
+            return ExitCode::from(1);
+        }
+    };
     daemon.with_status(|s| s.set_phase(Phase::Starting, "Booting"));
     // Trim runaway logs before anything else writes to them.
     rotate_runaway_logs();
@@ -178,6 +197,17 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
         tokio::spawn(drain_loop(daemon.clone()));
     }
 
+    // ── The spool drain — the only thing that POSTs to /v1/ingest ────────────
+    // Started BEFORE the first scan, on purpose: a previous run may have left
+    // redacted batches parked (that is the whole point of them being durable), and
+    // they should go out the moment the network is available rather than waiting
+    // for this boot's scan to produce something new.
+    let upload_task = tokio::spawn(crate::uploader::run_drain_loop(
+        daemon.spool.clone(),
+        daemon.api.clone(),
+        crate::runtime::UploadStatusObserver::new(daemon.status.clone(), daemon.state.clone()),
+    ));
+
     // ── Reconcile the processing-pipeline version (wipe cursors on a bump) ────
     {
         let mut state = daemon.state.lock().await;
@@ -216,6 +246,9 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
             // The winner runs its own heal; two processes downloading into the
             // same cache dir would race on the `.partial` files.
             heal_task.abort();
+            // Likewise the spool: it is a shared directory, and the winner is
+            // already draining it. Two uploaders would double-POST every batch.
+            upload_task.abort();
             if let Some(r) = &receiver {
                 r.abort();
             }
@@ -261,6 +294,21 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     heartbeat_task.abort();
     mirror_task.abort();
     heal_task.abort();
+    // The uploader ran throughout the drain above, so the last scan's batches had
+    // their chance to go out. Whatever is still spooled stays spooled: it is
+    // fsynced, and the next boot ships it without re-redacting a single turn.
+    // Aborting mid-POST is safe for the same reason — an unacknowledged batch is
+    // simply re-sent and deduped by id.
+    upload_task.abort();
+    let spooled = daemon.spool.depth().unwrap_or_default();
+    if spooled.batches > 0 {
+        modelstat_log::log_info!(
+            "{} redacted batch(es) still queued ({} MB) — they will be sent on the \
+             next start, with no reprocessing",
+            spooled.batches,
+            spooled.bytes / (1024 * 1024)
+        );
+    }
     daemon.with_status(|s| s.set_phase(Phase::Offline, "Stopped"));
     post_heartbeat_now(&daemon, None).await;
     let snap = daemon.with_status(|s| {
@@ -283,6 +331,17 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
 /// must not touch a NER handle that is already the real thing (rebuilding it
 /// would re-mmap ~430 MB for nothing).
 async fn heal_models(daemon: Arc<Daemon>) {
+    // Sweep out the weights of models we no longer load, first — this is where a
+    // superseded checkpoint's several hundred MB finally leave the disk, and doing
+    // it before the download means a machine that is short on space has the room.
+    let pruned = crate::engine::prune_stale_models();
+    if !pruned.is_empty() {
+        modelstat_log::log_info!(
+            "removed unused model cache(s): {} — superseded by the current redactor \
+             / embedder and never read again",
+            pruned.join(", ")
+        );
+    }
     for entry in crate::engine::heal_missing_models().await {
         // Exhaustive by design — a new ModelSlot variant fails to compile here
         // until it is given a loader.

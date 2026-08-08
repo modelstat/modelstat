@@ -1,9 +1,8 @@
-//! Concrete adapters wiring the scan + reconcile SEAMS to the real
-//! `modelstat_ingest::DeviceApi`. The daemon-main loop constructs a `DeviceApi`
-//! and hands it to `run_scan_over_jobs` (as a [`BatchUploader`]) and
-//! `reconcile_backfill` (as a [`BackfillDigest`]); the seams stay generic +
-//! fake-testable, these are the production impls. Both reuse `DeviceApi`'s
-//! already-tested HTTP methods (`upload_batch` never-drop matrix,
+//! Concrete adapters wiring the daemon's SEAMS to the real world: the scan's
+//! [`BatchSink`] onto the on-disk [`Spool`], the uploader's [`BatchUploader`] and
+//! reconcile's [`BackfillDigest`] onto `modelstat_ingest::DeviceApi`. The seams
+//! stay generic + fake-testable; these are the production impls. They reuse
+//! `DeviceApi`'s already-tested HTTP methods (`upload_batch` never-drop matrix,
 //! `authed_json_get` SPA-safe GET), so the only new logic — the result mapping +
 //! URL building — is factored into pure helpers with unit tests.
 
@@ -15,18 +14,42 @@ use modelstat_receiver::PipelineRunner;
 use modelstat_redact::NerModel;
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
 
+use crate::flush::PreparedBatch;
 use crate::reconcile::{BackfillDaySessions, BackfillDays, BackfillDigest};
-use crate::scan::{BatchUploader, Hold};
+use crate::scan::{BatchSink, Hold};
+use crate::spool::{Spool, SpoolError};
+use crate::uploader::{BatchUploader, Hold as UploadHold};
 
-/// Map an `upload_batch` result to the never-drop outcome the scan loop expects:
-/// a confirmed commit → the server-accepted count; anything else → HOLD (the
-/// cursor stays put, the batch re-ships next cycle). The reason is logged loudly.
-fn upload_outcome(result: UploadResult) -> Result<u64, Hold> {
+/// Map an `upload_batch` result to the never-drop outcome the drain expects: a
+/// confirmed commit → the server-accepted count; anything else → HOLD (the
+/// spooled file stays put and the next pass retries it). Logged loudly.
+fn upload_outcome(result: UploadResult) -> Result<u64, UploadHold> {
     match result {
         UploadResult::Commit(resp) => Ok(resp.accepted),
         UploadResult::Hold(reason) => {
             modelstat_log::log_warn!("batch upload held — {reason}");
-            Err(Hold)
+            Err(UploadHold)
+        }
+    }
+}
+
+impl BatchSink for Spool {
+    fn accept(&self, batch: &PreparedBatch) -> Result<(), Hold> {
+        match self.push(&batch.batch, batch.raw, batch.segment_count) {
+            Ok(_) => Ok(()),
+            // Backpressure, not corruption: the scan stops advancing cursors, the
+            // transcripts stay unread on disk, and the next cycle picks up exactly
+            // where this one stopped once the uploader has drained something.
+            Err(e @ SpoolError::Full { .. }) => {
+                modelstat_log::log_warn!("{e} — pausing the scan until the queue drains");
+                Err(Hold)
+            }
+            // A real fault. Loud, and the scan stops rather than advance a cursor
+            // past events it cannot prove are safe anywhere.
+            Err(e @ SpoolError::Io(_)) => {
+                modelstat_log::log_error!("{e} — scanning is paused; nothing has been lost");
+                Err(Hold)
+            }
         }
     }
 }
@@ -43,7 +66,7 @@ fn backfill_url(api_url: &str, day: Option<&str>) -> String {
 }
 
 impl BatchUploader for DeviceApi {
-    async fn upload(&self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold> {
+    async fn upload(&self, batch: &IngestBatch, raw: bool) -> Result<u64, UploadHold> {
         upload_outcome(self.upload_batch(batch, raw).await)
     }
 }
@@ -177,8 +200,40 @@ mod tests {
         assert_eq!(upload_outcome(commit), Ok(7));
         assert_eq!(
             upload_outcome(UploadResult::Hold("offline".into())),
-            Err(Hold)
+            Err(UploadHold)
         );
+    }
+
+    /// The spool is the scan's sink, and a full one must PUSH BACK rather than
+    /// drop: the batch is refused, the caller holds, and the events are still in
+    /// the transcript waiting to be re-read.
+    #[test]
+    fn a_full_spool_holds_the_scan_instead_of_losing_the_batch() {
+        let dir =
+            std::env::temp_dir().join(format!("modelstat-sink-{}-{}", std::process::id(), "full"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let spool = Spool::open(&dir, 1).unwrap(); // cap below one batch
+        let prepared = PreparedBatch {
+            batch: IngestBatch {
+                batch_id: "b1".into(),
+                device_id: "dev".into(),
+                daemon_version: "t".into(),
+                events: vec![ev("s1", "2026-07-16T10:00:00.000Z")],
+                segments: Vec::new(),
+                tool_calls: Vec::new(),
+                session_installs: None,
+                session_titles: None,
+                session_metadata: None,
+                summarizer_mode: None,
+                redactor_mode: None,
+            },
+            raw: true,
+            segment_count: 0,
+        };
+        // The first fits (the cap is only consulted before a write).
+        assert_eq!(spool.accept(&prepared), Ok(()));
+        assert_eq!(spool.accept(&prepared), Err(Hold));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

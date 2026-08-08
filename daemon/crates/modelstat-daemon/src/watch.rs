@@ -105,6 +105,17 @@ pub async fn watch_forever(daemon: std::sync::Arc<crate::runtime::Daemon>) {
         .collect::<Vec<_>>()
         .join(", ");
     modelstat_log::log_info!("watching: {joined}");
+
+    // A foreground watcher is still a collector: scanning only redacts and parks
+    // batches in the spool, so without this loop nothing it produced would ever be
+    // sent. Started before the first scan so anything a previous run left queued
+    // goes out immediately.
+    tokio::spawn(crate::uploader::run_drain_loop(
+        daemon.spool.clone(),
+        daemon.api.clone(),
+        crate::runtime::UploadStatusObserver::new(daemon.status.clone(), daemon.state.clone()),
+    ));
+
     crate::runtime::run_scan_cycle(daemon.clone(), "startup".to_string()).await;
 
     // notify's callback runs on its own thread; bridge to async via a channel.

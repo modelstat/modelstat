@@ -288,9 +288,31 @@ pub async fn cmd_sync(config: Arc<Config>, args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let machine_id = modelstat_ingest::intended_device_uuid();
-    let daemon = Daemon::build(config, device_id, machine_id);
-    scan_session(daemon, session_ids, file).await;
-    println!("✓ scan complete");
+    let daemon = match Daemon::build(config, device_id, machine_id) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("✗ could not open the upload spool: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    scan_session(daemon.clone(), session_ids, file).await;
+    // Scanning only redacts and queues. In the daemon a background loop does the
+    // sending; here there is no daemon (that is why we are on the cold path), so
+    // this process has to ship what it just produced or it would go nowhere.
+    let sent =
+        modelstat_daemon::uploader::drain_until_quiet(&daemon.spool, &*daemon.api, &mut ()).await;
+    if sent.held {
+        // Loud, and specific about what it means: the work is safe, it just has
+        // not left yet.
+        eprintln!(
+            "✗ scan complete, but the server would not take {} queued batch(es) — \
+             they are saved on disk and will be sent by the daemon (or the next \
+             `modelstat sync`) with no reprocessing",
+            sent.depth.batches
+        );
+        return ExitCode::FAILURE;
+    }
+    println!("✓ scan complete — {} events uploaded", sent.events_uploaded);
     ExitCode::SUCCESS
 }
 
@@ -305,7 +327,13 @@ pub async fn cmd_watch(config: Arc<Config>) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let machine_id = modelstat_ingest::intended_device_uuid();
-    let daemon = Daemon::build(config, device_id, machine_id);
+    let daemon = match Daemon::build(config, device_id, machine_id) {
+        Ok(d) => d,
+        Err(e) => {
+            modelstat_log::log_error!("could not open the upload spool: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     modelstat_daemon::watch::watch_forever(daemon).await;
     ExitCode::SUCCESS
 }

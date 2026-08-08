@@ -1,15 +1,21 @@
-//! The scan loop — a port of `apps/daemon/src/scan.ts`'s `runScanOverJobs`
-//! (the shared engine behind both `scanAll` and `scanSession`). Given an ordered
-//! job list it parses each transcript, buffers the events, composes batches via
-//! [`build_flush_batches`], ships them, and advances each file's cursor **only
-//! after a confirmed upload** — so a mid-scan failure re-parses the same files
-//! next cycle and retries (idempotent server-side). Good data is never dropped.
+//! The scan loop — the shared engine behind both `scanAll` and `scanSession`.
+//! Given an ordered job list it parses each transcript, buffers the events,
+//! composes batches via [`build_flush_batches`], parks them in the durable
+//! [`crate::spool`], and advances each file's cursor **only once its batch is on
+//! the platter** — so a mid-scan failure re-parses the same files next cycle.
+//! Good data is never dropped.
+//!
+//! The cursor rule used to be "only after a confirmed upload", which coupled the
+//! expensive half of the daemon (redaction) to the unreliable half (the network):
+//! every held upload threw away finished work and made the next cycle redo it.
+//! Durability now means "fsynced locally", and [`crate::uploader`] carries it the
+//! rest of the way, retrying forever without re-running a single model pass.
 //!
 //! Everything the loop does I/O with is an injected seam (`parse`, `checksum`,
-//! `correct_events`, `enrich_scripts`, the [`BatchUploader`], the
-//! [`CursorStore`]) so the whole state machine is unit-testable against a fake
-//! engine + fake server without touching a real `.jsonl` or the network. The
-//! daemon-main wires the real adapters (the [`crate::flush`] doc names them).
+//! `correct_events`, `enrich_scripts`, the [`BatchSink`], the [`CursorStore`]) so
+//! the whole state machine is unit-testable against a fake engine + fake sink
+//! without touching a real `.jsonl` or the network. The daemon-main wires the real
+//! adapters (the [`crate::flush`] doc names them).
 
 use std::collections::BTreeMap;
 
@@ -18,9 +24,7 @@ use modelstat_ingest::state::FileCursor;
 use modelstat_parsers::{GitEnrichment, ParseResult, ToolCallDraft};
 use modelstat_pipeline::{Embedder, LinkExtractor, ResilientSummarizer, Summarizer};
 use modelstat_redact::NerModel;
-use modelstat_wire::{IngestBatch, RawEvent, Segment};
-
-use futures_util::StreamExt;
+use modelstat_wire::{RawEvent, Segment};
 
 use crate::discover_jobs::{ParserKind, ScanJob};
 use crate::flush::{build_flush_batches, FlushOutcome, PreparedBatch};
@@ -52,21 +56,6 @@ pub const MAX_FILES_PER_SCAN: usize = 12;
 /// deterministic and the server upserts — so a short overlap buys self-healing.
 const RESHIP_LAG_MS: i64 = 10 * 60 * 1000;
 
-/// Most upload futures alive at once. A ceiling, not a policy — the uploader's
-/// adaptive gate decides how many actually run, and it can never exceed its own
-/// `MAX_CONCURRENCY`. Matching that here keeps this from being the binding
-/// constraint while still bounding the futures a flush allocates.
-const UPLOAD_FANOUT: usize = modelstat_ingest::upload_gate::MAX_CONCURRENCY;
-
-/// Flushes allowed on the wire at once while the parser keeps reading.
-///
-/// This is the memory dial. A flush is bounded by [`BATCH_MAX_EVENTS`], so the
-/// scan now holds up to this many batches' worth of prepared events instead of
-/// one — the price of never leaving the wire idle during a parse. Matched to the
-/// upload gate's ceiling because that is the most the server will accept
-/// concurrently anyway; more in flight here would only queue.
-const MAX_INFLIGHT_FLUSHES: usize = modelstat_ingest::upload_gate::MAX_CONCURRENCY;
-
 const STREAM_CHANNEL_CAP: usize = 4;
 
 /// Per-cycle scan bounds. `scan_all` passes `{ Some(MAX_FILES_PER_SCAN), false }`;
@@ -87,14 +76,19 @@ pub struct RunScanOptions {
 pub struct ScanTallies {
     pub files_scanned: usize,
     pub files_unchanged: usize,
-    pub batches_uploaded: u64,
-    pub events_uploaded: u64,
-    pub segments_uploaded: u64,
+    /// Batches redacted and parked durably in the spool. NOT "uploaded" — the
+    /// uploader owns that word and reports it separately, because telling someone
+    /// their data is sent when it is sitting on their own disk is a lie the tray
+    /// used to be able to tell during an outage.
+    pub batches_spooled: u64,
+    pub events_spooled: u64,
+    pub segments_spooled: u64,
     /// The per-cycle file cap was hit with files still pending — the caller
     /// should re-scan promptly to drain the rest (newest-first).
     pub more_pending: bool,
-    /// A flush was HELD (engine down / offline / non-commit): the buffered files'
-    /// cursors were left un-advanced and will be retried next cycle.
+    /// A flush was HELD (engine down, or the spool would not take it): the
+    /// buffered files' cursors were left un-advanced and will be retried next
+    /// cycle.
     pub held: bool,
 }
 
@@ -116,32 +110,29 @@ impl CursorStore for modelstat_ingest::RuntimeState {
     }
 }
 
-/// The hold signal: a flush could not commit (engine down, offline, or a
-/// non-2xx the never-drop matrix retries). The whole flush is held — cursors are
-/// NOT advanced, so the same events re-ship next cycle (idempotent server-side).
+/// The hold signal: a flush could not be made durable (the summariser engine is
+/// down, or the spool would not take the batch). Cursors are NOT advanced, so the
+/// same events are re-read next cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hold;
 
-/// Ships one assembled batch. The daemon backs this with `DeviceApi::upload_batch`
-/// (the M4 Part-1 never-drop matrix); tests use a fake that records or holds.
-/// `Ok(accepted)` = a CONFIRMED commit (cursor may advance); `Err(Hold)` = any
-/// non-commit (no token / reauth failed / retries exhausted / offline).
-pub trait BatchUploader {
-    /// `&self`, not `&mut self`: a flush uploads its batches CONCURRENTLY, and
-    /// an exclusive borrow would make that impossible. Implementors keep any
-    /// mutable state behind interior mutability (the real one already did —
-    /// every `DeviceApi` method takes `&self`).
-    ///
-    /// Spelled as an explicit `impl Future + Send` rather than `async fn`
-    /// because the concurrent flush lives inside a boxed `Send` task: with a
-    /// bare `async fn` the compiler cannot promise the returned future is `Send`
-    /// for every lifetime, and the scan fails to compile with "implementation of
-    /// `Send` is not general enough".
-    fn upload(
-        &self,
-        batch: &IngestBatch,
-        raw: bool,
-    ) -> impl std::future::Future<Output = Result<u64, Hold>> + Send;
+/// Where a finished batch goes. The daemon backs this with the on-disk
+/// [`crate::spool::Spool`]; tests use a fake that records or refuses.
+///
+/// This used to be `BatchUploader` — the scan POSTed each batch itself and only
+/// advanced a cursor once the server confirmed it. That coupling is what made an
+/// outage expensive: a held upload discarded the redacted batch, and the next
+/// cycle re-ran the PII model over the very same turns to rebuild it. Now the
+/// scan's job ends at "durably on this disk", which it can always achieve, and
+/// the uploader retries from there on its own clock.
+///
+/// Synchronous on purpose: parking a batch is one `write` + `fsync` + `rename`,
+/// and making it async bought nothing but the `Send`-bound gymnastics the
+/// concurrent shipper needed.
+pub trait BatchSink {
+    /// `Ok(())` = the batch is durable and the caller may advance its cursors.
+    /// `Err(Hold)` = it is not; stop the scan and retry the same events later.
+    fn accept(&self, batch: &PreparedBatch) -> Result<(), Hold>;
 }
 
 /// Progress sink for a scan — the daemon updates `last-status.json` + the tray
@@ -152,65 +143,29 @@ pub trait ScanObserver {
     fn on_file(&mut self, path: &str, index: usize, total: usize) {
         let _ = (path, index, total);
     }
-    /// A whole fan-out is going out together: `uploads` batches covering
-    /// `sessions` distinct sessions. Called ONCE, before any of them starts, so a
-    /// reader can say how much is on the wire and time it — the per-batch hooks
-    /// can't, because they no longer happen one at a time.
-    ///
-    /// `uploads == 0` means the wire is quiet again. The all-committed case is
-    /// implicit in [`ScanObserver::on_uploaded`] counting the set down, so this is
-    /// how a HELD fan-out says its unsent remainder is no longer in flight.
-    fn on_upload_set(&mut self, uploads: usize, sessions: usize) {
-        let _ = (uploads, sessions);
-    }
-    /// Right before a batch POSTs — these records are now in-flight.
-    fn on_upload(&mut self, events: usize, segments: usize) {
-        let _ = (events, segments);
-    }
-    /// After the POST is confirmed — `events` = server-accepted count.
-    fn on_uploaded(&mut self, events: usize, segments: usize) {
+    /// One batch is redacted and durably parked. It is NOT sent yet — the
+    /// uploader reports that, and a reader must be able to tell the two apart
+    /// (during an outage this keeps climbing while nothing leaves the machine).
+    fn on_spooled(&mut self, events: usize, segments: usize) {
         let _ = (events, segments);
     }
 }
 impl ScanObserver for () {}
 
-/// One flush's shippable output, fully OWNED — which is the entire point. It
-/// borrows none of the scan's exclusive state (`git`, the run-long per-session
-/// accumulators, the cursor store, the observer), so it can sit on the wire while
-/// the parser is already building the next one.
+/// One flush's finished output: the batches to park, and the cursors that may
+/// advance once they are parked.
 struct PreparedFlush {
-    /// Position in the flush order. The cursor rule below is a prefix rule, and a
-    /// prefix needs an order.
-    seq: u64,
     batches: Vec<PreparedBatch>,
-    /// Files fully parsed as of this flush. They advance only once this flush AND
-    /// every flush before it has committed — see `advance_prefix` in the scan
-    /// driver for why that "and every flush before it" is load-bearing.
+    /// Files fully parsed as of this flush.
     cursors: Vec<(String, FileCursor)>,
 }
 
-/// What a shipped flush came back with. Deliberately inert data: the driver owns
-/// the tallies, the observer and the cursor store, so a ship future touches none
-/// of them and the scan's `&mut` state never has to be shared across the several
-/// flushes now in flight at once.
-struct ShipOutcome {
-    seq: u64,
-    cursors: Vec<(String, FileCursor)>,
-    /// `(segment_count, events_accepted)` for each batch that committed.
-    committed: Vec<(usize, u64)>,
-    /// Set when a batch could not commit — the whole flush is held, and with it
-    /// every cursor from this flush onwards.
-    held: Option<Hold>,
-}
-
-/// Assemble whatever is buffered into shippable batches. Everything that needs
-/// the scan's exclusive state happens HERE, sequentially, so that the shipping
-/// half can be owned and concurrent. Empties `buffer`/`tool_buffer` and takes the
-/// pending cursors; on `Err(Hold)` the caller stops the scan and the un-advanced
-/// files retry next cycle.
+/// Assemble whatever is buffered into shippable batches — the expensive half of
+/// the daemon (summarise + the on-device PII pass). Empties `buffer`/`tool_buffer`
+/// and takes the pending cursors; on `Err(Hold)` the caller stops the scan and the
+/// un-advanced files retry next cycle.
 #[allow(clippy::too_many_arguments)]
 async fn prepare_flush<S, E, N, G, CE>(
-    seq: u64,
     device_id: &str,
     daemon_version: &str,
     mode: &str,
@@ -237,12 +192,10 @@ where
     // The cursors queued so far travel WITH this flush, even when there is
     // nothing to ship: a file that parsed clean but produced only events already
     // below its `shipped_below` floor still has to advance, or it re-parses every
-    // cycle forever. It rides the prefix rule like any other, because an earlier
-    // flush may still be on the wire.
+    // cycle forever.
     let cursors = std::mem::take(pending_cursors);
     if buffer.is_empty() && tool_buffer.is_empty() {
         return Ok(PreparedFlush {
-            seq,
             batches: Vec::new(),
             cursors,
         });
@@ -276,73 +229,19 @@ where
         // Engine down / cloud NER unavailable → hold the whole flush, never a
         // partial batch (that would advance the cursor past un-summarised events).
         FlushOutcome::Held => Err(Hold),
-        FlushOutcome::Ready(batches) => Ok(PreparedFlush {
-            seq,
-            batches,
-            cursors,
-        }),
+        FlushOutcome::Ready(batches) => Ok(PreparedFlush { batches, cursors }),
     }
 }
 
-/// POST one prepared flush's batches, as many at once as the uploader's adaptive
-/// gate allows.
+/// The shared parse → summarise → redact → park loop over an ordered job list.
+/// Holds at most ~one batch in memory and advances each file's cursor only once
+/// that batch is durable, so a mid-scan failure re-tries the same events next run.
+/// Both the incremental `scan_all` and the eager single-session scan funnel
+/// through here; their only differences are [`RunScanOptions`].
 ///
-/// Borrows only `&U`, never the scan's `&mut` state, which is what lets the
-/// caller hold several of these at once and keep parsing while they run. Before
-/// this split the parser sat idle for the whole of every upload and the wire sat
-/// idle for the whole of every parse, so a backlog of big transcripts moved at
-/// parse-then-send speed with at most one session ever in flight.
-async fn ship_flush<U>(flush: PreparedFlush, uploader: &U) -> ShipOutcome
-where
-    U: BatchUploader + Sync,
-{
-    let PreparedFlush {
-        seq,
-        batches,
-        cursors,
-    } = flush;
-    let mut committed = Vec::with_capacity(batches.len());
-    let mut held: Option<Hold> = None;
-    if !batches.is_empty() {
-        // Built with a plain loop rather than `.map(|pb| async move { … })`: a
-        // closure returning a future that BORROWS its argument has to satisfy
-        // `FnOnce(&PreparedBatch)` for every lifetime, which it cannot, and the
-        // error surfaces far away as "implementation of `Send`/`FnOnce` is not
-        // general enough" where the daemon boxes this future. A loop gives each
-        // future one concrete borrow and no closure at all.
-        let up: &U = uploader;
-        let mut futures = Vec::with_capacity(batches.len());
-        for pb in &batches {
-            futures.push(async move { (pb, up.upload(&pb.batch, pb.raw).await) });
-        }
-        let mut inflight = futures_util::stream::iter(futures).buffer_unordered(UPLOAD_FANOUT);
-        while let Some((pb, result)) = inflight.next().await {
-            match result {
-                Ok(accepted) => committed.push((pb.segment_count, accepted)),
-                // First hold wins and we stop: dropping the stream cancels what
-                // is still in flight and starts nothing new. Anything already
-                // accepted server-side is re-sent next scan and deduped by id,
-                // because no cursor moved.
-                Err(h) => {
-                    held = Some(h);
-                    break;
-                }
-            }
-        }
-    }
-    ShipOutcome {
-        seq,
-        cursors,
-        committed,
-        held,
-    }
-}
-
-/// The shared parse → summarise → upload loop over an ordered job list. Holds at
-/// most ~one batch in memory and advances each file's cursor only after its
-/// events land, so a mid-scan failure re-tries the same events next run. Both the
-/// incremental `scan_all` and the eager single-session scan funnel through here;
-/// their only differences are [`RunScanOptions`]. Port of `runScanOverJobs`.
+/// Uploading is deliberately NOT here — [`crate::uploader`] drains the spool on
+/// its own clock. That separation is what keeps a network outage from costing CPU:
+/// this loop only ever does the expensive work once per turn.
 ///
 /// The many parameters are the seams that let this be tested without real I/O:
 /// `parse`/`checksum` read a job (daemon wires `parse_job`/`quick_checksum`),
@@ -350,11 +249,11 @@ where
 /// `resolve_authoritative_git` over its own resolver — kept separate from `git`
 /// so two callers don't double-borrow one resolver), `exists`/`read_file` probe +
 /// read referenced script files for the best-effort script-summary enrichment
-/// (daemon wires the real `Path::exists` + a capped file read), `uploader`/
+/// (daemon wires the real `Path::exists` + a capped file read), `sink`/
 /// `cursors`/`observer` are the sinks. `git` is the metadata enrichment the loop
 /// OWNS and lends to each flush.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE>(
+pub async fn run_scan_over_jobs<S, E, N, G, K, P, C, CE>(
     ordered: Vec<ScanJob>,
     device_id: &str,
     daemon_version: &str,
@@ -372,7 +271,7 @@ pub async fn run_scan_over_jobs<S, E, N, G, U, P, C, CE>(
     // daemon's tokio-spawned single-flight task, whose future must be `Send`.
     exists: &(dyn Fn(&str) -> bool + Sync),
     read_file: &(dyn Fn(&str) -> Option<String> + Sync),
-    uploader: &U,
+    sink: &K,
     // `+ Send` on the trait objects: the scan runs in the daemon's tokio-spawned
     // single-flight task, whose future must be `Send` — and a `dyn Trait` erases
     // the concrete type's Send-ness unless the bound is spelled out. Every real
@@ -389,8 +288,9 @@ where
     E: Embedder,
     N: NerModel,
     G: GitEnrichment + Send,
-    // `Sync` because the concurrent flush shares `&U` across in-flight uploads.
-    U: BatchUploader + Sync,
+    // `Sync` so `&K` stays `Send` — the scan runs inside the daemon's
+    // tokio-spawned single-flight task, whose future must be `Send`.
+    K: BatchSink + Sync,
     // The streaming parse seam: emits events in bounded chunks (never a full
     // materialised `ParseResult.events`) + returns the tool-call/stats tail. `Fn +
     // Send + Sync + Clone + 'static` so the loop can run it on a `spawn_blocking`
@@ -409,7 +309,7 @@ where
     let mut buffer: Vec<RawEvent> = Vec::new();
     let mut tool_buffer: Vec<ToolCallDraft> = Vec::new();
     // Files whose events are buffered but whose cursor has NOT advanced yet —
-    // advanced only when the batch carrying their events commits (never-drop).
+    // advanced only once the batch carrying their events is durable (never-drop).
     let mut pending_cursors: Vec<(String, FileCursor)> = Vec::new();
     // Segments accumulated per session across the WHOLE run: a big file can split
     // a session across flush boundaries, and its title / call-attribution must
@@ -420,121 +320,61 @@ where
     // later flush's partial view can't overwrite a richer earlier one.
     let mut run_events: BTreeMap<String, Vec<RawEvent>> = BTreeMap::new();
 
-    // ── The upload pipeline ────────────────────────────────────────────────
+    // Prepare the buffered events into a flush and park it durably. Evaluates to
+    // `Result<(), Hold>`; an `Err` stops the scan with cursors un-advanced.
     //
-    // Flushes are PREPARED in order (that half owns `git` + the run-long
-    // accumulators, so it cannot overlap itself) and SHIPPED concurrently. The
-    // parser keeps reading while earlier flushes are still on the wire, which is
-    // what puts more than one session in flight: a real transcript blows past
-    // BATCH_MAX_EVENTS inside a single file, so every flush it triggers carries
-    // exactly one session, and awaiting each one inline meant the fan-out below
-    // never had more than one batch to spread over its slots.
-    let mut inflight = futures_util::stream::FuturesUnordered::new();
-    // Ship outcomes that landed out of order, parked until their turn comes up.
-    let mut settled: BTreeMap<u64, ShipOutcome> = BTreeMap::new();
-    let mut next_seq: u64 = 0;
-    // Every flush with `seq < committed_prefix` has committed. Cursors advance
-    // only up to here.
-    let mut committed_prefix: u64 = 0;
-    // The first hold seen. Once set we start nothing new and drain what is left.
-    let mut hold: Option<Hold> = None;
-
-    // Fold one landed flush into the tallies + observer, then advance the cursor
-    // prefix as far as the newly-contiguous run of commits allows.
-    //
-    // THE PREFIX RULE, which is the whole correctness story of this change: a
-    // flush's cursors advance only when it AND every flush before it committed.
-    // It matters because a big file's events span several flushes while its
-    // cursor is queued just once, after parsing — so without the rule a late
-    // success could advance a cursor past an earlier flush's un-landed events and
-    // those events would never be sent again. Sequentially this was implicit (a
-    // hold returned immediately, so there was never a later success to mis-apply);
-    // concurrently it has to be spelled out. Strictly a generalisation of the old
-    // behaviour, never a loosening.
-    macro_rules! absorb {
-        ($outcome:expr) => {{
-            let out: ShipOutcome = $outcome;
-            for (segments, accepted) in &out.committed {
-                tallies.batches_uploaded += 1;
-                tallies.events_uploaded += *accepted;
-                tallies.segments_uploaded += *segments as u64;
-                observer.on_uploaded(*accepted as usize, *segments);
-            }
-            if hold.is_none() {
-                hold = out.held.as_ref().map(|_| Hold);
-            }
-            settled.insert(out.seq, out);
-            while let Some(next) = settled.get(&committed_prefix) {
-                if next.held.is_some() {
-                    break;
-                }
-                let done = settled.remove(&committed_prefix).expect("just probed");
-                // Upserts are server-side idempotent, so a crash between here and
-                // the next scan just re-sends the same events safely.
-                for (path, cursor) in done.cursors {
-                    cursors.set_cursor(&path, cursor);
-                }
-                committed_prefix += 1;
-            }
-        }};
-    }
-
-    // Prepare the buffered events into a flush and put it on the wire, first
-    // making room by landing an older one if the pipeline is already full.
-    // Evaluates to `Result<(), Hold>` so the call sites read as they used to.
+    // This is sequential, and that is a simplification the spool bought. It used
+    // to be a small concurrent pipeline — several flushes on the wire at once,
+    // outcomes landing out of order, and a "prefix rule" so a late success could
+    // never advance a cursor past an earlier flush's un-landed events. All of that
+    // existed to keep the wire busy while the parser worked. The uploader is now a
+    // separate loop that is ALWAYS free to run, so the wire stays busy on its own,
+    // and this side gets to be a straight line: prepare, park, advance.
     macro_rules! flush {
         () => {{
-            while inflight.len() >= MAX_INFLIGHT_FLUSHES {
-                match inflight.next().await {
-                    Some(out) => absorb!(out),
-                    None => break,
-                }
-            }
-            match hold {
-                // Already holding: prepare nothing further, the scan is stopping.
-                Some(_) => Err(Hold),
-                None => {
-                    let seq = next_seq;
-                    let prepared = prepare_flush(
-                        seq,
-                        device_id,
-                        daemon_version,
-                        mode,
-                        &mut buffer,
-                        &mut tool_buffer,
-                        &mut pending_cursors,
-                        &mut run_segments,
-                        &mut run_events,
-                        accounts,
-                        resilient,
-                        embedder,
-                        ner,
-                        &mut *git,
-                        extract_links,
-                        &mut correct_events,
-                    )
-                    .await;
-                    match prepared {
-                        Err(Hold) => Err(Hold),
-                        Ok(prepared) => {
-                            next_seq += 1;
-                            let batches = prepared.batches.len();
-                            let sessions: std::collections::BTreeSet<&str> = prepared
-                                .batches
-                                .iter()
-                                .flat_map(|pb| {
-                                    pb.batch.events.iter().map(|e| e.session_id.as_str())
-                                })
-                                .collect();
-                            let sessions = sessions.len();
-                            for pb in &prepared.batches {
-                                observer.on_upload(pb.batch.events.len(), pb.segment_count);
-                            }
-                            observer.on_upload_set(batches, sessions);
-                            inflight.push(ship_flush(prepared, uploader));
-                            Ok(())
+            match prepare_flush(
+                device_id,
+                daemon_version,
+                mode,
+                &mut buffer,
+                &mut tool_buffer,
+                &mut pending_cursors,
+                &mut run_segments,
+                &mut run_events,
+                accounts,
+                resilient,
+                embedder,
+                ner,
+                &mut *git,
+                extract_links,
+                &mut correct_events,
+            )
+            .await
+            {
+                Err(Hold) => Err(Hold),
+                Ok(prepared) => {
+                    let mut parked = Ok(());
+                    for pb in &prepared.batches {
+                        if sink.accept(pb).is_err() {
+                            parked = Err(Hold);
+                            break;
+                        }
+                        tallies.batches_spooled += 1;
+                        tallies.events_spooled += pb.batch.events.len() as u64;
+                        tallies.segments_spooled += pb.segment_count as u64;
+                        observer.on_spooled(pb.batch.events.len(), pb.segment_count);
+                    }
+                    // All-or-nothing: a partial park leaves the tail of this flush
+                    // unbuilt, so the cursors must not move past it. The batches
+                    // that DID land are re-prepared next cycle and deduped by id
+                    // server-side — wasteful, but this only happens when the disk
+                    // itself is refusing writes.
+                    if parked.is_ok() {
+                        for (path, cursor) in prepared.cursors {
+                            cursors.set_cursor(&path, cursor);
                         }
                     }
+                    parked
                 }
             }
         }};
@@ -723,23 +563,9 @@ where
             }
         }
     }
-    // Ship the trailing partial batch. A hold here just leaves it for next cycle.
+    // Park the trailing partial batch. A hold here just leaves it for next cycle.
     if flush!().is_err() {
         tallies.held = true;
-    }
-    // Drain the pipeline. Every flush still on the wire has to land before the
-    // scan can report, because its cursors are what say the work is durable —
-    // returning early would drop them and re-send the same events next cycle.
-    while let Some(out) = inflight.next().await {
-        absorb!(out);
-    }
-    if hold.is_some() {
-        tallies.held = true;
-    }
-    if tallies.held {
-        // The unsent remainder never went anywhere — say so, or a reader keeps
-        // claiming "3 sessions uploading" through the whole backoff.
-        observer.on_upload_set(0, 0);
     }
     tallies
 }
@@ -754,7 +580,6 @@ mod tests {
     use modelstat_pipeline::NoEmbedder;
     use modelstat_sumclient::{CompleteRequest, SumError};
     use modelstat_wire::GitContext;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -804,42 +629,44 @@ mod tests {
         }
     }
 
-    // Records every committed batch, or holds every upload when `hold` is set.
-    // Records behind a `Mutex` because uploads overlap now — the real uploader
-    // takes `&self` for the same reason.
+    // Stands in for the on-disk spool: records every batch it accepts, or refuses
+    // everything when `refuse` is set (a full disk / unwritable spool). `&self`
+    // because the real sink takes `&self` too.
     #[derive(Default)]
-    struct RecordingUploader {
-        /// (event_count, raw) per committed batch.
-        uploaded: Mutex<Vec<(usize, bool)>>,
-        /// `source_event_id`s of EVERY upload attempt (held or committed) — lets a
-        /// test prove a crash-held batch and its resend are byte-identical, so the
-        /// server dedupes on id (no duplicates after a crash).
-        attempts: Mutex<Vec<Vec<String>>>,
-        hold: bool,
+    struct RecordingSink {
+        /// (event_count, raw) per accepted batch.
+        accepted: Mutex<Vec<(usize, bool)>>,
+        /// `source_event_id`s of EVERY batch offered (refused or accepted) — lets a
+        /// test prove a held batch and the one the next cycle rebuilds are
+        /// identical, so the server dedupes on id (no duplicates after a crash).
+        offered: Mutex<Vec<Vec<String>>>,
+        refuse: bool,
     }
-    impl RecordingUploader {
-        fn uploaded(&self) -> Vec<(usize, bool)> {
-            self.uploaded.lock().unwrap().clone()
+    impl RecordingSink {
+        fn accepted(&self) -> Vec<(usize, bool)> {
+            self.accepted.lock().unwrap().clone()
         }
-        fn attempts(&self) -> Vec<Vec<String>> {
-            self.attempts.lock().unwrap().clone()
+        fn offered(&self) -> Vec<Vec<String>> {
+            self.offered.lock().unwrap().clone()
         }
     }
-    impl BatchUploader for RecordingUploader {
-        async fn upload(&self, batch: &IngestBatch, raw: bool) -> Result<u64, Hold> {
-            self.attempts.lock().unwrap().push(
-                batch
+    impl BatchSink for RecordingSink {
+        fn accept(&self, pb: &PreparedBatch) -> Result<(), Hold> {
+            self.offered.lock().unwrap().push(
+                pb.batch
                     .events
                     .iter()
                     .map(|e| e.source_event_id.clone())
                     .collect(),
             );
-            if self.hold {
+            if self.refuse {
                 return Err(Hold);
             }
-            let n = batch.events.len();
-            self.uploaded.lock().unwrap().push((n, raw));
-            Ok(n as u64)
+            self.accepted
+                .lock()
+                .unwrap()
+                .push((pb.batch.events.len(), pb.raw));
+            Ok(())
         }
     }
 
@@ -976,7 +803,7 @@ mod tests {
     async fn scans_files_uploads_and_advances_cursors() {
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let events = vec![
@@ -999,7 +826,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1009,9 +836,9 @@ mod tests {
         assert_eq!(t.files_scanned, 2);
         assert_eq!(t.files_unchanged, 0);
         assert!(!t.held);
-        assert!(t.batches_uploaded >= 1);
+        assert!(t.batches_spooled >= 1);
         // Local mode never ships raw.
-        assert!(uploader.uploaded().iter().all(|(_, raw)| !raw));
+        assert!(sink.accepted().iter().all(|(_, raw)| !raw));
         // Both files' cursors advanced only after their events committed.
         assert!(cursors.get_cursor("/a.jsonl").is_some());
         assert!(cursors.get_cursor("/b.jsonl").is_some());
@@ -1021,7 +848,7 @@ mod tests {
     async fn skips_a_file_whose_size_and_tail_are_unchanged() {
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         // Pre-seed the cursor to EXACTLY what checksum() will report for /a.jsonl.
@@ -1050,7 +877,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1059,15 +886,15 @@ mod tests {
 
         assert_eq!(t.files_unchanged, 1);
         assert_eq!(t.files_scanned, 0);
-        assert_eq!(t.batches_uploaded, 0);
-        assert!(uploader.uploaded().is_empty());
+        assert_eq!(t.batches_spooled, 0);
+        assert!(sink.accepted().is_empty());
     }
 
     #[tokio::test]
     async fn force_read_all_bypasses_the_unchanged_skip() {
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         cursors.set_cursor(
@@ -1095,7 +922,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1104,7 +931,7 @@ mod tests {
 
         assert_eq!(t.files_scanned, 1);
         assert_eq!(t.files_unchanged, 0);
-        assert!(t.batches_uploaded >= 1);
+        assert!(t.batches_spooled >= 1);
     }
 
     #[tokio::test]
@@ -1117,7 +944,7 @@ mod tests {
             Duration::ZERO,
         );
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let t = run_scan_over_jobs(
@@ -1136,7 +963,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1144,10 +971,10 @@ mod tests {
         .await;
 
         assert!(t.held);
-        assert_eq!(t.batches_uploaded, 0);
+        assert_eq!(t.batches_spooled, 0);
         // Never-drop: the file's cursor stays put so it re-parses next cycle.
         assert!(cursors.get_cursor("/a.jsonl").is_none());
-        assert!(uploader.uploaded().is_empty());
+        assert!(sink.accepted().is_empty());
     }
 
     #[tokio::test]
@@ -1155,8 +982,8 @@ mod tests {
         let resilient = healthy();
         let mut git = NoGit;
         // Engine is healthy (batches build), but every upload holds.
-        let uploader = RecordingUploader {
-            hold: true,
+        let sink = RecordingSink {
+            refuse: true,
             ..Default::default()
         };
         let mut cursors = RuntimeState::default();
@@ -1177,7 +1004,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1185,7 +1012,7 @@ mod tests {
         .await;
 
         assert!(t.held);
-        assert_eq!(t.batches_uploaded, 0);
+        assert_eq!(t.batches_spooled, 0);
         assert!(cursors.get_cursor("/a.jsonl").is_none());
     }
 
@@ -1200,8 +1027,8 @@ mod tests {
         //   3. the commit finally advances the cursor.
         let resilient = healthy();
         let mut git = NoGit;
-        let mut uploader = RecordingUploader {
-            hold: true,
+        let mut sink = RecordingSink {
+            refuse: true,
             ..Default::default()
         };
         let mut cursors = RuntimeState::default();
@@ -1228,7 +1055,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1241,7 +1068,7 @@ mod tests {
         );
 
         // Cycle 2 — the server recovers; the same file re-ships and commits.
-        uploader.hold = false;
+        sink.refuse = false;
         let t2 = run_scan_over_jobs(
             vec![job("/a.jsonl")],
             "dev1",
@@ -1258,7 +1085,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1272,15 +1099,11 @@ mod tests {
 
         // The held attempt and the successful resend carried the IDENTICAL events —
         // same source_event_ids, so the server dedupes: a crash never duplicates.
+        assert_eq!(sink.offered().len(), 2, "one held attempt + one resend");
+        assert!(!sink.offered()[0].is_empty());
         assert_eq!(
-            uploader.attempts().len(),
-            2,
-            "one held attempt + one resend"
-        );
-        assert!(!uploader.attempts()[0].is_empty());
-        assert_eq!(
-            uploader.attempts()[0],
-            uploader.attempts()[1],
+            sink.offered()[0],
+            sink.offered()[1],
             "resend must carry byte-identical event ids (server dedupes on id)"
         );
     }
@@ -1289,7 +1112,7 @@ mod tests {
     async fn file_cap_stops_early_and_sets_more_pending() {
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let t = run_scan_over_jobs(
@@ -1308,7 +1131,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1330,7 +1153,7 @@ mod tests {
         // straddle: cursor advances only after the LAST batch carrying the file.
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let mut events = Vec::with_capacity(1100);
@@ -1354,7 +1177,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1363,11 +1186,11 @@ mod tests {
 
         assert!(!t.held);
         // Two batches: the 1000-event mid-file flush + the 100-event trailing one.
-        assert_eq!(t.batches_uploaded, 2);
-        assert_eq!(t.events_uploaded, 1100);
-        assert_eq!(uploader.uploaded().len(), 2);
-        assert_eq!(uploader.uploaded()[0].0, 1000);
-        assert_eq!(uploader.uploaded()[1].0, 100);
+        assert_eq!(t.batches_spooled, 2);
+        assert_eq!(t.events_spooled, 1100);
+        assert_eq!(sink.accepted().len(), 2);
+        assert_eq!(sink.accepted()[0].0, 1000);
+        assert_eq!(sink.accepted()[1].0, 100);
         // Cursor advanced exactly once, after the final batch.
         assert!(cursors.get_cursor("/big.jsonl").is_some());
     }
@@ -1381,7 +1204,7 @@ mod tests {
         // memory stays bounded even though the "file" is streamed piecemeal.
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let mut events = Vec::with_capacity(1100);
@@ -1405,7 +1228,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1413,10 +1236,10 @@ mod tests {
         .await;
 
         assert!(!t.held);
-        assert_eq!(t.events_uploaded, 1100);
-        assert_eq!(uploader.uploaded().len(), 2);
-        assert_eq!(uploader.uploaded()[0].0, 1000);
-        assert_eq!(uploader.uploaded()[1].0, 100);
+        assert_eq!(t.events_spooled, 1100);
+        assert_eq!(sink.accepted().len(), 2);
+        assert_eq!(sink.accepted()[0].0, 1000);
+        assert_eq!(sink.accepted()[1].0, 100);
         assert!(cursors.get_cursor("/big.jsonl").is_some());
     }
 
@@ -1429,7 +1252,7 @@ mod tests {
         // on "Uploading <BATCH_MAX_EVENTS> events" and never finished.
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         // 60 bytes confirmed-shipped; `checksum` reports the file is now 100.
@@ -1456,7 +1279,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1467,12 +1290,12 @@ mod tests {
         // The file was still fully PARSED (cross-line state intact) — only the two
         // already-confirmed events were dropped before the buffer.
         assert_eq!(t.files_scanned, 1);
-        assert_eq!(t.events_uploaded, 2);
-        assert_eq!(uploader.uploaded().len(), 1);
-        assert_eq!(uploader.uploaded()[0].0, 2);
+        assert_eq!(t.events_spooled, 2);
+        assert_eq!(sink.accepted().len(), 1);
+        assert_eq!(sink.accepted()[0].0, 2);
         // Exactly the tail, by id — never the re-shipped head.
         assert_eq!(
-            uploader.attempts()[0],
+            sink.offered()[0],
             vec![
                 "s1:2026-07-16T10:02:00.000Z".to_string(),
                 "s1:2026-07-16T10:03:00.000Z".to_string()
@@ -1490,7 +1313,7 @@ mod tests {
         // and it re-parses on every cycle for the rest of the daemon's life.
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         cursors.set_cursor("/quiet.jsonl", confirmed_through(60));
@@ -1514,7 +1337,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1522,8 +1345,8 @@ mod tests {
         .await;
 
         assert!(!t.held);
-        assert_eq!(t.events_uploaded, 0);
-        assert!(uploader.uploaded().is_empty()); // nothing on the wire
+        assert_eq!(t.events_spooled, 0);
+        assert!(sink.accepted().is_empty()); // nothing on the wire
         assert_eq!(cursors.get_cursor("/quiet.jsonl").unwrap().size, 100);
     }
 
@@ -1534,7 +1357,7 @@ mod tests {
         // append-in-place growth (`cs.size >= cur.size`) earns a floor.
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         // Confirmed through 500 bytes, but `checksum` now reports only 100.
@@ -1559,14 +1382,14 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
         )
         .await;
 
-        assert_eq!(t.events_uploaded, 2); // both, despite offsets below 500
+        assert_eq!(t.events_spooled, 2); // both, despite offsets below 500
     }
 
     #[tokio::test]
@@ -1575,7 +1398,7 @@ mod tests {
         // re-uploads on demand. A floor would make it ship nothing at all.
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = RecordingUploader::default();
+        let sink = RecordingSink::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         cursors.set_cursor("/done.jsonl", confirmed_through(100));
@@ -1599,14 +1422,14 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
         )
         .await;
 
-        assert_eq!(t.events_uploaded, 2);
+        assert_eq!(t.events_spooled, 2);
     }
 
     /// A LIVE NER model, which a cloud test needs: cloud egress fail-closes on a
@@ -1632,44 +1455,204 @@ mod tests {
         }
     }
 
-    /// Watches the fan-out: counts how many uploads are alive at the same
-    /// moment, and can hold one named session's batch.
+    /// Refuses one named session's batch — the "spool would not take it" case,
+    /// chosen by NAME so the test does not depend on flush ordering.
     #[derive(Default)]
-    struct ConcurrentUploader {
-        inflight: AtomicUsize,
-        peak: AtomicUsize,
-        /// The session whose batch holds — chosen by NAME, not by call order, so
-        /// the test does not depend on how the runtime interleaves.
-        hold_session: Option<&'static str>,
+    struct RefusesOneSession {
+        refuse_session: Option<&'static str>,
+        accepted: Mutex<Vec<String>>,
     }
-    impl BatchUploader for ConcurrentUploader {
-        async fn upload(&self, batch: &IngestBatch, _raw: bool) -> Result<u64, Hold> {
-            let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
-            self.peak.fetch_max(now, Ordering::SeqCst);
-            // Suspend, the way a real POST does while the server summarises. A
-            // sibling upload is polled meanwhile — if the loop were still
-            // sequential, `peak` could never exceed one.
-            for _ in 0..4 {
-                tokio::task::yield_now().await;
-            }
-            self.inflight.fetch_sub(1, Ordering::SeqCst);
-            let session = batch.events.first().map(|e| e.session_id.as_str());
-            if self.hold_session.is_some() && self.hold_session == session {
+    impl BatchSink for RefusesOneSession {
+        fn accept(&self, pb: &PreparedBatch) -> Result<(), Hold> {
+            let session = pb.batch.events.first().map(|e| e.session_id.as_str());
+            if self.refuse_session.is_some() && self.refuse_session == session {
                 return Err(Hold);
             }
-            Ok(batch.events.len() as u64)
+            self.accepted
+                .lock()
+                .unwrap()
+                .push(session.unwrap_or_default().to_string());
+            Ok(())
         }
     }
 
-    /// Three sessions in one file, cloud mode ⇒ three batches from ONE flush
-    /// (cloud ships one session per raw batch). They must be in flight together;
-    /// uploading them one at a time is what made a backlog take hours, since each
-    /// POST waits on a server-side summarise.
+    /// Never-drop, at the new boundary: if ANY batch in a flush cannot be parked,
+    /// no cursor from that flush advances — even though its siblings were parked
+    /// fine. The whole file re-parses next cycle and the server dedupes the
+    /// resends by event id.
+    ///
+    /// This is the property the old concurrent-upload "prefix rule" protected. It
+    /// still has to hold; only the failure it guards against has changed, from "the
+    /// server would not take it" to "this disk would not take it".
     #[tokio::test]
-    async fn uploads_in_one_flush_overlap_instead_of_queueing() {
+    async fn a_refusal_anywhere_in_the_flush_advances_no_cursor() {
         let resilient = healthy();
         let mut git = NoGit;
-        let uploader = ConcurrentUploader::default();
+        let sink = RefusesOneSession {
+            refuse_session: Some("s2"),
+            ..Default::default()
+        };
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        // Cloud mode ⇒ one raw batch per session, so one flush yields three.
+        let events = vec![
+            ev("s1", "2026-07-16T10:00:00.000Z"),
+            ev("s2", "2026-07-16T10:01:00.000Z"),
+            ev("s3", "2026-07-16T10:02:00.000Z"),
+        ];
+        let t = run_scan_over_jobs(
+            vec![job("/three.jsonl")],
+            "dev1",
+            "9.9.9",
+            "cloud",
+            opts(None, false),
+            &resilient,
+            &NoEmbedder,
+            &LiveNer,
+            &mut git,
+            None,
+            parse_with(events),
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &sink,
+            &mut cursors,
+            &mut obs,
+            &Accounts::new(),
+        )
+        .await;
+
+        assert!(t.held, "one refused batch holds the flush");
+        assert!(
+            cursors.get_cursor("/three.jsonl").is_none(),
+            "never-drop: a refusal anywhere in the flush advances NO cursor"
+        );
+        assert!(
+            t.batches_spooled < 3,
+            "the tally stops at the first refusal, counted {}",
+            t.batches_spooled
+        );
+    }
+
+    /// Counts how many times the PII model is asked to classify anything — the
+    /// expensive work, and the thing this whole change exists to stop repeating.
+    #[derive(Default)]
+    struct CountingNer {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl NerModel for CountingNer {
+        fn classify(&self, text: &str) -> Option<Vec<modelstat_redact::NerToken>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut out = Vec::new();
+            if let Some(i) = text.find("Katherine Johnson") {
+                let tok =
+                    |entity: &str, word: &str, a: usize, b: usize| modelstat_redact::NerToken {
+                        entity: entity.into(),
+                        word: word.into(),
+                        start: Some(a),
+                        end: Some(b),
+                    };
+                out.push(tok("B-PER", "Katherine", i, i + 9));
+                out.push(tok("I-PER", "Johnson", i + 10, i + 17));
+            }
+            Some(out)
+        }
+    }
+
+    /// THE regression test for the bug this change fixes.
+    ///
+    /// A user reported modelstat pinning their CPU. The cause was that redaction
+    /// and uploading shared one cursor: a flush that could not commit threw the
+    /// redacted batch away, so the next cycle re-read the same transcript and ran
+    /// the PII model over the same turns again — every five minutes, for as long
+    /// as the server was unreachable. Their log had 77 held flushes in one
+    /// morning, each one paying for redaction it then burned.
+    ///
+    /// The fix is that the scan's cursor now tracks DURABILITY, not delivery. So
+    /// with a real spool that nobody ever drains — the permanent-outage case — the
+    /// model must still be asked exactly once per turn, no matter how many scan
+    /// cycles go by.
+    #[tokio::test]
+    async fn an_outage_never_makes_the_redactor_run_twice() {
+        let dir = std::env::temp_dir().join(format!("modelstat-noredo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let spool = crate::spool::Spool::open(&dir, crate::spool::DEFAULT_MAX_SPOOL_BYTES).unwrap();
+        let resilient = healthy();
+        let mut git = NoGit;
+        let ner = CountingNer::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        let events = vec![
+            ev("s1", "2026-07-16T10:00:00.000Z"),
+            ev("s1", "2026-07-16T10:01:00.000Z"),
+        ];
+
+        // A macro rather than a closure: a closure returning a future that borrows
+        // `cursors` cannot name the lifetime, and the error lands far from here.
+        macro_rules! scan_once {
+            () => {
+                run_scan_over_jobs(
+                    vec![job("/a.jsonl")],
+                    "dev1",
+                    "9.9.9",
+                    "cloud",
+                    opts(Some(12), false),
+                    &resilient,
+                    &NoEmbedder,
+                    &ner,
+                    &mut git,
+                    None,
+                    parse_with(events.clone()),
+                    checksum,
+                    |e| e,
+                    &no_exists,
+                    &no_read,
+                    &spool,
+                    &mut cursors,
+                    &mut obs,
+                    &Accounts::new(),
+                )
+                .await
+            };
+        }
+
+        let first = scan_once!();
+        assert!(!first.held, "parking a batch must always succeed");
+        assert_eq!(first.batches_spooled, 1);
+        let after_first = ner.calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after_first > 0, "the first scan must actually redact");
+        assert!(
+            cursors.get_cursor("/a.jsonl").is_some(),
+            "a durably parked batch advances the cursor even though nothing was sent"
+        );
+
+        // The server stays down: the spool is never drained, so the batch is still
+        // sitting there. Four more cycles go by.
+        for _ in 0..4 {
+            let t = scan_once!();
+            assert_eq!(t.files_unchanged, 1, "an unchanged file must be skipped");
+            assert_eq!(t.batches_spooled, 0);
+        }
+        assert_eq!(
+            ner.calls.load(std::sync::atomic::Ordering::SeqCst),
+            after_first,
+            "five scan cycles through an outage must cost ONE redaction pass — \
+             this counter growing IS the CPU bug"
+        );
+
+        // And the work really is still there, whole, waiting for the wire.
+        assert_eq!(spool.list().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cloud mode splits one flush into a batch per session, and every one of them
+    /// must reach the sink — this is what the uploader later drains concurrently.
+    #[tokio::test]
+    async fn every_session_in_a_flush_reaches_the_sink() {
+        let resilient = healthy();
+        let mut git = NoGit;
+        let sink = RefusesOneSession::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let events = vec![
@@ -1693,7 +1676,7 @@ mod tests {
             |e| e,
             &no_exists,
             &no_read,
-            &uploader,
+            &sink,
             &mut cursors,
             &mut obs,
             &Accounts::new(),
@@ -1701,76 +1684,9 @@ mod tests {
         .await;
 
         assert!(!t.held);
-        assert_eq!(t.batches_uploaded, 3, "one batch per session");
-        assert_eq!(t.events_uploaded, 3);
-        assert!(
-            uploader.peak.load(Ordering::SeqCst) > 1,
-            "uploads must overlap, saw peak in-flight of {}",
-            uploader.peak.load(Ordering::SeqCst)
-        );
-        // Concurrency changes nothing about the cursor contract: all three
-        // committed, so the file advances exactly as before.
+        assert_eq!(t.batches_spooled, 3, "one batch per session");
+        assert_eq!(t.events_spooled, 3);
+        assert_eq!(sink.accepted.lock().unwrap().len(), 3);
         assert!(cursors.get_cursor("/three.jsonl").is_some());
-    }
-
-    /// The loss-proof half of the fan-out: ONE batch holding leaves the file's
-    /// cursor untouched, even though its siblings committed. The whole file
-    /// re-parses next cycle and the server dedupes the resends by event id —
-    /// which is exactly what the sequential loop did by returning early.
-    #[tokio::test]
-    async fn a_hold_anywhere_in_the_fanout_advances_no_cursor() {
-        let resilient = healthy();
-        let mut git = NoGit;
-        let uploader = ConcurrentUploader {
-            hold_session: Some("s2"),
-            ..Default::default()
-        };
-        let mut cursors = RuntimeState::default();
-        let mut obs = ();
-        let events = vec![
-            ev("s1", "2026-07-16T10:00:00.000Z"),
-            ev("s2", "2026-07-16T10:01:00.000Z"),
-            ev("s3", "2026-07-16T10:02:00.000Z"),
-        ];
-        let t = run_scan_over_jobs(
-            vec![job("/three.jsonl")],
-            "dev1",
-            "9.9.9",
-            "cloud",
-            opts(None, false),
-            &resilient,
-            &NoEmbedder,
-            &LiveNer,
-            &mut git,
-            None,
-            parse_with(events),
-            checksum,
-            |e| e,
-            &no_exists,
-            &no_read,
-            &uploader,
-            &mut cursors,
-            &mut obs,
-            &Accounts::new(),
-        )
-        .await;
-
-        assert!(t.held, "one held batch holds the flush");
-        assert!(
-            cursors.get_cursor("/three.jsonl").is_none(),
-            "never-drop: a held batch anywhere in the fan-out advances NO cursor"
-        );
-        // The drain stops at the hold: nothing after it is counted and nothing new
-        // is started. A sibling ALREADY in flight may still finish — harmless
-        // precisely because its receipt moves no cursor either.
-        assert!(
-            t.batches_uploaded < 3,
-            "the tally stops at the first hold, counted {}",
-            t.batches_uploaded
-        );
-        assert_eq!(
-            t.events_uploaded, t.batches_uploaded,
-            "one event per session, so counted events track counted batches"
-        );
     }
 }
