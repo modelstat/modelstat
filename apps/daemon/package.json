@@ -1,7 +1,8 @@
 {
   "name": "modelstat",
   "version": "0.30.1",
-  "description": "modelstat daemon — reads local AI-tool usage and ships tokenised events to modelstat.",
+  "private": true,
+  "description": "RETIRED TypeScript daemon — superseded by the Rust daemon in daemon/. Kept as the port source; never published (see README).",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/cli.mjs",

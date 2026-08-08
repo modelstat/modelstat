@@ -65,9 +65,13 @@ bounty program yet, but we're generous with swag and reference letters.
 
 ## Signing
 
-- The release workflows (`.github/workflows/release-daemon.yml` and
-  `.github/workflows/release-sdks.yml`) publish via OIDC Trusted Publishing —
-  short-lived, workflow-scoped credentials, no long-lived registry tokens.
+- The SDK release workflow (`.github/workflows/release-sdks.yml`) publishes via
+  OIDC Trusted Publishing — short-lived, workflow-scoped credentials, no
+  long-lived registry tokens.
+- The daemon release workflow (`.github/workflows/release-daemon-rs.yml`)
+  publishes native binaries to GitHub Releases with a `SHA256SUMS` manifest the
+  installer and the self-updater always verify, plus a minisign signature over it
+  when the release key is configured.
 
 ## Canonical contact
 

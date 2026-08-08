@@ -6,12 +6,16 @@ name: release-daemon-rs
 # a GitHub Release. The installer + the binary self-updater consume exactly these
 # assets.
 #
+# This is THE daemon release — the retired npm line published from `apps/daemon`
+# is gone (its publisher deleted, the package `private: true`), so nothing else
+# in this repo can take `releases/latest` from the `daemon-*` tags the installer
+# and the self-updater read.
+#
 # ZERO-TOUCH. Merging ANY commit that touches `daemon/` ships it end-to-end —
 # no version to type, no tag to push, no promote step. The version comes from the
-# Conventional Commits since the last `daemon-*` tag, by the same rules the npm
-# half uses (.github/scripts/release-plan.mjs): `feat` -> minor, `fix`/`perf`/
-# `refactor`/`revert` -> patch, `type!:` or `BREAKING CHANGE` -> major, and
-# `chore`/`docs`/`ci`/`test` -> no release at all.
+# Conventional Commits since the last `daemon-*` tag: `feat` -> minor,
+# `fix`/`perf`/`refactor`/`revert` -> patch, `type!:` or `BREAKING CHANGE` ->
+# major, and `chore`/`docs`/`ci`/`test` -> no release at all.
 #
 # `daemon/Cargo.toml`'s version is therefore OUTPUT, not input: the build stamps
 # the resolved version in before compiling (the binary bakes it via
@@ -105,8 +109,7 @@ jobs:
             V="${GITHUB_REF_NAME#daemon-}"
           else
             # Merge to main: the Conventional Commits since the last daemon-* tag
-            # decide the version. Same rules as the npm planner
-            # (.github/scripts/release-plan.mjs) so both halves of the repo agree:
+            # decide the version, by the repo's standard rules:
             #   feat -> minor | fix/perf/refactor/revert -> patch
             #   type!: or BREAKING CHANGE -> major (pre-1.0 clamps to minor)
             #   chore/docs/ci/test/style/build -> nothing
@@ -454,9 +457,7 @@ jobs:
 
       # Record the version the build just stamped, so `daemon/Cargo.toml` on main
       # keeps naming the last release (a local `cargo build` then reports the
-      # right number, and the seed path above has something to read). Same
-      # mechanism the npm half already uses — see the "Tag, bump main" step in
-      # release-daemon.yml.
+      # right number, and the seed path above has something to read).
       #
       # This can't re-trigger the workflow: pushes made with GITHUB_TOKEN don't
       # start new runs, and `[skip ci]` says so a second time. Skipped entirely on
