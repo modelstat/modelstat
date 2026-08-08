@@ -27,8 +27,22 @@ use crate::skips::{unknown_record_event, SkipLedger, UnknownRecord};
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
-use crate::util::slice_utf16;
+use crate::util::{slice_utf16, stated_duration_ms};
 use modelstat_wire::tc_fallback_id;
+
+/// The instant this record states about itself, or None when it states none.
+///
+/// A message without an instant cannot be placed in a conversation — and every
+/// wait the server derives is the distance between two of these, so an empty
+/// string is not a missing field but a wrong answer: it parses as epoch 0 and
+/// puts the message in 1970. The unknown-record path has always required a
+/// stated instant; the modelled arms require it too.
+fn stated_ts(obj: &Value) -> Option<String> {
+    obj.get("timestamp")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
 
 /// `<session-uuid>.jsonl` at the end of a path → the uuid.
 pub fn derive_session_id_from_filename(path: &str) -> Option<String> {
@@ -306,7 +320,8 @@ fn parse_inner(
                 }
             }
             let uuid = obj.get("uuid").and_then(Value::as_str);
-            if uuid.is_none() || session_id.is_none() {
+            let ts = stated_ts(&obj);
+            if uuid.is_none() || ts.is_none() || session_id.is_none() {
                 // A kind we DO model, arriving without the fields it is defined
                 // by. Ledgered under its own name: rename `uuid` upstream and
                 // every turn lands here, which is the same silent-zero-output
@@ -316,6 +331,7 @@ fn parse_inner(
                 continue;
             }
             let uuid = uuid.unwrap().to_string();
+            let ts = ts.unwrap();
             let event_id = match dedupe_id_for(&session_id, &uuid, offset, &mut ancestors) {
                 Some(id) => id,
                 None => {
@@ -358,7 +374,7 @@ fn parse_inner(
                         session_id.as_deref().unwrap(),
                         &event_id,
                         index,
-                        obj.get("timestamp").and_then(Value::as_str).unwrap_or(""),
+                        &ts,
                         model.as_deref(),
                         cwd.as_deref(),
                         Some(current_turn),
@@ -381,11 +397,7 @@ fn parse_inner(
 
             sink.push(RawEvent {
                 source_event_id: event_id,
-                ts: obj
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                ts,
                 kind: "assistant_message".to_string(),
                 agent: agent_name.clone(),
                 provider: "anthropic".to_string(),
@@ -444,7 +456,8 @@ fn parse_inner(
             }
 
             let uuid = obj.get("uuid").and_then(Value::as_str);
-            if uuid.is_none() || session_id.is_none() {
+            let ts = stated_ts(&obj);
+            if uuid.is_none() || ts.is_none() || session_id.is_none() {
                 // A kind we DO model, arriving without the fields it is defined
                 // by. Ledgered under its own name: rename `uuid` upstream and
                 // every turn lands here, which is the same silent-zero-output
@@ -454,6 +467,7 @@ fn parse_inner(
                 continue;
             }
             let uuid = uuid.unwrap().to_string();
+            let ts = ts.unwrap();
             let event_id = match dedupe_id_for(&session_id, &uuid, offset, &mut ancestors) {
                 Some(id) => id,
                 None => {
@@ -476,20 +490,17 @@ fn parse_inner(
             }
             // Claude Code stamps its own measured duration on the line that
             // carries a tool result — ship it as stated, never derived
-            // (SPEC 0005). Ambiguous multi-result lines share one number; the
-            // per-call truth stays ToolCallWire's started/ended pair.
-            let duration_ms = obj
-                .get("toolUseResult")
-                .and_then(|r| r.get("durationMs"))
-                .and_then(Value::as_u64);
+            // (SPEC 0005). Which FIELD it lands in is the tool's choice, not the
+            // format's (`durationMs`, `durationSeconds`, `totalDurationMs` all
+            // ship in one release), so the unit is read off the name rather than
+            // assumed — see `stated_duration_ms`. Ambiguous multi-result lines
+            // share one number; the per-call truth stays ToolCallWire's
+            // started/ended pair.
+            let duration_ms = obj.get("toolUseResult").and_then(stated_duration_ms);
             let refs = detect_event_references(&collect_ref_text(&content));
             sink.push(RawEvent {
                 source_event_id: event_id,
-                ts: obj
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                ts,
                 kind: "user_message".to_string(),
                 agent: ctx.agent("claude_code"),
                 provider: "anthropic".to_string(),
@@ -600,6 +611,7 @@ fn parse_inner(
                         session_id: sid,
                         ts: ts.to_string(),
                         turn_index: Some(current_turn),
+                        duration_ms: stated_duration_ms(&obj),
                         source_file: &ctx.source_file,
                         source_byte_offset: Some(offset),
                     }));
@@ -722,4 +734,169 @@ pub fn quick_checksum(path: &str) -> std::io::Result<QuickChecksum> {
         mtime,
         tail_hash: hex[..16].to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A transcript of `lines`, at a path whose uuid is the session's — so the
+    /// resume-copy rule sees a native file. Shapes only: every value below is
+    /// fabricated to match the FORM Claude Code writes, never copied from one.
+    fn transcript(lines: &[Value]) -> (String, tempdir::Guard) {
+        let dir = std::env::temp_dir().join(format!(
+            "modelstat-cc-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb.jsonl");
+        let text: String = lines
+            .iter()
+            .map(|l| format!("{}\n", serde_json::to_string(l).unwrap()))
+            .collect();
+        std::fs::write(&path, text).unwrap();
+        (
+            path.to_string_lossy().into_owned(),
+            tempdir::Guard(dir.to_string_lossy().into_owned()),
+        )
+    }
+
+    mod tempdir {
+        pub struct Guard(pub String);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    fn user_line(uuid: &str, text: &str) -> Value {
+        serde_json::json!({
+            "type": "user",
+            "uuid": uuid,
+            "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+            "timestamp": "2026-06-01T10:00:00.000Z",
+            "cwd": "/Users/dev/Projects/acme",
+            "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+        })
+    }
+
+    /// Claude Code states its own elapsed time under the name the TOOL chose,
+    /// with the unit in that name — three spellings ship in one release. The
+    /// parser used to read exactly one of them, so a web search and a sub-agent
+    /// run (the two longest tool calls a session makes) reported no duration at
+    /// all, and no reader could recover the number: it exists only in the local
+    /// JSONL.
+    #[test]
+    fn every_spelling_of_claude_s_own_measured_duration_ships() {
+        let with_result = |uuid: &str, result: Value| {
+            serde_json::json!({
+                "type": "user",
+                "uuid": uuid,
+                "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "timestamp": "2026-06-01T10:00:01.000Z",
+                "toolUseResult": result,
+                "message": { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_0123", "content": "ok" }
+                ]},
+            })
+        };
+        let (path, _guard) = transcript(&[
+            user_line("u-1", "go"),
+            with_result(
+                "u-2",
+                serde_json::json!({ "url": "https://example.test", "durationMs": 3500 }),
+            ),
+            with_result(
+                "u-3",
+                serde_json::json!({ "query": "acme", "durationSeconds": 7.5 }),
+            ),
+            with_result(
+                "u-4",
+                serde_json::json!({ "agentType": "general", "totalDurationMs": 105_000 }),
+            ),
+            with_result(
+                "u-5",
+                serde_json::json!({ "stdout": "", "timeoutMs": 120_000 }),
+            ),
+        ]);
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", path)).unwrap();
+        let durations: Vec<Option<u64>> = res.events.iter().map(|e| e.duration_ms).collect();
+        assert_eq!(
+            durations,
+            vec![None, Some(3500), Some(7500), Some(105_000), None],
+            "each tool's own spelling, read in the unit it states; a configured \
+             timeout is not an elapsed time"
+        );
+    }
+
+    /// Every wait the server derives is the distance between two message
+    /// timestamps, so a message with no stated instant is not a message with a
+    /// missing field — it is one that lands in 1970 and drags a whole session's
+    /// timing with it. The line is counted under its own kind instead, exactly
+    /// as a line missing its `uuid` already was.
+    #[test]
+    fn a_turn_that_states_no_instant_is_ledgered_rather_than_dated_to_the_epoch() {
+        let undated = |uuid: &str, kind: &str| {
+            serde_json::json!({
+                "type": kind,
+                "uuid": uuid,
+                "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "message": { "role": kind, "content": [{ "type": "text", "text": "hello" }] },
+            })
+        };
+        let (path, _guard) = transcript(&[
+            user_line("u-1", "the dated prompt"),
+            undated("u-2", "user"),
+            undated("a-1", "assistant"),
+        ]);
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", path)).unwrap();
+        assert_eq!(res.events.len(), 1, "only the dated line becomes an event");
+        assert_eq!(res.events[0].ts, "2026-06-01T10:00:00.000Z");
+        assert!(
+            res.events.iter().all(|e| !e.ts.is_empty()),
+            "no event may carry an empty instant"
+        );
+        assert_eq!(res.skipped_kinds.get("user"), Some(&1));
+        assert_eq!(res.skipped_kinds.get("assistant"), Some(&1));
+    }
+
+    /// A tool call's own start is the instant the assistant line states, and it
+    /// is never blank — the same gate the event takes.
+    #[test]
+    fn a_tool_call_starts_at_the_instant_its_line_states() {
+        let (path, _guard) = transcript(&[
+            user_line("u-1", "read the file"),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "a-1",
+                "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "timestamp": "2026-06-01T10:00:02.000Z",
+                "message": { "model": "claude-opus-4-8", "content": [
+                    { "type": "tool_use", "id": "toolu_0123", "name": "Read",
+                      "input": { "file_path": "/Users/dev/Projects/acme/x.ts" } }
+                ]},
+            }),
+            serde_json::json!({
+                "type": "user",
+                "uuid": "u-2",
+                "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "timestamp": "2026-06-01T10:00:03.500Z",
+                "message": { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_0123", "content": "ok" }
+                ]},
+            }),
+        ]);
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", path)).unwrap();
+        assert_eq!(res.tool_calls.len(), 1);
+        assert_eq!(res.tool_calls[0].started_at, "2026-06-01T10:00:02.000Z");
+        assert_eq!(
+            res.tool_calls[0].ended_at.as_deref(),
+            Some("2026-06-01T10:00:03.500Z")
+        );
+    }
 }

@@ -157,6 +157,12 @@ pub struct UnknownRecord<'a> {
     pub session_id: String,
     pub ts: String,
     pub turn_index: Option<u64>,
+    /// The elapsed time the record stated about itself, if any — see
+    /// [`crate::util::stated_duration_ms`]. Structural, like `ts` and the ids
+    /// above: a number the record wrote about its own timing, not content. It
+    /// is the whole reason codex's `task_complete` is worth shipping, and no
+    /// arm has to exist per kind for the next record that measures itself.
+    pub duration_ms: Option<u64>,
     pub source_file: &'a str,
     pub source_byte_offset: Option<u64>,
 }
@@ -178,7 +184,7 @@ pub fn unknown_record_event(r: UnknownRecord) -> RawEvent {
         git: None,
         tokens: None,
         tokens_unmapped: BTreeMap::new(),
-        duration_ms: None,
+        duration_ms: r.duration_ms,
         tool_calls: BTreeMap::new(),
         files_touched: Vec::new(),
         content_excerpt: None,
@@ -224,6 +230,7 @@ mod tests {
             session_id: "s1".into(),
             ts: "2026-01-01T00:00:00.000Z".into(),
             turn_index: Some(3),
+            duration_ms: Some(6556),
             source_file: "/t.jsonl",
             source_byte_offset: Some(42),
         });
@@ -233,5 +240,10 @@ mod tests {
         assert_eq!(ev.tokens, None);
         assert!(ev.tool_calls.is_empty());
         assert!(ev.files_touched.is_empty());
+        assert_eq!(
+            ev.duration_ms,
+            Some(6556),
+            "the timing the record stated about itself survives not being modelled"
+        );
     }
 }

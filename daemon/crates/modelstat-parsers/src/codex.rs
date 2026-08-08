@@ -34,7 +34,18 @@ use crate::tool_hash::{
     tool_identity,
 };
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
-use crate::util::slice_utf16;
+use crate::util::{slice_utf16, stated_duration_ms};
+
+/// The elapsed time a rollout record states about itself, in milliseconds.
+///
+/// Codex writes its facts inside `payload` (the line itself is an envelope of
+/// `timestamp` + `type`), so the probe reads the payload when there is one.
+/// This is how `task_complete`'s `duration_ms` — the only number in the rollout
+/// that says how long a turn actually took, and one no reader can reconstruct
+/// from timestamps — reaches the wire without an arm existing per payload type.
+fn record_duration_ms(obj: &Value) -> Option<u64> {
+    stated_duration_ms(obj.get("payload").unwrap_or(obj))
+}
 
 /// `response_item` payload types this parser sees, understands, and deliberately
 /// does not turn into events — each one duplicates an `event_msg` it already
@@ -335,7 +346,15 @@ fn parse_inner(
     let mut session_id: Option<String> = derive_session_id_from_rollout_path(&ctx.source_file);
     let mut cwd: Option<String> = None;
     let mut model: Option<String> = None;
+    // Conversation turn ordinal (SPEC 0005) — the SAME quantity the other three
+    // parsers emit: a turn starts at each typed prompt, and everything the agent
+    // does in reply inherits that ordinal. It used to count usage-bearing
+    // `token_count` lines instead, so one prompt's round trips walked the
+    // ordinal upward (a fixture with a single prompt spanned turns 0, 1 and 2)
+    // and the field meant something different for codex than for every other
+    // agent — which a cross-agent reading of turn timing cannot survive.
     let mut turn_index: u64 = 0;
+    let mut saw_user_prompt = false;
     let mut last_ts: Option<String> = None;
     // SPEC 0005: codex writes the assistant's prose on `event_msg`/
     // `agent_message` lines but its token counters on `event_msg`/`token_count`
@@ -554,6 +573,7 @@ fn parse_inner(
                         session_id: sid,
                         ts,
                         turn_index: Some(turn_index),
+                        duration_ms: record_duration_ms(&obj),
                         source_file: &ctx.source_file,
                         source_byte_offset: Some(offset),
                     }));
@@ -646,7 +666,6 @@ fn parse_inner(
                     redactions: Default::default(),
                 });
                 emitted += 1;
-                turn_index += 1;
                 continue;
             }
             if ptype == "agent_message" {
@@ -677,6 +696,15 @@ fn parse_inner(
                         .and_then(Value::as_str)
                         .unwrap_or(""),
                 );
+                // A real (typed) prompt starts a new turn, exactly as in the
+                // claude_code, pi and cursor parsers; anything before the first
+                // one sits in turn 0.
+                if content_excerpt.is_some() {
+                    if saw_user_prompt {
+                        turn_index += 1;
+                    }
+                    saw_user_prompt = true;
+                }
                 sink.push(RawEvent {
                     source_event_id: source_event_id(
                         &ctx.device_id,
@@ -691,11 +719,6 @@ fn parse_inner(
                     provider: "openai".to_string(),
                     model: model.clone(),
                     session_id: session_id.clone().unwrap(),
-                    // Codex's ordinal counts API round trips (it advances on
-                    // each usage-bearing `token_count`), not typed prompts —
-                    // unlike the other parsers. Stated so a message still
-                    // carries its position; the server derives conversation
-                    // turns from the role sequence regardless.
                     turn_index: Some(turn_index),
                     parent_event_id: None,
                     cwd: cwd.clone(),
@@ -734,6 +757,7 @@ fn parse_inner(
                         session_id: sid,
                         ts,
                         turn_index: Some(turn_index),
+                        duration_ms: record_duration_ms(&obj),
                         source_file: &ctx.source_file,
                         source_byte_offset: Some(offset),
                     }));
@@ -762,6 +786,7 @@ fn parse_inner(
                     session_id: sid,
                     ts,
                     turn_index: Some(turn_index),
+                    duration_ms: record_duration_ms(&obj),
                     source_file: &ctx.source_file,
                     source_byte_offset: Some(offset),
                 }));
@@ -787,6 +812,138 @@ fn parse_inner(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A rollout of `lines` at a path codex's own naming rule matches. Shapes
+    /// only — every value is fabricated to match the FORM codex writes.
+    fn rollout(lines: &[Value]) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "modelstat-codex-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path =
+            dir.join("rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl");
+        let text: String = lines
+            .iter()
+            .map(|l| format!("{}\n", serde_json::to_string(l).unwrap()))
+            .collect();
+        std::fs::write(&path, text).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn line(ts: &str, ptype: &str, extra: Value) -> Value {
+        let mut payload = json!({ "type": ptype });
+        if let (Some(p), Some(e)) = (payload.as_object_mut(), extra.as_object()) {
+            for (k, v) in e {
+                p.insert(k.clone(), v.clone());
+            }
+        }
+        json!({ "timestamp": ts, "type": "event_msg", "payload": payload })
+    }
+
+    fn usage(input: u64) -> Value {
+        json!({ "info": { "last_token_usage": {
+            "input_tokens": input, "cached_input_tokens": 0,
+            "output_tokens": 10, "reasoning_output_tokens": 0
+        }}})
+    }
+
+    /// The ordinal counts TYPED PROMPTS, the same quantity claude_code, pi and
+    /// cursor emit. It used to count usage-bearing `token_count` lines, so one
+    /// prompt whose reply took three round trips reported three different turns
+    /// — and `turn_index` meant one thing for codex and another for everyone
+    /// else, which no cross-agent reading of turn timing survives.
+    #[test]
+    fn the_turn_ordinal_advances_at_a_typed_prompt_not_at_an_api_round_trip() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            line(
+                "2026-08-05T11:58:59.076Z",
+                "user_message",
+                json!({ "message": "first ask" }),
+            ),
+            line("2026-08-05T11:59:02.811Z", "token_count", usage(100)),
+            line("2026-08-05T11:59:03.811Z", "token_count", usage(200)),
+            line("2026-08-05T11:59:04.046Z", "token_count", usage(300)),
+            line(
+                "2026-08-05T12:00:00.000Z",
+                "user_message",
+                json!({ "message": "second ask" }),
+            ),
+            line("2026-08-05T12:00:04.000Z", "token_count", usage(400)),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        let seen: Vec<(&str, Option<u64>)> = res
+            .events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.turn_index))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("user_message", Some(0)),
+                ("assistant_message", Some(0)),
+                ("assistant_message", Some(0)),
+                ("assistant_message", Some(0)),
+                ("user_message", Some(1)),
+                ("assistant_message", Some(1)),
+            ],
+            "three round trips answering one prompt are all that prompt's turn"
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// `task_complete` is the only record in a rollout that says how long a turn
+    /// took, and it is codex's OWN measurement — nothing downstream can derive
+    /// it. The parser models no arm for the record and still carries the number:
+    /// a stated duration is a structural field, like the instant and the ids.
+    #[test]
+    fn codex_s_own_stated_turn_duration_survives_the_record_being_unmodelled() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            line(
+                "2026-08-05T11:58:59.076Z",
+                "user_message",
+                json!({ "message": "ask" }),
+            ),
+            line(
+                "2026-08-05T11:59:04.063Z",
+                "task_complete",
+                json!({ "duration_ms": 6556, "time_to_first_token_ms": 3076,
+                        "started_at": 1_785_931_137u64, "completed_at": 1_785_931_144u64 }),
+            ),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        let done = res
+            .events
+            .iter()
+            .find(|e| e.kind == "task_complete")
+            .expect("the record ships as an event");
+        assert_eq!(
+            done.duration_ms,
+            Some(6556),
+            "codex's own number, as stated"
+        );
+        assert_eq!(done.ts, "2026-08-05T11:59:04.063Z");
+        assert_eq!(done.turn_index, Some(0), "it closes the prompt's own turn");
+        assert!(
+            done.content_excerpt.is_none(),
+            "an unmodelled record still ships none of what it said"
+        );
+        assert_eq!(
+            res.skipped_kinds.get("event_msg/task_complete"),
+            Some(&1),
+            "reading a structural field is not the same as modelling the record"
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
 
     #[test]
     fn reads_the_per_call_delta_not_the_cumulative_total() {

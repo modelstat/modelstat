@@ -112,6 +112,9 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
                         session_id: b.composer_id.clone(),
                         ts: b.created_at.clone(),
                         turn_index: Some(turn_index),
+                        // A bubble is a message record; none of the fields this
+                        // parser reads states an elapsed time.
+                        duration_ms: None,
                         source_file: &ctx.source_file,
                         source_byte_offset: None,
                     }));

@@ -136,11 +136,34 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       aspect carries the whole wave and the parser aspects stay put — one
 ///       fleet re-scan, mostly served by the span cache and the cloud
 ///       classifier.
+///
+/// claude_code v24 — the durations Claude Code MEASURED, which only the local
+///       JSONL ever held. It states its own elapsed time under the name each
+///       tool chose, with the unit in that name (`durationMs`,
+///       `durationSeconds`, `totalDurationMs` all ship in one release), and the
+///       parser read exactly one spelling — so a web search and a sub-agent run,
+///       the two longest calls a session makes, reported no duration at all.
+///       Also stops dating a turn that states no instant to the epoch: such a
+///       line now reports through the skip ledger instead of shipping `ts: ""`,
+///       which parses as 1970 and drags every wait derived from it. Re-reading
+///       is the only way history gains the numbers; nothing on the server can
+///       derive them.
+/// codex v24 — the turn ordinal and codex's own turn duration. `turn_index`
+///       counted usage-bearing `token_count` lines, i.e. API round trips, so one
+///       typed prompt whose reply took three round trips reported three turns
+///       and the field meant something different for codex than for every other
+///       agent — a cross-agent reading of turn timing cannot survive that. It
+///       now advances at the typed prompt, as claude_code, pi and cursor already
+///       did. And `task_complete` states `duration_ms`, the only number in a
+///       rollout that says how long a turn took; the record has no parser arm,
+///       so the number was dropped. A stated duration is structural, like the
+///       instant and the ids, so unmodelled records carry it now. Both are
+///       local-only facts: a re-scan is the only way uploaded sessions get them.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
     ("capture", LEGACY_WORLD_VERSION + 1),
     ("redaction", LEGACY_WORLD_VERSION),
-    ("claude_code", LEGACY_WORLD_VERSION),
-    ("codex", LEGACY_WORLD_VERSION),
+    ("claude_code", LEGACY_WORLD_VERSION + 1),
+    ("codex", LEGACY_WORLD_VERSION + 1),
     ("cursor", LEGACY_WORLD_VERSION),
     ("pi", LEGACY_WORLD_VERSION),
 ];
@@ -322,6 +345,17 @@ mod tests {
         }
     }
 
+    /// The compiled version of one aspect. Read rather than written out, so a
+    /// bump documents itself in [`ASPECT_VERSIONS`] alone and never has to be
+    /// mirrored into an assertion here.
+    fn compiled(aspect: &str) -> i64 {
+        ASPECT_VERSIONS
+            .iter()
+            .find(|(a, _)| *a == aspect)
+            .map(|(_, v)| *v)
+            .expect("aspect exists")
+    }
+
     fn state_with(cursors: &[&str]) -> FakeState {
         FakeState {
             legacy: None,
@@ -397,7 +431,7 @@ mod tests {
     #[test]
     fn a_parser_bump_wipes_only_that_parsers_files_and_the_unclaimed() {
         let mut s = state_with(&["/cc/a", "/codex/b", "/mystery/c"]);
-        s.aspects.insert("codex".into(), LEGACY_WORLD_VERSION - 1);
+        s.aspects.insert("codex".into(), compiled("codex") - 1);
         let r = reconcile_processing_aspects(&mut s, &lookup);
         assert!(r.changed);
         assert_eq!(
@@ -406,14 +440,14 @@ mod tests {
             "codex's file re-reads, the unclaimed file re-reads conservatively, \
              claude_code's file keeps its cursor"
         );
-        assert_eq!(s.aspects["codex"], LEGACY_WORLD_VERSION);
+        assert_eq!(s.aspects["codex"], compiled("codex"));
     }
 
     #[test]
     fn a_cross_parser_bump_rereads_the_world() {
         let mut s = state_with(&["/cc/a", "/codex/b"]);
         s.aspects
-            .insert("redaction".into(), LEGACY_WORLD_VERSION - 1);
+            .insert("redaction".into(), compiled("redaction") - 1);
         let r = reconcile_processing_aspects(&mut s, &lookup);
         assert!(r.changed);
         assert!(s.cursors.is_empty());
