@@ -457,11 +457,13 @@ impl DeviceApi {
         // guarantees no permanently-rejectable (over-cap) batch. Rust strings are
         // inherently well-formed UTF-8, so TS's `wellFormedStringify` is a no-op.
         let mut wire = batch.clone();
-        wire.summarizer_mode = Some(self.config.summarizer_mode());
-        // Build-time stamp wins (the scan's spool sink sets it — a batch names
-        // the mode it was actually scrubbed under, not whatever is set by the
-        // time it ships); this fallback covers SDK/receiver batches and spools
-        // written by older daemons.
+        // Build-time stamps win (the scan's spool sink sets both — a batch
+        // names the modes it was actually built under, not whatever is set by
+        // the time it ships); these fallbacks cover SDK/receiver batches and
+        // spools written by older daemons.
+        if wire.summarizer_mode.is_none() {
+            wire.summarizer_mode = Some(self.config.summarizer_mode());
+        }
         if wire.redactor_mode.is_none() {
             wire.redactor_mode = Some(self.config.redactor_mode());
         }

@@ -74,7 +74,14 @@ pub struct RuntimeState {
     pub api_url: String,
     pub cursor: BTreeMap<String, FileCursor>,
     pub segments_sent: i64,
+    /// The retired single-integer pipeline marker. READ-tolerated so the
+    /// aspect migration can see it, never written again — the daemon's
+    /// reconcile clears it on first boot after the upgrade.
+    #[serde(skip_serializing)]
     pub processing_version: Option<i64>,
+    /// Per-aspect pipeline versions (capture / redaction / one per parser) —
+    /// the marker that scopes re-scans to exactly what a change invalidated.
+    pub processing_aspects: BTreeMap<String, i64>,
     pub reconcile_cache: Value,
     #[serde(rename = "summariserDegraded")]
     pub summariser_degraded: bool,
@@ -82,11 +89,12 @@ pub struct RuntimeState {
     pub summariser_recovery_at: i64,
     pub reship_state: Value,
     pub summarizer_mode: String,
-    /// Written only once someone moves OFF the default, so a state file from an
-    /// older daemon still re-serializes byte-identically (the v16 golden proves
-    /// it). Absent means the DEFAULT — which is `cloud` now; an explicit `local`
-    /// is the choice that must survive every upgrade, and it always serializes.
-    #[serde(skip_serializing_if = "is_default_redactor")]
+    /// ALWAYS written. It used to serialize only off-default ("absent means
+    /// the default"), which bound every stored file's meaning to a compiled
+    /// constant — flipping the default silently rewrote what old files said.
+    /// The file states its own facts now; absent means only "written before
+    /// the setting existed", which the loader resolves to the current default
+    /// exactly once.
     pub redactor_mode: String,
     /// The self-hosted redactor endpoint (empty unless someone set one) — the
     /// redactor twin of `self_hosted_url`, which stays the SUMMARISER's.
@@ -102,6 +110,7 @@ impl Default for RuntimeState {
             cursor: BTreeMap::new(),
             segments_sent: 0,
             processing_version: None,
+            processing_aspects: BTreeMap::new(),
             reconcile_cache: json!({}),
             summariser_degraded: false,
             summariser_recovery_at: 0,
@@ -123,6 +132,7 @@ struct PartialState {
     cursor: Option<BTreeMap<String, FileCursor>>,
     segments_sent: Option<i64>,
     processing_version: Option<i64>,
+    processing_aspects: Option<BTreeMap<String, i64>>,
     reconcile_cache: Option<Value>,
     #[serde(rename = "summariserDegraded")]
     summariser_degraded: Option<bool>,
@@ -157,6 +167,7 @@ pub fn load_state() -> RuntimeState {
         cursor: obj.cursor.unwrap_or(d.cursor),
         segments_sent: obj.segments_sent.unwrap_or(d.segments_sent),
         processing_version: obj.processing_version,
+        processing_aspects: obj.processing_aspects.unwrap_or_default(),
         reconcile_cache: obj.reconcile_cache.unwrap_or(d.reconcile_cache),
         summariser_degraded: obj.summariser_degraded.unwrap_or(d.summariser_degraded),
         summariser_recovery_at: obj
@@ -202,11 +213,6 @@ pub fn set_api_url(v: &str) -> std::io::Result<()> {
     save_state(&s)
 }
 
-/// The persisted summarizer mode (always a valid value — `load_state` validates).
-fn is_default_redactor(m: &String) -> bool {
-    m == DEFAULT_REDACTOR_MODE
-}
-
 pub fn get_redactor_mode() -> String {
     load_state().redactor_mode
 }
@@ -243,15 +249,6 @@ pub fn get_self_hosted_url() -> String {
 pub fn set_self_hosted_url(url: &str) -> std::io::Result<()> {
     let mut s = load_state();
     s.self_hosted_url = url.to_string();
-    save_state(&s)
-}
-
-pub fn get_processing_version() -> Option<i64> {
-    load_state().processing_version
-}
-pub fn set_processing_version(v: i64) -> std::io::Result<()> {
-    let mut s = load_state();
-    s.processing_version = Some(v);
     save_state(&s)
 }
 
@@ -298,9 +295,17 @@ mod tests {
             assert_eq!(s.summarizer_mode, "cloud");
             assert_eq!(s.segments_sent, 42);
             assert_eq!(s.cursor.len(), 1);
-            // Re-serialize → semantically identical to the golden.
+            // Re-serialize → the golden, MINUS the retired single-integer
+            // marker (read-tolerated, never written again), PLUS the two
+            // fields every write now states outright: the aspect map (empty
+            // until the daemon's reconcile seeds it) and the redactor mode
+            // (the file's own fact, not a compiled default's shadow).
             let mine: Value = serde_json::to_value(&s).unwrap();
-            let want: Value = serde_json::from_str(&golden("state_v16.json")).unwrap();
+            let mut want: Value = serde_json::from_str(&golden("state_v16.json")).unwrap();
+            let w = want.as_object_mut().unwrap();
+            w.remove("processingVersion");
+            w.insert("processingAspects".into(), json!({}));
+            w.insert("redactorMode".into(), json!("cloud"));
             assert_eq!(mine, want);
         });
     }
@@ -317,12 +322,20 @@ mod tests {
             assert_eq!(s.summarizer_mode, "self-hosted");
             assert_eq!(s.self_hosted_url, "https://llm.acme.internal");
             assert!(s.summariser_degraded);
-            // selfHostedModel is dropped on write.
+            // selfHostedModel AND the retired processingVersion are dropped on write.
             save_state(&s).unwrap();
             let written = std::fs::read_to_string(state_path()).unwrap();
             assert!(
                 !written.contains("selfHostedModel"),
                 "selfHostedModel must be dropped on the next write"
+            );
+            assert!(
+                !written.contains("processingVersion"),
+                "the retired single-integer marker must not survive a write"
+            );
+            assert!(
+                written.contains("redactorMode"),
+                "the redactor mode is the file's own fact and always writes"
             );
             // apiUrl legacy value is preserved at the store layer (the localhost
             // reinterpretation is a Config-layer concern, not the store's).
@@ -348,11 +361,13 @@ mod tests {
             set_api_url("https://dev.example").unwrap();
             set_summarizer_mode("local").unwrap();
             set_self_hosted_url("https://llm.internal").unwrap();
-            set_processing_version(16).unwrap();
+            let mut s = load_state();
+            s.processing_aspects.insert("codex".into(), 24);
+            save_state(&s).unwrap();
             assert_eq!(get_api_url(), "https://dev.example");
             assert_eq!(get_summarizer_mode(), "local");
             assert_eq!(get_self_hosted_url(), "https://llm.internal");
-            assert_eq!(get_processing_version(), Some(16));
+            assert_eq!(load_state().processing_aspects["codex"], 24);
         });
     }
 }

@@ -9,7 +9,7 @@ use std::time::Duration;
 use modelstat_daemon::lock::{
     daemon_lock_path, is_process_alive, read_daemon_lock, terminate_process, terminate_process_hard,
 };
-use modelstat_daemon::processing_version::PROCESSING_VERSION;
+use modelstat_daemon::processing_version::ASPECT_VERSIONS;
 use modelstat_daemon::runtime::{scan_session, Daemon};
 use modelstat_daemon::supervise::{daemon_health, SuperviseDecision};
 use modelstat_ingest::state::{load_state, save_state};
@@ -19,18 +19,21 @@ use modelstat_service::{
 };
 use std::process::ExitCode;
 
-/// `reset` — wipe all file cursors + stamp the current PROCESSING_VERSION so the
-/// next scan re-reads every JSONL and re-summarises every session.
+/// `reset` — wipe all file cursors + stamp every pipeline aspect at its current
+/// version so the next scan re-reads every transcript and re-processes every
+/// session (without the boot reconcile mistaking the wipe for a stale install).
 pub fn cmd_reset() -> ExitCode {
     let mut state = load_state();
     state.cursor.clear();
-    state.processing_version = Some(PROCESSING_VERSION);
+    for (aspect, v) in ASPECT_VERSIONS {
+        state.processing_aspects.insert((*aspect).to_string(), *v);
+    }
     if let Err(e) = save_state(&state) {
         eprintln!("modelstat: couldn't reset cursors: {e}");
         return ExitCode::FAILURE;
     }
     println!(
-        "cursors reset — the daemon's next scan cycle will re-read every JSONL from the start and re-summarise every session at processing version v{PROCESSING_VERSION}."
+        "cursors reset — the daemon's next scan cycle will re-read every transcript from the start and re-process every session."
     );
     println!("  If the daemon is running, kick it now with: modelstat stop && modelstat start");
     ExitCode::SUCCESS

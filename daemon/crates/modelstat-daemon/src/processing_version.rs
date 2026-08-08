@@ -1,15 +1,17 @@
 //! Local processing-pipeline version — a port of
 //! `apps/daemon/src/processing-version.ts`.
 //!
-//! The marker that lets a new daemon build force a re-scan of every
-//! previously-uploaded session. File cursors track "uploaded up to byte N", so a
-//! normal restart only ships new events — but when the pipeline ITSELF changes
-//! shape (summariser model/prompt, sampling, redaction, segment boundaries), every
-//! previously-uploaded segment is stale even though the JSONL hasn't moved. On
-//! startup the daemon compares this compiled-in integer to the one stored in
-//! `state.json`; if higher, it wipes every cursor so the next scan re-reads the
-//! world through the current pipeline (a re-scan REPLACES segments by
-//! `segment_id` in place — no duplicates, no orphans).
+//! The markers that let a new daemon build force a re-scan of previously
+//! uploaded sessions. File cursors track "uploaded up to byte N", so a normal
+//! restart only ships new events — but when the pipeline ITSELF changes shape
+//! (capture, redaction, a parser's schema handling), the affected output is
+//! stale even though the JSONL hasn't moved. On startup the daemon compares
+//! the compiled-in PER-ASPECT versions ([`ASPECT_VERSIONS`]) to the stored
+//! ones; each stale aspect wipes exactly the cursors it invalidates — a
+//! parser-scoped fix re-reads one parser's files, a capture/redaction change
+//! re-reads the world (a re-scan REPLACES segments/messages by id in place —
+//! no duplicates, no orphans). The single-integer v1–v23 history below is the
+//! era when every bump claimed the world; see [`LEGACY_WORLD_VERSION`].
 
 use modelstat_ingest::RuntimeState;
 
@@ -94,141 +96,332 @@ use modelstat_ingest::RuntimeState;
 ///       stored messages carried an ORG marker). Re-ships so history is scrubbed by
 ///       the model that can actually see secrets, and un-marked where the old one
 ///       was only ever guessing.
-pub const PROCESSING_VERSION: i64 = 23;
+/// The last SINGLE-INTEGER pipeline version (the v1–v23 history above). The
+/// integer's flaw was its claim: every bump asserted "all prior output of every
+/// parser is stale" even when the change touched one parser (v17: codex token
+/// counts) or one aspect (v22: splice only) — and each of the five bumps of
+/// early August re-ran the entire corpus on every install. Kept only to migrate
+/// stored state; new bumps go in [`ASPECT_VERSIONS`].
+pub const LEGACY_WORLD_VERSION: i64 = 23;
 
-/// The state a reconcile reads + mutates: the stored marker plus the cursors it
-/// wipes on a bump. Abstracted so the decision is unit-testable without touching
-/// `state.json`.
+/// Per-ASPECT pipeline versions — several exact claims instead of one maximal
+/// one. A bump names precisely what today's change invalidated:
+///
+///   · `capture` / `redaction` — cross-parser aspects; a bump re-reads EVERY
+///     file (verbatim capture shape, redaction semantics).
+///   · one aspect per parser — a parser-scoped fix (a codex token-counting
+///     bug, a cursor schema move) re-reads only that parser's files.
+///
+/// The interface stays bounded (this fixed key set); the deleted structure is
+/// the old implicit claim that any change invalidates the world. All seeded at
+/// [`LEGACY_WORLD_VERSION`] so the migration is a no-op for a current install.
+///
+/// To bump: raise ONE aspect's number and document the why here, exactly as
+/// the v1–v23 history did.
+pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
+    ("capture", LEGACY_WORLD_VERSION),
+    ("redaction", LEGACY_WORLD_VERSION),
+    ("claude_code", LEGACY_WORLD_VERSION),
+    ("codex", LEGACY_WORLD_VERSION),
+    ("cursor", LEGACY_WORLD_VERSION),
+    ("pi", LEGACY_WORLD_VERSION),
+];
+
+/// The aspects that invalidate every parser's files when bumped.
+const CROSS_PARSER_ASPECTS: [&str; 2] = ["capture", "redaction"];
+
+impl crate::discover_jobs::ParserKind {
+    /// The processing aspect this parser's files re-scan under. Exhaustive on
+    /// purpose: adding a parser without an [`ASPECT_VERSIONS`] entry fails the
+    /// paired test, not a 3 a.m. debugging session.
+    pub fn aspect(self) -> &'static str {
+        match self {
+            crate::discover_jobs::ParserKind::ClaudeCode => "claude_code",
+            crate::discover_jobs::ParserKind::Codex => "codex",
+            crate::discover_jobs::ParserKind::Pi => "pi",
+            crate::discover_jobs::ParserKind::Cursor => "cursor",
+        }
+    }
+}
+
+/// The state a reconcile reads + mutates. Abstracted so the decision is
+/// unit-testable without touching `state.json`.
 pub trait ProcessingState {
-    fn processing_version(&self) -> Option<i64>;
-    fn set_processing_version(&mut self, v: i64);
-    fn wipe_cursors(&mut self);
+    fn aspect_version(&self, aspect: &str) -> Option<i64>;
+    fn set_aspect_version(&mut self, aspect: &str, v: i64);
+    /// The pre-aspect single integer, if the state file still carries one.
+    fn legacy_processing_version(&self) -> Option<i64>;
+    fn clear_legacy_processing_version(&mut self);
+    /// Drop every cursor `keep` rejects. `keep(path) == true` retains.
+    fn retain_cursors(&mut self, keep: &mut dyn FnMut(&str) -> bool);
 }
 
 impl ProcessingState for RuntimeState {
-    fn processing_version(&self) -> Option<i64> {
+    fn aspect_version(&self, aspect: &str) -> Option<i64> {
+        self.processing_aspects.get(aspect).copied()
+    }
+    fn set_aspect_version(&mut self, aspect: &str, v: i64) {
+        self.processing_aspects.insert(aspect.to_string(), v);
+    }
+    fn legacy_processing_version(&self) -> Option<i64> {
         self.processing_version
     }
-    fn set_processing_version(&mut self, v: i64) {
-        self.processing_version = Some(v);
+    fn clear_legacy_processing_version(&mut self) {
+        self.processing_version = None;
     }
-    fn wipe_cursors(&mut self) {
-        self.cursor.clear();
+    fn retain_cursors(&mut self, keep: &mut dyn FnMut(&str) -> bool) {
+        self.cursor.retain(|path, _| keep(path));
     }
 }
 
-/// What a reconcile did — surfaced in the startup log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a reconcile did — surfaced line-by-line in the startup log.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VersionReconcile {
     pub changed: bool,
-    pub from: i64,
-    pub to: i64,
+    /// One human line per action taken ("aspect codex v23 → v24: …").
+    pub notes: Vec<String>,
 }
 
-/// On startup: if the stored version is older than the compiled-in one (or absent
-/// → treated as v1), wipe cursors + stamp the new version so the next scan
-/// re-reads the world through the current pipeline. Port of
-/// `reconcileProcessingVersion`. The caller persists the mutated state (and logs
-/// the outcome) only when `changed`.
-pub fn reconcile_processing_version<S: ProcessingState>(state: &mut S) -> VersionReconcile {
-    let stored = state.processing_version().unwrap_or(1);
-    if stored >= PROCESSING_VERSION {
-        return VersionReconcile {
-            changed: false,
-            from: stored,
-            to: PROCESSING_VERSION,
-        };
+/// On startup: bring the stored aspect versions up to the compiled ones,
+/// wiping exactly the cursors each stale aspect invalidates so the next scan
+/// re-reads those files through the current pipeline (a re-scan REPLACES
+/// segments/messages by id server-side — no duplicates).
+///
+/// `parser_of` maps a cursor path to its parser's aspect, from the CURRENT
+/// discovery pass — the only honest source of "whose file is this". A path
+/// discovery no longer claims wipes CONSERVATIVELY on any parser bump:
+/// over-wiping re-reads a file, under-wiping silently skips the repair the
+/// bump exists to make.
+pub fn reconcile_processing_aspects<S: ProcessingState>(
+    state: &mut S,
+    parser_of: &dyn Fn(&str) -> Option<&'static str>,
+) -> VersionReconcile {
+    let mut out = VersionReconcile::default();
+
+    // ── Legacy single-integer migration ──────────────────────────────────
+    if let Some(legacy) = state.legacy_processing_version() {
+        if legacy < LEGACY_WORLD_VERSION {
+            // The old contract for an outdated install: everything re-reads.
+            state.retain_cursors(&mut |_| false);
+            out.notes.push(format!(
+                "legacy pipeline v{legacy} < v{LEGACY_WORLD_VERSION} — wiped every cursor once, \
+                 then moved to per-aspect versions"
+            ));
+        } else {
+            out.notes.push(format!(
+                "legacy pipeline v{legacy} retired — moved to per-aspect versions, nothing re-read"
+            ));
+        }
+        for (aspect, compiled) in ASPECT_VERSIONS {
+            if state.aspect_version(aspect).is_none() {
+                state.set_aspect_version(aspect, *compiled);
+            }
+        }
+        state.clear_legacy_processing_version();
+        out.changed = true;
     }
-    state.wipe_cursors();
-    state.set_processing_version(PROCESSING_VERSION);
-    VersionReconcile {
-        changed: true,
-        from: stored,
-        to: PROCESSING_VERSION,
+
+    // ── Fresh / hand-edited state: no versions at all ────────────────────
+    let any_aspect = ASPECT_VERSIONS
+        .iter()
+        .any(|(a, _)| state.aspect_version(a).is_some());
+    if !any_aspect {
+        // No marker anywhere. A fresh install has no cursors (the wipe is
+        // free); a state file WITH cursors but no versions is a hand-edit or
+        // corruption, and re-reading is the only safe reading of it.
+        state.retain_cursors(&mut |_| false);
+        for (aspect, compiled) in ASPECT_VERSIONS {
+            state.set_aspect_version(aspect, *compiled);
+        }
+        out.notes
+            .push("no pipeline versions stored — seeded all aspects, cursors cleared".into());
+        out.changed = true;
+        return out;
     }
+
+    // ── Per-aspect bumps ─────────────────────────────────────────────────
+    for (aspect, compiled) in ASPECT_VERSIONS {
+        let stored = state.aspect_version(aspect).unwrap_or(1);
+        if stored >= *compiled {
+            continue;
+        }
+        let mut wiped = 0usize;
+        if CROSS_PARSER_ASPECTS.contains(aspect) {
+            state.retain_cursors(&mut |_| {
+                wiped += 1;
+                false
+            });
+        } else {
+            state.retain_cursors(&mut |path| match parser_of(path) {
+                Some(a) if a == *aspect => {
+                    wiped += 1;
+                    false
+                }
+                // Unclaimed by current discovery: keep only if some OTHER
+                // parser claims it; unknown files wipe conservatively.
+                Some(_) => true,
+                None => {
+                    wiped += 1;
+                    false
+                }
+            });
+        }
+        state.set_aspect_version(aspect, *compiled);
+        out.notes.push(format!(
+            "aspect {aspect} v{stored} → v{compiled}: {wiped} cursor(s) wiped for re-processing"
+        ));
+        out.changed = true;
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[derive(Default)]
     struct FakeState {
-        version: Option<i64>,
-        cursors: usize,
-        wiped: bool,
+        legacy: Option<i64>,
+        aspects: BTreeMap<String, i64>,
+        cursors: Vec<String>,
     }
     impl ProcessingState for FakeState {
-        fn processing_version(&self) -> Option<i64> {
-            self.version
+        fn aspect_version(&self, aspect: &str) -> Option<i64> {
+            self.aspects.get(aspect).copied()
         }
-        fn set_processing_version(&mut self, v: i64) {
-            self.version = Some(v);
+        fn set_aspect_version(&mut self, aspect: &str, v: i64) {
+            self.aspects.insert(aspect.into(), v);
         }
-        fn wipe_cursors(&mut self) {
-            self.cursors = 0;
-            self.wiped = true;
+        fn legacy_processing_version(&self) -> Option<i64> {
+            self.legacy
+        }
+        fn clear_legacy_processing_version(&mut self) {
+            self.legacy = None;
+        }
+        fn retain_cursors(&mut self, keep: &mut dyn FnMut(&str) -> bool) {
+            self.cursors.retain(|p| keep(p));
+        }
+    }
+
+    fn state_with(cursors: &[&str]) -> FakeState {
+        FakeState {
+            legacy: None,
+            aspects: ASPECT_VERSIONS
+                .iter()
+                .map(|(a, v)| (a.to_string(), *v))
+                .collect(),
+            cursors: cursors.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Path → aspect for the tests: "/codex/…" is codex's, "/cc/…" is
+    /// claude_code's, anything else is unclaimed.
+    fn lookup(path: &str) -> Option<&'static str> {
+        if path.starts_with("/codex/") {
+            Some("codex")
+        } else if path.starts_with("/cc/") {
+            Some("claude_code")
+        } else {
+            None
         }
     }
 
     #[test]
-    fn absent_version_wipes_and_stamps() {
+    fn every_parser_has_an_aspect_entry() {
+        use crate::discover_jobs::ParserKind::*;
+        for kind in [ClaudeCode, Codex, Pi, Cursor] {
+            assert!(
+                ASPECT_VERSIONS.iter().any(|(a, _)| *a == kind.aspect()),
+                "parser {kind:?} has no aspect version — its fixes could never re-scan"
+            );
+        }
+    }
+
+    #[test]
+    fn a_current_legacy_install_migrates_without_rereading_anything() {
+        // The fleet case on upgrade day: stored v23, aspects absent.
         let mut s = FakeState {
-            version: None,
-            cursors: 7,
-            wiped: false,
+            legacy: Some(LEGACY_WORLD_VERSION),
+            aspects: BTreeMap::new(),
+            cursors: vec!["/cc/a".into(), "/codex/b".into()],
         };
-        let r = reconcile_processing_version(&mut s);
+        let r = reconcile_processing_aspects(&mut s, &lookup);
         assert!(r.changed);
-        assert_eq!(r.from, 1); // None → treated as v1
-        assert_eq!(r.to, PROCESSING_VERSION);
-        assert!(s.wiped);
-        assert_eq!(s.cursors, 0);
-        assert_eq!(s.version, Some(PROCESSING_VERSION));
+        assert_eq!(
+            s.cursors.len(),
+            2,
+            "a current install must not re-read the world"
+        );
+        assert_eq!(
+            s.legacy, None,
+            "the retired integer must not survive a write"
+        );
+        assert_eq!(s.aspects.len(), ASPECT_VERSIONS.len());
     }
 
     #[test]
-    fn older_version_wipes() {
+    fn a_stale_legacy_install_rereads_everything_once() {
         let mut s = FakeState {
-            version: Some(9),
-            cursors: 3,
-            wiped: false,
+            legacy: Some(9),
+            aspects: BTreeMap::new(),
+            cursors: vec!["/cc/a".into()],
         };
-        let r = reconcile_processing_version(&mut s);
+        let r = reconcile_processing_aspects(&mut s, &lookup);
         assert!(r.changed);
-        assert_eq!(r.from, 9);
-        assert!(s.wiped);
-        // The assertion is "reconcile stamps the CURRENT version", not any
-        // particular integer — hardcoding it made every legitimate bump red.
-        assert_eq!(s.version, Some(PROCESSING_VERSION));
+        assert!(
+            s.cursors.is_empty(),
+            "the old contract for old installs holds"
+        );
+        assert_eq!(s.legacy, None);
     }
 
     #[test]
-    fn current_or_newer_is_a_noop() {
-        for v in [PROCESSING_VERSION, PROCESSING_VERSION + 1] {
-            let mut s = FakeState {
-                version: Some(v),
-                cursors: 3,
-                wiped: false,
-            };
-            let r = reconcile_processing_version(&mut s);
-            assert!(!r.changed);
-            assert!(!s.wiped);
-            assert_eq!(s.cursors, 3); // cursors untouched
-            assert_eq!(s.version, Some(v)); // version untouched
-        }
+    fn a_parser_bump_wipes_only_that_parsers_files_and_the_unclaimed() {
+        let mut s = state_with(&["/cc/a", "/codex/b", "/mystery/c"]);
+        s.aspects.insert("codex".into(), LEGACY_WORLD_VERSION - 1);
+        let r = reconcile_processing_aspects(&mut s, &lookup);
+        assert!(r.changed);
+        assert_eq!(
+            s.cursors,
+            vec!["/cc/a".to_string()],
+            "codex's file re-reads, the unclaimed file re-reads conservatively, \
+             claude_code's file keeps its cursor"
+        );
+        assert_eq!(s.aspects["codex"], LEGACY_WORLD_VERSION);
     }
 
     #[test]
-    fn reconciles_a_real_runtime_state() {
-        // The bridge to the M1 state store: a default (version-absent) state
-        // reconciles up to the current version.
-        let mut s = RuntimeState::default();
-        assert_eq!(s.processing_version, None);
-        let r = reconcile_processing_version(&mut s);
+    fn a_cross_parser_bump_rereads_the_world() {
+        let mut s = state_with(&["/cc/a", "/codex/b"]);
+        s.aspects
+            .insert("redaction".into(), LEGACY_WORLD_VERSION - 1);
+        let r = reconcile_processing_aspects(&mut s, &lookup);
         assert!(r.changed);
-        assert_eq!(s.processing_version, Some(PROCESSING_VERSION));
-        // A second reconcile is a no-op now that it's stamped.
-        assert!(!reconcile_processing_version(&mut s).changed);
+        assert!(s.cursors.is_empty());
+    }
+
+    #[test]
+    fn current_aspects_are_a_noop() {
+        let mut s = state_with(&["/cc/a"]);
+        let r = reconcile_processing_aspects(&mut s, &lookup);
+        assert!(!r.changed, "{:?}", r.notes);
+        assert_eq!(s.cursors.len(), 1);
+    }
+
+    #[test]
+    fn no_versions_at_all_seeds_and_clears() {
+        let mut s = FakeState {
+            legacy: None,
+            aspects: BTreeMap::new(),
+            cursors: vec!["/cc/a".into()],
+        };
+        let r = reconcile_processing_aspects(&mut s, &lookup);
+        assert!(r.changed);
+        assert!(
+            s.cursors.is_empty(),
+            "unversioned cursors cannot be trusted"
+        );
+        assert_eq!(s.aspects.len(), ASPECT_VERSIONS.len());
     }
 }

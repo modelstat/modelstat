@@ -35,7 +35,7 @@ use crate::lock::{
     read_daemon_lock, remove_lock_if_owned, AcquireOpts, AcquireResult, OwnershipCheck,
     LOCK_RECHECK_MS,
 };
-use crate::processing_version::reconcile_processing_version;
+use crate::processing_version::reconcile_processing_aspects;
 use crate::reconcile::{reconcile_backfill, PerDaySession};
 use crate::rotate::rotate_runaway_logs;
 use crate::runtime::{now_iso, run_scan_cycle, scan_session, Daemon};
@@ -208,17 +208,21 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
         crate::runtime::UploadStatusObserver::new(daemon.status.clone(), daemon.state.clone()),
     ));
 
-    // ── Reconcile the processing-pipeline version (wipe cursors on a bump) ────
+    // ── Reconcile the per-aspect pipeline versions (scope any cursor wipes) ──
     {
+        // Discovery is the only honest source of "whose file is this": the
+        // lookup lets a parser-scoped bump wipe exactly that parser's cursors,
+        // while cross-parser aspects (capture/redaction) still wipe the world.
+        let kind_of: std::collections::BTreeMap<String, &'static str> = discover_jobs()
+            .into_iter()
+            .map(|j| (j.path, j.kind.aspect()))
+            .collect();
         let mut state = daemon.state.lock().await;
-        let pv = reconcile_processing_version(&mut *state);
+        let pv = reconcile_processing_aspects(&mut *state, &|p| kind_of.get(p).copied());
         if pv.changed {
-            modelstat_log::log_info!(
-                "processing pipeline v{} → v{} — wiped file cursors so every session \
-                 is re-processed by the new pipeline",
-                pv.from,
-                pv.to
-            );
+            for note in &pv.notes {
+                modelstat_log::log_info!("pipeline reconcile: {note}");
+            }
             let _ = save_state(&state);
         }
     }
@@ -262,7 +266,7 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     runner.idle().await;
 
     // ── Filesystem watcher + 5-min backstop + reconcile timers ──────────────
-    let _watcher = spawn_watcher(runner.clone(), quiescing.clone());
+    spawn_watcher(runner.clone(), quiescing.clone());
     tokio::spawn(backstop_loop(runner.clone(), quiescing.clone()));
     tokio::spawn(reconcile_loop(
         daemon.clone(),
@@ -810,29 +814,24 @@ async fn last_status_loop(daemon: Arc<Daemon>) {
     }
 }
 
-/// Start the notify filesystem watcher over the AI-tool data dirs: a `.jsonl`
-/// add/change schedules a debounced (1s) coalesced scan. Returns the watcher —
-/// which MUST be kept alive (dropping it stops watching), so `run` holds it until
-/// teardown. Port of the chokidar watcher + `scheduleScan`.
-fn spawn_watcher(
-    runner: CoalescingRunner<String>,
-    quiescing: Arc<AtomicBool>,
-) -> Option<notify::RecommendedWatcher> {
+/// Start the notify filesystem watcher over the transcript trees DISCOVERY
+/// finds: a transcript write schedules a debounced (1s) coalesced scan.
+///
+/// The watch set is derived, never listed: `covering_watch_dirs` over the
+/// discovered jobs, re-derived on the discovery backstop cadence so an
+/// install that appears mid-run (a new agent, a relocated one) starts getting
+/// real-time capture within one backstop instead of never. The watcher lives
+/// inside the maintenance task; dropping the task at shutdown stops watching.
+fn spawn_watcher(runner: CoalescingRunner<String>, quiescing: Arc<AtomicBool>) {
     use notify::{Event, RecursiveMode, Watcher};
 
-    let dirs = crate::watch::resolve_watch_dirs();
-    if dirs.is_empty() {
-        modelstat_log::log_info!(
-            "no AI-tool data dirs to watch (a fresh machine) — relying on the 5-min backstop scan"
-        );
-        return None;
-    }
     // notify's callback runs on its own thread; bridge events to async via an
     // unbounded channel (send is sync + non-blocking).
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| {
         if let Ok(ev) = res {
-            // Only transcript writes matter (the scan re-discovers the file set).
+            // Only transcript-container writes matter (the scan re-discovers
+            // the file set).
             if ev.paths.iter().any(|p| crate::watch::is_transcript_file(p)) {
                 let _ = tx.send(());
             }
@@ -843,15 +842,10 @@ fn spawn_watcher(
             modelstat_log::log_warn!(
                 "filesystem watcher unavailable ({e}) — relying on the 5-min backstop scan"
             );
-            return None;
+            return;
         }
     };
-    let mut watched = 0usize;
-    for dir in &dirs {
-        if watcher.watch(dir, RecursiveMode::Recursive).is_ok() {
-            watched += 1;
-        }
-    }
+
     // The 1s debounce: collapse a burst of writes into one coalesced scan ~1s
     // after the first event.
     tokio::spawn(async move {
@@ -863,8 +857,44 @@ fn spawn_watcher(
             }
         }
     });
-    modelstat_log::log_info!("watching {watched} AI-tool data directories");
-    Some(watcher)
+
+    // Watch-set maintenance: converge on discovery's covering set, forever.
+    tokio::spawn(async move {
+        let mut watched: std::collections::BTreeSet<std::path::PathBuf> = Default::default();
+        loop {
+            let jobs = tokio::task::spawn_blocking(crate::discover_jobs::discover_jobs)
+                .await
+                .unwrap_or_default();
+            let paths: Vec<std::path::PathBuf> = jobs
+                .iter()
+                .map(|j| std::path::PathBuf::from(&j.path))
+                .collect();
+            let refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+            let home = crate::watch::home_dir().unwrap_or_default();
+            let mut added = 0usize;
+            for dir in crate::watch::covering_watch_dirs(&refs, &home) {
+                if watched.insert(dir.clone()) {
+                    match watcher.watch(&dir, RecursiveMode::Recursive) {
+                        Ok(()) => added += 1,
+                        Err(e) => {
+                            modelstat_log::log_warn!(
+                                "could not watch {} ({e}) — its changes ride the backstop scan",
+                                dir.display()
+                            );
+                            watched.remove(&dir);
+                        }
+                    }
+                }
+            }
+            if added > 0 {
+                modelstat_log::log_info!(
+                    "watching {} transcript tree(s) (+{added} from discovery)",
+                    watched.len()
+                );
+            }
+            tokio::time::sleep(DISCOVERY_BACKSTOP).await;
+        }
+    });
 }
 
 /// Wait for a shutdown signal and return the process exit code: SIGINT → 130,
