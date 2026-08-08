@@ -317,6 +317,7 @@ pub fn discover_jobs_in_with(home: &Path, process_dirs: &[(String, String)]) -> 
     jobs.sort_by(|a, b| a.path.cmp(&b.path));
     jobs.dedup_by(|a, b| a.path == b.path);
 
+    apply_harness_labels_in(home, &mut jobs);
     jobs
 }
 
@@ -326,6 +327,119 @@ const CURSOR_DB_RELATIVE_PATH: &str = "User/globalStorage/state.vscdb";
 /// Discover every scan job under the real `$HOME`.
 pub fn discover_jobs() -> Vec<ScanJob> {
     home_dir().map(|h| discover_jobs_in(&h)).unwrap_or_default()
+}
+
+/// The session id a job's PATH names, by the owning parser's own derivation.
+/// Cursor has none: its store is one global DB, not a per-session file.
+fn job_session_id(job: &ScanJob) -> Option<String> {
+    match job.kind {
+        ParserKind::ClaudeCode => {
+            modelstat_parsers::claude_code::derive_session_id_from_filename(&job.path)
+        }
+        ParserKind::Codex => {
+            modelstat_parsers::codex::derive_session_id_from_rollout_path(&job.path)
+        }
+        ParserKind::Pi => modelstat_parsers::pi::derive_session_id_from_pi_path(&job.path),
+        ParserKind::Cursor => None,
+    }
+}
+
+/// The BB session-id set, cached per home. `built_wall_ms` sits beside the
+/// monotonic instant so a transcript's mtime (wall clock) can be compared
+/// against WHEN the set was read.
+struct HarnessCache {
+    built: std::time::Instant,
+    built_wall_ms: u128,
+    ids: std::collections::HashSet<String>,
+}
+
+/// Ceiling between BB-store reads: past this age any labelling pass re-reads.
+const HARNESS_REFRESH_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+/// Floor between BB-store reads when a refresh is DEMANDED — an unlabelled
+/// transcript newer than the cached set (a session that may have started after
+/// the last read). Keeps an active non-BB session, which stays unknown
+/// forever, from forcing a snapshot copy on every scan pass.
+const HARNESS_REFRESH_MIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Is the cached set stale enough to re-read the store?
+fn harness_refresh_due(age: std::time::Duration, unknown_newer_file: bool) -> bool {
+    age >= HARNESS_REFRESH_MAX || (unknown_newer_file && age >= HARNESS_REFRESH_MIN)
+}
+
+/// Label jobs whose session BB's store claims (`agent = "bb"`).
+///
+/// BB (an agentic IDE / agent harness) spawns Claude Code via the Agent SDK
+/// with the USER'S own home, so its transcripts sit in `~/.claude/projects`
+/// beside plain CLI runs — path-based attribution (the `claude_desktop`
+/// route) cannot tell them apart, and the transcript itself only says
+/// `entrypoint: sdk-cli`, an SDK embedder with no name. BB's own store can:
+/// it records each thread's provider session id, and a job whose path derives
+/// to one of those ids was driven by BB. A label set by a more specific claim
+/// (a Desktop-hosted tree) is never overwritten, and an id the store does not
+/// name stays honestly unlabelled.
+///
+/// The set is cached (per home) so a scan pass costs no snapshot copy in the
+/// steady state; a brand-new session's first parse still sees its label,
+/// because an unlabelled transcript NEWER than the cached set forces one
+/// bounded re-read (see [`HARNESS_REFRESH_MIN`]).
+fn apply_harness_labels_in(home: &Path, jobs: &mut [ScanJob]) {
+    let candidates: Vec<(usize, String)> = jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, j)| j.agent_label.is_none())
+        .filter_map(|(i, j)| job_session_id(j).map(|id| (i, id)))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+
+    type Caches = std::sync::Mutex<std::collections::HashMap<PathBuf, HarnessCache>>;
+    static CACHES: std::sync::OnceLock<Caches> = std::sync::OnceLock::new();
+    let mut caches = CACHES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let refresh = match caches.get(home) {
+        None => true,
+        Some(c) => {
+            let unknown_newer_file = candidates
+                .iter()
+                .any(|(i, id)| !c.ids.contains(id) && mtime_ms(&jobs[*i].path) > c.built_wall_ms);
+            harness_refresh_due(c.built.elapsed(), unknown_newer_file)
+        }
+    };
+    if refresh {
+        let built_wall_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        caches.insert(
+            home.to_path_buf(),
+            HarnessCache {
+                built: std::time::Instant::now(),
+                built_wall_ms,
+                ids: modelstat_parsers::harness::bb_session_ids_in(home)
+                    .into_iter()
+                    .collect(),
+            },
+        );
+    }
+
+    let ids = &caches.get(home).expect("inserted above when absent").ids;
+    for (i, id) in candidates {
+        if ids.contains(&id) {
+            jobs[i].agent_label = Some("bb".to_string());
+        }
+    }
+}
+
+/// [`apply_harness_labels_in`] against the real `$HOME` — for jobs built
+/// outside discovery (the eager scan's ad-hoc file target).
+pub(crate) fn apply_harness_labels(jobs: &mut [ScanJob]) {
+    if let Some(home) = home_dir() {
+        apply_harness_labels_in(&home, jobs);
+    }
 }
 
 /// Parse one job (collect mode) with the right parser.
@@ -628,6 +742,150 @@ mod cursor_discovery_tests {
             std::env::temp_dir().join(format!("modelstat-disco-empty-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         assert!(!jobs_in(&home).iter().any(|j| j.kind == ParserKind::Cursor));
+        std::fs::remove_dir_all(&home).ok();
+    }
+}
+
+#[cfg(test)]
+mod harness_label_tests {
+    use super::tests::jobs_in;
+    use super::*;
+
+    fn temp_home(tag: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!("modelstat-bbl-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    fn mk(home: &Path, rel: &str) {
+        let p = home.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"{}").unwrap();
+    }
+
+    /// A BB store naming exactly these provider session ids.
+    fn write_bb_db(home: &Path, ids: &[&str]) {
+        let dir = home.join(".bb");
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("bb.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (
+                id TEXT PRIMARY KEY NOT NULL,
+                thread_id TEXT NOT NULL,
+                provider_thread_id TEXT,
+                sequence INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                data TEXT DEFAULT '{}' NOT NULL,
+                created_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO events (id, thread_id, provider_thread_id, sequence, type, data, created_at) \
+                 VALUES (?1, 'thr_x', ?2, ?3, 'turn/started', '{}', 0)",
+                rusqlite::params![format!("evt_{i}"), id, i as i64],
+            )
+            .unwrap();
+        }
+    }
+
+    const BB_UUID: &str = "11111111-1111-4111-8111-111111111111";
+    const CLI_UUID: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// The heart of the feature: two Claude Code transcripts in the SAME
+    /// `~/.claude/projects` tree — one driven by BB, one a plain CLI run —
+    /// distinguishable only through BB's own store.
+    #[test]
+    fn a_bb_driven_claude_session_is_labelled_and_its_cli_neighbour_is_not() {
+        let home = temp_home("claude");
+        mk(&home, &format!(".claude/projects/-enc/{BB_UUID}.jsonl"));
+        mk(&home, &format!(".claude/projects/-enc/{CLI_UUID}.jsonl"));
+        write_bb_db(&home, &[BB_UUID]);
+
+        let jobs = jobs_in(&home);
+        let label = |uuid: &str| {
+            jobs.iter()
+                .find(|j| j.path.contains(uuid))
+                .expect("job discovered")
+                .agent_label
+                .clone()
+        };
+        assert_eq!(label(BB_UUID).as_deref(), Some("bb"));
+        assert_eq!(label(CLI_UUID), None, "a plain CLI run stays Claude Code");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The match goes through each parser's own session-id derivation, so a BB
+    /// provider that writes codex/pi-shaped artefacts labels for free.
+    #[test]
+    fn codex_and_pi_sessions_named_by_bb_label_through_their_own_derivations() {
+        let home = temp_home("multi");
+        let codex_uuid = "33333333-3333-4333-8333-333333333333";
+        let pi_uuid = "44444444-4444-4444-8444-444444444444";
+        mk(
+            &home,
+            &format!(".codex/sessions/2026/07/16/rollout-2026-07-16T12-00-00-{codex_uuid}.jsonl"),
+        );
+        mk(
+            &home,
+            &format!(".pi/agent/sessions/p/2026-07-16T12-00-00_{pi_uuid}.jsonl"),
+        );
+        write_bb_db(&home, &[codex_uuid, pi_uuid]);
+
+        let jobs = jobs_in(&home);
+        assert!(jobs
+            .iter()
+            .any(|j| j.kind == ParserKind::Codex && j.agent_label.as_deref() == Some("bb")));
+        assert!(jobs
+            .iter()
+            .any(|j| j.kind == ParserKind::Pi && j.agent_label.as_deref() == Some("bb")));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// No BB on the machine → the labelling pass is a no-op, never an error.
+    #[test]
+    fn a_home_without_a_bb_store_labels_nothing() {
+        let home = temp_home("none");
+        mk(&home, &format!(".claude/projects/-enc/{CLI_UUID}.jsonl"));
+
+        let jobs = jobs_in(&home);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].agent_label, None);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The refresh policy in one place: a demanded refresh (unlabelled
+    /// transcript newer than the cached set) is honoured past the floor, any
+    /// refresh past the ceiling, and nothing before either.
+    #[test]
+    fn the_refresh_policy_holds_its_floor_and_ceiling() {
+        use std::time::Duration;
+        assert!(!harness_refresh_due(Duration::from_secs(1), false));
+        assert!(!harness_refresh_due(Duration::from_secs(1), true));
+        assert!(!harness_refresh_due(Duration::from_secs(15), false));
+        assert!(harness_refresh_due(Duration::from_secs(15), true));
+        assert!(harness_refresh_due(Duration::from_secs(31), false));
+    }
+
+    /// The ad-hoc eager path labels the same way discovery does.
+    #[test]
+    fn an_ad_hoc_job_earns_its_label_from_the_real_home_store() {
+        // Exercised through `apply_harness_labels_in` directly: the pub(crate)
+        // wrapper only substitutes the real `$HOME`.
+        let home = temp_home("adhoc");
+        let rel = format!(".claude/projects/-enc/{BB_UUID}.jsonl");
+        mk(&home, &rel);
+        write_bb_db(&home, &[BB_UUID]);
+        let mut jobs = vec![ScanJob {
+            path: home.join(&rel).to_string_lossy().into_owned(),
+            kind: ParserKind::ClaudeCode,
+            since_ms: None,
+            agent_label: None,
+        }];
+        apply_harness_labels_in(&home, &mut jobs);
+        assert_eq!(jobs[0].agent_label.as_deref(), Some("bb"));
         std::fs::remove_dir_all(&home).ok();
     }
 }

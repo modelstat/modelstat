@@ -1783,6 +1783,7 @@ dependencies = [
  "modelstat-update",
  "modelstat-wire",
  "notify",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

@@ -58,3 +58,5 @@ windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_F
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
+# Harness-label tests build a BB store fixture (`~/.bb/bb.db`) to label against.
+rusqlite = { version = "0.32", features = ["bundled"] }

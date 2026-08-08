@@ -30,6 +30,7 @@ pub mod cursor;
 pub mod pi;
 
 pub mod discovery;
+pub mod harness;
 
 // Flat re-exports for the common surface.
 pub use skips::{unknown_record_event, SkipLedger, UnknownRecord};
