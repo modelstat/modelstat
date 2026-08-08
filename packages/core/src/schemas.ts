@@ -193,6 +193,20 @@ export const Segment = z.object({
    * source Insights' rule + skill detectors mine, distinct from the outcome
    * `abstract`. Optional; absent from daemons that predate it. */
   user_intent: z.string().max(512).optional(),
+  /** The daemon machine's LOCAL wall clock at `started_at` — the one fact only
+   * the device holds, since every timestamp on the wire is UTC. The
+   * `time_of_day` / `cadence` tags are a CUT of this made on a machine that
+   * cannot revise it; with the reading present the server can re-derive them
+   * and cut differently. Optional; absent from daemons that predate it. */
+  local_time: z
+    .object({
+      /** Minutes east of UTC at that instant (-420 for UTC-7), DST included. */
+      utc_offset_minutes: z.number().int().min(-840).max(840),
+      hour: z.number().int().min(0).max(23),
+      /** 0=Sunday … 6=Saturday (JS `getDay()`). */
+      weekday: z.number().int().min(0).max(6),
+    })
+    .optional(),
 });
 export type Segment = z.infer<typeof Segment>;
 

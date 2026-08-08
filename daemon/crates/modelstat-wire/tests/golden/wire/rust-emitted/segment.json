@@ -40,5 +40,10 @@
     "correction_count": 1,
     "frustration": 0.25
   },
-  "user_intent": "make the uploader never drop a batch"
+  "user_intent": "make the uploader never drop a batch",
+  "local_time": {
+    "utc_offset_minutes": -420,
+    "hour": 3,
+    "weekday": 1
+  }
 }

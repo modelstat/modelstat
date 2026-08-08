@@ -361,6 +361,7 @@ mod tests {
             abstract_embedding: None,
             behavior: None,
             user_intent: None,
+            local_time: None,
         }
     }
 

@@ -25,7 +25,8 @@ use std::collections::{BTreeMap, HashSet};
 use modelstat_redact::{pii_redact_checked, redact, PiiModel};
 use modelstat_sumclient::CompleteRequest;
 use modelstat_wire::{
-    segment_id, RawEvent, RedactionReport, Segment, SegmentBehavior, TaxonomyHintRooted, TokenUsage,
+    segment_id, RawEvent, RedactionReport, Segment, SegmentBehavior, SegmentLocalTime,
+    TaxonomyHintRooted, TokenUsage,
 };
 
 use crate::embed::{Embedder, EMBED_DIM};
@@ -299,9 +300,13 @@ where
     for c in components_from_slice(slice) {
         tags.push(hint("components", &c, 0.6));
     }
-    // Local-time dimensions (WHEN the work happened) — the daemon has the
-    // engineer's wall clock; the server only ever sees UTC (§18).
-    tags.extend(temporal_hints(started_at_ms));
+    // WHEN the work happened, in the engineer's own wall clock — the daemon is
+    // the only place that knows it, and the server only ever sees UTC (§18).
+    // The reading rides on the segment; the buckets are derived from it.
+    let local_time = local_time_of(started_at_ms);
+    if let Some(local) = local_time {
+        tags.extend(temporal_hints(local));
+    }
     // Mood/Mind/Posture primaries from the best-effort cognition pass.
     if let Some(c) = &cog {
         tags.extend(cognition_hints(c));
@@ -340,6 +345,7 @@ where
         abstract_embedding,
         behavior: Some(behavior),
         user_intent,
+        local_time,
     };
     SliceOutcome::Built(Box::new(seg))
 }
@@ -516,23 +522,36 @@ fn compute_behavior(slice: &[&RawEvent]) -> SegmentBehavior {
     }
 }
 
+/// The daemon machine's local wall clock at a slice's start — the READING, not a
+/// bucket. Only the device can know this (everything on the wire is UTC), so it
+/// is the one thing here that is strictly lost if it is not shipped.
+fn local_time_of(started_at_ms: i64) -> Option<SegmentLocalTime> {
+    use chrono::{Datelike, Local, Offset, TimeZone, Timelike};
+    let dt = Local.timestamp_millis_opt(started_at_ms).single()?;
+    Some(SegmentLocalTime {
+        // The offset in force at THAT instant, so a DST boundary reads
+        // correctly rather than through today's rule.
+        utc_offset_minutes: dt.offset().fix().local_minus_utc() / 60,
+        hour: dt.hour() as u8,
+        weekday: dt.weekday().num_days_from_sunday() as u8, // 0=Sun..6=Sat
+    })
+}
+
 /// Local-wall-clock taxonomy hints for a slice's start (index.ts `temporalHints`).
-/// Uses the daemon machine's timezone — the server only ever sees UTC.
-fn temporal_hints(started_at_ms: i64) -> Vec<TaxonomyHintRooted> {
-    use chrono::{Datelike, Local, TimeZone, Timelike};
-    let Some(dt) = Local.timestamp_millis_opt(started_at_ms).single() else {
-        return Vec::new(); // unreachable for real ISO timestamps
-    };
-    let time_of_day = time_of_day_bucket(dt.hour());
-    let cadence = cadence_bucket(dt.weekday().num_days_from_sunday()); // 0=Sun..6=Sat
+///
+/// These are a CUT of [`local_time_of`] — where Morning ends, whether Friday is
+/// its own thing — made on a device that cannot revise it. They ride one more
+/// release beside the reading they are derived from; the server owns the cut
+/// once it reads `local_time`.
+fn temporal_hints(local: SegmentLocalTime) -> Vec<TaxonomyHintRooted> {
     vec![
-        hint("time_of_day", time_of_day, 1.0),
-        hint("cadence", cadence, 1.0),
+        hint("time_of_day", time_of_day_bucket(local.hour), 1.0),
+        hint("cadence", cadence_bucket(local.weekday), 1.0),
     ]
 }
 
 /// Morning 5–12 / Midday 12–17 / Evening 17–21 / Night otherwise (§18).
-fn time_of_day_bucket(hour: u32) -> &'static str {
+fn time_of_day_bucket(hour: u8) -> &'static str {
     if (5..12).contains(&hour) {
         "Morning"
     } else if (12..17).contains(&hour) {
@@ -545,7 +564,7 @@ fn time_of_day_bucket(hour: u32) -> &'static str {
 }
 
 /// Weekend (Sat/Sun) / Friday / Weekday (§18). `day` is JS `getDay()`: 0=Sun..6=Sat.
-fn cadence_bucket(day: u32) -> &'static str {
+fn cadence_bucket(day: u8) -> &'static str {
     if day == 0 || day == 6 {
         "Weekend"
     } else if day == 5 {
@@ -930,6 +949,20 @@ mod tests {
     }
 
     #[test]
+    fn the_local_reading_agrees_with_the_buckets_derived_from_it() {
+        // Runs in whatever zone the machine is in — the assertion is the
+        // RELATIONSHIP, which is what shipping the reading buys: the server can
+        // re-derive every bucket the daemon emitted, and cut differently later.
+        let local = local_time_of(1_764_590_400_000).expect("a real instant reads");
+        assert!(local.hour < 24);
+        assert!(local.weekday < 7);
+        assert!((-12 * 60..=14 * 60).contains(&local.utc_offset_minutes));
+        let hints = temporal_hints(local);
+        assert_eq!(hints[0].name, time_of_day_bucket(local.hour));
+        assert_eq!(hints[1].name, cadence_bucket(local.weekday));
+    }
+
+    #[test]
     fn components_dedupe_and_cap() {
         let mk = |files: Vec<&str>| {
             let mut e = ev("e", "2026-06-01T10:00:00Z", "assistant_message", None);
@@ -990,6 +1023,7 @@ mod tests {
             abstract_embedding: None,
             behavior: None,
             user_intent: None,
+            local_time: None,
         }
     }
 

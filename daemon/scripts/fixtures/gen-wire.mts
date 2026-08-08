@@ -111,6 +111,7 @@ const segment = {
   source_event_ids: ["evt_16zw770jnvito", "evt_irnlblnsf9gx"],
   behavior: { user_turns: 3, correction_count: 1, frustration: 0.25 },
   user_intent: "make the uploader never drop a batch",
+  local_time: { utc_offset_minutes: -420, hour: 3, weekday: 1 },
 };
 
 const segmentWithEmbedding = {

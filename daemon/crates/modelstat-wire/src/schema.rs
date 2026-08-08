@@ -194,6 +194,25 @@ pub struct SegmentBehavior {
     pub frustration: Option<f64>,
 }
 
+/// The daemon machine's LOCAL wall clock at a segment's start.
+///
+/// The one fact only the device holds: every timestamp on the wire is UTC, so
+/// once a segment leaves the box nothing can recover what time it was for the
+/// person doing the work. The daemon used to spend that fact on two buckets
+/// (`Morning`/`Night`, `Weekend`/`Friday`/`Weekday`) and throw the reading
+/// away — a cut the server could never revise, redo per-org, or use for
+/// anything else. These are the reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentLocalTime {
+    /// Minutes east of UTC at that instant (`-420` for UTC-7), DST included —
+    /// the zone as it actually was, not as the zone database reads today.
+    pub utc_offset_minutes: i32,
+    /// Local hour, 0-23.
+    pub hour: u8,
+    /// Local day of week, 0=Sunday … 6=Saturday (JS `getDay()`).
+    pub weekday: u8,
+}
+
 /// A daemon-emitted segment — the sync unit (feature §17.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
@@ -216,6 +235,10 @@ pub struct Segment {
     pub behavior: Option<SegmentBehavior>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_intent: Option<String>,
+    /// The local wall clock at `started_at` — see [`SegmentLocalTime`]. Absent
+    /// when the instant is unreadable, and from daemons predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_time: Option<SegmentLocalTime>,
 }
 
 impl Segment {
@@ -520,6 +543,7 @@ mod tests {
             abstract_embedding: None,
             behavior: None,
             user_intent: None,
+            local_time: None,
         };
         seg.clamp();
         assert!(seg.r#abstract.len() <= caps::ABSTRACT_MAX);

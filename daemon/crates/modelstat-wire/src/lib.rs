@@ -27,7 +27,7 @@ pub use ids::{segment_id, source_event_id, tc_fallback_id, EventSource};
 pub use param_shape::param_shape;
 pub use schema::{
     Fingerprint, GitContext, HeartbeatPayload, IngestBatch, RawEvent, RedactionReport,
-    RegisterRequest, ScriptSummary, Segment, SegmentBehavior, TaxonomyHintRooted, TokenUsage,
-    ToolAction, ToolCallWire, SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_PATH_SHAPE,
+    RegisterRequest, ScriptSummary, Segment, SegmentBehavior, SegmentLocalTime, TaxonomyHintRooted,
+    TokenUsage, ToolAction, ToolCallWire, SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_PATH_SHAPE,
     SLUG_SOURCE_REPO_ROOT_DIR,
 };
