@@ -1,51 +1,104 @@
 //! `modelstat redactor [local|cloud|self-hosted]` — where turns get SCRUBBED.
 //!
 //! Its own setting, separate from `modelstat mode` (where turns get SUMMARISED),
-//! because they are separate questions with different answers for most people:
-//! scrub on my machine, summarise on yours. One setting could not say that.
+//! because they are separate questions with different answers: one setting could
+//! not say "scrub here, summarise there".
 //!
-//! Only `local` is implemented, and the other two are refused rather than quietly
-//! accepted. Both of them mean raw, unscrubbed text leaves the machine so that
-//! something else can scrub it — the exact egress the local redactor exists to
-//! prevent — so a setting that appeared to work while doing that would be the worst
-//! kind of footgun. They stay in the vocabulary because the wire and the config
-//! already carry them and the server side is being built; the CLI says so plainly.
+//! What never moves, in any mode: the layer-1 deterministic floor. Secrets,
+//! emails, key-shaped blobs and home paths are scrubbed on this machine before
+//! any byte leaves it. The modes only decide where the layer-2 PII model runs —
+//! on this machine (`local`), on modelstat's servers (`cloud`, the default), or
+//! on an endpoint the org operates (`self-hosted`). Remote modes are
+//! fail-closed like the local one: an endpoint that cannot answer means the
+//! flush HOLDS, never "ship it less redacted".
 
 use std::process::ExitCode;
 
 use modelstat_ingest::{state, Config};
+use modelstat_service::{install_service, Component, Scope};
 
-/// Plain-language copy per redactor mode.
+/// Plain-language copy per redactor mode: (title, what actually happens).
 fn redactor_info(mode: &str) -> (&'static str, &'static str) {
     match mode {
         "local" => (
-            "Local (default) — this machine scrubs, before anything is sent",
-            "names, emails, phone numbers, addresses, account numbers and secrets are \
-             removed on-device; nothing unscrubbed leaves, and a turn the redactor \
-             cannot read is held rather than sent",
+            "Local — this machine scrubs everything",
+            "the PII model (~900 MB, one download) runs on-device; even \
+             floor-scrubbed text never leaves until it is fully redacted",
         ),
         "cloud" => (
-            "Cloud — modelstat's servers would scrub",
-            "NOT AVAILABLE: this requires sending your raw, unscrubbed turns to us so \
-             we can scrub them, which is what the local redactor exists to avoid",
+            "Cloud (default) — modelstat's servers run the PII model",
+            "secrets, emails, keys and paths are still scrubbed on this machine \
+             first (always); the floor-scrubbed text is then classified on \
+             modelstat's servers, which return the spans and store nothing — \
+             splicing happens here, and only fully-redacted turns are uploaded",
         ),
         _ => (
-            "Self-hosted — your org's own redaction engine would scrub",
-            "NOT AVAILABLE: this requires sending raw, unscrubbed turns to that engine",
+            "Self-hosted — your org's endpoint runs the PII model",
+            "same contract as cloud, against an endpoint you operate \
+             (`modelstat-redactor`, or core's docker sidecar); the floor still \
+             runs on this machine first, and an unreachable endpoint holds \
+             uploads rather than degrading",
         ),
     }
 }
 
-pub fn cmd_redactor(config: &Config, args: &[String]) -> ExitCode {
-    let requested = args.first().map(|s| s.trim().to_lowercase());
+/// http(s)-only URL validation, the redactor twin of `validate_summarizer_url`.
+fn validate_redactor_url(url: &str) -> Result<(), String> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| format!("redactor URL is not a valid URL: \"{url}\"."))?;
+    match scheme {
+        "http" | "https" if !rest.is_empty() => Ok(()),
+        "http" | "https" => Err(format!("redactor URL is not a valid URL: \"{url}\".")),
+        other => Err(format!(
+            "redactor URL must use http(s): \"{url}\" (got \"{other}:\")."
+        )),
+    }
+}
+
+/// Best-effort healthz probe — warns loudly, never blocks the setting (the
+/// daemon holds + retries until the endpoint answers, and says so).
+async fn probe_redactor(base: &str, bearer: Option<String>) {
+    use modelstat_ingest::redactor_client::RemoteRedactor;
+    match RemoteRedactor::new(base, bearer).healthz().await {
+        Some(h) if h.protocol != modelstat_redact::remote::REDACT_PROTOCOL => eprintln!(
+            "  ⚠ redactor at {base} speaks protocol {} (this daemon expects {}) — \
+             uploads hold until one of them is upgraded",
+            h.protocol,
+            modelstat_redact::remote::REDACT_PROTOCOL
+        ),
+        Some(h) if !h.model_loaded => {
+            eprintln!("  ⚠ redactor at {base} is still loading its model — uploads hold until it's ready")
+        }
+        Some(_) => {}
+        None => eprintln!(
+            "  ⚠ couldn't reach the redactor at {base} yet — saved anyway; uploads hold + retry until it's up"
+        ),
+    }
+}
+
+pub async fn cmd_redactor(config: &Config, args: &[String]) -> ExitCode {
+    let positional = args.iter().find(|a| !a.starts_with('-')).cloned();
+    let url_flag = args
+        .iter()
+        .position(|a| a == "--url")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
     let current = config.redactor_mode();
 
-    // No argument: report, and say how the two settings relate.
-    let Some(requested) = requested else {
+    // No argument: report where scrubbing runs, and the floor guarantee.
+    let Some(requested) = positional.map(|s| s.trim().to_lowercase()) else {
         let (title, detail) = redactor_info(&current);
         println!("redactor: {current}");
         println!("  {title}");
         println!("  {detail}");
+        if current == "self-hosted" {
+            println!("  endpoint: {}", config.redactor_url());
+        }
+        if config.redactor_mode_is_env_overridden() {
+            println!("  note: MODELSTAT_REDACTOR_MODE is set and overrides the stored choice");
+        }
+        println!("  the secret floor always runs on this machine, in every mode");
         println!("summariser: {}", config.summarizer_mode());
         println!("  change the summariser with `modelstat mode`");
         return ExitCode::SUCCESS;
@@ -59,19 +112,72 @@ pub fn cmd_redactor(config: &Config, args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    if mode != "local" {
-        let (title, detail) = redactor_info(mode);
-        eprintln!("modelstat: {title}");
-        eprintln!("  {detail}");
-        eprintln!("  the redactor stays `{current}`");
-        return ExitCode::from(2);
+    if mode == "self-hosted" {
+        let url = url_flag
+            .or_else(|| {
+                std::env::var("MODELSTAT_REDACTOR_URL")
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or_default();
+        if url.is_empty() {
+            eprintln!("modelstat: self-hosted redaction needs an endpoint (--url <URL>)");
+            return ExitCode::from(2);
+        }
+        if let Err(e) = validate_redactor_url(&url) {
+            eprintln!("modelstat: {e}");
+            return ExitCode::from(2);
+        }
+        probe_redactor(&url, None).await;
+        if let Err(e) = state::set_redactor_url(&url) {
+            eprintln!("modelstat: could not save the redactor URL: {e}");
+            return ExitCode::FAILURE;
+        }
+    } else {
+        // Leaving self-hosted — clear the stored URL so a stale one can't resurface.
+        if let Err(e) = state::set_redactor_url("") {
+            eprintln!("modelstat: could not clear the redactor URL: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if mode == "cloud" {
+        probe_redactor(&config.api_url(), config.bearer()).await;
     }
 
     if let Err(e) = state::set_redactor_mode(mode) {
         eprintln!("modelstat: could not save the redactor setting: {e}");
         return ExitCode::FAILURE;
     }
+    let (title, detail) = redactor_info(mode);
     println!("redactor: {mode}");
+    println!("  {title}");
+    println!("  {detail}");
+
+    // Switching TO local needs the on-device model; fetch it now with progress
+    // so the first scan doesn't start held.
+    if mode == "local" {
+        println!("preparing the on-device redactor (~900 MB, downloads once)…");
+        if modelstat_daemon::engine::ensure_redactor_model().await {
+            println!("✓ on-device redactor ready");
+        } else {
+            eprintln!("redactor model not ready — the daemon keeps retrying in the background");
+        }
+    }
+
+    // Bounce the daemon so the running process rebuilds its redactor for the
+    // new mode (it is resolved once at boot) — only when there's a paired
+    // daemon to refresh, mirroring `modelstat mode`.
+    if config.bearer().is_some() {
+        match install_service(Component::Daemon, Scope::User) {
+            Ok(svc) => println!("✓ background service refreshed ({})", svc.path.display()),
+            Err(e) => eprintln!(
+                "couldn't refresh the service ({e}) — restart it by re-running `modelstat`"
+            ),
+        }
+    } else {
+        println!("run `modelstat` to install the background service with this mode.");
+    }
     ExitCode::SUCCESS
 }
 
@@ -80,27 +186,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_mode_has_copy_and_the_unavailable_ones_say_so() {
+    fn every_mode_has_copy_and_every_copy_names_the_floor_or_the_model() {
         for m in state::REDACTOR_MODES {
             let (title, detail) = redactor_info(m);
             assert!(!title.is_empty() && !detail.is_empty(), "{m}");
-            if m != "local" {
-                assert!(
-                    detail.contains("NOT AVAILABLE"),
-                    "a mode that would ship raw text must say it is unavailable: {m}"
-                );
-                assert!(
-                    detail.contains("raw"),
-                    "say what the cost actually is, not just that it is off: {m}"
-                );
-            }
         }
+        // The remote modes must say what still happens on-device — that copy is
+        // the consent surface, and "the floor runs first" is its load-bearing
+        // sentence.
+        for m in ["cloud", "self-hosted"] {
+            let (_, detail) = redactor_info(m);
+            assert!(
+                detail.contains("floor") && detail.contains("this machine"),
+                "{m} copy must state the on-device floor guarantee"
+            );
+        }
+        let (_, cloud) = redactor_info("cloud");
+        assert!(
+            cloud.contains("store nothing"),
+            "cloud copy must state the no-storage contract"
+        );
     }
 
     #[test]
-    fn local_is_the_default_and_cloud_is_the_summariser_default() {
-        // The pairing the product wants: scrub here, summarise there.
-        assert_eq!(state::DEFAULT_REDACTOR_MODE, "local");
+    fn both_defaults_are_cloud() {
+        // The product pairing: both axes default to cloud; local is the
+        // explicit privacy opt-out for each.
+        assert_eq!(state::DEFAULT_REDACTOR_MODE, "cloud");
         assert_eq!(state::DEFAULT_SUMMARIZER_MODE, "cloud");
+    }
+
+    #[test]
+    fn url_validation_is_http_s_only() {
+        assert!(validate_redactor_url("https://redactor.acme.internal:8477").is_ok());
+        assert!(validate_redactor_url("http://10.0.0.5:8477").is_ok());
+        assert!(validate_redactor_url("ftp://x").is_err());
+        assert!(validate_redactor_url("not-a-url").is_err());
+        assert!(validate_redactor_url("http://").is_err());
     }
 }

@@ -1,4 +1,4 @@
-//! Hugging Face model-bundle download (feature §9.5/§11) — the collector's NER +
+//! Hugging Face model-bundle download (feature §9.5/§11) — the collector's PII-detector +
 //! embedder models. The candle loaders need three files per model —
 //! `config.json`, `tokenizer.json`, `model.safetensors` — fetched into the shared
 //! cache `<models_dir>/hf/<name>/` that `connect` + the daemon share (survives
@@ -10,7 +10,7 @@
 //! `candle_verify` run.
 //!
 //! Best-effort like every download: a failure leaves the model absent, so the
-//! collector runs fail-open (embedder → time-gap) / fail-closed (NER → hold), and
+//! collector runs fail-open (embedder → time-gap) / fail-closed (detector → hold), and
 //! self-heals when a later attempt lands the files (§9.5).
 
 use std::path::{Path, PathBuf};

@@ -67,9 +67,9 @@ use modelstat_ingest::RuntimeState;
 ///       transcripts.
 /// v21 — long turns are actually REDACTED. The on-device NER model carries 512
 ///       learned positions and errors past them, `classify` mapped that error to
-///       "no model", and `ner_redact` reads "no model" as pass-through — so from
+///       "no model", and `pii_redact` reads "no model" as pass-through — so from
 ///       v19 onward, when turns became verbatim, every turn over ~2,700 chars
-///       left the box UNSCRUBBED. (`ner_active` never caught it: it probes with
+///       left the box UNSCRUBBED. (`redactor_active` never caught it: it probes with
 ///       one short sentinel, which always fits.) Inference is now WINDOWED —
 ///       every token classified, in overlapping passes the model can take, no
 ///       text shortened — and the cloud path holds per TURN when the model cannot

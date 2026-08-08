@@ -171,7 +171,7 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     let mirror_task = tokio::spawn(last_status_loop(daemon.clone()));
 
     // ── On-device model self-heal (background) ──────────────────────────────
-    // `connect` pre-warms the NER + BGE weights, but it gets ONE shot: a network
+    // `connect` pre-warms the detector + embedder weights, but it gets ONE shot: a network
     // blip there used to leave a model missing forever, with nothing to notice or
     // fix it. This retries until it lands and swaps the real model in without a
     // restart. Backgrounded — a ~560 MB download must never gate ingestion, and
@@ -328,7 +328,7 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
 /// fail-safe placeholder the daemon booted with.
 ///
 /// Only the models that actually landed are rebuilt: a `heal` that fetched BGE
-/// must not touch a NER handle that is already the real thing (rebuilding it
+/// must not touch a detector handle that is already the real thing (rebuilding it
 /// would re-mmap ~430 MB for nothing).
 async fn heal_models(daemon: Arc<Daemon>) {
     // Sweep out the weights of models we no longer load, first — this is where a
@@ -342,11 +342,13 @@ async fn heal_models(daemon: Arc<Daemon>) {
             pruned.join(", ")
         );
     }
-    for entry in crate::engine::heal_missing_models().await {
+    for entry in crate::engine::heal_missing_models(daemon.config.redacts_locally()).await {
         // Exhaustive by design — a new ModelSlot variant fails to compile here
         // until it is given a loader.
         match entry.slot {
-            crate::engine::ModelSlot::Ner => daemon.ner.set(crate::engine::build_ner()),
+            crate::engine::ModelSlot::Redactor => daemon
+                .redactor
+                .set(crate::engine::build_redactor(&daemon.config)),
             crate::engine::ModelSlot::Embedder => {
                 daemon.embedder.set(crate::engine::build_embedder())
             }
@@ -635,8 +637,8 @@ async fn drain_loop(daemon: Arc<Daemon>) {
             continue;
         }
         let embedder = daemon.embedder.get();
-        let ner = daemon.ner.get();
-        let pipeline = EnginePipeline::new(&daemon.resilient, &*embedder, &*ner);
+        let redactor = daemon.redactor.get();
+        let pipeline = EnginePipeline::new(&daemon.resilient, &*embedder, &*redactor);
         let mut uploader = (*daemon.api).clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
         // Fresh per pass, like the scan's — the resolver caches cwd→context, and a

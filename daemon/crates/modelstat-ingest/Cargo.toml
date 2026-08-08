@@ -15,13 +15,17 @@ repository.workspace = true
 [dependencies]
 modelstat-log.workspace = true
 modelstat-wire.workspace = true
+# The remote-redactor client implements modelstat-redact's NerModel trait over
+# HTTP — the trait and the wire shapes live there, the credentials live here.
+modelstat-redact.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 regex.workspace = true
 # `sync` for the upload gate's Semaphore — do not rely on another crate
-# enabling it through feature unification.
-tokio = { workspace = true, features = ["sync"] }
+# enabling it through feature unification. `rt` + `rt-multi-thread` for the
+# redactor client's block_in_place bridge (same shape as the ONNX forward pass).
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "time"] }
 reqwest.workspace = true
 chrono.workspace = true
 hostname.workspace = true

@@ -16,13 +16,13 @@
 //!   [`ResilientSummarizer::engine`], never the hold-and-retry path.
 //!
 //! Abstract redaction is layer 1 (the compiled-in [`redact`] floor, ALWAYS) +
-//! layer 2 (the injected [`NerModel`] seam, best-effort — the daemon wires the
-//! candle BERT-NER; tests pass a fake that answers). Layer 3 (the LLM backstop) is
+//! layer 2 (the injected [`PiiModel`] seam, best-effort — the daemon wires the
+//! candle BERT-PII; tests pass a fake that answers). Layer 3 (the LLM backstop) is
 //! command-only (§9.5), never applied to abstracts.
 
 use std::collections::{BTreeMap, HashSet};
 
-use modelstat_redact::{ner_redact_checked, redact, NerModel};
+use modelstat_redact::{pii_redact_checked, redact, PiiModel};
 use modelstat_sumclient::CompleteRequest;
 use modelstat_wire::{
     segment_id, RawEvent, RedactionReport, Segment, SegmentBehavior, TaxonomyHintRooted, TokenUsage,
@@ -81,12 +81,12 @@ pub async fn build_for_one_session<S, E, N>(
     events: &[RawEvent],
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
-    ner: &N,
+    redactor: &N,
 ) -> BuildOutcome
 where
     S: Summarizer,
     E: Embedder,
-    N: NerModel,
+    N: PiiModel,
 {
     if events.is_empty() {
         return BuildOutcome::Ready(Vec::new());
@@ -117,7 +117,7 @@ where
     let mut segments = Vec::with_capacity(groups.len());
     for group in groups {
         let slice: Vec<&RawEvent> = group.iter().map(|&i| sorted[i]).collect();
-        match summarise_slice(session_id, &slice, resilient, embedder, ner).await {
+        match summarise_slice(session_id, &slice, resilient, embedder, redactor).await {
             SliceOutcome::Built(seg) => segments.push(*seg),
             SliceOutcome::Skipped => {}
             SliceOutcome::Held => return BuildOutcome::Held,
@@ -208,12 +208,12 @@ async fn summarise_slice<S, E, N>(
     slice: &[&RawEvent],
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
-    ner: &N,
+    redactor: &N,
 ) -> SliceOutcome
 where
     S: Summarizer,
     E: Embedder,
-    N: NerModel,
+    N: PiiModel,
 {
     if slice.is_empty() {
         return SliceOutcome::Skipped;
@@ -256,7 +256,7 @@ where
         SummarizeOutcome::Held => return SliceOutcome::Held,
     };
 
-    // Redact the abstract: layer-1 floor (always) + layer-2 NER, FAIL-CLOSED.
+    // Redact the abstract: layer-1 floor (always) + layer-2 PII, FAIL-CLOSED.
     //
     // The abstract is uploaded in every mode — that is the whole point of local
     // mode — so "the raw turns never leave this machine" is only true if what the
@@ -265,7 +265,7 @@ where
     // text nobody checked. Same rule the cloud path already follows; local and
     // self-hosted egress are no less egress.
     let floor = redact(&raw_abstract, None);
-    let Some(ner_pass) = ner_redact_checked(ner, &floor.text) else {
+    let Some(model_pass) = pii_redact_checked(redactor, &floor.text) else {
         modelstat_log::log_warn!(
             "redactor could not classify a {}-char abstract — holding this session \
              rather than uploading an unscrubbed summary",
@@ -273,12 +273,12 @@ where
         );
         return SliceOutcome::Held;
     };
-    let redacted_text = ner_pass.text;
+    let redacted_text = model_pass.text;
     let redaction = RedactionReport {
         secrets_found: floor.counts.secrets_found,
         emails_redacted: floor.counts.emails_redacted,
         paths_redacted_absolute: floor.counts.paths_redacted_absolute,
-        extra: ner_pass.counts, // pf_<type> keys
+        extra: model_pass.counts, // pf_<type> keys
     };
 
     // Cognition (best-effort) → its `[Mood: …] [Mind: …] [Stance: …]` suffix rides
@@ -338,7 +338,7 @@ where
     };
 
     // User-intent distillation — from the developer's OWN messages, best-effort.
-    let user_intent = summarise_user_intent(slice, resilient.engine(), ner).await;
+    let user_intent = summarise_user_intent(slice, resilient.engine(), redactor).await;
 
     let source_event_ids: Vec<String> = slice.iter().map(|e| e.source_event_id.clone()).collect();
     let id = segment_id(session_id, started_at_ms, ended_at_ms, &source_event_ids);
@@ -449,11 +449,15 @@ fn sample_and_redact_excerpts(slice: &[&RawEvent]) -> Vec<String> {
 /// Distill what the DEVELOPER asked for from their OWN messages only — the source
 /// Insights' rule + skill detectors mine (index.ts `summariseUserIntent`).
 /// Best-effort: uses the raw engine (a failure is `None`, never a session hold),
-/// then floor + NER redacts, trims, caps to 240 chars.
-async fn summarise_user_intent<S, N>(slice: &[&RawEvent], engine: &S, ner: &N) -> Option<String>
+/// then floor + PII redacts, trims, caps to 240 chars.
+async fn summarise_user_intent<S, N>(
+    slice: &[&RawEvent],
+    engine: &S,
+    redactor: &N,
+) -> Option<String>
 where
     S: Summarizer,
-    N: NerModel,
+    N: PiiModel,
 {
     let user_excerpts: Vec<String> = slice
         .iter()
@@ -488,7 +492,7 @@ where
     let floored = redact(&raw, None).text;
     // Fail-closed like everywhere else: no scrub, no user_intent. Dropping the
     // field costs one nicety; shipping an unscrubbed one costs a person's name.
-    let scrubbed = ner_redact_checked(ner, &floored)?.text;
+    let scrubbed = pii_redact_checked(redactor, &floored)?.text;
     let trimmed = take_chars(scrubbed.trim(), USER_INTENT_MAX_CHARS);
     if trimmed.is_empty() {
         None
@@ -660,15 +664,15 @@ fn collapse_ws(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::embed::NoEmbedder;
-    use modelstat_redact::{NerToken, UnavailableNer};
+    use modelstat_redact::{PiiToken, UnavailableRedactor};
 
     /// A redactor that ANSWERS and finds nothing. Needed now that every egress
     /// path — including the uploaded abstract — holds when the redactor cannot
-    /// read a turn. `UnavailableNer` still means "no redactor", and the hold test
+    /// read a turn. `UnavailableRedactor` still means "no redactor", and the hold test
     /// below uses it for exactly that.
-    struct AnsweringNer;
-    impl NerModel for AnsweringNer {
-        fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
+    struct AnsweringRedactor;
+    impl PiiModel for AnsweringRedactor {
+        fn classify(&self, _text: &str) -> Option<Vec<PiiToken>> {
             Some(Vec::new())
         }
     }
@@ -771,7 +775,7 @@ mod tests {
             ),
         ];
         let r = resilient(Fake::reply("Fixed a null deref in the auth middleware"));
-        match build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await {
+        match build_for_one_session(&events, &r, &NoEmbedder, &AnsweringRedactor).await {
             BuildOutcome::Ready(segs) => {
                 assert_eq!(segs.len(), 1);
                 let s = &segs[0];
@@ -815,7 +819,7 @@ mod tests {
         )];
         let r = resilient(Fake::failing());
         assert_eq!(
-            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await,
+            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringRedactor).await,
             BuildOutcome::Held
         );
     }
@@ -830,7 +834,7 @@ mod tests {
         ];
         let f = Fake::reply("unused");
         let r = resilient(f);
-        match build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await {
+        match build_for_one_session(&events, &r, &NoEmbedder, &AnsweringRedactor).await {
             BuildOutcome::Ready(segs) => assert!(segs.is_empty()),
             BuildOutcome::Held => panic!("0 excerpts must skip, never hold"),
         }
@@ -858,7 +862,7 @@ mod tests {
             .collect();
         let r = resilient(Fake::reply("Cut a release of acme/web"));
         let BuildOutcome::Ready(segs) =
-            build_for_one_session(&[e], &r, &NoEmbedder, &AnsweringNer).await
+            build_for_one_session(&[e], &r, &NoEmbedder, &AnsweringRedactor).await
         else {
             panic!("expected Ready");
         };
@@ -913,7 +917,7 @@ mod tests {
         ];
         let r = resilient(Fake::reply("Iterated on X then Y"));
         let BuildOutcome::Ready(segs) =
-            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await
+            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringRedactor).await
         else {
             panic!("expected Ready");
         };
@@ -933,7 +937,7 @@ mod tests {
         )];
         let r = resilient(Fake::reply("Did the embeddable work"));
         let BuildOutcome::Ready(segs) =
-            build_for_one_session(&events, &r, &FixedEmbedder, &AnsweringNer).await
+            build_for_one_session(&events, &r, &FixedEmbedder, &AnsweringRedactor).await
         else {
             panic!("expected Ready");
         };
@@ -1101,7 +1105,7 @@ mod tests {
         // The engine is healthy; only the redactor is missing.
         assert!(
             matches!(
-                build_for_one_session(&events, &r, &NoEmbedder, &UnavailableNer).await,
+                build_for_one_session(&events, &r, &NoEmbedder, &UnavailableRedactor).await,
                 BuildOutcome::Held
             ),
             "an abstract is egress too — no scrub, no upload"
@@ -1109,7 +1113,7 @@ mod tests {
 
         // With a redactor that answers, the same session builds.
         assert!(matches!(
-            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringNer).await,
+            build_for_one_session(&events, &r, &NoEmbedder, &AnsweringRedactor).await,
             BuildOutcome::Ready(_)
         ));
     }

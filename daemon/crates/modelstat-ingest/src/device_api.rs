@@ -458,7 +458,13 @@ impl DeviceApi {
         // inherently well-formed UTF-8, so TS's `wellFormedStringify` is a no-op.
         let mut wire = batch.clone();
         wire.summarizer_mode = Some(self.config.summarizer_mode());
-        wire.redactor_mode = Some(self.config.redactor_mode());
+        // Build-time stamp wins (the scan's spool sink sets it — a batch names
+        // the mode it was actually scrubbed under, not whatever is set by the
+        // time it ships); this fallback covers SDK/receiver batches and spools
+        // written by older daemons.
+        if wire.redactor_mode.is_none() {
+            wire.redactor_mode = Some(self.config.redactor_mode());
+        }
         wire.clamp();
 
         // One slot for the whole call, retries included: a retry is this same

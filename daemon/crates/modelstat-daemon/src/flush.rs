@@ -6,7 +6,7 @@
 //! Two paths, keyed on the summariser mode:
 //!   - **cloud**: redact the raw turns on-device ([`prepare_cloud_raw_events`],
 //!     FAIL-CLOSED) and emit ONE raw batch per session (no local segments — the
-//!     server summarises). NER down ⇒ [`FlushOutcome::Held`] (no-degrade: we hold
+//!     server summarises). Detector down ⇒ [`FlushOutcome::Held`] (no-degrade: we hold
 //!     + retry rather than ship floor-only-redacted turns, §21.5).
 //!   - **local / self-hosted**: [`build_for_one_session`] per session (any
 //!     `Held` ⇒ hold the whole flush, never a partial batch), then titles +
@@ -25,7 +25,7 @@ use modelstat_pipeline::{
     prepare_cloud_raw_events, BuildOutcome, Embedder, LinkExtractor, ResilientSummarizer,
     Summarizer,
 };
-use modelstat_redact::NerModel;
+use modelstat_redact::PiiModel;
 use modelstat_wire::{IngestBatch, RawEvent, Segment, TokenUsage};
 
 /// One assembled batch plus how the scan loop should ship it: `raw` picks the
@@ -65,7 +65,7 @@ pub async fn build_flush_batches<S, E, N>(
     mut drafts: Vec<ToolCallDraft>,
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
-    ner: &N,
+    redactor: &N,
     // Moved into the metadata pass (its only use), so no reborrow lifetime dance.
     // `+ Send`: this runs inside the daemon's tokio-spawned single-flight scan,
     // whose future must be `Send` (a `dyn Trait` erases the concrete Send-ness).
@@ -84,7 +84,7 @@ pub async fn build_flush_batches<S, E, N>(
 where
     S: Summarizer,
     E: Embedder,
-    N: NerModel,
+    N: PiiModel,
 {
     if events.is_empty() && drafts.is_empty() {
         return FlushOutcome::Ready(Vec::new());
@@ -93,13 +93,13 @@ where
 
     // ── Cloud: redact on-device, ship raw, summarise server-side ──
     if mode == "cloud" {
-        let Some(cloud_events) = prepare_cloud_raw_events(&events, &mut drafts, ner) else {
-            // FAIL-CLOSED + no-degrade: the on-device NER redactor is unavailable,
+        let Some(cloud_events) = prepare_cloud_raw_events(&events, &mut drafts, redactor) else {
+            // FAIL-CLOSED + no-degrade: the PII redactor cannot answer,
             // so turns can't be scrubbed before leaving the box. HOLD + retry (the
             // TS shipped local extractive; the rewrite never degrades).
             modelstat_log::log_warn!(
-                "cloud NER/PII redactor unavailable — holding this flush \
-                 (no raw egress, no degrade); retrying once the model is ready"
+                "the PII redactor cannot answer — holding this flush \
+                 (no raw egress, no degrade); retrying once it is ready"
             );
             return FlushOutcome::Held;
         };
@@ -215,7 +215,7 @@ where
             .push(e.clone());
     }
     for sess_events in by_session.values() {
-        match build_for_one_session(sess_events, resilient, embedder, ner).await {
+        match build_for_one_session(sess_events, resilient, embedder, redactor).await {
             BuildOutcome::Held => return FlushOutcome::Held,
             BuildOutcome::Ready(segs) => segments.extend(segs),
         }
@@ -247,11 +247,11 @@ where
     let session_titles = build_session_titles(&title_input, resilient.engine()).await;
     let session_metadata = build_session_metadata(&title_input, &events, git, extract_links).await;
 
-    // Deep-redact the SHIPPED tool commands before attribution: L2 (NER, always
+    // Deep-redact the SHIPPED tool commands before attribution: L2 (the PII detector, always
     // on-device) + L3 (LLM backstop, LOCAL mode only — §21.13, never crosses the
-    // machine boundary). Both fail-safe: a down NER/engine leaves the L1-floored
+    // machine boundary). Both fail-safe: a down detector/engine leaves the L1-floored
     // command unchanged. The cloud path already ran L2 inside prepare_cloud_raw_events.
-    enrich_tool_call_redaction(&mut drafts, ner);
+    enrich_tool_call_redaction(&mut drafts, redactor);
     if mode == "local" {
         deep_redact_tool_commands(&mut drafts, resilient.engine()).await;
     }
@@ -308,9 +308,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::AnsweringNer;
+    use crate::testing::AnsweringRedactor;
     use modelstat_pipeline::NoEmbedder;
-    use modelstat_redact::UnavailableNer;
+    use modelstat_redact::UnavailableRedactor;
     use modelstat_sumclient::CompleteRequest;
     use std::time::Duration;
 
@@ -333,13 +333,13 @@ mod tests {
         }
     }
 
-    /// A fake "live" NER — tags Katherine Johnson / Globex Corporation by surface,
-    /// so `ner_active`'s sentinel scrubs and the cloud path proceeds instead of
-    /// fail-closing. Cloud tests that want the HOLD use `UnavailableNer`.
-    struct LiveNer;
-    impl modelstat_redact::NerModel for LiveNer {
-        fn classify(&self, _text: &str) -> Option<Vec<modelstat_redact::NerToken>> {
-            let tok = |ent: &str, word: &str| modelstat_redact::NerToken {
+    /// A fake "live" detector — tags Katherine Johnson / Globex Corporation by surface,
+    /// so `redactor_active`'s sentinel scrubs and the cloud path proceeds instead of
+    /// fail-closing. Cloud tests that want the HOLD use `UnavailableRedactor`.
+    struct LiveRedactor;
+    impl modelstat_redact::PiiModel for LiveRedactor {
+        fn classify(&self, _text: &str) -> Option<Vec<modelstat_redact::PiiToken>> {
+            let tok = |ent: &str, word: &str| modelstat_redact::PiiToken {
                 entity: ent.into(),
                 word: word.into(),
                 start: None,
@@ -414,7 +414,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             None,
             None,
             &mut acc,
@@ -468,7 +468,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             None,
             None,
             &mut acc,
@@ -508,7 +508,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             None,
             None,
             &mut acc,
@@ -549,7 +549,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             None,
             None,
             &mut acc,
@@ -561,8 +561,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_mode_holds_when_ner_is_down() {
-        // Fail-closed: cloud + UnavailableNer → Held (no raw egress, no degrade).
+    async fn cloud_mode_holds_when_the_redactor_is_down() {
+        // Fail-closed: cloud + UnavailableRedactor → Held (no raw egress, no degrade).
         let resilient = ResilientSummarizer::with_cooldown(
             Fake {
                 reply: "x".into(),
@@ -581,7 +581,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &UnavailableNer,
+            &UnavailableRedactor,
             None,
             None,
             &mut acc,
@@ -627,7 +627,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &LiveNer,
+            &LiveRedactor,
             None,
             None,
             &mut acc,
@@ -636,7 +636,7 @@ mod tests {
         )
         .await;
         let FlushOutcome::Ready(batches) = out else {
-            panic!("a live NER must not hold")
+            panic!("a live detector must not hold")
         };
         assert_eq!(batches.len(), 1, "one session ⇒ one raw batch");
         assert!(batches[0].raw, "cloud ships the raw endpoint");
@@ -673,7 +673,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &LiveNer,
+            &LiveRedactor,
             None,
             None,
             &mut acc,
@@ -695,7 +695,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &LiveNer,
+            &LiveRedactor,
             None,
             None,
             &mut acc,
@@ -734,7 +734,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &LiveNer,
+            &LiveRedactor,
             None,
             None,
             &mut acc,
@@ -767,7 +767,7 @@ mod tests {
             Vec::new(),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             None,
             None,
             &mut acc,

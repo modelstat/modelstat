@@ -26,6 +26,7 @@ pub mod identity;
 pub mod ingest;
 pub mod machine_key;
 pub mod paths;
+pub mod redactor_client;
 pub mod state;
 pub mod timefmt;
 pub mod upload_gate;

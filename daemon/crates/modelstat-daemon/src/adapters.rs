@@ -11,7 +11,7 @@ use modelstat_pipeline::{
     build_for_one_session, BuildOutcome, Embedder, ResilientSummarizer, Summarizer,
 };
 use modelstat_receiver::PipelineRunner;
-use modelstat_redact::NerModel;
+use modelstat_redact::PiiModel;
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
 
 use crate::flush::PreparedBatch;
@@ -54,6 +54,29 @@ impl BatchSink for Spool {
     }
 }
 
+/// A [`BatchSink`] that stamps the REDACTOR mode a batch was actually built
+/// under before parking it. The stamp has to happen here, at the spool door:
+/// batches wait in the spool for arbitrarily long, and stamping at upload time
+/// (as `summarizer_mode` still does) would label a batch with whatever the
+/// setting is by then — the exact drift `redactor_mode` exists to make
+/// answerable ("was THIS batch scrubbed on the box?").
+pub struct StampedSink<'a> {
+    pub spool: &'a Spool,
+    pub redactor_mode: String,
+}
+
+impl BatchSink for StampedSink<'_> {
+    fn accept(&self, batch: &PreparedBatch) -> Result<(), Hold> {
+        let mut stamped = PreparedBatch {
+            batch: batch.batch.clone(),
+            raw: batch.raw,
+            segment_count: batch.segment_count,
+        };
+        stamped.batch.redactor_mode = Some(self.redactor_mode.clone());
+        self.spool.accept(&stamped)
+    }
+}
+
 /// The backfill-digest endpoint URL: `<api>/v1/backfill/digests[?day=<day>]`
 /// (port of `api.ts::backfillGet`). The day is a plain `YYYY-MM-DD` (no chars
 /// that need percent-encoding).
@@ -93,15 +116,15 @@ impl BackfillDigest for DeviceApi {
 pub struct EnginePipeline<'a, S, E, N> {
     resilient: &'a ResilientSummarizer<S>,
     embedder: &'a E,
-    ner: &'a N,
+    redactor: &'a N,
 }
 
 impl<'a, S, E, N> EnginePipeline<'a, S, E, N> {
-    pub fn new(resilient: &'a ResilientSummarizer<S>, embedder: &'a E, ner: &'a N) -> Self {
+    pub fn new(resilient: &'a ResilientSummarizer<S>, embedder: &'a E, redactor: &'a N) -> Self {
         EnginePipeline {
             resilient,
             embedder,
-            ner,
+            redactor,
         }
     }
 }
@@ -110,10 +133,10 @@ impl<S, E, N> PipelineRunner for EnginePipeline<'_, S, E, N>
 where
     S: Summarizer,
     E: Embedder,
-    N: NerModel,
+    N: PiiModel,
 {
     async fn run(&self, events: &[RawEvent]) -> Option<Vec<Segment>> {
-        match build_for_one_session(events, self.resilient, self.embedder, self.ner).await {
+        match build_for_one_session(events, self.resilient, self.embedder, self.redactor).await {
             BuildOutcome::Ready(segments) => Some(segments),
             BuildOutcome::Held => None,
         }
@@ -123,7 +146,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::AnsweringNer;
+    use crate::testing::AnsweringRedactor;
     use modelstat_ingest::IngestResponse;
     use modelstat_pipeline::NoEmbedder;
     use modelstat_sumclient::{CompleteRequest, SumError};
@@ -177,14 +200,14 @@ mod tests {
         ];
         // Healthy → Some(segments).
         let healthy = ResilientSummarizer::with_cooldown(Fake { failing: false }, Duration::ZERO);
-        let runner = EnginePipeline::new(&healthy, &NoEmbedder, &AnsweringNer);
+        let runner = EnginePipeline::new(&healthy, &NoEmbedder, &AnsweringRedactor);
         let segs = runner.run(&events).await;
         assert!(segs.is_some());
         assert!(!segs.unwrap().is_empty());
 
         // Engine down → None (HOLD, no degraded batch).
         let down = ResilientSummarizer::with_cooldown(Fake { failing: true }, Duration::ZERO);
-        let runner = EnginePipeline::new(&down, &NoEmbedder, &AnsweringNer);
+        let runner = EnginePipeline::new(&down, &NoEmbedder, &AnsweringRedactor);
         assert!(runner.run(&events).await.is_none());
     }
 

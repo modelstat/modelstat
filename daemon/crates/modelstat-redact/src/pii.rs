@@ -1,19 +1,23 @@
-//! Redaction layer 2 — the on-device NER adapter (feature §9.5, plan §3/D5).
+//! Redaction layer 2 — the PII-detector adapter (feature §9.5, plan §3/D5).
 //!
-//! A token-classification model (BERT-base-NER class) names person/org/location
-//! entities the deterministic floor (layer 1) can't catch. This module owns the
-//! pure post-processing — BIO span merge, the precise offset splice (else the
-//! word-boundary surface fallback), the `pf_<type>` counts, and the fail-closed
-//! liveness probe — over a [`NerModel`] trait. The candle runtime slots in behind
-//! the trait (`candle` feature); until then [`UnavailableNer`] latches
-//! pass-through, and [`ner_active`] answers `false` so cloud/self-hosted egress
-//! fails CLOSED (holds) rather than shipping less-redacted (§21.5).
+//! A token-classification model names the private things the deterministic
+//! floor (layer 1) can't catch — people, addresses, account numbers, secrets
+//! in prose. This module owns the pure post-processing — BIO/BIOES span merge,
+//! the precise offset splice (else the word-boundary surface fallback), the
+//! `pf_<type>` counts, and the fail-closed liveness probe — over a
+//! [`PiiModel`] trait. Everything here is MODEL-AGNOSTIC on purpose: the
+//! labels come from whichever checkpoint the runtime loads, on-device or
+//! remote, and swapping models must never touch this file. (`pf_` is the
+//! wire's namespace for model-layer counts — a shipped contract, not the
+//! current model's name.) [`UnavailableRedactor`] latches pass-through when no
+//! backend exists, and [`redactor_active`] answers `false` so egress fails
+//! CLOSED (holds) rather than shipping less-redacted (§21.5).
 
 use std::collections::BTreeMap;
 
-/// One classified subword token from the NER model.
+/// One classified subword token from the PII model.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NerToken {
+pub struct PiiToken {
     /// The BIO tag, e.g. `"B-PER"`, `"I-ORG"`, or `"O"`.
     pub entity: String,
     /// The subword surface (`"##xyz"` wordpiece continuations kept).
@@ -25,25 +29,36 @@ pub struct NerToken {
 
 /// A token-classification model. `classify` returns None when the model is
 /// unavailable (missing/loading) — the caller latches pass-through, and
-/// [`ner_active`] then reports the layer as down (fail-closed for egress).
-pub trait NerModel {
-    fn classify(&self, text: &str) -> Option<Vec<NerToken>>;
+/// [`redactor_active`] then reports the layer as down (fail-closed for egress).
+pub trait PiiModel {
+    fn classify(&self, text: &str) -> Option<Vec<PiiToken>>;
+
+    /// One answer per text — or `None` if ANY text could not be answered,
+    /// because the callers that batch (a flush's worth of turns) hold
+    /// all-or-nothing anyway: a flush with one unclassifiable turn does not
+    /// ship its other turns around it.
+    ///
+    /// The default is the sequential loop every in-process model wants;
+    /// network-backed models override it to put many texts in one request.
+    fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
+        texts.iter().map(|t| self.classify(t)).collect()
+    }
 }
 
-/// The fail-closed default: no NER model. Redaction is a pass-through and
-/// [`ner_active`] is `false`, so cloud/self-hosted HOLD rather than ship
+/// The fail-closed default: no PII model. Redaction is a pass-through and
+/// [`redactor_active`] is `false`, so cloud/self-hosted HOLD rather than ship
 /// less-redacted (§9.5).
-pub struct UnavailableNer;
+pub struct UnavailableRedactor;
 
-impl NerModel for UnavailableNer {
-    fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
+impl PiiModel for UnavailableRedactor {
+    fn classify(&self, _text: &str) -> Option<Vec<PiiToken>> {
         None
     }
 }
 
 /// The result of a layer-2 pass: redacted text + `pf_<type>` counts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NerRedaction {
+pub struct PiiRedaction {
     pub text: String,
     /// `pf_<type>` → count (e.g. `pf_per`, `pf_org`).
     pub counts: BTreeMap<String, u64>,
@@ -91,20 +106,20 @@ fn reconstruct_surface(words: &[&str]) -> String {
 
 struct Span<'a> {
     type_: String,
-    tokens: Vec<&'a NerToken>,
+    tokens: Vec<&'a PiiToken>,
 }
 
-/// Run the layer-2 NER redactor, or `None` when the model did not answer for
+/// Run the layer-2 PII redactor, or `None` when the model did not answer for
 /// THIS text. Egress paths must use this one: a turn the model couldn't classify
 /// has not been scrubbed, and the only safe thing to do with it is hold.
 ///
-/// [`ner_active`] is not enough on its own — it probes with one short sentinel,
+/// [`redactor_active`] is not enough on its own — it probes with one short sentinel,
 /// so it says the layer is up while individual turns still fail. That gap shipped
 /// long turns unredacted once turns became verbatim, which is why the answer is
 /// now per text.
-pub fn ner_redact_checked<M: NerModel>(model: &M, text: &str) -> Option<NerRedaction> {
+pub fn pii_redact_checked<M: PiiModel>(model: &M, text: &str) -> Option<PiiRedaction> {
     if text.is_empty() {
-        return Some(NerRedaction {
+        return Some(PiiRedaction {
             text: text.to_string(),
             counts: BTreeMap::new(),
         });
@@ -114,19 +129,46 @@ pub fn ner_redact_checked<M: NerModel>(model: &M, text: &str) -> Option<NerRedac
         .map(|tokens| redact_spans(text, tokens))
 }
 
-/// Run the layer-2 NER redactor. On an unavailable/erroring model the text is
+/// Run the layer-2 PII redactor. On an unavailable/erroring model the text is
 /// returned unchanged (the floor already redacted it) — fine for LOCAL use, where
 /// nothing leaves the machine. Anything that ships must use
-/// [`ner_redact_checked`] and hold instead. Port of `redactWithPrivacyFilter`.
-pub fn ner_redact<M: NerModel>(model: &M, text: &str) -> NerRedaction {
-    ner_redact_checked(model, text).unwrap_or_else(|| NerRedaction {
+/// [`pii_redact_checked`] and hold instead. Port of `redactWithPrivacyFilter`.
+pub fn pii_redact<M: PiiModel>(model: &M, text: &str) -> PiiRedaction {
+    pii_redact_checked(model, text).unwrap_or_else(|| PiiRedaction {
         text: text.to_string(),
         counts: BTreeMap::new(),
     })
 }
 
+/// [`pii_redact_checked`] over a batch: one redaction per text, or `None` when
+/// any text went unanswered. Empty texts skip the model (as the single-text
+/// path does), so a batch's answers are element-for-element identical to the
+/// per-text ones — only the number of model round-trips changes.
+pub fn pii_redact_checked_many<M: PiiModel>(
+    model: &M,
+    texts: &[String],
+) -> Option<Vec<PiiRedaction>> {
+    let ask: Vec<String> = texts.iter().filter(|t| !t.is_empty()).cloned().collect();
+    let mut answers = model.classify_many(&ask)?.into_iter();
+    let out = texts
+        .iter()
+        .map(|t| {
+            if t.is_empty() {
+                PiiRedaction {
+                    text: String::new(),
+                    counts: BTreeMap::new(),
+                }
+            } else {
+                // classify_many answered every asked text (its contract), in order.
+                redact_spans(t, answers.next().expect("one answer per asked text"))
+            }
+        })
+        .collect();
+    Some(out)
+}
+
 /// Splice `[REDACTED:<TYPE>]` over every entity span the model named.
-fn redact_spans(text: &str, tokens: Vec<NerToken>) -> NerRedaction {
+fn redact_spans(text: &str, tokens: Vec<PiiToken>) -> PiiRedaction {
     // Decode BIO tags into entity spans.
     let mut spans: Vec<Span> = Vec::new();
     for t in &tokens {
@@ -191,7 +233,7 @@ fn redact_spans(text: &str, tokens: Vec<NerToken>) -> NerRedaction {
             let marker: Vec<char> = format!("[REDACTED:{type_}]").chars().collect();
             chars.splice(start..end, marker);
         }
-        NerRedaction {
+        PiiRedaction {
             text: chars.into_iter().collect(),
             counts,
         }
@@ -219,7 +261,7 @@ fn redact_spans(text: &str, tokens: Vec<NerToken>) -> NerRedaction {
                 bump(type_, n, &mut counts);
             }
         }
-        NerRedaction { text: out, counts }
+        PiiRedaction { text: out, counts }
     }
 }
 
@@ -302,32 +344,32 @@ fn word_boundary_replace(text: &str, surface: &str, marker: &str) -> (String, u6
     (out, count)
 }
 
-/// Prove the NER layer is LIVE (not a silent pass-through) — the fail-closed gate
+/// Prove the PII layer is LIVE (not a silent pass-through) — the fail-closed gate
 /// for cloud/self-hosted (§9.5). A sentinel PERSON that the regex floor does NOT
 /// target must come back scrubbed. Never panics — a dead model answers `false`.
-pub fn ner_active<M: NerModel>(model: &M) -> bool {
+pub fn redactor_active<M: PiiModel>(model: &M) -> bool {
     let sentinel = "Escalate the incident to Katherine Johnson at Globex Corporation.";
-    !ner_redact(model, sentinel)
+    !pii_redact(model, sentinel)
         .text
         .contains("Katherine Johnson")
 }
 
-// ── candle BERT-NER runtime (feature `candle`) ───────────────────────────────
+// ── candle BERT-PII runtime (feature `candle`) ───────────────────────────────
 //
 // Compile-verified against candle-transformers 0.8; run-verification needs the
-// downloaded dslim/bert-base-NER weights. Exact-span parity vs transformers.js is
+// downloaded dslim/bert-base-PII weights. Exact-span parity vs transformers.js is
 // not required — PROCESSING_VERSION 16 absorbs the runtime swap (plan R2/D13);
-// the fail-closed liveness gate (`ner_active`) keeps egress safe regardless.
+// the fail-closed liveness gate (`redactor_active`) keeps egress safe regardless.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A canned NER model keyed to the sentinel + a couple fixtures.
-    struct MockNer;
-    impl NerModel for MockNer {
-        fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
-            let tok = |ent: &str, word: &str, start: usize, end: usize| NerToken {
+    /// A canned PII model keyed to the sentinel + a couple fixtures.
+    struct MockRedactor;
+    impl PiiModel for MockRedactor {
+        fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
+            let tok = |ent: &str, word: &str, start: usize, end: usize| PiiToken {
                 entity: ent.into(),
                 word: word.into(),
                 start: Some(start),
@@ -350,7 +392,7 @@ mod tests {
     #[test]
     fn precise_splice_merges_bio_and_counts() {
         let text = "Escalate the incident to Katherine Johnson at Globex Corporation.";
-        let out = ner_redact(&MockNer, text);
+        let out = pii_redact(&MockRedactor, text);
         assert_eq!(
             out.text,
             "Escalate the incident to [REDACTED:PER] at [REDACTED:ORG]."
@@ -361,14 +403,14 @@ mod tests {
 
     #[test]
     fn liveness_gate() {
-        assert!(ner_active(&MockNer));
+        assert!(redactor_active(&MockRedactor));
         // Fail-closed: no model → sentinel survives → NOT active.
-        assert!(!ner_active(&UnavailableNer));
+        assert!(!redactor_active(&UnavailableRedactor));
     }
 
     #[test]
     fn unavailable_is_passthrough() {
-        let out = ner_redact(&UnavailableNer, "Katherine Johnson");
+        let out = pii_redact(&UnavailableRedactor, "Katherine Johnson");
         assert_eq!(out.text, "Katherine Johnson");
         assert!(out.counts.is_empty());
     }
@@ -376,9 +418,9 @@ mod tests {
     #[test]
     fn word_boundary_fallback_keeps_marketing_intact() {
         struct NoOffsets;
-        impl NerModel for NoOffsets {
-            fn classify(&self, _t: &str) -> Option<Vec<NerToken>> {
-                Some(vec![NerToken {
+        impl PiiModel for NoOffsets {
+            fn classify(&self, _t: &str) -> Option<Vec<PiiToken>> {
+                Some(vec![PiiToken {
                     entity: "B-PER".into(),
                     word: "Mark".into(),
                     start: None,
@@ -386,7 +428,7 @@ mod tests {
                 }])
             }
         }
-        let out = ner_redact(&NoOffsets, "Mark reviewed the Marketing plan for Mark");
+        let out = pii_redact(&NoOffsets, "Mark reviewed the Marketing plan for Mark");
         assert_eq!(
             out.text,
             "[REDACTED:PER] reviewed the Marketing plan for [REDACTED:PER]"
@@ -409,20 +451,20 @@ mod tests {
     fn a_failed_classification_is_distinguishable_from_a_clean_one() {
         // The distinction the leak turned on: "nothing to redact" and "could not
         // read this" both used to come back as unchanged text.
-        assert!(ner_redact_checked(&UnavailableNer, "Katherine Johnson").is_none());
-        let clean = ner_redact_checked(&NoEntities, "Katherine Johnson").expect("answered");
+        assert!(pii_redact_checked(&UnavailableRedactor, "Katherine Johnson").is_none());
+        let clean = pii_redact_checked(&NoEntities, "Katherine Johnson").expect("answered");
         assert_eq!(clean.text, "Katherine Johnson");
         // The lossy wrapper still exists for LOCAL use, and still passes through.
         assert_eq!(
-            ner_redact(&UnavailableNer, "Katherine Johnson").text,
+            pii_redact(&UnavailableRedactor, "Katherine Johnson").text,
             "Katherine Johnson"
         );
     }
 
     /// Answers, finds nothing.
     struct NoEntities;
-    impl NerModel for NoEntities {
-        fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
+    impl PiiModel for NoEntities {
+        fn classify(&self, _text: &str) -> Option<Vec<PiiToken>> {
             Some(Vec::new())
         }
     }
@@ -433,9 +475,9 @@ mod tests {
         /// Char range of the fragment it "detects", and the type it calls it.
         range: (usize, usize),
     }
-    impl NerModel for LabelsSubword {
-        fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
-            Some(vec![NerToken {
+    impl PiiModel for LabelsSubword {
+        fn classify(&self, _text: &str) -> Option<Vec<PiiToken>> {
+            Some(vec![PiiToken {
                 entity: "B-ORG".into(),
                 word: "frag".into(),
                 start: Some(self.range.0),
@@ -481,7 +523,7 @@ mod tests {
             ("a Compose app is up", (2, 4)),                  // "Co" of Compose
             ("ping Katherine today", (5, 9)),                 // "Kath" of Katherine
         ] {
-            let out = ner_redact(&LabelsSubword { range: frag }, text).text;
+            let out = pii_redact(&LabelsSubword { range: frag }, text).text;
             no_marker_touches_a_word(&out);
             assert!(
                 !out.contains("PC Request") && !out.contains("ugbot") && !out.contains("mpose"),
@@ -491,7 +533,7 @@ mod tests {
         }
 
         // And the whole word really is gone, not just the fragment.
-        let out = ner_redact(
+        let out = pii_redact(
             &LabelsSubword { range: (7, 9) },
             "Error: eRPC Request failed",
         )
@@ -503,14 +545,14 @@ mod tests {
     fn snapping_stops_at_punctuation_and_whitespace() {
         // It must not swallow the sentence: a span already on word boundaries is
         // left exactly where it was.
-        let out = ner_redact(
+        let out = pii_redact(
             &LabelsSubword { range: (7, 11) },
             "Error: eRPC Request failed",
         )
         .text;
         assert_eq!(out, "Error: [REDACTED:ORG] Request failed");
         // Underscore and hyphen stay boundaries, so compounds keep their shape.
-        let out = ner_redact(&LabelsSubword { range: (0, 2) }, "abc_def and x").text;
+        let out = pii_redact(&LabelsSubword { range: (0, 2) }, "abc_def and x").text;
         assert_eq!(out, "[REDACTED:ORG]_def and x");
     }
 
@@ -519,9 +561,9 @@ mod tests {
         // Two subwords of ONE word: splicing both would use offsets the first
         // splice already invalidated.
         struct TwoFragments;
-        impl NerModel for TwoFragments {
-            fn classify(&self, _t: &str) -> Option<Vec<NerToken>> {
-                let tok = |a, b| NerToken {
+        impl PiiModel for TwoFragments {
+            fn classify(&self, _t: &str) -> Option<Vec<PiiToken>> {
+                let tok = |a, b| PiiToken {
                     entity: "B-PER".into(),
                     word: "f".into(),
                     start: Some(a),
@@ -530,7 +572,7 @@ mod tests {
                 Some(vec![tok(5, 7), tok(8, 10)])
             }
         }
-        let out = ner_redact(&TwoFragments, "ping Katherine today").text;
+        let out = pii_redact(&TwoFragments, "ping Katherine today").text;
         no_marker_touches_a_word(&out);
         assert_eq!(out, "ping [REDACTED:PER] today");
     }
@@ -551,16 +593,16 @@ mod tests {
     #[test]
     fn two_adjacent_singles_do_not_swallow_what_sits_between_them() {
         struct TwoSingles;
-        impl NerModel for TwoSingles {
-            fn classify(&self, _t: &str) -> Option<Vec<NerToken>> {
+        impl PiiModel for TwoSingles {
+            fn classify(&self, _t: &str) -> Option<Vec<PiiToken>> {
                 Some(vec![
-                    NerToken {
+                    PiiToken {
                         entity: "S-private_person".into(),
                         word: "Ada".into(),
                         start: Some(0),
                         end: Some(3),
                     },
-                    NerToken {
+                    PiiToken {
                         entity: "S-private_person".into(),
                         word: "Grace".into(),
                         start: Some(12),
@@ -569,7 +611,7 @@ mod tests {
                 ])
             }
         }
-        let out = ner_redact(&TwoSingles, "Ada told me Grace shipped it").text;
+        let out = pii_redact(&TwoSingles, "Ada told me Grace shipped it").text;
         assert_eq!(
             out, "[REDACTED:PRIVATE_PERSON] told me [REDACTED:PRIVATE_PERSON] shipped it",
             "the words between two singles must survive"

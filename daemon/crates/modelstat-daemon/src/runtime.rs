@@ -31,7 +31,7 @@ use crate::discover_jobs::{
     discover_jobs, order_jobs_newest_first, parse_job_streaming, ParserKind, ScanJob,
 };
 use crate::engine::{
-    build_embedder, build_ner, engine_base_url, DaemonEmbedder, DaemonNer, Swappable,
+    build_embedder, build_redactor, engine_base_url, DaemonEmbedder, DaemonRedactor, Swappable,
 };
 use crate::insights::{refresh_session_insights, SessionInsightsFetcher};
 use crate::scan::{
@@ -111,7 +111,7 @@ pub struct Daemon {
     /// model finishes downloading, so a blip during `connect` costs minutes of
     /// degraded quality instead of lasting until the next restart.
     pub embedder: Arc<Swappable<DaemonEmbedder>>,
-    pub ner: Arc<Swappable<DaemonNer>>,
+    pub redactor: Arc<Swappable<DaemonRedactor>>,
     /// Cursors + segments-sent + reconcile caches. An **async** mutex because a
     /// scan holds it across awaits (advancing cursors as batches commit);
     /// reconcile + processing-version take it too, so those serialise against a
@@ -156,7 +156,7 @@ impl Daemon {
             api: Arc::new(DeviceApi::new(config.clone())),
             resilient: Arc::new(ResilientSummarizer::new(engine)),
             embedder: Arc::new(Swappable::new(build_embedder())),
-            ner: Arc::new(Swappable::new(build_ner())),
+            redactor: Arc::new(Swappable::new(build_redactor(&config))),
             state: Arc::new(TokioMutex::new(load_state())),
             status: Arc::new(StdMutex::new(Status::default())),
             queue: Arc::new(FileQueueStore::new(home_path("queue.json"))),
@@ -462,20 +462,12 @@ fn eager_target_jobs(session_ids: &[String], file: Option<&str>) -> Vec<ScanJob>
 /// mutate across awaits) — an `await`-safe tokio mutex, so reconcile +
 /// processing-version serialise against it.
 async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptions) -> ScanTallies {
-    // The redactor has to be one we can actually honour. `cloud` and `self-hosted`
-    // both mean raw text leaves so something else can scrub it, and neither exists
-    // yet — so scanning at all would either ship unscrubbed turns or build batches
-    // that can never be sent. `modelstat redactor` refuses to store those values,
-    // but MODELSTAT_REDACTOR_MODE can still name one, so the check belongs here too:
-    // at the door, where the decision is honest about doing nothing.
-    if !daemon.config.redacts_locally() {
-        modelstat_log::log_warn!(
-            "redactor is `{}`, which would send unscrubbed turns off this machine — \
-             nothing is being scanned or uploaded. Set `modelstat redactor local`.",
-            daemon.config.redactor_mode()
-        );
-        return ScanTallies::default();
-    }
+    // Every redactor mode scans. `cloud`/`self-hosted` classify spans remotely
+    // over floor-scrubbed text, and their failure shape is the same fail-closed
+    // hold the local model has: `pii_redact_checked` answers `None`, the flush
+    // holds, nothing unscrubbed ever leaves (§9.5). A misconfigured mode (no
+    // URL, unpaired device) builds as `UnavailableRedactor`, which holds the same
+    // way — loudly, at build time, with the fix in the log.
     let device_id = daemon.device_id.as_str();
     let daemon_version = daemon.config.version();
 
@@ -486,7 +478,13 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     let mut git = RealGitEnrichment::new();
     // Where finished batches go. Not the network — the upload loop owns that, and
     // keeping the two apart is what stops an outage from re-running the redactor.
-    let sink = &*daemon.spool;
+    // Stamped at the door with the redactor mode THIS scan classified under, so
+    // a mode switch while batches sit spooled cannot mislabel them.
+    let sink = crate::adapters::StampedSink {
+        spool: &daemon.spool,
+        redactor_mode: daemon.config.redactor_mode(),
+    };
+    let sink = &sink;
     let mut observer = StatusObserver {
         status: &daemon.status,
     };
@@ -510,7 +508,7 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     // Snapshot the model handles for this scan: a mid-scan self-heal swap must
     // not change which embedder half a session was built with.
     let embedder = daemon.embedder.get();
-    let ner = daemon.ner.get();
+    let redactor = daemon.redactor.get();
 
     // Snapshot the logged-in accounts ONCE for the whole scan, for the same
     // reason: the heartbeat rewrites this file every 10s, and a switch landing
@@ -527,7 +525,7 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         opts,
         &daemon.resilient,
         &*embedder,
-        &*ner,
+        &*redactor,
         &mut git,
         Some(&*extractor),
         parse,

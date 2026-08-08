@@ -58,17 +58,17 @@ pub use single_flight::CoalescingRunner;
 /// to hand it a working redactor, exactly like production does.
 #[cfg(test)]
 pub(crate) mod testing {
-    use modelstat_redact::{NerModel, NerToken};
+    use modelstat_redact::{PiiModel, PiiToken};
 
     /// Answers for any text, and redacts the liveness sentinel's name so
-    /// `ner_active` reads the layer as UP.
-    pub struct AnsweringNer;
+    /// `redactor_active` reads the layer as UP.
+    pub struct AnsweringRedactor;
 
-    impl NerModel for AnsweringNer {
-        fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+    impl PiiModel for AnsweringRedactor {
+        fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
             let mut out = Vec::new();
             if let Some(i) = text.find("Katherine Johnson") {
-                let tok = |entity: &str, word: &str, a: usize, b: usize| NerToken {
+                let tok = |entity: &str, word: &str, a: usize, b: usize| PiiToken {
                     entity: entity.into(),
                     word: word.into(),
                     start: Some(a),

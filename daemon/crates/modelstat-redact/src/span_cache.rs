@@ -7,7 +7,7 @@
 //! hundreds of milliseconds of inference for a text we have already answered is
 //! pure waste. This module remembers the answers.
 //!
-//! What is cached is the model's RAW output (the [`NerToken`] list), never any
+//! What is cached is the model's RAW output (the [`PiiToken`] list), never any
 //! transform of the text: the splice/snap/merge logic downstream keeps running
 //! on every call, so a cached answer is byte-identical to a computed one by
 //! construction, and changes to that logic need no cache invalidation.
@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-use crate::ner::{NerModel, NerToken};
+use crate::pii::{PiiModel, PiiToken};
 
 /// Default size cap for the cache file — generous enough to hold the unique
 /// texts of a very large corpus (spans are tiny; most answers are the empty
@@ -101,7 +101,7 @@ impl SpanStore {
         }
     }
 
-    fn get(&self, text: &str) -> Option<Vec<NerToken>> {
+    fn get(&self, text: &str) -> Option<Vec<PiiToken>> {
         if self.dead.load(Ordering::Relaxed) {
             return None;
         }
@@ -136,7 +136,7 @@ impl SpanStore {
         }
     }
 
-    fn put(&self, text: &str, tokens: &[NerToken]) {
+    fn put(&self, text: &str, tokens: &[PiiToken]) {
         if self.dead.load(Ordering::Relaxed) {
             return;
         }
@@ -201,9 +201,9 @@ fn now_ms() -> i64 {
 }
 
 /// Compact array-of-arrays: `[[entity, word, start|null, end|null], …]`.
-/// Hand-rolled (no serde derives on [`NerToken`]) so the wire shape of the
+/// Hand-rolled (no serde derives on [`PiiToken`]) so the wire shape of the
 /// cache is explicit and stable.
-fn encode_tokens(tokens: &[NerToken]) -> String {
+fn encode_tokens(tokens: &[PiiToken]) -> String {
     let rows: Vec<serde_json::Value> = tokens
         .iter()
         .map(|t| serde_json::json!([t.entity, t.word, t.start, t.end]))
@@ -211,12 +211,12 @@ fn encode_tokens(tokens: &[NerToken]) -> String {
     serde_json::Value::Array(rows).to_string()
 }
 
-fn decode_tokens(json: &str) -> Option<Vec<NerToken>> {
+fn decode_tokens(json: &str) -> Option<Vec<PiiToken>> {
     let rows: Vec<(String, String, Option<usize>, Option<usize>)> =
         serde_json::from_str(json).ok()?;
     Some(
         rows.into_iter()
-            .map(|(entity, word, start, end)| NerToken {
+            .map(|(entity, word, start, end)| PiiToken {
                 entity,
                 word,
                 start,
@@ -226,7 +226,7 @@ fn decode_tokens(json: &str) -> Option<Vec<NerToken>> {
     )
 }
 
-/// A [`NerModel`] that answers from the store when it can and from the wrapped
+/// A [`PiiModel`] that answers from the store when it can and from the wrapped
 /// model when it must. With no store it is a transparent pass-through, so
 /// callers hold ONE type either way.
 pub struct CachedNer<N> {
@@ -234,7 +234,7 @@ pub struct CachedNer<N> {
     store: Option<SpanStore>,
 }
 
-impl<N: NerModel> CachedNer<N> {
+impl<N: PiiModel> CachedNer<N> {
     pub fn new(inner: N, store: Option<SpanStore>) -> Self {
         CachedNer { inner, store }
     }
@@ -245,8 +245,8 @@ impl<N: NerModel> CachedNer<N> {
     }
 }
 
-impl<N: NerModel> NerModel for CachedNer<N> {
-    fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+impl<N: PiiModel> PiiModel for CachedNer<N> {
+    fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
         let Some(store) = &self.store else {
             return self.inner.classify(text);
         };
@@ -262,7 +262,7 @@ impl<N: NerModel> NerModel for CachedNer<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ner::{ner_redact, UnavailableNer};
+    use crate::pii::{pii_redact, UnavailableRedactor};
     use std::sync::atomic::AtomicUsize;
 
     /// Counts calls; answers a fixed span for "Katherine", nothing otherwise.
@@ -276,11 +276,11 @@ mod tests {
             }
         }
     }
-    impl NerModel for Counting {
-        fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+    impl PiiModel for Counting {
+        fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Some(match text.find("Katherine") {
-                Some(at) => vec![NerToken {
+                Some(at) => vec![PiiToken {
                     entity: "S-private_person".into(),
                     word: "Katherine".into(),
                     start: Some(at),
@@ -300,8 +300,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cached = CachedNer::new(Counting::new(), Some(store(tmp.path(), "fp1")));
         let text = "ping Katherine about the deploy";
-        let first = ner_redact(&cached, text);
-        let second = ner_redact(&cached, text);
+        let first = pii_redact(&cached, text);
+        let second = pii_redact(&cached, text);
         assert_eq!(first, second, "a cache hit must be byte-identical");
         assert!(first.text.contains("[REDACTED:PRIVATE_PERSON]"));
         assert_eq!(cached.inner().calls.load(Ordering::SeqCst), 1);
@@ -321,7 +321,7 @@ mod tests {
     fn no_answer_is_never_cached() {
         let tmp = tempfile::tempdir().unwrap();
         let st = store(tmp.path(), "fp1");
-        let cached = CachedNer::new(UnavailableNer, Some(st));
+        let cached = CachedNer::new(UnavailableRedactor, Some(st));
         assert_eq!(cached.classify("Katherine"), None);
         assert_eq!(cached.classify("Katherine"), None);
         assert!(
@@ -413,13 +413,13 @@ mod tests {
     #[test]
     fn tokens_round_trip_exactly() {
         let tokens = vec![
-            NerToken {
+            PiiToken {
                 entity: "B-private_person".into(),
                 word: "Kath".into(),
                 start: Some(0),
                 end: Some(4),
             },
-            NerToken {
+            PiiToken {
                 entity: "E-private_person".into(),
                 word: "##erine".into(),
                 start: None,
