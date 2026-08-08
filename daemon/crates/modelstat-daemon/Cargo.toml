@@ -21,6 +21,8 @@ modelstat-update.workspace = true
 modelstat-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The span-cache fingerprint (engine.rs) digests the redactor's weights.
+sha2.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "signal"] }
@@ -39,8 +41,10 @@ candle = ["modelstat-pipeline/candle"]
 
 # The on-device REDACTOR (OpenAI Privacy Filter over ONNX Runtime). Separate from
 # `candle`, which now only carries the BGE embedder: the two models have different
-# runtimes, and a build can want one without the other.
-onnx = ["modelstat-redact/onnx"]
+# runtimes, and a build can want one without the other. `cache` rides along: the
+# span cache only ever fronts the real model, so a build with no model has no
+# cache to feed.
+onnx = ["modelstat-redact/onnx", "modelstat-redact/cache"]
 
 # Singleton-lock process-liveness probe (kill(pid,0) / OpenProcess). Both already
 # in the tree via tokio; the daemon only needs OpenProcess/CloseHandle on Windows.

@@ -17,6 +17,8 @@ pub mod policy;
 #[cfg(feature = "onnx")]
 pub mod privacy_filter;
 mod redact;
+#[cfg(feature = "cache")]
+pub mod span_cache;
 
 pub use floor::FLOOR_REPLACEMENT_TEMPLATES;
 pub use ner::{
@@ -27,3 +29,5 @@ pub use policy::{
     POLICIES_BUNDLED_FALLBACK, POLICIES_CONFIG_KIND,
 };
 pub use redact::{redact, redact_with_remote, RedactionCounts, RedactionResult};
+#[cfg(feature = "cache")]
+pub use span_cache::{CachedNer, SpanStore};

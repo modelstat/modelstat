@@ -1785,6 +1785,7 @@ dependencies = [
  "notify",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "windows-sys 0.61.2",
 ]
@@ -1919,8 +1920,11 @@ dependencies = [
  "ndarray 0.16.1",
  "ort",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokenizers",
  "tokio",
 ]

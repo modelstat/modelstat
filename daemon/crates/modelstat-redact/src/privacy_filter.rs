@@ -121,7 +121,11 @@ pub const RECALL_BIAS: f32 = 0.0;
 /// [`RECALL_BIAS`]. A knob rather than a constant because the right answer depends
 /// on what a deployment fears more, and someone who wants the model's own
 /// calibrated default should not have to fork us to get it.
-fn recall_bias() -> f32 {
+///
+/// Public because the span cache keys on it: an answer computed at one bias must
+/// never be served at another, so the cache fingerprint has to name the SAME
+/// value [`PrivacyFilter::load`] will actually use.
+pub fn recall_bias() -> f32 {
     std::env::var("MODELSTAT_REDACTOR_RECALL_BIAS")
         .ok()
         .and_then(|v| v.trim().parse::<f32>().ok())
