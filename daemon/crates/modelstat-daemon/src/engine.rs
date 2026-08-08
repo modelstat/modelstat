@@ -144,6 +144,46 @@ pub fn missing_models() -> Vec<&'static OnDeviceModel> {
         .collect()
 }
 
+/// Delete cached model directories no entry in [`ON_DEVICE_MODELS`] claims,
+/// returning what was removed.
+///
+/// Replacing a model used to leave the old weights on disk forever: swapping the
+/// BERT redactor for Privacy Filter left 414 MB of `bert-base-NER` sitting in the
+/// cache of every install, downloaded once and never read again. Nothing was ever
+/// going to notice, because nothing looked.
+///
+/// Keyed on [`ON_DEVICE_MODELS`] rather than a list of names to delete, so this
+/// cannot go stale: whatever the daemon does not load is, by definition, garbage.
+/// That makes it destructive by construction, so it deletes ONLY directories
+/// directly under `<models>/hf/` — the ones this code created — and never
+/// recurses anywhere else.
+pub fn prune_stale_models() -> Vec<String> {
+    let hf = models_cache_dir().join("hf");
+    let Ok(entries) = std::fs::read_dir(&hf) else {
+        return Vec::new(); // no cache yet — nothing to prune
+    };
+    let keep: std::collections::BTreeSet<&str> =
+        ON_DEVICE_MODELS.iter().map(|m| m.model.dir_name).collect();
+    let mut removed = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if keep.contains(name.as_str()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => removed.push(name),
+            Err(e) => modelstat_log::log_warn!(
+                "could not remove the unused model cache {}: {e}",
+                entry.path().display()
+            ),
+        }
+    }
+    removed
+}
+
 /// Pre-warm the layer-2 NER redactor into the shared cache (§9.5). Returns
 /// whether it is now present. `connect`/`mode` call it so the first scan runs at
 /// full redaction quality; the bounded [`RetryPolicy::interactive`] keeps a human
@@ -407,6 +447,51 @@ mod tests {
                 entry.key
             );
         }
+    }
+
+    /// The cleanup keeps what the daemon loads and deletes what it does not — the
+    /// 414 MB of superseded BERT weights every install was carrying.
+    #[test]
+    fn pruning_removes_superseded_models_and_keeps_the_live_ones() {
+        let tmp = std::env::temp_dir().join(format!("modelstat-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let hf = tmp.join("hf");
+        std::fs::create_dir_all(&hf).unwrap();
+        // One live model, one superseded one, and a stray file that is not a
+        // model dir at all.
+        let live = ON_DEVICE_MODELS[0].model.dir_name;
+        std::fs::create_dir_all(hf.join(live)).unwrap();
+        std::fs::create_dir_all(hf.join("bert-base-NER")).unwrap();
+        std::fs::write(hf.join("bert-base-NER").join("model.safetensors"), b"old").unwrap();
+        std::fs::write(hf.join("notes.txt"), b"x").unwrap();
+
+        let removed = with_env(
+            &[("MODELSTAT_MODELS_DIR", Some(tmp.to_str().unwrap()))],
+            prune_stale_models,
+        );
+        assert_eq!(removed, vec!["bert-base-NER"]);
+        assert!(
+            !hf.join("bert-base-NER").exists(),
+            "the old weights are gone"
+        );
+        assert!(hf.join(live).exists(), "a live model must never be pruned");
+        assert!(
+            hf.join("notes.txt").exists(),
+            "only directories are pruned — never loose files"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A missing cache is the first-boot case, not an error.
+    #[test]
+    fn pruning_an_absent_cache_is_a_no_op() {
+        let tmp = std::env::temp_dir().join(format!("modelstat-prune-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let removed = with_env(
+            &[("MODELSTAT_MODELS_DIR", Some(tmp.to_str().unwrap()))],
+            prune_stale_models,
+        );
+        assert!(removed.is_empty());
     }
 
     /// `missing_models` drives both the self-heal and `status`, so "present" must

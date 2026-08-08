@@ -39,6 +39,39 @@
 //! why — it is control flow, not one big matmul. Do not "optimise" this to a GPU
 //! provider without measuring; that is the whole story of this comment.
 //!
+//! # Why prepacking is off, and why nothing else is
+//!
+//! A user reported the daemon holding ~4 GB. It was real: this session reached
+//! **3.37 GB resident and stayed there**, because ONNX Runtime's defaults assume a
+//! server saturating a box with back-to-back inference, and we are a background
+//! process that redacts in bursts and then sleeps for minutes.
+//!
+//! Four candidate knobs were measured on the real weights, same six-turn corpus
+//! (37 → 8,797 tokens), M4 Pro, release build, three runs each. Resident memory
+//! once the run settled:
+//!
+//!     setting                    idle RSS     inference
+//!     (defaults)                   3.37 GB        4.9 s
+//!     prepacking off               2.55 GB        4.3 s   ← shipped
+//!     CPU arena off                4.09 GB        4.9 s
+//!     memory pattern off           3.34 GB        4.6 s
+//!     intra-op spinning off        3.37 GB        4.9 s
+//!
+//! Only prepacking moved the number: **−0.82 GB (−24%), and slightly FASTER**, so
+//! there is no trade to weigh.
+//!
+//! The other three are documented here because each is the obvious next thing to
+//! try and each is a dead end. Disabling the CPU arena is actively HARMFUL (+0.72
+//! GB — without the pool, per-run buffers fragment the allocator instead of being
+//! reused). Memory pattern is within noise. And spinning — the one that sounds
+//! most like a CPU bug — burns **0.00 s of CPU over a 15 s idle window** either
+//! way, because ORT's spin window is milliseconds and then the threads block. The
+//! high CPU in that report was real inference during a re-scan, not idle spinning;
+//! that is what the upload spool and the background nice level address.
+//!
+//! Do not add these back without re-measuring. That is what the harness in this
+//! module's history was for, and it is why this table exists.
+//!
 //! [pf]: https://huggingface.co/openai/privacy-filter
 
 use std::path::Path;
@@ -146,6 +179,17 @@ impl PrivacyFilter {
             // Bounded so the redactor cannot starve the machine it is protecting:
             // this runs in the background on someone's laptop while they work.
             .with_intra_threads(intra_threads())
+            .map_err(|e| e.to_string())?
+            // Don't PREPACK the weights — see the module docs for the numbers.
+            //
+            // Prepacking rewrites each int4 weight tensor into a layout the matmul
+            // kernel prefers, and keeps BOTH copies for the life of the session.
+            // On a 128-expert MoE that is a lot of tensors, and it is why an idle
+            // daemon sat on gigabytes it was never going to use again. It buys
+            // throughput for a server doing back-to-back inference on the same
+            // weights; we redact in short bursts and then sleep for minutes, so we
+            // are paying the memory and not collecting the speed.
+            .with_prepacking(false)
             .map_err(|e| e.to_string())?
             .commit_from_file(model_dir.join("onnx").join("model_q4.onnx"))
             .map_err(|e| e.to_string())?;

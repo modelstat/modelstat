@@ -88,6 +88,18 @@ fn read_capped(path: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
+/// How much redacted-but-unsent data the spool holds before the scan pauses
+/// (`MODELSTAT_SPOOL_MAX_BYTES`, else [`crate::spool::DEFAULT_MAX_SPOOL_BYTES`]).
+/// An env knob because the right answer depends on the disk: a build box with
+/// 40 GB free can ride out an outage a laptop cannot.
+fn max_spool_bytes() -> u64 {
+    std::env::var("MODELSTAT_SPOOL_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(crate::spool::DEFAULT_MAX_SPOOL_BYTES)
+}
+
 /// The shared, process-lifetime handles every daemon subsystem reads. All heavy
 /// state is already behind `Arc`/`Mutex`, so the scan runner, heartbeat, SDK
 /// drain, reconcile, and watcher each hold a cheap `Arc<Daemon>` clone.
@@ -110,6 +122,10 @@ pub struct Daemon {
     pub status: Arc<StdMutex<Status>>,
     /// The durable SDK ingest queue the loopback receiver writes + the drain reads.
     pub queue: Arc<FileQueueStore>,
+    /// Redacted batches waiting for the wire. The scan pushes, the upload loop
+    /// drains. This is what makes an outage cost a retry instead of a re-run of
+    /// the PII model over every turn again.
+    pub spool: Arc<crate::spool::Spool>,
     pub device_id: String,
     pub machine_id: String,
     /// The install-time summariser mode, resolved ONCE (a change bounces the
@@ -124,10 +140,19 @@ impl Daemon {
     /// Construct the shared handles from config: load persisted state, build the
     /// engine client for the active mode, and load the on-device models (real
     /// candle or fail-safe). Starts NO task — [`run`] owns the loop.
-    pub fn build(config: Arc<Config>, device_id: String, machine_id: String) -> Arc<Self> {
+    pub fn build(
+        config: Arc<Config>,
+        device_id: String,
+        machine_id: String,
+    ) -> std::io::Result<Arc<Self>> {
         let mode = config.summarizer_mode();
         let engine = SummarizerClient::new(engine_base_url(&config));
-        Arc::new(Daemon {
+        // Fallible, and deliberately so: without a spool the daemon has nowhere
+        // durable to put a redacted batch, and carrying on would mean either
+        // dropping data or re-redacting it forever. Better to refuse to start and
+        // say why.
+        let spool = crate::spool::Spool::open(home_path("spool"), max_spool_bytes())?;
+        Ok(Arc::new(Daemon {
             api: Arc::new(DeviceApi::new(config.clone())),
             resilient: Arc::new(ResilientSummarizer::new(engine)),
             embedder: Arc::new(Swappable::new(build_embedder())),
@@ -135,12 +160,13 @@ impl Daemon {
             state: Arc::new(TokioMutex::new(load_state())),
             status: Arc::new(StdMutex::new(Status::default())),
             queue: Arc::new(FileQueueStore::new(home_path("queue.json"))),
+            spool: Arc::new(spool),
             device_id,
             machine_id,
             mode,
             config,
             handled_updates: Arc::new(StdMutex::new(std::collections::HashSet::new())),
-        })
+        }))
     }
 
     /// Briefly lock the live status to mutate it (never held across an await).
@@ -189,40 +215,116 @@ impl ScanObserver for StatusObserver<'_> {
             s.set_busy_now();
         });
     }
-    fn on_upload_set(&mut self, uploads: usize, sessions: usize) {
-        // What is on the wire and since when. Uploads in a set leave together, so
-        // one clock dates the slowest of them — which is what a watcher staring at
-        // a line that hasn't moved actually wants to know.
-        self.with(|s| s.start_upload_set(uploads as u64, sessions as u64));
-    }
-    fn on_upload(&mut self, events: usize, segments: usize) {
+    fn on_spooled(&mut self, events: usize, segments: usize) {
         self.with(|s| {
-            s.set_stat("segments_sending", json!(segments));
-            let line = shipped_line(s, events as u64);
-            s.set_phase(Phase::Uploading, line);
-        });
-    }
-    fn on_uploaded(&mut self, events: usize, segments: usize) {
-        let iso = now_iso();
-        self.with(|s| {
-            s.bump_stat("events_uploaded", events as u64);
-            s.bump_stat("batches_uploaded", 1);
-            // The same numbers again, scoped to THIS sweep — the lifetime
-            // counters above are in the tens of thousands after a few days and
-            // say nothing about the pass a watcher is currently looking at.
-            // Events + segments only: files land once the pass ends, so the two
-            // callers stay disjoint.
+            // "Processed", not "sent". These two words used to be the same number
+            // because the scan did both; now a batch can be redacted and queued
+            // while the network is down, and saying "sent" then would be a lie the
+            // tray tells for as long as the outage lasts.
+            s.bump_stat("events_processed", events as u64);
+            s.bump_stat("batches_processed", 1);
+            // Scoped to THIS sweep — the lifetime counters above are in the tens
+            // of thousands after a few days and say nothing about the pass a
+            // watcher is currently looking at. Files land once the pass ends, so
+            // the two callers stay disjoint.
             s.bump_run(0, 0, events as u64, segments as u64);
-            s.set_stat("segments_sending", json!(0));
-            s.finish_one_upload();
-            s.note_event_at(iso);
-            // Back to `Processing`: this batch is committed and the next one is
-            // being parsed + summarised, which is where most of a cycle's wall
-            // clock goes. Staying on `Uploading` made the tray claim an upload for
-            // minutes at a stretch, with nothing on the wire.
             let line = shipped_line(s, 0);
             s.set_phase(Phase::Processing, line);
         });
+    }
+}
+
+/// Feeds the spool drain into the same live [`Status`]. Separate from
+/// [`StatusObserver`] on purpose: this is the only thing allowed to touch the
+/// `*_uploaded` counters, so "sent" can only ever mean the server said yes.
+///
+/// Holds the two handles it needs rather than the whole `Daemon`, so the
+/// reporting rules above can be unit-tested without booting a collector.
+pub struct UploadStatusObserver {
+    status: Arc<StdMutex<Status>>,
+    state: Arc<TokioMutex<RuntimeState>>,
+}
+
+impl UploadStatusObserver {
+    pub fn new(status: Arc<StdMutex<Status>>, state: Arc<TokioMutex<RuntimeState>>) -> Self {
+        Self { status, state }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut Status) -> R) -> R {
+        let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut s)
+    }
+}
+
+impl crate::uploader::UploadObserver for UploadStatusObserver {
+    fn on_pass_start(&mut self, batches: u64) {
+        self.with(|s| {
+            s.start_upload_set(batches, batches);
+            s.set_queue(batches);
+            let line = shipped_line(s, 0);
+            s.set_phase(Phase::Uploading, line);
+        });
+    }
+
+    fn on_uploaded(&mut self, events: u64, segments: usize) {
+        let iso = now_iso();
+        self.with(|s| {
+            s.bump_stat("events_uploaded", events);
+            s.bump_stat("batches_uploaded", 1);
+            s.set_stat("segments_sending", json!(segments));
+            s.finish_one_upload();
+            s.note_event_at(iso);
+            // Refresh the line so the "N events sent" counter visibly climbs while
+            // a backlog drains, instead of freezing until the pass ends.
+            if s.phase == Phase::Uploading {
+                let line = shipped_line(s, 0);
+                s.set_message(line);
+            }
+        });
+    }
+
+    fn on_pass_end(&mut self, outcome: &crate::uploader::DrainOutcome) {
+        let depth = outcome.depth;
+        self.with(|s| {
+            s.set_queue(depth.batches);
+            s.set_stat("segments_sending", json!(0));
+            // Nothing left on the wire. Said explicitly, or a reader keeps
+            // claiming "3 sessions uploading" through the whole backoff.
+            s.start_upload_set(0, 0);
+            // Only stand down from a phase WE set. The drain and a scan run at the
+            // same time now, and a finished upload must not overwrite "scanning —
+            // 12 session files left" with "idle" while the scan is still going.
+            if s.phase == Phase::Uploading {
+                let line = shipped_line(s, 0);
+                if depth.batches == 0 {
+                    s.set_phase(Phase::Idle, line);
+                } else {
+                    s.set_phase(Phase::Processing, line);
+                }
+            }
+        });
+        // The lifetime segments-sent total is persisted, so it moves HERE — where
+        // segments genuinely reach the server — rather than when a scan finishes.
+        // Spawned because this hook is sync and the state lock is async; the
+        // counter is a display total, so a few ms of lag costs nothing.
+        if outcome.segments_uploaded > 0 {
+            let segments = outcome.segments_uploaded;
+            let state = self.state.clone();
+            let status = self.status.clone();
+            tokio::spawn(async move {
+                let total = {
+                    let mut guard = state.lock().await;
+                    guard.segments_sent += segments as i64;
+                    let total = guard.segments_sent;
+                    if let Err(e) = save_state(&guard) {
+                        modelstat_log::log_warn!("could not persist segments_sent: {e}");
+                    }
+                    total
+                };
+                let mut s = status.lock().unwrap_or_else(|e| e.into_inner());
+                s.set_stat("segments_sent", json!(total));
+            });
+        }
     }
 }
 
@@ -382,10 +484,9 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     let extractor = make_extract_links(daemon.resilient.engine());
     let mut correct = make_correct_events();
     let mut git = RealGitEnrichment::new();
-    // The shared handle itself, not a clone: uploading takes `&self` now, and the
-    // adaptive concurrency limit belongs to the server rather than to a handle —
-    // every clone shares it anyway.
-    let uploader = &*daemon.api;
+    // Where finished batches go. Not the network — the upload loop owns that, and
+    // keeping the two apart is what stops an outage from re-running the redactor.
+    let sink = &*daemon.spool;
     let mut observer = StatusObserver {
         status: &daemon.status,
     };
@@ -434,21 +535,26 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         &mut correct,
         &exists,
         &read_file,
-        uploader,
+        sink,
         &mut *guard as &mut (dyn CursorStore + Send),
         &mut observer,
         &accounts,
     )
     .await;
 
-    // Fold the segments-sent lifetime total + persist the advanced cursors once,
-    // atomically. A crash after this just re-sends idempotently from the cursor.
-    if tallies.segments_uploaded > 0 {
-        guard.segments_sent += tallies.segments_uploaded as i64;
-    }
+    // Persist the advanced cursors. The segments-sent lifetime total is NOT folded
+    // here any more — a spooled segment has not been sent, and the upload loop
+    // bumps that counter when the server actually takes it.
     let segments_sent = guard.segments_sent;
     let _ = save_state(&guard);
     drop(guard);
+
+    // Anything this scan produced is on disk and waiting; poke the uploader so it
+    // goes out now rather than on its next backstop tick. Without this the spool
+    // would add up to a minute of latency to every batch, which is exactly the
+    // trade the spool is not allowed to make. (Each `push` pokes it too — this is
+    // the end-of-scan backstop for a pass that was already mid-flight.)
+    daemon.spool.wake().notify_one();
 
     daemon.with_status(|s| {
         s.bump_stat("files_scanned", tallies.files_scanned as u64);
@@ -558,8 +664,8 @@ pub async fn scan_session(daemon: Arc<Daemon>, session_ids: Vec<String>, file: O
 
     daemon.with_status(|s| {
         s.set_phase(Phase::Watching, "Waiting for new events");
-        s.set_message(if t.segments_uploaded > 0 {
-            format!("Eager scan: {} segments uploaded", t.segments_uploaded)
+        s.set_message(if t.segments_spooled > 0 {
+            format!("Eager scan: {} segments queued to send", t.segments_spooled)
         } else {
             "Eager scan: nothing new".to_string()
         });
@@ -668,16 +774,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn upload_observer() -> (Arc<StdMutex<Status>>, UploadStatusObserver) {
+        let status = Arc::new(StdMutex::new(Status::default()));
+        let obs = UploadStatusObserver::new(
+            status.clone(),
+            Arc::new(TokioMutex::new(RuntimeState::default())),
+        );
+        (status, obs)
+    }
+
+    fn drained(
+        batches: u64,
+        segments: u64,
+        held: bool,
+        left: u64,
+    ) -> crate::uploader::DrainOutcome {
+        crate::uploader::DrainOutcome {
+            batches_uploaded: batches,
+            events_uploaded: 0,
+            segments_uploaded: segments,
+            held,
+            depth: crate::spool::SpoolDepth {
+                batches: left,
+                bytes: left * 100,
+            },
+        }
+    }
+
     #[test]
-    fn the_observer_reports_what_is_on_the_wire_and_clears_it_after() {
-        let status = StdMutex::new(Status::default());
-        let mut obs = StatusObserver { status: &status };
-        // Three sessions ship together — the count a watcher sees, plus a clock.
-        obs.on_upload_set(3, 3);
+    fn the_upload_observer_reports_what_is_on_the_wire_and_clears_it_after() {
+        use crate::uploader::UploadObserver;
+        let (status, mut obs) = upload_observer();
+        // Three batches go out together — the count a watcher sees, plus a clock.
+        obs.on_pass_start(3);
         {
             let s = status.lock().unwrap();
             let u = s.uploading.clone().expect("in flight");
             assert_eq!((u.uploads, u.sessions), (3, 3));
+            assert_eq!(s.queue_size, 3);
         }
         obs.on_uploaded(10, 0);
         assert_eq!(
@@ -691,30 +825,76 @@ mod tests {
             "the wire is quiet once the last one commits"
         );
 
-        // A held fan-out: one commits, the rest never go out.
-        obs.on_upload_set(3, 3);
+        // A held pass: one commits, the rest stay spooled. The tray must say the
+        // wire is quiet, and say how many are still waiting.
+        obs.on_pass_start(3);
         obs.on_uploaded(10, 0);
-        obs.on_upload_set(0, 0);
+        obs.on_pass_end(&drained(1, 0, true, 2));
+        let s = status.lock().unwrap();
         assert!(
-            status.lock().unwrap().uploading.is_none(),
+            s.uploading.is_none(),
             "a hold must not leave the tray claiming an upload through the backoff"
         );
+        assert_eq!(s.queue_size, 2, "and it must say what is still waiting");
     }
 
-    #[test]
-    fn status_observer_drives_phase_progress_and_stats() {
-        let status = StdMutex::new(Status::default());
-        let mut obs = StatusObserver { status: &status };
-        obs.on_file("/a/b/c.jsonl", 0, 3);
-        obs.on_upload(10, 4);
-        obs.on_uploaded(9, 4);
+    /// The honesty split this change exists to protect: the SCAN counts what it
+    /// processed, and only the UPLOADER may count what was sent. During an outage
+    /// the first climbs and the second must not move at all.
+    ///
+    /// Async because a completed pass persists the lifetime segments-sent total on
+    /// the runtime, exactly as it does in the daemon.
+    #[tokio::test]
+    async fn processed_and_sent_are_separate_counters() {
+        use crate::uploader::UploadObserver;
+        let status = Arc::new(StdMutex::new(Status::default()));
+        {
+            let mut scan_obs = StatusObserver { status: &status };
+            scan_obs.on_file("/a/b/c.jsonl", 0, 3);
+            scan_obs.on_spooled(10, 4);
+        }
+        {
+            let s = status.lock().unwrap();
+            assert_eq!(s.progress_done, 1);
+            assert_eq!(s.progress_total, 3);
+            assert_eq!(s.stats["events_processed"], json!(10));
+            assert_eq!(s.stats["batches_processed"], json!(1));
+            assert!(
+                !s.stats.contains_key("events_uploaded"),
+                "nothing has been SENT yet — the scan must not claim otherwise"
+            );
+        }
+
+        // Now the uploader lands it, and only now does "sent" move.
+        let mut up_obs = UploadStatusObserver::new(
+            status.clone(),
+            Arc::new(TokioMutex::new(RuntimeState::default())),
+        );
+        up_obs.on_pass_start(1);
+        up_obs.on_uploaded(9, 4);
+        up_obs.on_pass_end(&drained(1, 4, false, 0));
         let s = status.lock().unwrap();
-        assert_eq!(s.progress_done, 1);
-        assert_eq!(s.progress_total, 3);
         assert_eq!(s.stats["events_uploaded"], json!(9));
         assert_eq!(s.stats["batches_uploaded"], json!(1));
-        assert_eq!(s.stats["segments_sending"], json!(0)); // reset after upload
+        assert_eq!(s.stats["segments_sending"], json!(0)); // reset after the pass
+        assert_eq!(s.queue_size, 0);
         assert!(s.last_event_at.is_some());
+    }
+
+    /// A finished upload must not overwrite a running scan's phase — the two loops
+    /// are independent now, and the scan's line is the more informative one.
+    #[test]
+    fn a_finished_upload_does_not_stomp_on_a_running_scan() {
+        use crate::uploader::UploadObserver;
+        let (status, mut obs) = upload_observer();
+        status
+            .lock()
+            .unwrap()
+            .set_phase(Phase::Scanning, "3 session files left");
+        obs.on_pass_end(&drained(1, 0, false, 0));
+        let s = status.lock().unwrap();
+        assert_eq!(s.phase, Phase::Scanning);
+        assert_eq!(s.message.as_deref(), Some("3 session files left"));
     }
 
     #[test]
@@ -741,10 +921,9 @@ mod tests {
             "starting a file starts the elapsed clock"
         );
 
-        obs.on_upload(10, 4);
-        assert_eq!(status.lock().unwrap().phase, Phase::Uploading);
-
-        obs.on_uploaded(10, 4);
+        // Parking a finished batch is PROCESSING, not uploading — nothing has
+        // left the machine yet.
+        obs.on_spooled(10, 4);
         assert_eq!(status.lock().unwrap().phase, Phase::Processing);
     }
 
@@ -767,18 +946,24 @@ mod tests {
         // The bug this replaces: every full batch is exactly BATCH_MAX_EVENTS, so a
         // message built from the in-flight size was byte-identical forever —
         // "Uploading 1000 events" while 11 batches had already landed.
-        let status = StdMutex::new(Status::default());
-        let mut obs = StatusObserver { status: &status };
-        obs.on_file("/a/b/c.jsonl", 2, 71);
+        use crate::uploader::UploadObserver;
+        let status = Arc::new(StdMutex::new(Status::default()));
+        {
+            let mut scan_obs = StatusObserver { status: &status };
+            scan_obs.on_file("/a/b/c.jsonl", 2, 71);
+        }
+        let mut obs = UploadStatusObserver::new(
+            status.clone(),
+            Arc::new(TokioMutex::new(RuntimeState::default())),
+        );
 
-        obs.on_upload(1000, 0);
+        obs.on_pass_start(2);
+        obs.on_uploaded(1000, 0);
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
             Some("1,000 events sent · file 3/71")
         );
-        obs.on_uploaded(1000, 0);
-
-        obs.on_upload(1000, 0); // same batch size, DIFFERENT line
+        obs.on_uploaded(1000, 0); // same batch size, DIFFERENT line
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
             Some("2,000 events sent · file 3/71")
@@ -790,16 +975,17 @@ mod tests {
         // Cloud ships raw events with 0 segments; local / self-hosted ship both.
         // Counting events keeps the line honest in both — it can never read the
         // misleading "0 segments" a segment-only counter produced in cloud mode.
-        let status = StdMutex::new(Status::default());
-        let mut obs = StatusObserver { status: &status };
+        use crate::uploader::UploadObserver;
+        let (status, mut obs) = upload_observer();
 
-        obs.on_upload(120, 3); // segment batch (local / self-hosted)
+        obs.on_pass_start(2);
+        obs.on_uploaded(120, 3); // segment batch (local / self-hosted)
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
             Some("120 events sent")
         );
 
-        obs.on_upload(120, 0); // raw event batch (cloud)
+        obs.on_uploaded(0, 0); // raw event batch (cloud), 0 segments
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
             Some("120 events sent")

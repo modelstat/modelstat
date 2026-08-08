@@ -13,6 +13,7 @@ pub mod enrich_scripts;
 pub mod flush;
 pub mod insights;
 pub mod lock;
+pub mod priority;
 pub mod processing_version;
 pub mod reconcile;
 pub mod rotate;
@@ -20,9 +21,11 @@ pub mod run;
 pub mod runtime;
 pub mod scan;
 pub mod single_flight;
+pub mod spool;
 pub mod status;
 pub mod statusline;
 pub mod supervise;
+pub mod uploader;
 pub mod watch;
 
 pub use authoritative_git::resolve_authoritative_git;
@@ -33,9 +36,11 @@ pub use reconcile::{
     ReconcileStore,
 };
 pub use scan::{
-    run_scan_over_jobs, BatchUploader, CursorStore, Hold, RunScanOptions, ScanObserver,
-    ScanTallies, BATCH_MAX_EVENTS, BATCH_MAX_TOOL_CALLS, MAX_FILES_PER_SCAN,
+    run_scan_over_jobs, BatchSink, CursorStore, Hold, RunScanOptions, ScanObserver, ScanTallies,
+    BATCH_MAX_EVENTS, BATCH_MAX_TOOL_CALLS, MAX_FILES_PER_SCAN,
 };
+pub use spool::{Spool, SpoolDepth, SpoolEntry, SpoolError, SpooledBatch};
+pub use uploader::{drain_once, run_drain_loop, BatchUploader, DrainOutcome, UploadObserver};
 
 pub use lock::{
     acquire_daemon_lock, check_lock_ownership, daemon_lock_path, is_process_alive,
