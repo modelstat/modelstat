@@ -84,6 +84,13 @@ struct SummarizerInfo: Decodable {
   let env_override: Bool?
 }
 
+/// One recently-active session from the daemon's live ledger.
+struct LiveEntry: Decodable {
+  let agent: String?
+  let label: String?
+  let last_ms: Int?
+}
+
 struct DeviceInfo: Decodable {
   let hostname: String?
   let os_family: String?
@@ -106,6 +113,9 @@ struct LocalStatus: Decodable {
   /// Stated by the daemon (busy right now?) — the tray must not re-derive it
   /// from phase names it happens to know.
   let active: Bool?
+  /// Sessions with fresh transcript activity, newest first — the daemon's own
+  /// answer to "what is running right now".
+  let live: [LiveEntry]?
   let message: String?
   /// Epoch ms when the work now in progress started, or nil when idle. A
   /// timestamp rather than a duration so this menu can tick the elapsed clock
@@ -222,6 +232,7 @@ final class TrayController: NSObject {
   private let deviceMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let analyzedMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   /// Pipeline activity — sessions processing/finished + events uploaded.
+  private let liveMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let pipelineMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   /// What the agent has discovered on this machine — installations + identities.
   private let detectedMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -318,7 +329,7 @@ final class TrayController: NSObject {
 
   /// The non-clickable info rows at the top of the menu, in order.
   private var infoItems: [NSMenuItem] {
-    [statusMI, progressMI, uploadMI, deviceMI, analyzedMI, pipelineMI, detectedMI]
+    [statusMI, progressMI, uploadMI, liveMI, deviceMI, analyzedMI, pipelineMI, detectedMI]
   }
 
   /// Set an info row's title, hiding the row when the title is empty.
@@ -563,7 +574,7 @@ final class TrayController: NSObject {
     let local = localLatest ?? s.local
     if s.paired == false {
       setInfo(statusMI, "Not paired — run `npx modelstat@latest`")
-      for mi in [progressMI, uploadMI, deviceMI, analyzedMI, pipelineMI, detectedMI] {
+      for mi in [progressMI, uploadMI, liveMI, deviceMI, analyzedMI, pipelineMI, detectedMI] {
         setInfo(mi, "")
       }
       claimMI.title = "Open modelstat.ai"
@@ -663,6 +674,28 @@ final class TrayController: NSObject {
       setInfo(analyzedMI, "")
     }
 
+    // What is running RIGHT NOW — the daemon's live ledger (sessions with
+    // transcript writes in the last 15 minutes), newest first. One line: the
+    // freshest session named, the rest counted.
+    if let live = local?.live, !live.isEmpty {
+      let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+      let fresh = live.filter { nowMs - ($0.last_ms ?? 0) < 15 * 60 * 1000 }
+      if let first = fresh.first {
+        let label = first.label ?? first.agent ?? "session"
+        let agent = first.agent ?? ""
+        let ago = Self.shortDuration(max(0, (nowMs - (first.last_ms ?? nowMs)) / 1000))
+        var line = "▶ \(label)"
+        if !agent.isEmpty && agent != label { line += " · \(agent)" }
+        line += " · \(ago) ago"
+        if fresh.count > 1 { line += "  (+\(fresh.count - 1) more live)" }
+        setInfo(liveMI, line)
+      } else {
+        setInfo(liveMI, "")
+      }
+    } else {
+      setInfo(liveMI, "")
+    }
+
     // Pipeline activity — segments are the headline (what the user
     // asked to see): how many are uploading right now, and how many
     // have been sent in total. Events / files trail as context. All
@@ -677,7 +710,7 @@ final class TrayController: NSObject {
       var bits: [String] = []
       if sending > 0 { bits.append("↑ \(sending) sending") }
       if sent > 0 { bits.append("\(fmtCount(sent)) segments sent") }
-      if events > 0 { bits.append("\(fmtCount(events)) events") }
+      if events > 0 { bits.append("\(fmtCount(events)) events uploaded") }
       // "scanned", not bare "files": the sweep row above counts files too, and
       // these are the lifetime total rather than this pass's.
       if scanned > 0 { bits.append("\(scanned) files scanned") }
@@ -737,8 +770,8 @@ final class TrayController: NSObject {
       if let n = run.files_new, n > 0 { split.append("\(n) new") }
       if let n = run.files_unchanged, n > 0 { split.append("\(n) skipped") }
       if !split.isEmpty { bits.append(split.joined(separator: ", ")) }
-      if let n = run.events, n > 0 { bits.append("\(fmtCount(n)) events") }
-      if let n = run.segments, n > 0 { bits.append("\(fmtCount(n)) segments") }
+      if let n = run.events, n > 0 { bits.append("+\(fmtCount(n)) events this pass") }
+      if let n = run.segments, n > 0 { bits.append("+\(fmtCount(n)) segments") }
     }
     // Segments on the wire RIGHT NOW — a gauge, not a total, so it only earns a
     // slot while a batch is actually in flight. Always 0 in cloud mode, which
