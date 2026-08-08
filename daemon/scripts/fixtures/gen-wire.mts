@@ -36,6 +36,7 @@ const fullRawEvent = {
     remote_host: "github.com",
     remote_slug: "acme/app",
     branch: "main",
+    slug_source: "git_remote",
   },
   tokens: { input: 10, output: 20, cache_creation: 0, cache_read: 5, reasoning: 0 },
   duration_ms: 1234,
