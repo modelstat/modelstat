@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use modelstat_parsers::ToolCallDraft;
-use modelstat_redact::{ner_active, ner_redact_checked_many, redact, NerModel};
+use modelstat_redact::{pii_redact_checked_many, redact, redactor_active, PiiModel};
 use modelstat_wire::{RawEvent, Segment, ToolCallWire};
 
 /// Crockford base32 — the ULID alphabet.
@@ -98,15 +98,15 @@ pub fn attach_segment_ids_by_map(
         .collect()
 }
 
-/// Deep-redact each draft's `command_redacted` with the NER pass (layer 2) — the
+/// Deep-redact each draft's `command_redacted` with the PII pass (layer 2) — the
 /// shipped command is the most sensitive field, previously regex-floor only.
 /// Deduped per distinct command, best-effort, mutates drafts in place. Port of
-/// `enrichToolCallRedaction` (here the redactor is the NER Privacy Filter).
+/// `enrichToolCallRedaction` (here the redactor is the PII Privacy Filter).
 /// Returns `false` when the redactor could not classify some command, so the
 /// caller can hold. A tool command is shipped text like any other — a command line
 /// carries paths, hostnames and the occasional pasted token — so "could not read
 /// it" cannot mean "send it as-is".
-pub fn enrich_tool_call_redaction<N: NerModel>(drafts: &mut [ToolCallDraft], ner: &N) -> bool {
+pub fn enrich_tool_call_redaction<N: PiiModel>(drafts: &mut [ToolCallDraft], redactor: &N) -> bool {
     // Distinct commands first, classified as ONE batch: a repeated command is
     // classified once (as before), and a remote redactor sees one request per
     // flush instead of one per command.
@@ -128,7 +128,7 @@ pub fn enrich_tool_call_redaction<N: NerModel>(drafts: &mut [ToolCallDraft], ner
     if distinct.is_empty() {
         return true;
     }
-    let Some(passes) = ner_redact_checked_many(ner, &distinct) else {
+    let Some(passes) = pii_redact_checked_many(redactor, &distinct) else {
         modelstat_log::log_warn!(
             "redactor could not classify {} distinct tool commands — holding",
             distinct.len()
@@ -157,7 +157,7 @@ pub fn enrich_tool_call_redaction<N: NerModel>(drafts: &mut [ToolCallDraft], ner
 
 /// LAYER-3 deep redaction of the SHIPPED tool commands (§9.5/§21.13) — LOCAL mode
 /// only. Runs the LLM backstop ([`crate::passes::redact_backstop`]) over each
-/// draft's `command_redacted` on top of the floor (L1) + NER (L2), deduped per
+/// draft's `command_redacted` on top of the floor (L1) + PII (L2), deduped per
 /// distinct command. Fail-safe: a model error / prefilter miss leaves the command
 /// UNCHANGED, and the backstop can only ever ADD a redaction of a substring that
 /// genuinely appears — never reword, invent, or leak. The caller gates this to
@@ -192,7 +192,7 @@ pub async fn deep_redact_tool_commands<S: crate::Summarizer>(
 /// The floor's three counters keep their own names — they are deterministic
 /// detections of a different kind (a key-shaped string, an email, an absolute
 /// path), and collapsing them into the model's categories would lose that. The
-/// model's keys arrive prefixed `pf_` from `ner_redact`; the prefix is dropped here
+/// model's keys arrive prefixed `pf_` from `pii_redact`; the prefix is dropped here
 /// so the stored dimension is the category itself, which is what an analytics query
 /// asks for: `secret`, not `pf_secret`.
 ///
@@ -218,27 +218,27 @@ fn redaction_counts(
 }
 
 /// Prepare a Cloud-mode raw batch: run the FULL redaction (regex floor + the
-/// on-device NER/PII pass) over every event excerpt AND tool-call command before
-/// they leave the machine. FAIL-CLOSED — returns `None` when NER is unavailable,
+/// PII-model pass) over every event excerpt AND tool-call command before
+/// they leave the machine. FAIL-CLOSED — returns `None` when PII is unavailable,
 /// so the caller keeps data local rather than shipping floor-only turns off the
-/// box (§9.5/§21.5). Mutates `drafts` (their `command_redacted` gets the NER
+/// box (§9.5/§21.5). Mutates `drafts` (their `command_redacted` gets the PII
 /// pass). Port of `prepareCloudRawEvents`.
-pub fn prepare_cloud_raw_events<N: NerModel>(
+pub fn prepare_cloud_raw_events<N: PiiModel>(
     events: &[RawEvent],
     drafts: &mut [ToolCallDraft],
-    ner: &N,
+    redactor: &N,
 ) -> Option<Vec<RawEvent>> {
-    if !ner_active(ner) {
+    if !redactor_active(redactor) {
         return None; // fail-closed — the caller holds / keeps data local
     }
-    // Per TURN, not just once up front: `ner_active` probes with a short sentinel,
+    // Per TURN, not just once up front: `redactor_active` probes with a short sentinel,
     // so it can say the layer is up while a particular turn fails to classify. A
     // turn that failed has NOT been scrubbed, and shipping it would be exactly the
     // egress the fail-closed rule exists to prevent — so the whole flush holds and
     // retries, and nothing is lost.
     //
     // The floor runs turn by turn; classification runs as ONE batch over the
-    // floored texts (`ner_redact_checked_many`). Element-for-element the answers
+    // floored texts (`pii_redact_checked_many`). Element-for-element the answers
     // are identical to the per-turn calls — batching only changes how many
     // round-trips a remote redactor pays.
     let mut floored_texts: Vec<String> = Vec::new();
@@ -254,9 +254,9 @@ pub fn prepare_cloud_raw_events<N: NerModel>(
     let passes = if floored_texts.is_empty() {
         Vec::new()
     } else {
-        let Some(p) = ner_redact_checked_many(ner, &floored_texts) else {
+        let Some(p) = pii_redact_checked_many(redactor, &floored_texts) else {
             modelstat_log::log_warn!(
-                "NER could not classify a flush of {} turns ({} chars) — holding \
+                "PII could not classify a flush of {} turns ({} chars) — holding \
                  rather than shipping anything unscrubbed",
                 floored_texts.len(),
                 floored_texts.iter().map(|t| t.len()).sum::<usize>()
@@ -279,7 +279,7 @@ pub fn prepare_cloud_raw_events<N: NerModel>(
             redacted[i].redactions = counts;
         }
     }
-    if !drafts.is_empty() && !enrich_tool_call_redaction(drafts, ner) {
+    if !drafts.is_empty() && !enrich_tool_call_redaction(drafts, redactor) {
         return None; // hold — a command went unscrubbed
     }
     Some(redacted)
@@ -288,16 +288,16 @@ pub fn prepare_cloud_raw_events<N: NerModel>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use modelstat_redact::{NerToken, UnavailableNer};
+    use modelstat_redact::{PiiToken, UnavailableRedactor};
     use modelstat_wire::{TokenUsage, ToolAction};
 
-    /// A fake "live" NER: tags Katherine Johnson (PER) + Globex Corporation (ORG)
-    /// by surface (no offsets → word-boundary path), so `ner_active`'s sentinel
+    /// A fake "live" PII: tags Katherine Johnson (PER) + Globex Corporation (ORG)
+    /// by surface (no offsets → word-boundary path), so `redactor_active`'s sentinel
     /// scrubs and any test text carrying those names gets redacted.
-    struct FakeNer;
-    impl NerModel for FakeNer {
-        fn classify(&self, _text: &str) -> Option<Vec<NerToken>> {
-            let tok = |ent: &str, word: &str| NerToken {
+    struct FakeRedactor;
+    impl PiiModel for FakeRedactor {
+        fn classify(&self, _text: &str) -> Option<Vec<PiiToken>> {
+            let tok = |ent: &str, word: &str| PiiToken {
                 entity: ent.into(),
                 word: word.into(),
                 start: None,
@@ -433,7 +433,7 @@ mod tests {
     fn cloud_raw_events_fail_closed_when_ner_down() {
         let events = vec![ev("e1", Some("hello"))];
         let mut drafts = vec![draft("c1", "e1", Some("ssh prod"))];
-        assert!(prepare_cloud_raw_events(&events, &mut drafts, &UnavailableNer).is_none());
+        assert!(prepare_cloud_raw_events(&events, &mut drafts, &UnavailableRedactor).is_none());
         // Fail-closed must NOT have mutated the drafts.
         assert_eq!(
             drafts[0]
@@ -454,7 +454,8 @@ mod tests {
             ev("e3", None),
         ];
         let mut drafts = vec![draft("c1", "e1", Some("mail Katherine Johnson"))];
-        let out = prepare_cloud_raw_events(&events, &mut drafts, &FakeNer).expect("ner active");
+        let out =
+            prepare_cloud_raw_events(&events, &mut drafts, &FakeRedactor).expect("redactor active");
         assert_eq!(
             out[0].content_excerpt.as_deref(),
             Some("Escalate to [REDACTED:PER] now")
@@ -462,7 +463,7 @@ mod tests {
         // Unchanged excerpt keeps the original event untouched.
         assert_eq!(out[1].content_excerpt.as_deref(), Some("no entities here"));
         assert_eq!(out[2].content_excerpt, None);
-        // The shipped command got the NER pass.
+        // The shipped command got the PII pass.
         assert_eq!(
             drafts[0]
                 .action
@@ -507,24 +508,24 @@ mod tests {
     }
 
     /// A model that answers for short text and FAILS on long text — the real
-    /// shape of the bug this guards: `ner_active`'s sentinel passes, then a long
+    /// shape of the bug this guards: `redactor_active`'s sentinel passes, then a long
     /// verbatim turn cannot be classified.
     struct FailsOnLongText;
-    impl NerModel for FailsOnLongText {
-        fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+    impl PiiModel for FailsOnLongText {
+        fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
             if text.len() > 200 {
                 return None; // "couldn't classify this one"
             }
             // Answer the liveness sentinel so the layer reads as UP.
             let mut out = Vec::new();
             if let Some(i) = text.find("Katherine Johnson") {
-                out.push(NerToken {
+                out.push(PiiToken {
                     entity: "B-PER".into(),
                     word: "Katherine".into(),
                     start: Some(i),
                     end: Some(i + 9),
                 });
-                out.push(NerToken {
+                out.push(PiiToken {
                     entity: "I-PER".into(),
                     word: "Johnson".into(),
                     start: Some(i + 10),
@@ -541,7 +542,7 @@ mod tests {
         let events = vec![ev("e1", Some(&long))];
         let mut drafts: Vec<ToolCallDraft> = Vec::new();
         // The layer is UP by the sentinel probe…
-        assert!(modelstat_redact::ner_active(&FailsOnLongText));
+        assert!(modelstat_redact::redactor_active(&FailsOnLongText));
         // …and the flush still holds, because THIS turn was never scrubbed.
         assert!(
             prepare_cloud_raw_events(&events, &mut drafts, &FailsOnLongText).is_none(),
@@ -570,7 +571,7 @@ mod tests {
             Some("Escalate to Katherine Johnson at mail@example.com now"),
         )];
         let mut drafts: Vec<ToolCallDraft> = Vec::new();
-        let out = prepare_cloud_raw_events(&events, &mut drafts, &FakeNer).expect("shipped");
+        let out = prepare_cloud_raw_events(&events, &mut drafts, &FakeRedactor).expect("shipped");
         let text = out[0].content_excerpt.clone().unwrap();
         let counts = &out[0].redactions;
         assert!(!counts.is_empty(), "something was redacted: {text}");
@@ -616,7 +617,7 @@ mod tests {
         let secret = "sk-live-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
         let events = vec![ev("e1", Some(&format!("token {secret} in prod")))];
         let mut drafts: Vec<ToolCallDraft> = Vec::new();
-        let out = prepare_cloud_raw_events(&events, &mut drafts, &FakeNer).expect("shipped");
+        let out = prepare_cloud_raw_events(&events, &mut drafts, &FakeRedactor).expect("shipped");
         let blob = serde_json::to_string(&out[0]).unwrap();
         assert!(!blob.contains(secret), "the value itself must not ship");
         for key in out[0].redactions.keys() {

@@ -78,17 +78,33 @@ fn summarizer_obj(config: &Config) -> Value {
     Value::Object(m)
 }
 
-/// The `models` sub-object — one entry per on-device model, `{present, size,
-/// path}`.
+/// The `redactor` sub-object: `{mode, url?, env_override}` — the summariser
+/// object's twin, so the tray renders both settings from one poll.
+fn redactor_obj(config: &Config) -> Value {
+    let mut m = Map::new();
+    m.insert("mode".into(), json!(config.redactor_mode()));
+    if config.redactor_mode() == "self-hosted" {
+        m.insert("url".into(), json!(config.redactor_url()));
+    }
+    m.insert(
+        "env_override".into(),
+        json!(config.redactor_mode_is_env_overridden()),
+    );
+    Value::Object(m)
+}
+
+/// The `models` sub-object — one entry per REQUIRED on-device model, `{present,
+/// size, path}`. A remote-redactor install does not need (and must not report
+/// missing) the ~900 MB PII model.
 ///
 /// Pure `stat`s, no model is loaded. This exists because a missing model used to
 /// be visible ONLY as a warning buried in `err.log`: the BGE weights went
 /// un-downloaded on every install for as long as the Rust daemon existed, and
 /// nothing a user or support could run would say so.
-fn models_obj() -> Value {
+fn models_obj(config: &Config) -> Value {
     let dir = modelstat_daemon::engine::models_cache_dir();
     let mut m = Map::new();
-    for entry in &modelstat_daemon::engine::ON_DEVICE_MODELS {
+    for entry in modelstat_daemon::engine::required_models(config.redacts_locally()) {
         m.insert(
             entry.key.to_string(),
             json!({
@@ -101,11 +117,11 @@ fn models_obj() -> Value {
     Value::Object(m)
 }
 
-/// The human `models:` line — one per model, so "why are my summaries bad?" is
-/// answerable without opening a log file.
-fn print_models() {
+/// The human `models:` line — one per required model, so "why are my summaries
+/// bad?" is answerable without opening a log file.
+fn print_models(config: &Config) {
     let dir = modelstat_daemon::engine::models_cache_dir();
-    for entry in &modelstat_daemon::engine::ON_DEVICE_MODELS {
+    for entry in modelstat_daemon::engine::required_models(config.redacts_locally()) {
         let size = entry.model.weights_size_label;
         if entry.model.is_present(&dir) {
             println!("  \x1b[32m✓\x1b[0m {} ({size})", entry.label);
@@ -199,7 +215,8 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
             "pairing": pairing,
             "auto_update": { "enabled": auto_update_enabled(), "pinned_by_env": auto_update_pinned_by_env() },
             "summarizer": summarizer_obj(&config),
-            "models": models_obj(),
+            "redactor": redactor_obj(&config),
+            "models": models_obj(&config),
             "api": config.api_url(),
             "logs": logs_dir().display().to_string(),
             "state": state_path().display().to_string(),
@@ -250,8 +267,20 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
         ""
     };
     println!("summariser: {mode}{sm_endpoint}{sm_env} — change with `modelstat mode`");
+    let rd_mode = config.redactor_mode();
+    let rd_endpoint = if rd_mode == "self-hosted" {
+        format!(" @ {}", config.redactor_url())
+    } else {
+        String::new()
+    };
+    let rd_env = if config.redactor_mode_is_env_overridden() {
+        " (env override)"
+    } else {
+        ""
+    };
+    println!("redactor: {rd_mode}{rd_endpoint}{rd_env} — change with `modelstat redactor`");
     println!("on-device models:");
-    print_models();
+    print_models(&config);
     println!(
         "auto-update: {}{}",
         if auto_update_enabled() { "on" } else { "off" },

@@ -1,4 +1,4 @@
-//! The remote span classifier — [`NerModel`] over HTTP (feature: redactor
+//! The remote span classifier — [`PiiModel`] over HTTP (feature: redactor
 //! modes). In `cloud` mode the endpoint is modelstat's `/v1/redact/*` behind
 //! the device bearer; in `self-hosted` it is whatever the org runs at
 //! `redactor_url` (same protocol, no auth unless they front it themselves).
@@ -21,7 +21,7 @@ use std::time::Duration;
 use modelstat_redact::remote::{
     ClassifyRequest, ClassifyResponse, MAX_REQUEST_BYTES, MAX_TEXTS_PER_REQUEST, REDACT_PROTOCOL,
 };
-use modelstat_redact::{NerModel, NerToken};
+use modelstat_redact::{PiiModel, PiiToken};
 
 use crate::ingest::{jitter, retry_after};
 
@@ -76,6 +76,12 @@ impl RemoteRedactor {
         format!("{}{path}", self.base)
     }
 
+    /// [`Self::healthz`] from sync code (daemon boot, CLI probes) via the same
+    /// bridge `classify` uses.
+    pub fn healthz_blocking(&self) -> Option<modelstat_redact::remote::RedactHealth> {
+        self.block_on(self.healthz())
+    }
+
     /// `GET /v1/redact/healthz` — one attempt, no retry. `status` and the span
     /// cache's fingerprint read this; neither wants to wait out a backoff.
     pub async fn healthz(&self) -> Option<modelstat_redact::remote::RedactHealth> {
@@ -90,7 +96,7 @@ impl RemoteRedactor {
         resp.json().await.ok()
     }
 
-    /// The blocking bridge for the sync [`NerModel`] trait — the runtime the
+    /// The blocking bridge for the sync [`PiiModel`] trait — the runtime the
     /// daemon runs when there is one, a throwaway one when there isn't (CLI
     /// probes, tests without a runtime).
     fn block_on<T: Send>(&self, fut: impl std::future::Future<Output = T> + Send) -> T {
@@ -116,7 +122,7 @@ impl RemoteRedactor {
 
     /// POST one chunk, with retry on busy/unavailable/transport. `None` is
     /// "hold": the caller's flush machinery owns what happens next.
-    async fn classify_chunk(&self, texts: &[String]) -> Option<Vec<Vec<NerToken>>> {
+    async fn classify_chunk(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
         let body = ClassifyRequest {
             protocol: REDACT_PROTOCOL,
             texts: texts.to_vec(),
@@ -224,13 +230,13 @@ impl RemoteRedactor {
     }
 }
 
-impl NerModel for RemoteRedactor {
-    fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+impl PiiModel for RemoteRedactor {
+    fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
         self.classify_many(std::slice::from_ref(&text.to_string()))
             .map(|mut v| v.remove(0))
     }
 
-    fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<NerToken>>> {
+    fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
         if texts.is_empty() {
             return Some(Vec::new());
         }
@@ -286,15 +292,21 @@ mod tests {
                         let head = String::from_utf8_lossy(&req[..head_end]).to_string();
                         let want: usize = head
                             .lines()
-                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:")
-                                .map(|v| v.trim().parse().unwrap_or(0)))
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap_or(0))
+                            })
                             .unwrap_or(0);
                         if req.len() >= head_end + 4 + want {
                             break;
                         }
                     }
                 }
-                seen2.lock().unwrap().push(String::from_utf8_lossy(&req).to_string());
+                seen2
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&req).to_string());
                 let reason = match status {
                     200 => "OK",
                     429 => "Too Many Requests",
@@ -349,7 +361,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn busy_then_ok_retries_and_succeeds() {
         let m = mock(vec![
-            (429, "Retry-After: 0\r\n", r#"{"error":"redactor_busy"}"#.into()),
+            (
+                429,
+                "Retry-After: 0\r\n",
+                r#"{"error":"redactor_busy"}"#.into(),
+            ),
             (200, "", ok_body("[[]]")),
         ]);
         let r = RemoteRedactor::new(&m.addr, None);
@@ -361,9 +377,21 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_server_that_stays_down_is_a_hold_not_a_degrade() {
         let m = mock(vec![
-            (503, "Retry-After: 0\r\n", r#"{"error":"redactor_unavailable"}"#.into()),
-            (503, "Retry-After: 0\r\n", r#"{"error":"redactor_unavailable"}"#.into()),
-            (503, "Retry-After: 0\r\n", r#"{"error":"redactor_unavailable"}"#.into()),
+            (
+                503,
+                "Retry-After: 0\r\n",
+                r#"{"error":"redactor_unavailable"}"#.into(),
+            ),
+            (
+                503,
+                "Retry-After: 0\r\n",
+                r#"{"error":"redactor_unavailable"}"#.into(),
+            ),
+            (
+                503,
+                "Retry-After: 0\r\n",
+                r#"{"error":"redactor_unavailable"}"#.into(),
+            ),
         ]);
         let r = RemoteRedactor::new(&m.addr, None);
         assert_eq!(r.classify_many(&["x".into()]), None);

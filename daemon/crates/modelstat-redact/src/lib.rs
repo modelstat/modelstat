@@ -6,13 +6,13 @@
 //! (with the Windows shapes feature §17.4 mandates), and repo-root
 //! relativization. Fail-closed and never remotely weakenable (feature §21.6).
 //!
-//! Layer-2 (candle NER) and layer-3 (local-only LLM backstop) redaction land in
+//! Layer-2 (the PII detector) and layer-3 (local-only LLM backstop) redaction land in
 //! M3 (feature §9.5); this crate is layer 1, the irreducible baseline.
 
 mod entropy;
 mod floor;
-pub mod ner;
 mod paths;
+pub mod pii;
 pub mod policy;
 #[cfg(feature = "onnx")]
 pub mod privacy_filter;
@@ -22,9 +22,9 @@ pub mod remote;
 pub mod span_cache;
 
 pub use floor::FLOOR_REPLACEMENT_TEMPLATES;
-pub use ner::{
-    ner_active, ner_redact, ner_redact_checked, ner_redact_checked_many, NerModel, NerRedaction,
-    NerToken, UnavailableNer,
+pub use pii::{
+    pii_redact, pii_redact_checked, pii_redact_checked_many, redactor_active, PiiModel,
+    PiiRedaction, PiiToken, UnavailableRedactor,
 };
 pub use policy::{
     compile_policy_patterns, CompiledPattern, RedactionPattern, RedactionPolicyBundle,

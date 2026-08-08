@@ -298,21 +298,30 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
         let _ = uninstall_service(Component::Summarizer, scope);
         emit(j, "summariser_model_skipped", json!({ "mode": mode }));
     }
-    // Every mode: pre-warm the on-device NER redactor (fail-closed on cloud/
-    // self-hosted, so this keeps the first scan full-quality).
-    step(
-        j,
-        "Preparing the on-device redactor (downloads the ~430 MB PII model)",
-    );
-    if modelstat_daemon::engine::ensure_ner_model().await {
-        ok_line(j, "on-device redactor ready");
-        emit(j, "redactor_model_ready", json!({}));
-    } else {
-        warn_line(
+    // The ~900 MB PII model is only for LOCAL redaction. The default (cloud)
+    // classifies spans server-side over floor-scrubbed text, so a default
+    // install skips the biggest download of onboarding entirely.
+    if config.redacts_locally() {
+        step(
             j,
-            "redactor model not ready — the daemon keeps retrying in the background",
+            "Preparing the on-device redactor (downloads the ~900 MB PII model)",
         );
-        emit(j, "redactor_model_not_ready", json!({}));
+        if modelstat_daemon::engine::ensure_redactor_model().await {
+            ok_line(j, "on-device redactor ready");
+            emit(j, "redactor_model_ready", json!({}));
+        } else {
+            warn_line(
+                j,
+                "redactor model not ready — the daemon keeps retrying in the background",
+            );
+            emit(j, "redactor_model_not_ready", json!({}));
+        }
+    } else {
+        emit(
+            j,
+            "redactor_model_skipped",
+            json!({ "mode": config.redactor_mode() }),
+        );
     }
 
     // Every mode: pre-warm the BGE embedder. This is the ONLY thing that ever

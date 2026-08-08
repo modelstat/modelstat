@@ -80,7 +80,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
-use crate::ner::{NerModel, NerToken};
+use crate::pii::{PiiModel, PiiToken};
 
 /// Attention band — a token attends within ±this many tokens. From the
 /// checkpoint's `sliding_window`, and the reason windowed inference is exact.
@@ -285,8 +285,8 @@ impl PrivacyFilter {
     }
 }
 
-impl NerModel for PrivacyFilter {
-    fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+impl PiiModel for PrivacyFilter {
+    fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
         self.try_classify(text)
             .inspect_err(|e| modelstat_log::log_warn!("privacy filter could not classify: {e}"))
             .ok()
@@ -294,7 +294,7 @@ impl NerModel for PrivacyFilter {
 }
 
 impl PrivacyFilter {
-    fn try_classify(&self, text: &str) -> Result<Vec<NerToken>, String> {
+    fn try_classify(&self, text: &str) -> Result<Vec<PiiToken>, String> {
         // Tokenized ONCE, so every token keeps a byte offset into the whole text no
         // matter which window ends up labelling it.
         let enc = self
@@ -322,11 +322,11 @@ impl PrivacyFilter {
             .enumerate()
             .map(|(i, id)| {
                 let (sb, eb) = offsets.get(i).copied().unwrap_or((0, 0));
-                NerToken {
+                PiiToken {
                     entity: self.id2label[id].clone(),
                     word: words.get(i).cloned().unwrap_or_default(),
-                    start: Some(crate::ner::byte_to_char(text, sb)),
-                    end: Some(crate::ner::byte_to_char(text, eb)),
+                    start: Some(crate::pii::byte_to_char(text, sb)),
+                    end: Some(crate::pii::byte_to_char(text, eb)),
                 }
             })
             .collect())

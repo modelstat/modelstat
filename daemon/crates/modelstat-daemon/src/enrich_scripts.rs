@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use modelstat_parsers::{detect_script_refs, resolve_script_path, LocalToolContext, ToolCallDraft};
 use modelstat_pipeline::passes::script_summary;
 use modelstat_pipeline::Summarizer;
-use modelstat_redact::{ner_redact_checked, redact, NerModel};
+use modelstat_redact::{pii_redact_checked, redact, PiiModel};
 use modelstat_wire::{ScriptSummary, ToolAction};
 
 /// Wire cap on `ToolAction.scripts` (`z.array(...).max(8)`).
@@ -60,7 +60,7 @@ fn default_roots(cwd: Option<&str>) -> Vec<String> {
 /// Enrich each draft's `ToolAction.scripts` in place from the matching local
 /// context (raw command + cwd). Never panics — per-call failures are swallowed.
 /// `engine` summarises a script's content; `exists`/`read_file` probe + read the
-/// resolved file locally; `model_redact` (optional) is the NER pass run over the
+/// resolved file locally; `model_redact` (optional) is the PII-detector pass run over the
 /// model sentence AFTER the deterministic floor (defense-in-depth). Port of
 /// `enrichToolCallScripts`.
 pub async fn enrich_tool_call_scripts<S, N>(
@@ -75,7 +75,7 @@ pub async fn enrich_tool_call_scripts<S, N>(
     model_redact: Option<&N>,
 ) where
     S: Summarizer,
-    N: NerModel,
+    N: PiiModel,
 {
     if contexts.is_empty() {
         return;
@@ -106,7 +106,7 @@ async fn enrich_one_action<S, N>(
     model_redact: Option<&N>,
 ) where
     S: Summarizer,
-    N: NerModel,
+    N: PiiModel,
 {
     // No redacted command → nothing on the wire to anchor a token to.
     let Some(redacted_command) = action.command_redacted.clone() else {
@@ -156,13 +156,13 @@ async fn enrich_one_action<S, N>(
             continue;
         };
         // Defence-in-depth: the model could echo a secret/PII from the file body.
-        // Regex floor first, then the optional NER pass, then cap.
+        // Regex floor first, then the optional model pass, then cap.
         let mut summary_text = redact(&summary_raw, None).text;
-        if let Some(ner) = model_redact {
+        if let Some(redactor) = model_redact {
             // Skip the summary entirely rather than ship one the redactor never
             // read — this text is about a FILE's contents, so it is the last place
             // to guess.
-            match ner_redact_checked(ner, &summary_text) {
+            match pii_redact_checked(redactor, &summary_text) {
                 Some(pass) => summary_text = pass.text,
                 None => continue,
             }
@@ -187,7 +187,7 @@ async fn enrich_one_action<S, N>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use modelstat_redact::UnavailableNer;
+    use modelstat_redact::UnavailableRedactor;
     use modelstat_sumclient::{CompleteRequest, SumError};
 
     // A fake engine: every script summarises to a fixed sentence.
@@ -251,9 +251,9 @@ mod tests {
         let contexts = vec![ctx("c1", "bash ./deploy.sh")];
         let exists = |_: &str| true; // any candidate "exists"
         let read = |_: &str| Some("echo deploying".to_string());
-        let no_ner: Option<&UnavailableNer> = None;
+        let no_model: Option<&UnavailableRedactor> = None;
 
-        enrich_tool_call_scripts(&mut drafts, &contexts, &Fake, &exists, &read, no_ner).await;
+        enrich_tool_call_scripts(&mut drafts, &contexts, &Fake, &exists, &read, no_model).await;
 
         let scripts = &drafts[0].action.as_ref().unwrap().scripts;
         assert_eq!(scripts.len(), 1);
@@ -267,9 +267,9 @@ mod tests {
         let contexts = vec![ctx("OTHER", "bash ./deploy.sh")]; // different call id
         let exists = |_: &str| true;
         let read = |_: &str| Some("echo hi".to_string());
-        let no_ner: Option<&UnavailableNer> = None;
+        let no_model: Option<&UnavailableRedactor> = None;
 
-        enrich_tool_call_scripts(&mut drafts, &contexts, &Fake, &exists, &read, no_ner).await;
+        enrich_tool_call_scripts(&mut drafts, &contexts, &Fake, &exists, &read, no_model).await;
         assert!(drafts[0].action.as_ref().unwrap().scripts.is_empty());
     }
 
@@ -279,9 +279,9 @@ mod tests {
         let contexts = vec![ctx("c1", "bash ./deploy.sh")];
         let exists = |_: &str| false; // nothing resolves on disk
         let read = |_: &str| Some("echo hi".to_string());
-        let no_ner: Option<&UnavailableNer> = None;
+        let no_model: Option<&UnavailableRedactor> = None;
 
-        enrich_tool_call_scripts(&mut drafts, &contexts, &Fake, &exists, &read, no_ner).await;
+        enrich_tool_call_scripts(&mut drafts, &contexts, &Fake, &exists, &read, no_model).await;
         assert!(drafts[0].action.as_ref().unwrap().scripts.is_empty());
     }
 

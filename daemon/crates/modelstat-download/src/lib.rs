@@ -1,7 +1,7 @@
 //! `modelstat-download` — the shared model-artifact downloader (feature §11).
 //!
 //! One resume-safe downloader for every model file: the engine's Qwen GGUF
-//! (~2.7 GB) and the collector's NER (~430 MB) + embedder (~130 MB) models.
+//! (~2.7 GB) and the collector's PII detector (~900 MB) + embedder (~130 MB) models.
 //! Resume-safe (`.partial` + `Range` + atomic rename), sha256-verified when a
 //! digest is pinned, with a throttled progress meter (single redrawing TTY line
 //! / a periodic non-TTY line).

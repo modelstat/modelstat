@@ -9,7 +9,9 @@ repository.workspace = true
 [dependencies]
 modelstat-log.workspace = true
 modelstat-wire.workspace = true
-modelstat-redact.workspace = true
+# `cache` unconditionally: the span cache fronts BOTH the on-device model (onnx
+# builds) and the remote client (every build) — see engine::DaemonNer.
+modelstat-redact = { workspace = true, features = ["cache"] }
 modelstat-parsers.workspace = true
 modelstat-pipeline.workspace = true
 modelstat-download.workspace = true

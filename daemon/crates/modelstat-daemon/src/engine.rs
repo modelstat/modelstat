@@ -1,5 +1,5 @@
 //! Engine + on-device model wiring for the daemon-main loop — the concrete
-//! `Summarizer` / `Embedder` / `NerModel` triple the scan + drain pipelines run
+//! `Summarizer` / `Embedder` / `PiiModel` triple the scan + drain pipelines run
 //! over, resolved from the install-time summarizer mode (feature §9.2, §9.5).
 //!
 //! Three moving parts:
@@ -7,11 +7,12 @@
 //!      `local` (and the unused-engine `cloud` default) reach the loopback engine
 //!      at `http://127.0.0.1:<port>` (port from `summarizer.json`, default 4321);
 //!      `self-hosted` is the same engine on the org's box (`selfHostedUrl`).
-//!   2. [`build_embedder`] / [`build_ner`] — the BGE embedder + BERT-NER. Real
-//!      candle models when built `--features candle` AND their weights are present
-//!      in the shared cache (populated by `connect`, §9.5); otherwise the fail-safe
-//!      [`NoEmbedder`] / [`UnavailableNer`]. A candle load failure degrades LOUDLY
-//!      to the fail-safe pair — which keeps cloud mode correctly FAIL-CLOSED (NER
+//!   2. [`build_embedder`] / [`build_redactor`] — the embedder + the layer-2 PII
+//!      detector for the active REDACTOR mode. Both are role interfaces: which
+//!      checkpoint backs them is a loader detail, and swapping a model must
+//!      never ripple past its own build fn. Any load/config failure degrades
+//!      LOUDLY to the fail-safe pair ([`NoEmbedder`] / [`UnavailableRedactor`]),
+//!      which keeps every egress path correctly FAIL-CLOSED (detector
 //!      unavailable ⇒ the flush holds, never floor-only egress).
 //!
 //! The engine binary itself (llama.cpp) is NEVER linked here — the collector only
@@ -21,7 +22,7 @@ use std::path::PathBuf;
 
 use modelstat_ingest::{home_path, Config};
 use modelstat_pipeline::{Embedder, NoEmbedder};
-use modelstat_redact::{NerModel, NerToken, UnavailableNer};
+use modelstat_redact::{PiiModel, PiiToken, UnavailableRedactor};
 
 /// The loopback engine's default port — must match `modelstat-llm`'s
 /// `DEFAULT_PORT` (kept in sync by hand, since the collector can't link that
@@ -78,8 +79,8 @@ pub fn engine_base_url(config: &Config) -> String {
 }
 
 /// The base on-device model dir (`MODELSTAT_MODELS_DIR` override, else
-/// `~/.modelstat/models`) — one cache for `connect` + the daemon so the ~560 MB
-/// NER + BGE weights download once and survive upgrades (§9.5). The `hf/<name>`
+/// `~/.modelstat/models`) — one cache for `connect` + the daemon so model
+/// weights download once and survive upgrades (§9.5). The `hf/<name>`
 /// cache subdir is owned by `modelstat-download` (`HfModel::dir`); callers pass
 /// this BASE so the downloader and the loaders below agree on `<base>/hf/<name>`
 /// (passing `.../models/hf` here previously doubled it to `.../models/hf/hf/…`).
@@ -97,7 +98,7 @@ pub fn models_cache_dir() -> PathBuf {
 /// mistake that left BGE un-downloaded for the whole life of the Rust daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSlot {
-    Ner,
+    Redactor,
     Embedder,
 }
 
@@ -124,7 +125,7 @@ pub const ON_DEVICE_MODELS: [OnDeviceModel; 2] = [
         model: &modelstat_download::PRIVACY_FILTER,
         key: "redactor",
         label: "PII redactor",
-        slot: ModelSlot::Ner,
+        slot: ModelSlot::Redactor,
     },
     OnDeviceModel {
         model: &modelstat_download::BGE_SMALL,
@@ -134,12 +135,24 @@ pub const ON_DEVICE_MODELS: [OnDeviceModel; 2] = [
     },
 ];
 
-/// The models whose files are NOT all on disk. Cheap (a `stat` per file),
-/// side-effect-free — what `status` reports and what the self-heal acts on.
-pub fn missing_models() -> Vec<&'static OnDeviceModel> {
-    let dir = models_cache_dir();
+/// The models this install actually needs, given where redaction runs: a
+/// remote-redactor device does NOT need the ~900 MB Privacy Filter on disk —
+/// that is half the point of the cloud default — so the self-heal must not
+/// download it and `status` must not report it missing.
+pub fn required_models(redacts_locally: bool) -> Vec<&'static OnDeviceModel> {
     ON_DEVICE_MODELS
         .iter()
+        .filter(|m| redacts_locally || m.slot != ModelSlot::Redactor)
+        .collect()
+}
+
+/// The required models whose files are NOT all on disk. Cheap (a `stat` per
+/// file), side-effect-free — what `status` reports and what the self-heal acts
+/// on.
+pub fn missing_models(redacts_locally: bool) -> Vec<&'static OnDeviceModel> {
+    let dir = models_cache_dir();
+    required_models(redacts_locally)
+        .into_iter()
         .filter(|m| !m.model.is_present(&dir))
         .collect()
 }
@@ -184,11 +197,11 @@ pub fn prune_stale_models() -> Vec<String> {
     removed
 }
 
-/// Pre-warm the layer-2 NER redactor into the shared cache (§9.5). Returns
+/// Pre-warm the layer-2 PII detector into the shared cache (§9.5). Returns
 /// whether it is now present. `connect`/`mode` call it so the first scan runs at
 /// full redaction quality; the bounded [`RetryPolicy::interactive`] keeps a human
 /// from waiting forever, and the daemon's self-heal finishes what this can't.
-pub async fn ensure_ner_model() -> bool {
+pub async fn ensure_redactor_model() -> bool {
     ensure_model(&modelstat_download::PRIVACY_FILTER, "PII redactor").await
 }
 
@@ -213,15 +226,15 @@ async fn ensure_model(model: &modelstat_download::HfModel, label: &str) -> bool 
 /// The daemon spawns this in the background at boot. It exists because `connect`
 /// is the ONLY other downloader: before this, a model that failed its one
 /// download attempt — a network blip, a laptop lid closed mid-install — stayed
-/// missing forever, and the user had no way to know. With cloud/self-hosted the
-/// NER model is worse than a quality loss: flushes fail closed and HOLD, so the
-/// daemon uploads nothing at all until it lands.
+/// missing forever, and the user had no way to know. A missing PII detector is
+/// worse than a quality loss: flushes fail closed and HOLD, so the daemon
+/// uploads nothing at all until it lands.
 ///
 /// Returns the models it successfully fetched, so the caller can hot-swap them in
 /// without a restart. Uses [`RetryPolicy::forever`] — nobody is waiting, and an
 /// offline machine simply resumes when the network returns.
-pub async fn heal_missing_models() -> Vec<&'static OnDeviceModel> {
-    let missing = missing_models();
+pub async fn heal_missing_models(redacts_locally: bool) -> Vec<&'static OnDeviceModel> {
+    let missing = missing_models(redacts_locally);
     if missing.is_empty() {
         return Vec::new();
     }
@@ -349,14 +362,21 @@ pub fn build_embedder() -> DaemonEmbedder {
     DaemonEmbedder::None(NoEmbedder)
 }
 
-/// The daemon's NER redactor (redaction layer 2) — the real candle BERT-NER model
-/// when available, else the fail-closed [`UnavailableNer`]. Critical for privacy:
-/// when unavailable, cloud/self-hosted flushes HOLD (fail-closed, §9.5) rather
-/// than shipping floor-only-redacted content off the machine.
-pub enum DaemonNer {
-    /// NER inactive — only the deterministic regex floor (layer 1) applies. In
-    /// cloud/self-hosted this makes the flush fail-closed (holds, no egress).
-    Unavailable(UnavailableNer),
+/// The daemon's layer-2 PII detector for the active REDACTOR mode: the
+/// on-device model (`local`), the serving model behind modelstat's
+/// `/v1/redact/*` (`cloud`) or an org's own endpoint (`self-hosted`) — or the
+/// fail-closed [`UnavailableRedactor`] when the mode's backend can't even be
+/// constructed. Whatever the variant, "could not classify" makes the flush
+/// HOLD (fail-closed, §9.5) rather than ship less-redacted content; the
+/// layer-1 floor has run on-device before any of these ever see a byte.
+pub enum DaemonRedactor {
+    /// Detector inactive — only the deterministic floor (layer 1) applies, and
+    /// every flush that must classify holds (no egress).
+    Unavailable(UnavailableRedactor),
+    /// A remote span classifier speaking the `/v1/redact` protocol — cloud or
+    /// self-hosted, same client. Behind the span cache so repeated texts cost a
+    /// hash lookup, not a round-trip.
+    Remote(modelstat_redact::CachedNer<modelstat_ingest::redactor_client::RemoteRedactor>),
     /// OpenAI Privacy Filter over ONNX Runtime — the PII detector (§9.5) —
     /// behind the span cache, so a text the model already classified (repeated
     /// tool output, or the whole corpus on a version-bump re-scan) skips
@@ -366,31 +386,40 @@ pub enum DaemonNer {
     PrivacyFilter(modelstat_redact::CachedNer<modelstat_redact::privacy_filter::PrivacyFilter>),
 }
 
-impl NerModel for DaemonNer {
-    fn classify(&self, text: &str) -> Option<Vec<NerToken>> {
+impl PiiModel for DaemonRedactor {
+    fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
         match self {
-            DaemonNer::Unavailable(n) => n.classify(text),
+            DaemonRedactor::Unavailable(n) => n.classify(text),
+            DaemonRedactor::Remote(n) => n.classify(text),
             #[cfg(feature = "onnx")]
-            DaemonNer::PrivacyFilter(n) => n.classify(text),
+            DaemonRedactor::PrivacyFilter(n) => n.classify(text),
+        }
+    }
+
+    fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
+        match self {
+            DaemonRedactor::Unavailable(n) => n.classify_many(texts),
+            DaemonRedactor::Remote(n) => n.classify_many(texts),
+            #[cfg(feature = "onnx")]
+            DaemonRedactor::PrivacyFilter(n) => n.classify_many(texts),
         }
     }
 }
 
-/// The span cache for the redactor at `model_dir`, or `None` when it can't be
-/// keyed or opened — the cache may only ever make redaction faster, so every
-/// failure here degrades to "no cache", never to "no redaction".
+/// The span cache under `fingerprint`, or `None` when it can't be opened — the
+/// cache may only ever make redaction faster, so every failure here degrades to
+/// "no cache", never to "no redaction".
 ///
 /// `MODELSTAT_SPAN_CACHE=off` disables it; `MODELSTAT_SPAN_CACHE_MAX_MB`
-/// resizes it (default 512).
-#[cfg(feature = "onnx")]
-fn open_span_store(model_dir: &std::path::Path) -> Option<modelstat_redact::SpanStore> {
+/// resizes it (default 512). Local and remote answers share the one file —
+/// their fingerprints differ, so their keys can never collide.
+fn open_span_store(fingerprint: &str) -> Option<modelstat_redact::SpanStore> {
     if matches!(
         std::env::var("MODELSTAT_SPAN_CACHE").ok().as_deref(),
         Some("off") | Some("0") | Some("false")
     ) {
         return None;
     }
-    let fingerprint = redactor_fingerprint(model_dir)?;
     let max_bytes = std::env::var("MODELSTAT_SPAN_CACHE_MAX_MB")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -398,7 +427,7 @@ fn open_span_store(model_dir: &std::path::Path) -> Option<modelstat_redact::Span
         .unwrap_or(modelstat_redact::span_cache::DEFAULT_MAX_BYTES);
     match modelstat_redact::SpanStore::open(
         &home_path("span-cache.sqlite3"),
-        &fingerprint,
+        fingerprint,
         max_bytes,
     ) {
         Ok(store) => Some(store),
@@ -442,24 +471,91 @@ fn redactor_fingerprint(model_dir: &std::path::Path) -> Option<String> {
         h.update(&buf[..n]);
     }
     Some(format!(
-        "pf:{:x}:bias={}",
+        "local:{:x}:bias={}",
         h.finalize(),
         modelstat_redact::privacy_filter::recall_bias()
     ))
 }
 
-/// Build the redactor for this process. Loads OpenAI Privacy Filter from the
-/// shared cache when built `--features onnx` and its weights are present;
-/// otherwise (or on a load failure) uses [`UnavailableNer`] — which the redaction
-/// floor still backstops, and which keeps EVERY mode fail-closed, since an
-/// uploaded abstract is egress too.
-pub fn build_ner() -> DaemonNer {
+/// Build the redactor for the active REDACTOR mode.
+///
+/// `cloud` / `self-hosted` construct the remote client (span-cached under the
+/// server's version-bearing model id, probed once here); `local` loads OpenAI
+/// Privacy Filter from the shared cache when built `--features onnx` and its
+/// weights are present. Every failure path lands on [`UnavailableRedactor`] — which
+/// the redaction floor still backstops, and which keeps EVERY mode fail-closed,
+/// since an uploaded abstract is egress too.
+pub fn build_redactor(config: &Config) -> DaemonRedactor {
+    match config.redactor_mode().as_str() {
+        "cloud" => {
+            let Some(bearer) = config.bearer() else {
+                // Unpaired process (tests, a fresh install mid-enroll): nothing
+                // can be classified remotely without credentials, so hold.
+                modelstat_log::log_warn!(
+                    "cloud redactor needs a paired device — flushes hold until enrollment"
+                );
+                return DaemonRedactor::Unavailable(UnavailableRedactor);
+            };
+            build_remote_redactor(&config.api_url(), Some(bearer), "cloud")
+        }
+        "self-hosted" => {
+            let url = config.redactor_url();
+            if url.trim().is_empty() {
+                modelstat_log::log_error!(
+                    "self-hosted redactor has no endpoint URL — set one with \
+                     `modelstat redactor self-hosted --url <URL>`; flushes hold until then"
+                );
+                return DaemonRedactor::Unavailable(UnavailableRedactor);
+            }
+            build_remote_redactor(&url, None, "self-hosted")
+        }
+        _ => build_local_redactor(),
+    }
+}
+
+/// The remote span classifier for `base`, span-cached when the endpoint can
+/// name its weights. The healthz probe is best-effort: an unreachable endpoint
+/// still yields a working client (classification holds + retries), it just
+/// runs uncached until a boot finds the endpoint up.
+fn build_remote_redactor(base: &str, bearer: Option<String>, label: &str) -> DaemonRedactor {
+    let client = modelstat_ingest::redactor_client::RemoteRedactor::new(base, bearer);
+    let store = match client.healthz_blocking() {
+        Some(h) if h.model_loaded => open_span_store(&format!("remote:{}", h.model)),
+        Some(_) => {
+            modelstat_log::log_info!(
+                "{label} redactor at {base} is still loading its model — flushes hold until ready"
+            );
+            None
+        }
+        None => {
+            modelstat_log::log_warn!(
+                "{label} redactor at {base} is unreachable — flushes hold + retry; \
+                 span cache stays off until a boot finds it up"
+            );
+            None
+        }
+    };
+    modelstat_log::log_info!(
+        "redactor (layer 2): {label} span classifier at {base}{}",
+        if store.is_some() {
+            ", span cache on"
+        } else {
+            ", span cache off"
+        }
+    );
+    DaemonRedactor::Remote(modelstat_redact::CachedNer::new(client, store))
+}
+
+/// The on-device Privacy Filter (`local` mode), or the fail-closed fallback.
+fn build_local_redactor() -> DaemonRedactor {
     #[cfg(feature = "onnx")]
     {
         let dir = model_dir("MODELSTAT_REDACTOR_MODEL_DIR", "privacy-filter");
         match modelstat_redact::privacy_filter::PrivacyFilter::load(&dir) {
             Ok(n) => {
-                let store = open_span_store(&dir);
+                let store = redactor_fingerprint(&dir)
+                    .as_deref()
+                    .and_then(open_span_store);
                 modelstat_log::log_info!(
                     "redactor (layer 2): OpenAI Privacy Filter loaded (PII spans, on-device{})",
                     if store.is_some() {
@@ -468,7 +564,7 @@ pub fn build_ner() -> DaemonNer {
                         ", span cache off"
                     }
                 );
-                return DaemonNer::PrivacyFilter(modelstat_redact::CachedNer::new(n, store));
+                return DaemonRedactor::PrivacyFilter(modelstat_redact::CachedNer::new(n, store));
             }
             Err(err) => {
                 modelstat_log::log_warn!(
@@ -480,7 +576,7 @@ pub fn build_ner() -> DaemonNer {
             }
         }
     }
-    DaemonNer::Unavailable(UnavailableNer)
+    DaemonRedactor::Unavailable(UnavailableRedactor)
 }
 
 #[cfg(test)]
@@ -496,8 +592,8 @@ mod tests {
     fn every_model_the_daemon_loads_is_in_the_download_list() {
         let slots: Vec<ModelSlot> = ON_DEVICE_MODELS.iter().map(|m| m.slot).collect();
         assert!(
-            slots.contains(&ModelSlot::Ner),
-            "build_ner() loads a model that nothing downloads"
+            slots.contains(&ModelSlot::Redactor),
+            "build_redactor() loads a model that nothing downloads"
         );
         assert!(
             slots.contains(&ModelSlot::Embedder),
@@ -709,6 +805,52 @@ mod tests {
         // Without --features candle, the models are always the fail-safe pair.
         // (With the feature, they still fall back unless weights are present.)
         assert!(matches!(build_embedder(), DaemonEmbedder::None(_)) || cfg!(feature = "candle"));
-        assert!(matches!(build_ner(), DaemonNer::Unavailable(_)) || cfg!(feature = "candle"));
+        // Forced-local without weights → fail-closed Unavailable, never a
+        // silent pass-through. (An empty temp home also has no identity, so the
+        // cloud default would be Unavailable too — pin the local branch, which
+        // is the one with a model to miss.)
+        let tmp =
+            std::env::temp_dir().join(format!("modelstat-redactor-build-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let built = with_env(
+            &[
+                ("MODELSTAT_REDACTOR_MODE", Some("local")),
+                ("MODELSTAT_HOME", Some(tmp.to_str().unwrap())),
+            ],
+            || build_redactor(&Config::load("daemon-test")),
+        );
+        assert!(matches!(built, DaemonRedactor::Unavailable(_)) || cfg!(feature = "onnx"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn remote_models_are_not_required_on_disk() {
+        // The point of the cloud default: no ~900 MB download. The detector
+        // slot drops out of the required list; the embedder never does.
+        let remote: Vec<_> = required_models(false).iter().map(|m| m.slot).collect();
+        assert!(!remote.contains(&ModelSlot::Redactor));
+        assert!(remote.contains(&ModelSlot::Embedder));
+        let local: Vec<_> = required_models(true).iter().map(|m| m.slot).collect();
+        assert!(local.contains(&ModelSlot::Redactor));
+    }
+
+    #[test]
+    fn self_hosted_without_a_url_is_fail_closed() {
+        let tmp =
+            std::env::temp_dir().join(format!("modelstat-redactor-sh-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let built = with_env(
+            &[
+                ("MODELSTAT_REDACTOR_MODE", Some("self-hosted")),
+                ("MODELSTAT_REDACTOR_URL", None),
+                ("MODELSTAT_HOME", Some(tmp.to_str().unwrap())),
+            ],
+            || build_redactor(&Config::load("daemon-test")),
+        );
+        assert!(
+            matches!(built, DaemonRedactor::Unavailable(_)),
+            "a remote mode with nowhere to send must hold, not pass through"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

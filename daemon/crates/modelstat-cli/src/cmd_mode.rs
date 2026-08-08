@@ -276,16 +276,23 @@ pub async fn cmd_mode(config: Arc<Config>, args: &[String]) -> ExitCode {
     }
 
     // Arm/disarm the local engine for the new mode, then pull both on-device
-    // models — the NER redactor (fail-closed on cloud/self-hosted) and the BGE
+    // models — the PII redactor (fail-closed on cloud/self-hosted) and the BGE
     // embedder (segmentation's topic-shift boundary) — so the next scan is
     // full-quality. `connect` and this are the only things that fetch them; the
     // daemon reads the cache and never downloads.
     reconcile_local_engine(&mode).await;
-    println!("preparing the on-device redactor (~430 MB, downloads once)…");
-    if modelstat_daemon::engine::ensure_ner_model().await {
-        println!("✓ on-device redactor ready");
+    if config.redacts_locally() {
+        println!("preparing the on-device redactor (~900 MB, downloads once)…");
+        if modelstat_daemon::engine::ensure_redactor_model().await {
+            println!("✓ on-device redactor ready");
+        } else {
+            eprintln!("redactor model not ready — the daemon keeps retrying in the background");
+        }
     } else {
-        eprintln!("redactor model not ready — the daemon keeps retrying in the background");
+        println!(
+            "redactor is `{}` — no on-device PII model needed (`modelstat redactor` to change)",
+            config.redactor_mode()
+        );
     }
     println!("preparing the on-device embedder (~130 MB, downloads once)…");
     if modelstat_daemon::engine::ensure_embedder_model().await {

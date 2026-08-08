@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use modelstat_redact::privacy_filter::PrivacyFilter;
-use modelstat_redact::{ner_active, ner_redact_checked};
+use modelstat_redact::{pii_redact_checked, redactor_active};
 
 fn model_dir() -> Option<PathBuf> {
     [
@@ -64,7 +64,7 @@ fn it_redacts_what_must_never_ship() {
     let m = PrivacyFilter::load(&dir).expect("load");
 
     // The liveness gate every egress path consults.
-    assert!(ner_active(&m), "the sentinel person must be scrubbed");
+    assert!(redactor_active(&m), "the sentinel person must be scrubbed");
 
     // (input, what must be gone, which marker must appear)
     let cases: [(&str, &str, &str); 4] = [
@@ -90,7 +90,7 @@ fn it_redacts_what_must_never_ship() {
         ),
     ];
     for (input, must_be_gone, marker) in cases {
-        let out = ner_redact_checked(&m, input)
+        let out = pii_redact_checked(&m, input)
             .expect("the model answered")
             .text;
         eprintln!("  {out}");
@@ -129,7 +129,7 @@ fn it_leaves_technical_prose_alone() {
             "modelstat-daemon",
         ),
     ] {
-        let out = ner_redact_checked(&m, text).expect("answered").text;
+        let out = pii_redact_checked(&m, text).expect("answered").text;
         eprintln!("  {out}");
         assert!(out.contains(keep), "{keep} was redacted away: {out}");
         assert_no_word_fragments(&out);
@@ -148,11 +148,11 @@ fn long_turns_are_redacted_and_fast() {
     let m = PrivacyFilter::load(&dir).expect("load");
     let name = "Escalate the incident to Katherine Johnson at Globex Corporation.";
     let filler = "the quick brown fox jumps over the lazy dog ";
-    let _ = ner_redact_checked(&m, "warm up the session");
+    let _ = pii_redact_checked(&m, "warm up the session");
     for reps in [1usize, 20, 60, 200, 1000] {
         let text = format!("{}{name}", filler.repeat(reps));
         let started = Instant::now();
-        let out = ner_redact_checked(&m, &text).expect("answered").text;
+        let out = pii_redact_checked(&m, &text).expect("answered").text;
         eprintln!(
             "  chars={:>7} {:>8.0}ms redacted={}",
             text.len(),
@@ -207,7 +207,7 @@ fn the_operating_point_is_measured_not_assumed() {
         let caught = must_catch
             .iter()
             .filter(|(t, gone)| {
-                !ner_redact_checked(&m, t)
+                !pii_redact_checked(&m, t)
                     .expect("answered")
                     .text
                     .contains(gone)
@@ -216,7 +216,7 @@ fn the_operating_point_is_measured_not_assumed() {
         let kept = should_keep
             .iter()
             .filter(|(t, keep)| {
-                ner_redact_checked(&m, t)
+                pii_redact_checked(&m, t)
                     .expect("answered")
                     .text
                     .contains(keep)

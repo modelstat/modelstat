@@ -23,7 +23,7 @@ use modelstat_ingest::accounts::Accounts;
 use modelstat_ingest::state::FileCursor;
 use modelstat_parsers::{GitEnrichment, ParseResult, ToolCallDraft};
 use modelstat_pipeline::{Embedder, LinkExtractor, ResilientSummarizer, Summarizer};
-use modelstat_redact::NerModel;
+use modelstat_redact::PiiModel;
 use modelstat_wire::{RawEvent, Segment};
 
 use crate::discover_jobs::{ParserKind, ScanJob};
@@ -177,7 +177,7 @@ async fn prepare_flush<S, E, N, G, CE>(
     accounts: &Accounts,
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
-    ner: &N,
+    redactor: &N,
     git: &mut G,
     extract_links: Option<&LinkExtractor<'_>>,
     correct_events: &mut CE,
@@ -185,7 +185,7 @@ async fn prepare_flush<S, E, N, G, CE>(
 where
     S: Summarizer,
     E: Embedder,
-    N: NerModel,
+    N: PiiModel,
     G: GitEnrichment + Send,
     CE: FnMut(Vec<RawEvent>) -> Vec<RawEvent>,
 {
@@ -214,7 +214,7 @@ where
         drafts,
         resilient,
         embedder,
-        ner,
+        redactor,
         // Fresh reborrow per flush — `git` outlives every flush, so this dodges
         // the reborrow-across-await lifetime trap (see flush.rs LESSON). `+ Send`
         // so the erased trait object stays `Send` for the spawned scan task.
@@ -226,7 +226,7 @@ where
     )
     .await;
     match outcome {
-        // Engine down / cloud NER unavailable → hold the whole flush, never a
+        // Engine down / the redactor unable to answer → hold the whole flush, never a
         // partial batch (that would advance the cursor past un-summarised events).
         FlushOutcome::Held => Err(Hold),
         FlushOutcome::Ready(batches) => Ok(PreparedFlush { batches, cursors }),
@@ -261,7 +261,7 @@ pub async fn run_scan_over_jobs<S, E, N, G, K, P, C, CE>(
     opts: RunScanOptions,
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
-    ner: &N,
+    redactor: &N,
     git: &mut G,
     extract_links: Option<&LinkExtractor<'_>>,
     parse: P,
@@ -286,7 +286,7 @@ pub async fn run_scan_over_jobs<S, E, N, G, K, P, C, CE>(
 where
     S: Summarizer,
     E: Embedder,
-    N: NerModel,
+    N: PiiModel,
     G: GitEnrichment + Send,
     // `Sync` so `&K` stays `Send` — the scan runs inside the daemon's
     // tokio-spawned single-flight task, whose future must be `Send`.
@@ -344,7 +344,7 @@ where
                 accounts,
                 resilient,
                 embedder,
-                ner,
+                redactor,
                 &mut *git,
                 extract_links,
                 &mut correct_events,
@@ -520,7 +520,7 @@ where
             resilient.engine(),
             exists,
             read_file,
-            Some(ner),
+            Some(redactor),
         )
         .await;
         // Drafts deliberately take NO `shipped_below` floor. A draft's
@@ -574,7 +574,7 @@ where
 mod tests {
     use super::*;
     use crate::discover_jobs::ParserKind;
-    use crate::testing::AnsweringNer;
+    use crate::testing::AnsweringRedactor;
     use modelstat_ingest::RuntimeState;
     use modelstat_parsers::{FileChange, ParseStats, PrOutcome};
     use modelstat_pipeline::NoEmbedder;
@@ -818,7 +818,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(events),
@@ -869,7 +869,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -914,7 +914,7 @@ mod tests {
             opts(None, true), // force_read_all
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -955,7 +955,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -996,7 +996,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -1047,7 +1047,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(events.clone()),
@@ -1077,7 +1077,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(events),
@@ -1123,7 +1123,7 @@ mod tests {
             opts(Some(1), false), // cap at ONE changed file
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(vec![ev("s1", "2026-07-16T10:00:00.000Z")]),
@@ -1169,7 +1169,7 @@ mod tests {
             opts(None, false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(events),
@@ -1220,7 +1220,7 @@ mod tests {
             opts(None, false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_in_chunks(events, 100),
@@ -1271,7 +1271,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(events),
@@ -1329,7 +1329,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(events),
@@ -1374,7 +1374,7 @@ mod tests {
             opts(Some(12), false),
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(events),
@@ -1414,7 +1414,7 @@ mod tests {
             opts(None, true), // force_read_all
             &resilient,
             &NoEmbedder,
-            &AnsweringNer,
+            &AnsweringRedactor,
             &mut git,
             None,
             parse_with(events),
@@ -1432,17 +1432,17 @@ mod tests {
         assert_eq!(t.events_spooled, 2);
     }
 
-    /// A LIVE NER model, which a cloud test needs: cloud egress fail-closes on a
-    /// redactor that is missing OR ineffective, and `ner_active` decides which by
+    /// A LIVE detector, which a cloud test needs: cloud egress fail-closes on a
+    /// redactor that is missing OR ineffective, and `redactor_active` decides which by
     /// probing with a sentinel name and checking it really disappeared. So this
     /// answers the probe and finds nothing in the test turns themselves.
-    struct LiveNer;
-    impl NerModel for LiveNer {
-        fn classify(&self, text: &str) -> Option<Vec<modelstat_redact::NerToken>> {
+    struct LiveRedactor;
+    impl PiiModel for LiveRedactor {
+        fn classify(&self, text: &str) -> Option<Vec<modelstat_redact::PiiToken>> {
             let mut out = Vec::new();
             if let Some(i) = text.find("Katherine Johnson") {
                 let tok =
-                    |entity: &str, word: &str, a: usize, b: usize| modelstat_redact::NerToken {
+                    |entity: &str, word: &str, a: usize, b: usize| modelstat_redact::PiiToken {
                         entity: entity.into(),
                         word: word.into(),
                         start: Some(a),
@@ -1508,7 +1508,7 @@ mod tests {
             opts(None, false),
             &resilient,
             &NoEmbedder,
-            &LiveNer,
+            &LiveRedactor,
             &mut git,
             None,
             parse_with(events),
@@ -1538,16 +1538,16 @@ mod tests {
     /// Counts how many times the PII model is asked to classify anything — the
     /// expensive work, and the thing this whole change exists to stop repeating.
     #[derive(Default)]
-    struct CountingNer {
+    struct CountingRedactor {
         calls: std::sync::atomic::AtomicUsize,
     }
-    impl NerModel for CountingNer {
-        fn classify(&self, text: &str) -> Option<Vec<modelstat_redact::NerToken>> {
+    impl PiiModel for CountingRedactor {
+        fn classify(&self, text: &str) -> Option<Vec<modelstat_redact::PiiToken>> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut out = Vec::new();
             if let Some(i) = text.find("Katherine Johnson") {
                 let tok =
-                    |entity: &str, word: &str, a: usize, b: usize| modelstat_redact::NerToken {
+                    |entity: &str, word: &str, a: usize, b: usize| modelstat_redact::PiiToken {
                         entity: entity.into(),
                         word: word.into(),
                         start: Some(a),
@@ -1580,7 +1580,7 @@ mod tests {
         let spool = crate::spool::Spool::open(&dir, crate::spool::DEFAULT_MAX_SPOOL_BYTES).unwrap();
         let resilient = healthy();
         let mut git = NoGit;
-        let ner = CountingNer::default();
+        let redactor = CountingRedactor::default();
         let mut cursors = RuntimeState::default();
         let mut obs = ();
         let events = vec![
@@ -1600,7 +1600,7 @@ mod tests {
                     opts(Some(12), false),
                     &resilient,
                     &NoEmbedder,
-                    &ner,
+                    &redactor,
                     &mut git,
                     None,
                     parse_with(events.clone()),
@@ -1620,7 +1620,7 @@ mod tests {
         let first = scan_once!();
         assert!(!first.held, "parking a batch must always succeed");
         assert_eq!(first.batches_spooled, 1);
-        let after_first = ner.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let after_first = redactor.calls.load(std::sync::atomic::Ordering::SeqCst);
         assert!(after_first > 0, "the first scan must actually redact");
         assert!(
             cursors.get_cursor("/a.jsonl").is_some(),
@@ -1635,7 +1635,7 @@ mod tests {
             assert_eq!(t.batches_spooled, 0);
         }
         assert_eq!(
-            ner.calls.load(std::sync::atomic::Ordering::SeqCst),
+            redactor.calls.load(std::sync::atomic::Ordering::SeqCst),
             after_first,
             "five scan cycles through an outage must cost ONE redaction pass — \
              this counter growing IS the CPU bug"
@@ -1668,7 +1668,7 @@ mod tests {
             opts(None, false),
             &resilient,
             &NoEmbedder,
-            &LiveNer,
+            &LiveRedactor,
             &mut git,
             None,
             parse_with(events),

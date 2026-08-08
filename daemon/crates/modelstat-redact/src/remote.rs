@@ -10,12 +10,12 @@
 //! already run on-device, so secrets, emails, key-shaped blobs and home paths
 //! are gone before any request is built. The response carries the model's raw
 //! non-`"O"` tokens; the requesting device does the splicing itself
-//! ([`crate::ner`]), so a remote answer flows through the exact code path a
+//! ([`crate::redactor`]), so a remote answer flows through the exact code path a
 //! local one does and produces byte-identical redaction.
 
 use serde::{Deserialize, Serialize};
 
-use crate::ner::NerToken;
+use crate::pii::PiiToken;
 
 /// Version of this contract. A server answering a different protocol is a
 /// skew the client treats as "cannot answer" (hold), never as best-effort.
@@ -37,7 +37,7 @@ pub struct ClassifyRequest {
     pub texts: Vec<String>,
 }
 
-/// One classified token on the wire — [`NerToken`] with its field meanings
+/// One classified token on the wire — [`PiiToken`] with its field meanings
 /// pinned: `entity` is the raw BIOES tag exactly as the checkpoint emits it,
 /// `start`/`end` are CHAR offsets (Unicode scalar values) into the
 /// corresponding request text.
@@ -51,9 +51,9 @@ pub struct WireToken {
     pub end: Option<usize>,
 }
 
-impl From<WireToken> for NerToken {
+impl From<WireToken> for PiiToken {
     fn from(t: WireToken) -> Self {
-        NerToken {
+        PiiToken {
             entity: t.entity,
             word: t.word,
             start: t.start,
@@ -62,8 +62,8 @@ impl From<WireToken> for NerToken {
     }
 }
 
-impl From<&NerToken> for WireToken {
-    fn from(t: &NerToken) -> Self {
+impl From<&PiiToken> for WireToken {
+    fn from(t: &PiiToken) -> Self {
         WireToken {
             entity: t.entity.clone(),
             word: t.word.clone(),
@@ -127,7 +127,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resp.results.len(), 1);
-        let tok: NerToken = resp.results[0][0].clone().into();
+        let tok: PiiToken = resp.results[0][0].clone().into();
         assert_eq!(tok.entity, "S-private_person");
         assert_eq!(tok.start, Some(5));
         assert_eq!(tok.end, Some(14));
