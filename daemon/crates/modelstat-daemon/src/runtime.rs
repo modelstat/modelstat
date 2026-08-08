@@ -31,7 +31,8 @@ use crate::discover_jobs::{
     discover_jobs, order_jobs_newest_first, parse_job_streaming, ParserKind, ScanJob,
 };
 use crate::engine::{
-    build_embedder, build_redactor, engine_base_url, DaemonEmbedder, DaemonRedactor, Swappable,
+    build_embedder, build_redactor, engine_base_url, DaemonEmbedder, DaemonRedactor, RemoteConfig,
+    Swappable,
 };
 use crate::insights::{refresh_session_insights, SessionInsightsFetcher};
 use crate::scan::{
@@ -112,6 +113,11 @@ pub struct Daemon {
     /// degraded quality instead of lasting until the next restart.
     pub embedder: Arc<Swappable<DaemonEmbedder>>,
     pub redactor: Arc<Swappable<DaemonRedactor>>,
+    /// Server-delivered config (`policies`, `calibration`). Seeded from disk at
+    /// build so a scan is never gated on the network, refreshed on a timer by
+    /// [`crate::run`]. Adopting a payload installs it where it is enforced, so
+    /// nothing on the scan path reads this handle.
+    pub remote_config: Arc<RemoteConfig>,
     /// Cursors + segments-sent + reconcile caches. An **async** mutex because a
     /// scan holds it across awaits (advancing cursors as batches commit);
     /// reconcile + processing-version take it too, so those serialise against a
@@ -162,6 +168,9 @@ impl Daemon {
             resilient: Arc::new(ResilientSummarizer::new(engine)),
             embedder: Arc::new(Swappable::new(build_embedder())),
             redactor: Arc::new(Swappable::new(build_redactor(&config))),
+            // Before the first scan, always: whatever config this device last
+            // saw is in force from the very first turn it redacts.
+            remote_config: Arc::new(RemoteConfig::load()),
             state: Arc::new(TokioMutex::new(load_state())),
             status: Arc::new(StdMutex::new(Status::default())),
             queue: Arc::new(FileQueueStore::new(home_path("queue.json"))),
