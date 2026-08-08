@@ -20,7 +20,9 @@ use serde_json::Value;
 
 use modelstat_ingest::home_path;
 
-use crate::insights::{read_cached_insights_sync, SessionInsights};
+use crate::insights::{
+    read_cached_insights_sync, SessionInsights, STATUS_NOT_INGESTED, STATUS_READY,
+};
 
 // ── ANSI (tiny + self-contained; no dependency) ──────────────────────────
 const DIM: &str = "\x1b[2m";
@@ -160,14 +162,19 @@ pub fn render_statusline(input: &StatuslineInput, insights: Option<&SessionInsig
 
     // 2. modelstat layer — effective $ + taxonomy from the local cache.
     match insights {
-        Some(ins) if ins.status != "not_ingested" => {
+        Some(ins) if ins.status != STATUS_NOT_INGESTED => {
             if let Some(cost) = format_cost(ins.cost_usd.as_ref()) {
                 parts.push(format!("{GREEN}{cost}{RESET}"));
             }
             let tax = render_taxonomy(ins, 3);
             if !tax.is_empty() {
                 parts.push(format!("{DIM}{tax}{RESET}"));
-            } else if ins.status == "analyzing" {
+            } else if ins.status != STATUS_READY {
+                // Not "is it exactly `analyzing`" — anything that is not the
+                // explicit finished marker still has work coming. Testing for
+                // `analyzing` meant a status this build has never heard of
+                // rendered a blank line where "analyzing…" belongs, and the
+                // server could not fix it without a fleet release.
                 parts.push(format!("{DIM}analyzing…{RESET}"));
             }
         }
@@ -311,6 +318,22 @@ mod tests {
         assert!(line.contains("12k tok"), "{line}");
         assert!(line.contains("analyzing…"), "{line}");
         assert!(!line.contains('$'), "{line}");
+    }
+
+    #[test]
+    fn an_unknown_status_reads_as_still_working() {
+        // The placeholder is gated on "not finished", not on the one word this
+        // build happens to know: a server that starts saying `queued` must not
+        // silently blank the line on every installed daemon.
+        for status in ["queued", "summarising", "retrying"] {
+            let ins = insights(json!({ "status": status }));
+            let line = strip(&render_statusline(&cw_input(), Some(&ins)));
+            assert!(line.contains("analyzing…"), "{status}: {line}");
+        }
+        // …and `ready` with nothing to show still says nothing.
+        let ready = insights(json!({ "status": "ready", "taxonomy_nodes": [] }));
+        let line = strip(&render_statusline(&cw_input(), Some(&ready)));
+        assert!(!line.contains("analyzing"), "{line}");
     }
 
     #[test]

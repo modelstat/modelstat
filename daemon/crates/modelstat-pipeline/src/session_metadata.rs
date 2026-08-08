@@ -298,6 +298,11 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
                     pr.merged = Some(o.merged);
                     pr.merged_at = Some(o.merged_at);
                     pr.reverted = Some(o.reverted);
+                    // The commit the `merged` reading rests on, so the server can
+                    // check the convention rather than take it on faith.
+                    pr.merge_sha = o.merge_sha;
+                    pr.merge_subject = o.merge_subject;
+                    pr.merge_method = o.merge_method.map(str::to_string);
                 }
             }
         }
@@ -397,6 +402,7 @@ mod tests {
             abstract_embedding: None,
             behavior: None,
             user_intent: None,
+            local_time: None,
         }
     }
 
@@ -406,6 +412,7 @@ mod tests {
             remote_host: Some(host.into()),
             remote_slug: Some(slug.into()),
             branch: Some(branch.into()),
+            slug_source: None,
         }
     }
 
@@ -493,6 +500,9 @@ mod tests {
                 merged: true,
                 merged_at: Some("2026-07-16T11:00:00Z".into()),
                 reverted: false,
+                merge_sha: Some("c0ffee1".into()),
+                merge_subject: Some("feat: retries (#42)".into()),
+                merge_method: Some("subject_ref_convention"),
             },
         );
         let out = build_session_metadata(&[s], &[e], Some(&mut fake), None).await;
@@ -510,6 +520,10 @@ mod tests {
         assert_eq!(pr.merged, Some(true));
         assert_eq!(pr.merged_at, Some(Some("2026-07-16T11:00:00Z".into())));
         assert_eq!(pr.reverted, Some(false));
+        // The enrichment carries its evidence all the way onto the wire ref.
+        assert_eq!(pr.merge_sha.as_deref(), Some("c0ffee1"));
+        assert_eq!(pr.merge_subject.as_deref(), Some("feat: retries (#42)"));
+        assert_eq!(pr.merge_method.as_deref(), Some("subject_ref_convention"));
     }
 
     #[tokio::test]

@@ -36,6 +36,7 @@ const fullRawEvent = {
     remote_host: "github.com",
     remote_slug: "acme/app",
     branch: "main",
+    slug_source: "git_remote",
   },
   tokens: { input: 10, output: 20, cache_creation: 0, cache_read: 5, reasoning: 0 },
   duration_ms: 1234,
@@ -111,6 +112,7 @@ const segment = {
   source_event_ids: ["evt_16zw770jnvito", "evt_irnlblnsf9gx"],
   behavior: { user_turns: 3, correction_count: 1, frustration: 0.25 },
   user_intent: "make the uploader never drop a batch",
+  local_time: { utc_offset_minutes: -420, hour: 3, weekday: 1 },
 };
 
 const segmentWithEmbedding = {

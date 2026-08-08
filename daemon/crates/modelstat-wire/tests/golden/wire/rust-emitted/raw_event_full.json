@@ -13,7 +13,8 @@
     "remote_url": "https://github.com/acme/app.git",
     "remote_host": "github.com",
     "remote_slug": "acme/app",
-    "branch": "main"
+    "branch": "main",
+    "slug_source": "git_remote"
   },
   "tokens": {
     "input": 10,

@@ -187,9 +187,20 @@ pub fn mcp_server_name(raw: &str) -> String {
     format!("mcp:{}", slice_utf16(&normalize_tool_name(raw), 116))
 }
 
-/// Split an observed tool name into wire `server` + `name`:
-/// `mcp__<server>__<tool>` → `{ server: "mcp:<server>", name }`, anything else →
-/// `{ server: "builtin", name }`. Both parts normalized.
+/// Split an observed tool name into wire `server` + `name`.
+///
+/// A name is only split when it LABELS its own namespace — it leads with the
+/// literal `mcp` marker: `mcp__<server>__<tool>` (Claude Code / Claude Desktop),
+/// and the `mcp.<server>.<tool>` / `mcp:<server>:<tool>` spellings of the same
+/// convention. Anything else is the agent's own tool surface and ships VERBATIM
+/// under `builtin`.
+///
+/// What is deliberately NOT done: splitting a bare `a.b` or `a:b`. Without the
+/// marker there is no way to tell a namespaced tool from a tool whose name
+/// merely contains a separator, and inventing a server that never existed is
+/// worse than not splitting — a wrong `server` becomes a wrong taxonomy leaf and
+/// a wrong per-server rollup, and the raw name is gone. Not splitting loses
+/// nothing: the full observed name is right there in `name`.
 pub fn split_observed_tool_name(observed: &str) -> (String, String) {
     let trimmed = observed.trim();
     if let Some((server, tool)) = split_mcp(trimmed) {
@@ -198,27 +209,31 @@ pub fn split_observed_tool_name(observed: &str) -> (String, String) {
     ("builtin".to_string(), normalize_tool_name(observed))
 }
 
-/// Match `^mcp__([^_].*?)__(.+)$` — non-greedy first group so the FIRST `__`
-/// (after a non-`_` lead char) splits server from tool.
+/// The `mcp`-marked namespaced spellings, in the order they are tried. Each is a
+/// LITERAL prefix plus a literal separator, so a match is evidence and never an
+/// inference: no tool of an agent's own is named `mcp__…__…`.
+const MCP_SHAPES: [(&str, &str); 3] = [("mcp__", "__"), ("mcp.", "."), ("mcp:", ":")];
+
+/// Match `mcp<sep><server><sep><tool>` for any shape in [`MCP_SHAPES`] — the
+/// EARLIEST separator after a non-separator lead splits server from tool, and
+/// both halves must be non-empty (`mcp__server__` names no tool, so it is not a
+/// namespaced name and ships whole).
 fn split_mcp(s: &str) -> Option<(&str, &str)> {
-    let rest = s.strip_prefix("mcp__")?;
-    let first = rest.chars().next()?;
-    if first == '_' {
-        return None;
-    }
-    // Non-greedy `([^_].*?)__(.+)`: find the earliest `__` at index ≥1 whose
-    // tail (`.+`) is non-empty.
-    let bytes = rest.as_bytes();
-    let mut i = 1;
-    while i + 2 <= bytes.len() {
-        if bytes[i] == b'_' && bytes.get(i + 1) == Some(&b'_') {
-            let server = &rest[..i];
-            let tool = &rest[i + 2..];
-            if !tool.is_empty() {
+    for (prefix, sep) in MCP_SHAPES {
+        let Some(rest) = s.strip_prefix(prefix) else {
+            continue;
+        };
+        if rest.starts_with(sep) {
+            continue; // `mcp____tool` — an empty server name.
+        }
+        // Skip index 0: the server must be at least one character.
+        if let Some(at) = rest.get(1..).and_then(|tail| tail.find(sep)).map(|i| i + 1) {
+            let server = &rest[..at];
+            let tool = &rest[at + sep.len()..];
+            if !server.is_empty() && !tool.is_empty() {
                 return Some((server, tool));
             }
         }
-        i += 1;
     }
     None
 }
@@ -276,6 +291,50 @@ mod tests {
         assert_eq!(
             split_observed_tool_name("WebSearch"),
             ("builtin".into(), "WebSearch".into())
+        );
+    }
+
+    #[test]
+    fn the_other_mcp_spellings_split_too() {
+        assert_eq!(
+            split_observed_tool_name("mcp.github.create_pr"),
+            ("mcp:github".into(), "create_pr".into())
+        );
+        assert_eq!(
+            split_observed_tool_name("mcp:brave-search:web_search"),
+            ("mcp:brave-search".into(), "web_search".into())
+        );
+        // The tool half keeps every remaining separator — only the FIRST one
+        // after the server splits.
+        assert_eq!(
+            split_observed_tool_name("mcp.acme.deploy.rollback"),
+            ("mcp:acme".into(), "deploy.rollback".into())
+        );
+    }
+
+    #[test]
+    fn a_name_without_the_marker_is_never_split() {
+        // No `mcp` marker ⇒ no evidence of a namespace. Splitting these would
+        // invent a server that never existed and lose the observed name; the
+        // full name ships verbatim instead.
+        for observed in [
+            "package.json",
+            "github.create_issue",
+            "kubectl:apply",
+            "a.b",
+        ] {
+            let (server, name) = split_observed_tool_name(observed);
+            assert_eq!(server, "builtin", "{observed}");
+            assert_eq!(name, observed, "{observed}");
+        }
+        // Marked but incomplete: no tool half, so it is not a namespaced name.
+        assert_eq!(
+            split_observed_tool_name("mcp__server__"),
+            ("builtin".into(), "mcp__server__".into())
+        );
+        assert_eq!(
+            split_observed_tool_name("mcp__"),
+            ("builtin".into(), "mcp__".into())
         );
     }
 

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use modelstat_wire::GitContext;
+use modelstat_wire::{GitContext, SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_PATH_SHAPE};
 use regex::Regex;
 
 /// The main-repo path for a (possibly ephemeral) worktree cwd: strips
@@ -113,6 +113,31 @@ pub fn guess_repo_slug_from_path(cwd: Option<&str>) -> Option<String> {
     Some(format!("{a}/{b}"))
 }
 
+/// The [`GitContext`] a parser may claim when it could not ask git: the slug (if
+/// any) came from [`guess_repo_slug_from_path`], so the ONLY things known are
+/// the path shape and whatever branch the transcript itself recorded.
+///
+/// `remote_host` is therefore None. It used to be stamped `"github.com"`
+/// whenever the guessed slug contained a `/` — a forge invented from a directory
+/// layout, written into the same field [`GitResolver`] fills from `git config`,
+/// so the server could not tell the two apart. `slug_source` now labels the
+/// guess instead. None when there is nothing at all to say.
+pub fn path_guessed_git_context(
+    slug: Option<String>,
+    branch: Option<String>,
+) -> Option<GitContext> {
+    if slug.is_none() && branch.is_none() {
+        return None;
+    }
+    Some(GitContext {
+        remote_url: None,
+        remote_host: None,
+        slug_source: slug.as_ref().map(|_| SLUG_SOURCE_PATH_SHAPE.to_string()),
+        remote_slug: slug,
+        branch,
+    })
+}
+
 /// Run `git` in `cwd`, returning stdout on a zero exit within `timeout`, else
 /// None. Thin wrapper over [`crate::util::run_command`] — git enrichment is
 /// never allowed to block or fail a scan.
@@ -148,6 +173,7 @@ impl GitResolver {
                 remote_host: None,
                 remote_slug: None,
                 branch: None,
+                slug_source: None,
             },
             Some(root) => {
                 let ran = |args: &[&str]| -> Option<String> {
@@ -169,6 +195,8 @@ impl GitResolver {
                 GitContext {
                     remote_url,
                     remote_host: host,
+                    // The one path allowed to name a host: git told us.
+                    slug_source: slug.as_ref().map(|_| SLUG_SOURCE_GIT_REMOTE.to_string()),
                     remote_slug: slug,
                     branch,
                 }
@@ -201,6 +229,25 @@ mod tests {
             Some("acme")
         );
         assert_eq!(guess_repo_slug_from_path(None), None);
+    }
+
+    #[test]
+    fn a_path_guessed_slug_names_no_forge() {
+        // Regression: the slug's `/` used to be read as "this is on GitHub" and
+        // stamped into the same field `git config` fills. A directory layout is
+        // not evidence of a host — self-hosted GitLab, Gitea, and Bitbucket all
+        // sit behind the same `<org>/<repo>` shape.
+        let ctx = path_guessed_git_context(Some("acme/myrepo".into()), None).unwrap();
+        assert_eq!(ctx.remote_slug.as_deref(), Some("acme/myrepo"));
+        assert_eq!(ctx.remote_host, None);
+        assert_eq!(ctx.remote_url, None);
+        assert_eq!(ctx.slug_source.as_deref(), Some(SLUG_SOURCE_PATH_SHAPE));
+        // A branch with no slug is still worth shipping, and sources nothing.
+        let branch_only = path_guessed_git_context(None, Some("main".into())).unwrap();
+        assert_eq!(branch_only.branch.as_deref(), Some("main"));
+        assert_eq!(branch_only.slug_source, None);
+        // Nothing observed at all → no context.
+        assert!(path_guessed_git_context(None, None).is_none());
     }
 
     #[test]
@@ -254,6 +301,7 @@ mod tests {
         let ctx = resolver.resolve(Some(&path)).unwrap();
         assert_eq!(ctx.remote_slug.as_deref(), Some("acme/myrepo"));
         assert_eq!(ctx.remote_host.as_deref(), Some("github.com"));
+        assert_eq!(ctx.slug_source.as_deref(), Some(SLUG_SOURCE_GIT_REMOTE));
         // Second call is served from cache.
         assert_eq!(
             resolver

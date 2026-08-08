@@ -25,7 +25,8 @@ use std::collections::{BTreeMap, HashSet};
 use modelstat_redact::{pii_redact_checked, redact, PiiModel};
 use modelstat_sumclient::CompleteRequest;
 use modelstat_wire::{
-    segment_id, RawEvent, RedactionReport, Segment, SegmentBehavior, TaxonomyHintRooted, TokenUsage,
+    segment_id, RawEvent, RedactionReport, Segment, SegmentBehavior, SegmentLocalTime,
+    TaxonomyHintRooted, TokenUsage,
 };
 
 use crate::embed::{Embedder, EMBED_DIM};
@@ -42,21 +43,6 @@ use crate::prompts::{
 };
 use crate::resilient::{ResilientSummarizer, SummarizeOutcome, Summarizer};
 use crate::segment::{parse_ts_ms, segment_turns, turn_meta, turn_surface};
-
-/// Substrings that mark a frustrated/blocked mood in a cognition emotion tag
-/// (matched case-insensitively). A generic linguistic cue set — NOT domain vocab.
-/// FROZEN (§18): a change shifts the behavior signal and needs a version bump.
-const FRUSTRATION_MARKERS: [&str; 9] = [
-    "frustrat",
-    "annoy",
-    "stuck",
-    "confus",
-    "irritat",
-    "block",
-    "stress",
-    "angr",
-    "overwhelm",
-];
 
 /// The result of building one session's segments.
 #[derive(Debug, Clone, PartialEq)]
@@ -294,8 +280,8 @@ where
         format!("{redacted_text} {suffix}")
     };
 
-    // Privacy-preserving behavioral signal — counts/ratios only, never raw text.
-    let behavior = compute_behavior(slice, cog.as_ref());
+    // Privacy-preserving behavioral counts — never raw text, never a score.
+    let behavior = compute_behavior(slice);
 
     // Deterministic tags from event metadata, in the frozen order (§18).
     let mut tags: Vec<TaxonomyHintRooted> = Vec::new();
@@ -308,18 +294,19 @@ where
         if let Some(slug) = &git.remote_slug {
             tags.push(hint("projects", slug, 1.0));
         }
-        if let Some(branch) = &git.branch {
-            if let Some(env) = infer_environment(branch) {
-                tags.push(hint("environments", env, 0.7));
-            }
-        }
+        // No `environments` hint: the branch ships verbatim in GitContext and
+        // the server owns what a branch name means for a given org.
     }
     for c in components_from_slice(slice) {
         tags.push(hint("components", &c, 0.6));
     }
-    // Local-time dimensions (WHEN the work happened) — the daemon has the
-    // engineer's wall clock; the server only ever sees UTC (§18).
-    tags.extend(temporal_hints(started_at_ms));
+    // WHEN the work happened, in the engineer's own wall clock — the daemon is
+    // the only place that knows it, and the server only ever sees UTC (§18).
+    // The reading rides on the segment; the buckets are derived from it.
+    let local_time = local_time_of(started_at_ms);
+    if let Some(local) = local_time {
+        tags.extend(temporal_hints(local));
+    }
     // Mood/Mind/Posture primaries from the best-effort cognition pass.
     if let Some(c) = &cog {
         tags.extend(cognition_hints(c));
@@ -358,6 +345,7 @@ where
         abstract_embedding,
         behavior: Some(behavior),
         user_intent,
+        local_time,
     };
     SliceOutcome::Built(Box::new(seg))
 }
@@ -501,10 +489,16 @@ where
     }
 }
 
-/// Per-segment behavioral signal — counts/ratios only, never raw text.
+/// Per-segment behavioral COUNTS — never raw text, and never a score.
 /// `correction_count` = user messages that land right after an assistant message.
-/// `frustration` (0-1) rises with re-prompt density and negative cognition mood.
-fn compute_behavior(slice: &[&RawEvent], cognition: Option<&CognitionTags>) -> SegmentBehavior {
+///
+/// There is no `frustration` any more. It was `max(correction_count / 4, 0.8 if
+/// any emotion tag contains one of nine English stems)`: two hard-coded numbers
+/// and a substring list scoring an LLM's own free-text output, on a device that
+/// cannot revise either. Both inputs already ship — the counts here, the emotion
+/// tags in the abstract's `[Mood: …]` suffix and the `mood` hint — so the score
+/// is the server's to compute, where it can be changed without a fleet release.
+fn compute_behavior(slice: &[&RawEvent]) -> SegmentBehavior {
     let mut user_turns = 0u64;
     let mut correction_count = 0u64;
     let mut prev_was_assistant = false;
@@ -521,54 +515,43 @@ fn compute_behavior(slice: &[&RawEvent], cognition: Option<&CognitionTags>) -> S
             _ => {}
         }
     }
-    let frustrated_mood = cognition
-        .map(|c| {
-            c.emotions.iter().any(|e| {
-                let lower = e.to_lowercase();
-                FRUSTRATION_MARKERS.iter().any(|m| lower.contains(m))
-            })
-        })
-        .unwrap_or(false);
-    let raw = (correction_count as f64 / 4.0).max(if frustrated_mood { 0.8 } else { 0.0 });
-    let frustration = (raw.min(1.0) * 100.0).round() / 100.0;
     SegmentBehavior {
         user_turns,
         correction_count,
-        frustration,
+        frustration: None,
     }
 }
 
-/// Map a branch name to a deployment environment (index.ts `inferEnvironment`).
-fn infer_environment(branch: &str) -> Option<&'static str> {
-    let b = branch.to_lowercase();
-    if b == "main" || b == "master" || b.starts_with("release/") {
-        Some("Prod")
-    } else if b == "staging" || b.starts_with("staging/") {
-        Some("Staging")
-    } else if b == "dev" || b == "develop" || b.starts_with("dev/") {
-        Some("Dev")
-    } else {
-        None
-    }
+/// The daemon machine's local wall clock at a slice's start — the READING, not a
+/// bucket. Only the device can know this (everything on the wire is UTC), so it
+/// is the one thing here that is strictly lost if it is not shipped.
+fn local_time_of(started_at_ms: i64) -> Option<SegmentLocalTime> {
+    use chrono::{Datelike, Local, Offset, TimeZone, Timelike};
+    let dt = Local.timestamp_millis_opt(started_at_ms).single()?;
+    Some(SegmentLocalTime {
+        // The offset in force at THAT instant, so a DST boundary reads
+        // correctly rather than through today's rule.
+        utc_offset_minutes: dt.offset().fix().local_minus_utc() / 60,
+        hour: dt.hour() as u8,
+        weekday: dt.weekday().num_days_from_sunday() as u8, // 0=Sun..6=Sat
+    })
 }
 
 /// Local-wall-clock taxonomy hints for a slice's start (index.ts `temporalHints`).
-/// Uses the daemon machine's timezone — the server only ever sees UTC.
-fn temporal_hints(started_at_ms: i64) -> Vec<TaxonomyHintRooted> {
-    use chrono::{Datelike, Local, TimeZone, Timelike};
-    let Some(dt) = Local.timestamp_millis_opt(started_at_ms).single() else {
-        return Vec::new(); // unreachable for real ISO timestamps
-    };
-    let time_of_day = time_of_day_bucket(dt.hour());
-    let cadence = cadence_bucket(dt.weekday().num_days_from_sunday()); // 0=Sun..6=Sat
+///
+/// These are a CUT of [`local_time_of`] — where Morning ends, whether Friday is
+/// its own thing — made on a device that cannot revise it. They ride one more
+/// release beside the reading they are derived from; the server owns the cut
+/// once it reads `local_time`.
+fn temporal_hints(local: SegmentLocalTime) -> Vec<TaxonomyHintRooted> {
     vec![
-        hint("time_of_day", time_of_day, 1.0),
-        hint("cadence", cadence, 1.0),
+        hint("time_of_day", time_of_day_bucket(local.hour), 1.0),
+        hint("cadence", cadence_bucket(local.weekday), 1.0),
     ]
 }
 
 /// Morning 5–12 / Midday 12–17 / Evening 17–21 / Night otherwise (§18).
-fn time_of_day_bucket(hour: u32) -> &'static str {
+fn time_of_day_bucket(hour: u8) -> &'static str {
     if (5..12).contains(&hour) {
         "Morning"
     } else if (12..17).contains(&hour) {
@@ -581,7 +564,7 @@ fn time_of_day_bucket(hour: u32) -> &'static str {
 }
 
 /// Weekend (Sat/Sun) / Friday / Weekday (§18). `day` is JS `getDay()`: 0=Sun..6=Sat.
-fn cadence_bucket(day: u32) -> &'static str {
+fn cadence_bucket(day: u8) -> &'static str {
     if day == 0 || day == 6 {
         "Weekend"
     } else if day == 5 {
@@ -843,7 +826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tags_cover_project_environment_components_and_tool_mix() {
+    async fn tags_cover_project_components_and_tool_mix() {
         let mut e = ev(
             "e1",
             "2026-06-01T10:00:00.000Z",
@@ -855,6 +838,7 @@ mod tests {
             remote_host: Some("github.com".into()),
             remote_slug: Some("acme/web".into()),
             branch: Some("main".into()),
+            slug_source: None,
         });
         e.files_touched = vec!["core/rust/main.rs".into(), "core/rust/lib.rs".into()];
         e.tool_calls = [("Bash".to_string(), 3u64), ("Read".to_string(), 1u64)]
@@ -871,10 +855,9 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.root_key == "projects" && t.name == "acme/web"));
-        assert!(s
-            .tags
-            .iter()
-            .any(|t| t.root_key == "environments" && t.name == "Prod"));
+        // `main` used to be tagged `environments: Prod` here — a client-side
+        // guess at the server's node names. The branch itself is what ships.
+        assert!(!s.tags.iter().any(|t| t.root_key == "environments"));
         // top-2-level dir dedups to a single "core/rust" component.
         let comps: Vec<&str> = s
             .tags
@@ -924,7 +907,9 @@ mod tests {
         let b = segs[0].behavior.as_ref().unwrap();
         assert_eq!(b.user_turns, 2);
         assert_eq!(b.correction_count, 1);
-        assert_eq!(b.frustration, 0.25); // 1/4, no frustrated mood
+        // The counts ship; the score does not. Omitted, not zeroed — a zero
+        // would read as "measured, and calm".
+        assert_eq!(b.frustration, None);
     }
 
     #[tokio::test]
@@ -948,17 +933,6 @@ mod tests {
     }
 
     #[test]
-    fn infer_environment_maps_branches() {
-        assert_eq!(infer_environment("main"), Some("Prod"));
-        assert_eq!(infer_environment("MASTER"), Some("Prod"));
-        assert_eq!(infer_environment("release/1.2"), Some("Prod"));
-        assert_eq!(infer_environment("staging"), Some("Staging"));
-        assert_eq!(infer_environment("dev/foo"), Some("Dev"));
-        assert_eq!(infer_environment("develop"), Some("Dev"));
-        assert_eq!(infer_environment("feature/x"), None);
-    }
-
-    #[test]
     fn temporal_buckets_match_the_frozen_boundaries() {
         assert_eq!(time_of_day_bucket(5), "Morning");
         assert_eq!(time_of_day_bucket(11), "Morning");
@@ -972,6 +946,20 @@ mod tests {
         assert_eq!(cadence_bucket(6), "Weekend"); // Sat
         assert_eq!(cadence_bucket(5), "Friday");
         assert_eq!(cadence_bucket(3), "Weekday");
+    }
+
+    #[test]
+    fn the_local_reading_agrees_with_the_buckets_derived_from_it() {
+        // Runs in whatever zone the machine is in — the assertion is the
+        // RELATIONSHIP, which is what shipping the reading buys: the server can
+        // re-derive every bucket the daemon emitted, and cut differently later.
+        let local = local_time_of(1_764_590_400_000).expect("a real instant reads");
+        assert!(local.hour < 24);
+        assert!(local.weekday < 7);
+        assert!((-12 * 60..=14 * 60).contains(&local.utc_offset_minutes));
+        let hints = temporal_hints(local);
+        assert_eq!(hints[0].name, time_of_day_bucket(local.hour));
+        assert_eq!(hints[1].name, cadence_bucket(local.weekday));
     }
 
     #[test]
@@ -1035,6 +1023,7 @@ mod tests {
             abstract_embedding: None,
             behavior: None,
             user_intent: None,
+            local_time: None,
         }
     }
 

@@ -69,6 +69,15 @@ export const PullRequestRef = z.object({
   reverted: z.boolean().nullable().optional(),
   hotfixed: z.boolean().nullable().optional(),
   reopened: z.boolean().nullable().optional(),
+  // The evidence behind `merged`. It is decided from a CONVENTION — a commit
+  // subject mentioning `#<n>` — which is wrong in both directions ("Fix bug
+  // reported in #123" merged nothing; a custom squash template merges without
+  // the number). These three ship the matched commit (public repo facts) and
+  // the name of the reading, so the server can weigh the claim instead of
+  // taking it. Absent when nothing matched, and from daemons predating them.
+  merge_sha: z.string().max(64).optional(),
+  merge_subject: z.string().max(400).optional(),
+  merge_method: z.string().max(40).optional(),
 });
 export type PullRequestRef = z.infer<typeof PullRequestRef>;
 
@@ -90,6 +99,12 @@ export const IssueRef = z.object({
   url: z.string().max(400).nullable().default(null),
   source: RefSource.default("content"),
   confidence: z.number().min(0).max(1).default(0.8),
+  /** The observed text does not identify WHAT this reference is. Two shapes set
+   * it: `org/repo#N`, which GitHub resolves to either a PR or an issue (the
+   * daemon files it as an issue and says so), and a bare `TEAM-123`, which may
+   * be no ticket at all (`UTF-8`, `SHA-256`). A URL never sets it. Absent —
+   * not `false` — when the reference is unambiguous. */
+  ambiguous: z.boolean().optional(),
 });
 export type IssueRef = z.infer<typeof IssueRef>;
 

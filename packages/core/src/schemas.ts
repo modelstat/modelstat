@@ -31,9 +31,18 @@ export type TokenUsage = z.infer<typeof TokenUsage>;
 /** Git context derived from cwd → nearest `.git`. */
 export const GitContext = z.object({
   remote_url: z.string().nullable(),
+  /** The forge host, and only when git itself named it (parsed out of
+   * `remote.origin.url`). Null everywhere else — a slug read off a directory
+   * layout says nothing about where the repo is hosted. */
   remote_host: z.string().nullable(), // "github.com"
   remote_slug: z.string().nullable(), // "org/repo"
   branch: z.string().nullable(),
+  /** How `remote_slug` was reached, so a fact and a guess are distinguishable:
+   * `git_remote` (the repo's configured remote — the only source that can also
+   * name a host), `repo_root_dir` (a real repo with no remote, keyed on its
+   * root directory name), `path_shape` (inferred from the cwd's shape, no repo
+   * reachable). Absent when there is no slug, and from daemons predating it. */
+  slug_source: z.string().max(40).optional(),
 });
 export type GitContext = z.infer<typeof GitContext>;
 
@@ -168,8 +177,15 @@ export const Segment = z.object({
       /** User messages that land right after the assistant — a re-prompt /
        * correction proxy. */
       correction_count: z.number().int().nonnegative().default(0),
-      /** 0-1 frustration estimate (re-prompt density + negative mood tags). */
-      frustration: z.number().min(0).max(1).default(0),
+      /** 0-1 frustration estimate. The daemon NO LONGER PRODUCES this: it was
+       * `max(correction_count / 4, 0.8 if a mood tag matched one of nine
+       * English stems)` — hard-coded weights and a substring list scoring the
+       * model's own free text, on a device that cannot revise either. It is
+       * omitted rather than zeroed, so "no opinion" stays distinguishable from
+       * "calm"; the counts above and the `[Mood: …]` tags are the inputs, and
+       * scoring them is the server's job. Optional for payloads that predate
+       * the removal. */
+      frustration: z.number().min(0).max(1).optional(),
     })
     .optional(),
   /** Distilled "what the developer asked for / how they directed the AI" — from
@@ -177,6 +193,20 @@ export const Segment = z.object({
    * source Insights' rule + skill detectors mine, distinct from the outcome
    * `abstract`. Optional; absent from daemons that predate it. */
   user_intent: z.string().max(512).optional(),
+  /** The daemon machine's LOCAL wall clock at `started_at` — the one fact only
+   * the device holds, since every timestamp on the wire is UTC. The
+   * `time_of_day` / `cadence` tags are a CUT of this made on a machine that
+   * cannot revise it; with the reading present the server can re-derive them
+   * and cut differently. Optional; absent from daemons that predate it. */
+  local_time: z
+    .object({
+      /** Minutes east of UTC at that instant (-420 for UTC-7), DST included. */
+      utc_offset_minutes: z.number().int().min(-840).max(840),
+      hour: z.number().int().min(0).max(23),
+      /** 0=Sunday … 6=Saturday (JS `getDay()`). */
+      weekday: z.number().int().min(0).max(6),
+    })
+    .optional(),
 });
 export type Segment = z.infer<typeof Segment>;
 

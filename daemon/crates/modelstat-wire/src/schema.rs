@@ -41,17 +41,37 @@ pub struct TokenUsage {
     pub reasoning: u64,
 }
 
-/// Git context — all four fields nullable (present, may be null).
+/// Where [`GitContext::remote_slug`] came from. The daemon reaches a slug three
+/// ways and they are not equally true: only [`SLUG_SOURCE_GIT_REMOTE`] read the
+/// repo's own configured remote. Stamped so the server can weigh a fact against
+/// a guess instead of receiving both as the same string.
+pub const SLUG_SOURCE_GIT_REMOTE: &str = "git_remote";
+/// The slug is the repo-ROOT directory name — a real repo on disk, but one with
+/// no configured remote, so it names no forge and no owner.
+pub const SLUG_SOURCE_REPO_ROOT_DIR: &str = "repo_root_dir";
+/// The slug was inferred from the SHAPE of the cwd (`…/projects/<a>/<b>`) with
+/// no repo reachable at all. A guess about a path, not an observation of git.
+pub const SLUG_SOURCE_PATH_SHAPE: &str = "path_shape";
+
+/// Git context — the four original fields nullable (present, may be null), plus
+/// the additive `slug_source` provenance marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitContext {
     #[serde(default)]
     pub remote_url: Option<String>,
+    /// The forge host, and ONLY when git itself named it (parsed out of
+    /// `remote.origin.url`). Null is the honest value everywhere else — a slug
+    /// that came from a path shape says nothing about where the repo is hosted.
     #[serde(default)]
     pub remote_host: Option<String>,
     #[serde(default)]
     pub remote_slug: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    /// One of the `SLUG_SOURCE_*` markers — how `remote_slug` was reached.
+    /// Absent on contexts that carry no slug (and from daemons predating it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug_source: Option<String>,
 }
 
 /// Redaction report — three guaranteed counters plus `pf_*` catchall keys.
@@ -159,15 +179,38 @@ fn default_tag_confidence() -> f64 {
     0.7
 }
 
-/// Privacy-preserving per-segment behavioral signal (counts/ratios only).
+/// Privacy-preserving per-segment behavioral signal (counts only).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SegmentBehavior {
     #[serde(default)]
     pub user_turns: u64,
     #[serde(default)]
     pub correction_count: u64,
-    #[serde(default)]
-    pub frustration: f64,
+    /// A 0-1 score the daemon NO LONGER PRODUCES — it is omitted, not zeroed,
+    /// so "no opinion" is distinguishable from "calm". The field survives for
+    /// the payloads already stored and for the server that still reads it; the
+    /// scoring belongs where it can be revised without a fleet release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frustration: Option<f64>,
+}
+
+/// The daemon machine's LOCAL wall clock at a segment's start.
+///
+/// The one fact only the device holds: every timestamp on the wire is UTC, so
+/// once a segment leaves the box nothing can recover what time it was for the
+/// person doing the work. The daemon used to spend that fact on two buckets
+/// (`Morning`/`Night`, `Weekend`/`Friday`/`Weekday`) and throw the reading
+/// away — a cut the server could never revise, redo per-org, or use for
+/// anything else. These are the reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentLocalTime {
+    /// Minutes east of UTC at that instant (`-420` for UTC-7), DST included —
+    /// the zone as it actually was, not as the zone database reads today.
+    pub utc_offset_minutes: i32,
+    /// Local hour, 0-23.
+    pub hour: u8,
+    /// Local day of week, 0=Sunday … 6=Saturday (JS `getDay()`).
+    pub weekday: u8,
 }
 
 /// A daemon-emitted segment — the sync unit (feature §17.3).
@@ -192,6 +235,10 @@ pub struct Segment {
     pub behavior: Option<SegmentBehavior>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_intent: Option<String>,
+    /// The local wall clock at `started_at` — see [`SegmentLocalTime`]. Absent
+    /// when the instant is unreadable, and from daemons predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_time: Option<SegmentLocalTime>,
 }
 
 impl Segment {
@@ -496,6 +543,7 @@ mod tests {
             abstract_embedding: None,
             behavior: None,
             user_intent: None,
+            local_time: None,
         };
         seg.clamp();
         assert!(seg.r#abstract.len() <= caps::ABSTRACT_MAX);

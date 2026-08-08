@@ -210,8 +210,19 @@ pub fn parse_cognition_reply(text: &str) -> Option<CognitionTags> {
     })
 }
 
-/// Lowercase → NFKD → keep `[a-z0-9-]` → collapse/trim hyphens → cap 24 chars,
-/// dedupe, cap 3 per field.
+/// Lowercase → NFC → drop control/whitespace characters → collapse/trim hyphens
+/// → cap 24 chars, dedupe, cap 3 per field.
+///
+/// The filter used to be `[a-z0-9-]` over an NFKD decomposition, which is an
+/// ASCII-only alphabet: every CJK, Cyrillic, Greek, Arabic, Hebrew, Thai and
+/// Devanagari tag reduced to `""` and was dropped, so a model answering in the
+/// user's own language produced no cognition tags at all — silently, and looking
+/// exactly like a model that had nothing to say. The tag is a LABEL the server
+/// stores and groups on; its codepoints are the data. The length caps are the
+/// real guard (they bound the wire), so only characters that would corrupt a
+/// stored label are removed: control characters and whitespace. NFC (composed —
+/// the same form [`normalize_tool_name`] uses) replaces NFKD, whose only job
+/// here was to strip accents apart for the ASCII filter that just went.
 pub fn sanitise_tags(raw: Option<&Value>) -> Vec<String> {
     let Some(Value::Array(arr)) = raw else {
         return Vec::new();
@@ -220,10 +231,10 @@ pub fn sanitise_tags(raw: Option<&Value>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for t in arr {
         let Some(t) = t.as_str() else { continue };
-        let lowered: String = t.to_lowercase().nfkd().collect();
+        let lowered: String = t.to_lowercase().nfc().collect();
         let filtered: String = lowered
             .chars()
-            .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+            .filter(|c| !c.is_control() && !c.is_whitespace())
             .collect();
         let collapsed = collapse_hyphens(&filtered);
         let trimmed = collapsed.trim_matches('-');
@@ -591,15 +602,41 @@ mod tests {
     #[tokio::test]
     async fn cognition_parses_fenced_json() {
         let fake = Fake::reply(
-            "```json\n{\"emotions\":[\"Frustrated!\",\"frustrated\"],\"meta\":[\"in-flow\"],\"posture\":[]}\n```",
+            "```json\n{\"emotions\":[\"Frustrated\",\"frustrated\"],\"meta\":[\"in flow\"],\"posture\":[]}\n```",
         );
         let tags = cognition(&fake, "a long enough abstract about work")
             .await
             .unwrap();
-        // Dedup + sanitise: "Frustrated!" → "frustrated", dup dropped.
+        // Dedup + sanitise: case-folded, so the second copy is dropped.
         assert_eq!(tags.emotions, vec!["frustrated"]);
-        assert_eq!(tags.meta, vec!["in-flow"]);
+        // Whitespace is one of the two classes still filtered out.
+        assert_eq!(tags.meta, vec!["inflow"]);
         assert!(tags.posture.is_empty());
+    }
+
+    #[test]
+    fn tags_in_any_script_survive() {
+        // Regression: the filter was `[a-z0-9-]`, so EVERY tag written in a
+        // non-Latin script collapsed to "" and was dropped — a model answering
+        // in the user's own language produced no cognition tags at all, and the
+        // silence looked exactly like a model with nothing to say.
+        let tags = sanitise_tags(Some(&serde_json::json!([
+            "集中",      // CJK
+            "Спокойный", // Cyrillic (also proves case folding is Unicode-wide)
+            "χαρά",      // Greek
+        ])));
+        assert_eq!(tags, vec!["集中", "спокойный", "χαρά"]);
+    }
+
+    #[test]
+    fn the_caps_still_bind() {
+        // The length + count caps are what actually bounds the wire, and they
+        // count CHARACTERS, so a 3-byte-per-char script is not cut short.
+        let long_cjk = "字".repeat(40);
+        let tags = sanitise_tags(Some(&serde_json::json!([long_cjk, "a", "b", "c", "d"])));
+        assert_eq!(tags.len(), MAX_COGNITION_TAGS_PER_FIELD);
+        assert_eq!(tags[0].chars().count(), MAX_COGNITION_TAG_CHARS);
+        assert_eq!(tags[0], "字".repeat(MAX_COGNITION_TAG_CHARS));
     }
 
     #[tokio::test]

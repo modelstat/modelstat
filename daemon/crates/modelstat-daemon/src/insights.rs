@@ -6,8 +6,8 @@
 //! `~/.modelstat/sessions/<sessionId>.json`. The always-on `modelstat statusline`
 //! command reads ONLY this cache (never the network), so the status line is
 //! instant + offline-tolerant. Server enrichment is async (tokens+cost in ~2s,
-//! taxonomy follows), so a fresh session is briefly `analyzing`; we short-poll a
-//! small bounded number of times so the cache converges to `ready`.
+//! taxonomy follows), so a fresh session is briefly un-enriched; we short-poll a
+//! small bounded number of times so the cache converges to a TERMINAL status.
 //!
 //! The `sessions_dir` + the network fetch are injected: daemon-main passes the
 //! real `home_path("sessions")` + a `DeviceApi`-backed MCP fetcher, tests pass a
@@ -57,8 +57,33 @@ pub struct SessionInsights {
     pub cached_at: Option<String>,
 }
 
-/// Bounded short-poll delays while the server is still `analyzing`.
+/// Bounded short-poll delays while the server is still working.
 const POLL_DELAYS_MS: [u64; 4] = [1200, 2000, 3000, 4000];
+
+/// The server has finished enriching this session.
+pub const STATUS_READY: &str = "ready";
+/// The server has never seen this session — there is nothing to wait for.
+pub const STATUS_NOT_INGESTED: &str = "not_ingested";
+
+/// The statuses that mean the server is DONE with this session — it has enriched
+/// it, or it has nothing to enrich. Everything else, including a status this
+/// build has never heard of, is read as still-working.
+///
+/// This is the honest direction of the test. Polling `while status == "analyzing"`
+/// made every unknown status terminal, so the day the server adds `queued` or
+/// `summarising` the fleet stops on the FIRST reply and caches a half-enriched
+/// payload — a break that ships from the server and cannot be fixed there. The
+/// wrong reading is bounded here: at worst four extra polls over ~10s.
+const TERMINAL_STATUSES: [&str; 2] = [STATUS_READY, STATUS_NOT_INGESTED];
+
+/// True while the server may still have work to do for this session.
+fn still_working(status: Option<&str>) -> bool {
+    match status {
+        // No status at all (a fetch failure) — nothing to converge to.
+        None => false,
+        Some(s) => !TERMINAL_STATUSES.contains(&s),
+    }
+}
 
 /// Percent-encode a session id for a safe path segment (matches the intent of
 /// `encodeURIComponent` — a `/` can never escape the sessions dir). UUID ids
@@ -127,10 +152,11 @@ fn status_of(insights: &Value) -> Option<&str> {
 }
 
 /// Fetch + cache one session chain's insights, eagerly prioritising the server's
-/// enrichment, and short-poll a few times while it's `analyzing` so the cache
-/// converges to `ready`. Every interim result is cached too (the statusline shows
-/// progress). Best-effort throughout — a write failure never sinks a scan. Keyed
-/// by the FIRST id (Claude Code's live `session_id`). Port of
+/// enrichment, and short-poll a few times while the server may still be working
+/// ([`still_working`]) so the cache converges to a terminal status. Every interim
+/// result is cached too (the statusline shows progress). Best-effort throughout —
+/// a write failure never sinks a scan. Keyed by the FIRST id
+/// (Claude Code's live `session_id`). Port of
 /// `refreshSessionInsights`. `now_iso` stamps `cached_at` (injected so callers
 /// control the clock).
 pub async fn refresh_session_insights<F: SessionInsightsFetcher>(
@@ -147,8 +173,8 @@ pub async fn refresh_session_insights<F: SessionInsightsFetcher>(
         let _ = cache_session_insights(sessions_dir, cache_key, v, &now_iso());
     }
     for delay in POLL_DELAYS_MS {
-        // Stop as soon as the server has moved past `analyzing`.
-        if insights.as_ref().and_then(status_of) != Some("analyzing") {
+        // Stop only on a status that explicitly says the server is finished.
+        if !still_working(insights.as_ref().and_then(status_of)) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -257,5 +283,42 @@ mod tests {
             "ready"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_status_this_build_has_never_heard_of_keeps_polling() {
+        // The server may name a new in-progress phase at any time. Reading an
+        // unknown status as terminal would stop the fleet on the first reply and
+        // cache a half-enriched payload — a break shipped from the server that
+        // the server could not then fix.
+        let dir = tmp_dir("unknown");
+        let fetcher = ScriptedFetcher {
+            replies: Mutex::new(
+                [
+                    json!({ "status": "queued", "segment_count": 0 }),
+                    json!({ "status": "summarising", "segment_count": 1 }),
+                    json!({ "status": "ready", "segment_count": 3 }),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            eager_calls: Mutex::new(0),
+        };
+        let ids = vec!["sess-x".to_string()];
+        refresh_session_insights(&fetcher, &ids, &dir, || "t".to_string()).await;
+        let read = read_cached_insights_sync(&dir, "sess-x").unwrap();
+        assert_eq!(read.status, "ready");
+        assert_eq!(read.segment_count, Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_explicit_terminal_markers_stop_the_poll() {
+        assert!(!still_working(Some("ready")));
+        assert!(!still_working(Some("not_ingested")));
+        assert!(still_working(Some("analyzing")));
+        assert!(still_working(Some("anything_new")));
+        // No status at all means the fetch failed — nothing to converge to.
+        assert!(!still_working(None));
     }
 }

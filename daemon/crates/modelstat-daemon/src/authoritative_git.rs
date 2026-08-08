@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use modelstat_wire::{GitContext, RawEvent};
+use modelstat_wire::{GitContext, RawEvent, SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_REPO_ROOT_DIR};
 
 /// The corrected repo identity for a cwd (slug always present).
 struct RepoIdentity {
@@ -21,6 +21,10 @@ struct RepoIdentity {
     remote_host: Option<String>,
     remote_slug: String,
     branch: Option<String>,
+    /// Which of the two corrections produced `remote_slug` — the configured
+    /// remote, or the repo-root directory name. Rides to the server so a bare
+    /// root name is never mistaken for an `owner/repo` off a real forge.
+    slug_source: &'static str,
 }
 
 /// The last path component of `path` (`/a/b/repo` → `repo`), or `""`.
@@ -70,6 +74,7 @@ pub fn resolve_authoritative_git(
                     remote_host: g.remote_host,
                     remote_slug: slug,
                     branch: g.branch,
+                    slug_source: SLUG_SOURCE_GIT_REMOTE,
                 },
             );
             continue;
@@ -85,6 +90,7 @@ pub fn resolve_authoritative_git(
                     remote_host: None,
                     remote_slug: name,
                     branch: branch_fallback,
+                    slug_source: SLUG_SOURCE_REPO_ROOT_DIR,
                 },
             );
         }
@@ -106,6 +112,7 @@ pub fn resolve_authoritative_git(
                         remote_url: id.remote_url.clone(),
                         remote_host: id.remote_host.clone(),
                         remote_slug: Some(id.remote_slug.clone()),
+                        slug_source: Some(id.slug_source.to_string()),
                         // Keep the branch the parser recorded for THIS turn; fall
                         // back to the on-disk branch only when the event had none.
                         branch: e
@@ -124,6 +131,7 @@ pub fn resolve_authoritative_git(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use modelstat_wire::SLUG_SOURCE_PATH_SHAPE;
 
     fn ev(cwd: Option<&str>, branch: Option<&str>) -> RawEvent {
         RawEvent {
@@ -143,6 +151,7 @@ mod tests {
                 remote_host: None,
                 remote_slug: Some("guessed/subdir".into()),
                 branch: Some(b.into()),
+                slug_source: Some(SLUG_SOURCE_PATH_SHAPE.to_string()),
             }),
             tokens: None,
             duration_ms: None,
@@ -167,11 +176,14 @@ mod tests {
                     remote_host: Some("github.com".into()),
                     remote_slug: Some("acme/api".into()),
                     branch: Some("main".into()),
+                    slug_source: Some(SLUG_SOURCE_GIT_REMOTE.to_string()),
                 })
             },
             |_cwd| Some("/repo".into()),
         );
         let g = out[0].git.as_ref().unwrap();
+        // The correction re-labels the provenance too: the path guess is gone.
+        assert_eq!(g.slug_source.as_deref(), Some(SLUG_SOURCE_GIT_REMOTE));
         assert_eq!(g.remote_slug.as_deref(), Some("acme/api")); // corrected
         assert_eq!(g.branch.as_deref(), Some("feature/x")); // turn branch preserved
     }
@@ -187,11 +199,15 @@ mod tests {
                     remote_host: None,
                     remote_slug: None, // no origin
                     branch: Some("dev".into()),
+                    slug_source: None,
                 })
             },
             |_cwd| Some("/home/dev/myrepo".into()),
         );
         let g = out[0].git.as_ref().unwrap();
+        // A directory name is not an `owner/repo` off a forge, and says so.
+        assert_eq!(g.slug_source.as_deref(), Some(SLUG_SOURCE_REPO_ROOT_DIR));
+        assert!(g.remote_host.is_none());
         assert_eq!(g.remote_slug.as_deref(), Some("myrepo")); // bare root name
         assert_eq!(g.branch.as_deref(), Some("dev")); // on-disk branch (event had none)
     }
@@ -200,11 +216,10 @@ mod tests {
     fn no_git_reachable_leaves_the_event_untouched() {
         let events = vec![ev(Some("/tmp/scratch"), Some("wip"))];
         let out = resolve_authoritative_git(&events, |_| None, |_| None);
-        // Unchanged: the parser's guessed slug survives.
-        assert_eq!(
-            out[0].git.as_ref().unwrap().remote_slug.as_deref(),
-            Some("guessed/subdir")
-        );
+        // Unchanged: the parser's guessed slug survives — still labeled a guess.
+        let g = out[0].git.as_ref().unwrap();
+        assert_eq!(g.remote_slug.as_deref(), Some("guessed/subdir"));
+        assert_eq!(g.slug_source.as_deref(), Some(SLUG_SOURCE_PATH_SHAPE));
     }
 
     #[test]

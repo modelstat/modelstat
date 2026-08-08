@@ -15,12 +15,12 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use modelstat_redact::redact;
-use modelstat_wire::{source_event_id, EventSource, GitContext, RawEvent, TokenUsage};
+use modelstat_wire::{source_event_id, EventSource, RawEvent, TokenUsage};
 use regex::Regex;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
-use crate::git::guess_repo_slug_from_path;
+use crate::git::{guess_repo_slug_from_path, path_guessed_git_context};
 use crate::line_reader::OffsetLines;
 use crate::references::detect_event_references;
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
@@ -360,19 +360,7 @@ fn parse_inner(
                 }
             }
 
-            let git = if slug.is_some() || git_branch.is_some() {
-                Some(GitContext {
-                    remote_url: None,
-                    remote_host: slug
-                        .as_ref()
-                        .filter(|s| s.contains('/'))
-                        .map(|_| "github.com".to_string()),
-                    remote_slug: slug.clone(),
-                    branch: git_branch.clone(),
-                })
-            } else {
-                None
-            };
+            let git = path_guessed_git_context(slug.clone(), git_branch.clone());
 
             sink.push(RawEvent {
                 source_event_id: event_id,
