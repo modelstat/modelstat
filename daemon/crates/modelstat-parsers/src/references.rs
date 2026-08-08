@@ -28,14 +28,23 @@ fn default_content_source() -> String {
 fn default_git_source() -> String {
     "git".to_string()
 }
+/// The schema's `confidence` default — and, since the per-detector constants
+/// went, the ONLY value the daemon ever writes into that field. See the note on
+/// [`PullRequestRef::confidence`].
 fn default_pr_confidence() -> f64 {
     0.9
 }
+/// See [`default_pr_confidence`].
 fn default_issue_confidence() -> f64 {
     0.8
 }
 fn default_issue_provider() -> String {
     "other".to_string()
+}
+
+/// `#[serde(skip_serializing_if)]` for a `bool` — omit the common `false`.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Trust ranking — higher wins when the same entity is seen twice.
@@ -77,6 +86,12 @@ pub struct PullRequestRef {
     pub url: Option<String>,
     #[serde(default = "default_content_source")]
     pub source: String,
+    /// VESTIGIAL. The daemon writes one constant here — [`default_pr_confidence`]
+    /// — for every detector. The per-detector weights it used to carry (0.95 for
+    /// a forge URL, 0.6 for a shorthand) were invented numbers standing in for
+    /// "which detector fired", which `source` and [`IssueRef::ambiguous`] now say
+    /// outright. Kept only because the server still reads the field; see the
+    /// core follow-up.
     #[serde(default = "default_pr_confidence")]
     pub confidence: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,8 +124,16 @@ pub struct IssueRef {
     pub url: Option<String>,
     #[serde(default = "default_content_source")]
     pub source: String,
+    /// VESTIGIAL — see [`PullRequestRef::confidence`].
     #[serde(default = "default_issue_confidence")]
     pub confidence: f64,
+    /// The observed text does not identify WHAT this reference is. Two shapes
+    /// set it: `org/repo#N`, which GitHub itself resolves to either a PR or an
+    /// issue (the daemon files it as an issue and says so), and a bare
+    /// `TEAM-123`, which may be no ticket at all (`UTF-8`, `SHA-256`). A URL
+    /// never sets it — a `/issues/` path states its own kind.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ambiguous: bool,
 }
 
 /// A file a session changed, with the lines added/deleted across the session's
@@ -230,14 +253,6 @@ fn bare_ticket() -> &'static Regex {
     static C: OnceLock<Regex> = OnceLock::new();
     re(&C, r"(?-u:\b)([A-Z][A-Z0-9]{1,9}-[0-9]{1,6})(?-u:\b)")
 }
-/// PR-cue lookbehind for the shorthand (`\b(pr|pull-request|…|merged)\s*$`).
-fn pr_cue() -> &'static Regex {
-    static C: OnceLock<Regex> = OnceLock::new();
-    re(
-        &C,
-        r"(?i)(?-u:\b)(pr|pull[ -]?request|merge[ -]?request|mr|merged)\s*$",
-    )
-}
 
 fn repo_from(host: Option<String>, slug: &str, source: &str) -> RepoRef {
     RepoRef {
@@ -251,6 +266,10 @@ fn repo_from(host: Option<String>, slug: &str, source: &str) -> RepoRef {
 /// Extract every repo / PR / issue reference from a blob of text. `source` tags
 /// every reference and gates the noisier patterns (bare `TEAM-123` keys only for
 /// `source == "model"`).
+///
+/// Every reference ships the schema-default `confidence`. Which detector fired
+/// is stated by `source` plus [`IssueRef::ambiguous`], not by a weight — see the
+/// note on [`PullRequestRef::confidence`].
 pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
     let mut out = DetectedRefs::default();
     if text.is_empty() {
@@ -265,7 +284,7 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             number: c[3].parse().unwrap_or(0),
             url: Some(c[0].to_string()),
             source: source.into(),
-            confidence: 0.95,
+            confidence: default_pr_confidence(),
             merged: None,
             merged_at: None,
             reverted: None,
@@ -283,7 +302,7 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             number: c[2].parse().unwrap_or(0),
             url: Some(c[0].to_string()),
             source: source.into(),
-            confidence: 0.95,
+            confidence: default_pr_confidence(),
             merged: None,
             merged_at: None,
             reverted: None,
@@ -302,7 +321,7 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             number: c[3].parse().unwrap_or(0),
             url: Some(c[0].to_string()),
             source: source.into(),
-            confidence: 0.95,
+            confidence: default_pr_confidence(),
             merged: None,
             merged_at: None,
             reverted: None,
@@ -322,7 +341,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             slug: Some(slug.clone()),
             url: Some(c[0].to_string()),
             source: source.into(),
-            confidence: 0.95,
+            confidence: default_issue_confidence(),
+            ambiguous: false,
         });
         out.repos
             .push(repo_from(Some("github.com".into()), &slug, source));
@@ -334,7 +354,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             slug: Some(c[1].to_string()),
             url: Some(c[0].to_string()),
             source: source.into(),
-            confidence: 0.95,
+            confidence: default_issue_confidence(),
+            ambiguous: false,
         });
         out.repos
             .push(repo_from(Some("gitlab.com".into()), &c[1], source));
@@ -346,7 +367,8 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             slug: None,
             url: Some(c[0].to_string()),
             source: source.into(),
-            confidence: 0.9,
+            confidence: default_issue_confidence(),
+            ambiguous: false,
         });
     }
     for c in jira_issue().captures_iter(text) {
@@ -356,64 +378,43 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             slug: None,
             url: Some(c[0].to_string()),
             source: source.into(),
-            confidence: 0.9,
+            confidence: default_issue_confidence(),
+            ambiguous: false,
         });
     }
 
+    // `org/repo#N` names a thread whose KIND the text does not state — GitHub
+    // resolves the same number to a PR or an issue and redirects between them.
+    // This used to be decided by an English lookbehind ("merged …", "PR …")
+    // weighted 0.6 against 0.55: it read only English, missed every "landed
+    // acme/api#7", and turned a coin flip into a number. ONE reference is
+    // emitted now, filed as an issue and FLAGGED ambiguous — the reconcile pass
+    // in `dedupe` drops it when a real PR for the same slug+number is also
+    // present, and the server resolves the rest.
     for c in slug_hash().captures_iter(text) {
-        let m0 = c.get(0).unwrap();
-        let slug = c[1].to_string();
-        let number: u64 = c[2].parse().unwrap_or(0);
-        // The `org/repo#N` shorthand is ambiguous. Default to an issue, but an
-        // adjacent PR cue ("PR org/repo#N", "merged …") disambiguates to a PR.
-        // `m0.start()` is a byte offset. Backing up a fixed 20 bytes can land
-        // *inside* a multi-byte char (e.g. an em-dash `—` = 3 bytes); slicing a
-        // &str at a non-boundary panics — and with `panic = "abort"` that crashes
-        // the whole daemon (crash-loop). Walk back to the nearest char boundary
-        // first. `m0.start()` itself is always a boundary (a regex match start).
-        let mut lead_start = m0.start().saturating_sub(20);
-        while lead_start > 0 && !text.is_char_boundary(lead_start) {
-            lead_start -= 1;
-        }
-        let lead = &text[lead_start..m0.start()];
-        if pr_cue().is_match(lead) {
-            out.pull_requests.push(PullRequestRef {
-                host: Some("github.com".into()),
-                slug: Some(slug.clone()),
-                number,
-                url: None,
-                source: source.into(),
-                confidence: 0.6,
-                merged: None,
-                merged_at: None,
-                reverted: None,
-                merge_sha: None,
-                merge_subject: None,
-                merge_method: None,
-            });
-            out.repos
-                .push(repo_from(Some("github.com".into()), &slug, source));
-        } else {
-            out.issues.push(IssueRef {
-                provider: "github".into(),
-                key: c[2].to_string(),
-                slug: Some(slug),
-                url: None,
-                source: source.into(),
-                confidence: 0.55,
-            });
-        }
+        out.issues.push(IssueRef {
+            provider: "github".into(),
+            key: c[2].to_string(),
+            slug: Some(c[1].to_string()),
+            url: None,
+            source: source.into(),
+            confidence: default_issue_confidence(),
+            ambiguous: true,
+        });
     }
 
     if source == "model" {
         for c in bare_ticket().captures_iter(text) {
+            // `SHA-256`, `UTF-8` and `RFC-822` all fit the shape, so a bare key
+            // may be no ticket at all — what the old 0.4 was trying to say.
             out.issues.push(IssueRef {
                 provider: "other".into(),
                 key: c[1].to_string(),
                 slug: None,
                 url: None,
                 source: source.into(),
-                confidence: 0.4,
+                confidence: default_issue_confidence(),
+                ambiguous: true,
             });
         }
     }
@@ -543,6 +544,9 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
                     url: win.url.or(lose.url),
                     source: win.source,
                     confidence: win.confidence.max(lose.confidence),
+                    // One sighting that KNEW the kind settles it for both — a
+                    // `/issues/` URL beside a shorthand is no longer ambiguous.
+                    ambiguous: win.ambiguous && lose.ambiguous,
                 };
             }
             None => {
@@ -605,12 +609,14 @@ fn valid_pr(p: &PullRequestRef) -> bool {
         && opt_chars(&p.slug) <= 200
         && opt_chars(&p.url) <= 400
 }
+/// Caps only. There is deliberately no provider allowlist: the detector that
+/// found the issue is the thing that names its provider, so a membership test
+/// here could only ever drop a tracker the daemon had already identified — the
+/// next one added, or one a future channel reports. Size is the real guard.
 fn valid_issue(i: &IssueRef) -> bool {
-    matches!(
-        i.provider.as_str(),
-        "github" | "gitlab" | "bitbucket" | "linear" | "jira" | "other"
-    ) && !i.key.is_empty()
+    !i.key.is_empty()
         && chars(&i.key) <= 80
+        && chars(&i.provider) <= 40
         && opt_chars(&i.slug) <= 200
         && opt_chars(&i.url) <= 400
 }
@@ -651,7 +657,10 @@ pub fn detect_branch_tickets(branch: Option<&str>) -> Vec<IssueRef> {
             slug: None,
             url: None,
             source: "git".into(),
-            confidence: 0.7,
+            confidence: default_issue_confidence(),
+            // A branch name is a place someone deliberately wrote a ticket key,
+            // and `source: "git"` already says the reference is deterministic.
+            ambiguous: false,
         });
     }
     out
@@ -744,16 +753,43 @@ mod tests {
     }
 
     #[test]
-    fn shorthand_defaults_to_issue_pr_cue_flips_it() {
-        let issue = detect_event_references("fixes acme/api#7").unwrap();
-        assert_eq!(issue["issues"][0]["key"], "7");
-        assert_eq!(issue["issues"][0]["provider"], "github");
-        assert!(issue["pull_requests"].as_array().unwrap().is_empty());
+    fn the_shorthand_is_emitted_once_and_flagged_ambiguous() {
+        // Both readings of `org/repo#N` produce ONE reference, flagged. The
+        // English cue that used to split them ("merged" → a 0.6 PR, anything
+        // else → a 0.55 issue) is gone: it decided a coin flip from one word.
+        for text in ["fixes acme/api#7", "merged acme/api#7", "landed acme/api#7"] {
+            let refs = detect_event_references(text).unwrap();
+            assert_eq!(refs["issues"][0]["key"], "7", "{text}");
+            assert_eq!(refs["issues"][0]["provider"], "github", "{text}");
+            assert_eq!(refs["issues"][0]["ambiguous"], true, "{text}");
+            assert_eq!(refs["issues"].as_array().unwrap().len(), 1, "{text}");
+            assert!(
+                refs["pull_requests"].as_array().unwrap().is_empty(),
+                "{text}"
+            );
+        }
+    }
 
-        let pr = detect_event_references("merged acme/api#7").unwrap();
-        assert_eq!(pr["pull_requests"][0]["number"], 7);
-        // The phantom issue is reconciled away (same slug+number).
-        assert!(pr["issues"].as_array().unwrap().is_empty());
+    #[test]
+    fn a_real_pr_url_reconciles_the_shorthand_away() {
+        // A URL states its own kind, so the ambiguous twin for the same
+        // slug+number is dropped rather than shipped alongside it.
+        let refs =
+            detect_event_references("merged acme/api#7 — see https://github.com/acme/api/pull/7")
+                .unwrap();
+        assert_eq!(refs["pull_requests"][0]["number"], 7);
+        assert!(refs["issues"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_issue_url_settles_the_ambiguity_of_the_same_shorthand() {
+        let refs =
+            detect_event_references("acme/api#7 — https://github.com/acme/api/issues/7").unwrap();
+        let issues = refs["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 1);
+        // `ambiguous` is omitted entirely once something knew the kind.
+        assert!(issues[0].get("ambiguous").is_none());
+        assert_eq!(issues[0]["url"], "https://github.com/acme/api/issues/7");
     }
 
     #[test]
@@ -762,8 +798,9 @@ mod tests {
         // `text[m0.start()-20 .. m0.start()]`, and `start-20` landed *inside* an
         // em-dash (`—`, 3 bytes). Slicing a &str off a char boundary panics —
         // and under `panic = "abort"` that aborted the whole daemon, so it
-        // crash-looped and never sent a segment. A run of em-dashes guarantees
-        // `start-20` falls mid-char; this must now scan cleanly.
+        // crash-looped and never sent a segment. The look-behind is gone with
+        // the cue itself, so the class of bug is gone too; kept as the guard
+        // that no future disambiguation reintroduces a byte-offset slice.
         let text = format!("{} acme/api#7", "—".repeat(7));
         let refs = detect_event_references(&text).unwrap();
         assert_eq!(refs["issues"][0]["key"], "7");
@@ -790,7 +827,7 @@ mod tests {
         assert_eq!(issues[0].key, "ENG-742");
         assert_eq!(issues[0].provider, "other");
         assert_eq!(issues[0].source, "git");
-        assert_eq!(issues[0].confidence, 0.7);
+        assert!(!issues[0].ambiguous);
         // None / empty / ticket-free branches yield nothing.
         assert!(detect_branch_tickets(None).is_empty());
         assert!(detect_branch_tickets(Some("")).is_empty());
@@ -837,7 +874,7 @@ mod tests {
             number: 42,
             url: None,
             source: "git".into(),
-            confidence: 0.95,
+            confidence: default_pr_confidence(),
             merged: None,
             merged_at: None,
             reverted: None,

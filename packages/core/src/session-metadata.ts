@@ -99,6 +99,12 @@ export const IssueRef = z.object({
   url: z.string().max(400).nullable().default(null),
   source: RefSource.default("content"),
   confidence: z.number().min(0).max(1).default(0.8),
+  /** The observed text does not identify WHAT this reference is. Two shapes set
+   * it: `org/repo#N`, which GitHub resolves to either a PR or an issue (the
+   * daemon files it as an issue and says so), and a bare `TEAM-123`, which may
+   * be no ticket at all (`UTF-8`, `SHA-256`). A URL never sets it. Absent —
+   * not `false` — when the reference is unambiguous. */
+  ambiguous: z.boolean().optional(),
 });
 export type IssueRef = z.infer<typeof IssueRef>;
 
