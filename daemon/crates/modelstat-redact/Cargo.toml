@@ -32,9 +32,18 @@ ndarray = { version = "0.16", optional = true }
 # worker (see `privacy_filter::label_window`).
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"], optional = true }
 
+# The span cache (`span_cache`): classification is pure, so repeated texts —
+# rife in agent transcripts, and the whole corpus on a re-scan — are answered
+# from disk instead of re-running the model. `bundled` matches the pin in
+# modelstat-parsers so the workspace carries ONE SQLite.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+sha2 = { workspace = true, optional = true }
+
 [features]
 default = []
 onnx = ["dep:ort", "dep:ndarray", "dep:tokenizers", "dep:tokio"]
+cache = ["dep:rusqlite", "dep:sha2"]
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile = "3"

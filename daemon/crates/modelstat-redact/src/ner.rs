@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 /// One classified subword token from the NER model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NerToken {
     /// The BIO tag, e.g. `"B-PER"`, `"I-ORG"`, or `"O"`.
     pub entity: String,

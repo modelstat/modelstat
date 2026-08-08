@@ -357,9 +357,13 @@ pub enum DaemonNer {
     /// NER inactive — only the deterministic regex floor (layer 1) applies. In
     /// cloud/self-hosted this makes the flush fail-closed (holds, no egress).
     Unavailable(UnavailableNer),
-    /// OpenAI Privacy Filter over ONNX Runtime — the PII detector (§9.5).
+    /// OpenAI Privacy Filter over ONNX Runtime — the PII detector (§9.5) —
+    /// behind the span cache, so a text the model already classified (repeated
+    /// tool output, or the whole corpus on a version-bump re-scan) skips
+    /// inference. The cache stores raw model answers only; with it cold, absent,
+    /// or disabled the behaviour is exactly the bare model's.
     #[cfg(feature = "onnx")]
-    PrivacyFilter(modelstat_redact::privacy_filter::PrivacyFilter),
+    PrivacyFilter(modelstat_redact::CachedNer<modelstat_redact::privacy_filter::PrivacyFilter>),
 }
 
 impl NerModel for DaemonNer {
@@ -370,6 +374,78 @@ impl NerModel for DaemonNer {
             DaemonNer::PrivacyFilter(n) => n.classify(text),
         }
     }
+}
+
+/// The span cache for the redactor at `model_dir`, or `None` when it can't be
+/// keyed or opened — the cache may only ever make redaction faster, so every
+/// failure here degrades to "no cache", never to "no redaction".
+///
+/// `MODELSTAT_SPAN_CACHE=off` disables it; `MODELSTAT_SPAN_CACHE_MAX_MB`
+/// resizes it (default 512).
+#[cfg(feature = "onnx")]
+fn open_span_store(model_dir: &std::path::Path) -> Option<modelstat_redact::SpanStore> {
+    if matches!(
+        std::env::var("MODELSTAT_SPAN_CACHE").ok().as_deref(),
+        Some("off") | Some("0") | Some("false")
+    ) {
+        return None;
+    }
+    let fingerprint = redactor_fingerprint(model_dir)?;
+    let max_bytes = std::env::var("MODELSTAT_SPAN_CACHE_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|mb| mb * 1024 * 1024)
+        .unwrap_or(modelstat_redact::span_cache::DEFAULT_MAX_BYTES);
+    match modelstat_redact::SpanStore::open(
+        &home_path("span-cache.sqlite3"),
+        &fingerprint,
+        max_bytes,
+    ) {
+        Ok(store) => Some(store),
+        Err(e) => {
+            modelstat_log::log_warn!(
+                "span cache could not open ({e}) — redaction runs uncached at full model cost"
+            );
+            None
+        }
+    }
+}
+
+/// Name the exact model the cache's answers come from: a digest over the
+/// checkpoint config, every model file's size, a head+tail sample of the big
+/// weights sidecar, and the recall bias in force. There is no pinned upstream
+/// revision to lean on (the downloader tracks the repo), so identity comes from
+/// the bytes on disk. `None` — files unreadable — means "cannot say", and an
+/// unnameable model gets no cache rather than a guessed key.
+#[cfg(feature = "onnx")]
+fn redactor_fingerprint(model_dir: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(std::fs::read(model_dir.join("config.json")).ok()?);
+    for entry in modelstat_download::PRIVACY_FILTER.files {
+        let meta = std::fs::metadata(model_dir.join(entry.local)).ok()?;
+        h.update(entry.local.as_bytes());
+        h.update(meta.len().to_le_bytes());
+    }
+    // 64 KiB off each end of the weights sidecar: enough that swapped weights
+    // can't share a fingerprint by size alone, cheap enough for every boot.
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(model_dir.join("onnx").join("model_q4.onnx_data")).ok()?;
+        let len = f.metadata().ok()?.len();
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = f.read(&mut buf).ok()?;
+        h.update(&buf[..n]);
+        f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)))
+            .ok()?;
+        let n = f.read(&mut buf).ok()?;
+        h.update(&buf[..n]);
+    }
+    Some(format!(
+        "pf:{:x}:bias={}",
+        h.finalize(),
+        modelstat_redact::privacy_filter::recall_bias()
+    ))
 }
 
 /// Build the redactor for this process. Loads OpenAI Privacy Filter from the
@@ -383,10 +459,16 @@ pub fn build_ner() -> DaemonNer {
         let dir = model_dir("MODELSTAT_REDACTOR_MODEL_DIR", "privacy-filter");
         match modelstat_redact::privacy_filter::PrivacyFilter::load(&dir) {
             Ok(n) => {
+                let store = open_span_store(&dir);
                 modelstat_log::log_info!(
-                    "redactor (layer 2): OpenAI Privacy Filter loaded (PII spans, on-device)"
+                    "redactor (layer 2): OpenAI Privacy Filter loaded (PII spans, on-device{})",
+                    if store.is_some() {
+                        ", span cache on"
+                    } else {
+                        ", span cache off"
+                    }
                 );
-                return DaemonNer::PrivacyFilter(n);
+                return DaemonNer::PrivacyFilter(modelstat_redact::CachedNer::new(n, store));
             }
             Err(err) => {
                 modelstat_log::log_warn!(
