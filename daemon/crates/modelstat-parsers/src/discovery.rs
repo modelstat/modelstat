@@ -738,32 +738,47 @@ fn expand_path(p: &str) -> String {
 /// [`expand_path`] against an explicit home.
 ///
 /// The home is injected so a caller working over a test root — or any home that
-/// is not this process's — resolves `~` and the XDG defaults inside it. A `$VAR`
-/// that IS set still wins as written: an environment variable is an absolute
-/// override somebody chose, not a path relative to anything.
+/// is not this process's — resolves every home-relative form inside it.
 fn expand_path_with_home(home: &Path, p: &str) -> String {
     let home = home.to_string_lossy().into_owned();
+    // `$APPDATA`, `$LOCALAPPDATA` and the XDG pair are PLATFORM BASE
+    // DIRECTORIES: they say where *this user's* home keeps application data. So
+    // they are read from the environment only when the home being expanded IS
+    // this user's, and derived from the given home otherwise. Without that split
+    // a caller working over an injected root asks for `<root>/AppData/Roaming`
+    // and gets the real `%APPDATA%` — which on Windows is always set, so the
+    // root it was handed is quietly ignored.
+    //
+    // The per-agent relocation variables (`CODEX_HOME`, `PI_HOME`, …) are a
+    // different thing and keep winning unconditionally: those name one tool's
+    // absolute directory, not a base the home derives.
+    let is_this_users_home = home_dir().is_some_and(|real| real == home);
+    let base = |var: &str, derived: String| {
+        if is_this_users_home {
+            env_or(var, || derived)
+        } else {
+            derived
+        }
+    };
     let mut s = p.to_string();
     s = s.replace(
         "$XDG_CONFIG_HOME",
-        &env_or("XDG_CONFIG_HOME", || format!("{home}/.config")),
+        &base("XDG_CONFIG_HOME", format!("{home}/.config")),
     );
     s = s.replace(
         "$XDG_DATA_HOME",
-        &env_or("XDG_DATA_HOME", || format!("{home}/.local/share")),
+        &base("XDG_DATA_HOME", format!("{home}/.local/share")),
     );
-    // Unset `%APPDATA%` falls back to what it MEANS rather than to the empty
-    // string, which used to turn `$APPDATA/Cursor` into the absolute `/Cursor`
-    // — a path that exists on nobody's machine and silently probed nothing.
-    // Windows layouts show up under non-Windows homes often enough to matter
-    // (translation layers, restored profiles, test roots).
+    // An unset `%APPDATA%` falls back to what the variable MEANS rather than to
+    // the empty string, which used to turn `$APPDATA/Cursor` into the absolute
+    // `/Cursor` — a path on nobody's machine that silently probed nothing.
     s = s.replace(
         "$LOCALAPPDATA",
-        &env_or("LOCALAPPDATA", || format!("{home}/AppData/Local")),
+        &base("LOCALAPPDATA", format!("{home}/AppData/Local")),
     );
     s = s.replace(
         "$APPDATA",
-        &env_or("APPDATA", || format!("{home}/AppData/Roaming")),
+        &base("APPDATA", format!("{home}/AppData/Roaming")),
     );
     s = s.replace("$HOME", &home);
     if let Some(rest) = s.strip_prefix('~') {
@@ -1442,6 +1457,31 @@ mod tests {
         assert!(file_signature_installs(&root, &claimed).is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An injected home means EVERY home-relative form resolves inside it.
+    ///
+    /// `%APPDATA%` is always set on Windows, so honouring it while expanding
+    /// somebody else's home sent discovery to the real roaming profile and
+    /// quietly ignored the root it was handed — caught by the Windows CI lane,
+    /// invisible on macOS and Linux where the variable is usually unset.
+    #[test]
+    fn platform_base_dirs_follow_the_home_they_are_given() {
+        let root = Path::new("/tmp/modelstat-not-a-real-home");
+        for (raw, tail) in [
+            ("$APPDATA/Cursor", "/AppData/Roaming/Cursor"),
+            ("$LOCALAPPDATA/Cursor", "/AppData/Local/Cursor"),
+            ("$XDG_CONFIG_HOME/codex", "/.config/codex"),
+            ("$XDG_DATA_HOME/codex", "/.local/share/codex"),
+            ("~/.claude", "/.claude"),
+            ("$HOME/.claude", "/.claude"),
+        ] {
+            assert_eq!(
+                expand_path_with_home(root, raw),
+                format!("{}{tail}", root.display()),
+                "{raw} escaped the home it was given"
+            );
+        }
     }
 
     #[test]
