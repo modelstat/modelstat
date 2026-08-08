@@ -308,11 +308,8 @@ where
         if let Some(slug) = &git.remote_slug {
             tags.push(hint("projects", slug, 1.0));
         }
-        if let Some(branch) = &git.branch {
-            if let Some(env) = infer_environment(branch) {
-                tags.push(hint("environments", env, 0.7));
-            }
-        }
+        // No `environments` hint: the branch ships verbatim in GitContext and
+        // the server owns what a branch name means for a given org.
     }
     for c in components_from_slice(slice) {
         tags.push(hint("components", &c, 0.6));
@@ -535,20 +532,6 @@ fn compute_behavior(slice: &[&RawEvent], cognition: Option<&CognitionTags>) -> S
         user_turns,
         correction_count,
         frustration,
-    }
-}
-
-/// Map a branch name to a deployment environment (index.ts `inferEnvironment`).
-fn infer_environment(branch: &str) -> Option<&'static str> {
-    let b = branch.to_lowercase();
-    if b == "main" || b == "master" || b.starts_with("release/") {
-        Some("Prod")
-    } else if b == "staging" || b.starts_with("staging/") {
-        Some("Staging")
-    } else if b == "dev" || b == "develop" || b.starts_with("dev/") {
-        Some("Dev")
-    } else {
-        None
     }
 }
 
@@ -843,7 +826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tags_cover_project_environment_components_and_tool_mix() {
+    async fn tags_cover_project_components_and_tool_mix() {
         let mut e = ev(
             "e1",
             "2026-06-01T10:00:00.000Z",
@@ -872,10 +855,9 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.root_key == "projects" && t.name == "acme/web"));
-        assert!(s
-            .tags
-            .iter()
-            .any(|t| t.root_key == "environments" && t.name == "Prod"));
+        // `main` used to be tagged `environments: Prod` here — a client-side
+        // guess at the server's node names. The branch itself is what ships.
+        assert!(!s.tags.iter().any(|t| t.root_key == "environments"));
         // top-2-level dir dedups to a single "core/rust" component.
         let comps: Vec<&str> = s
             .tags
@@ -946,17 +928,6 @@ mod tests {
             segs[0].abstract_embedding.as_ref().unwrap().len(),
             EMBED_DIM
         );
-    }
-
-    #[test]
-    fn infer_environment_maps_branches() {
-        assert_eq!(infer_environment("main"), Some("Prod"));
-        assert_eq!(infer_environment("MASTER"), Some("Prod"));
-        assert_eq!(infer_environment("release/1.2"), Some("Prod"));
-        assert_eq!(infer_environment("staging"), Some("Staging"));
-        assert_eq!(infer_environment("dev/foo"), Some("Dev"));
-        assert_eq!(infer_environment("develop"), Some("Dev"));
-        assert_eq!(infer_environment("feature/x"), None);
     }
 
     #[test]
