@@ -5,7 +5,10 @@
 //!
 //! Deliberately a direct filesystem walk (not the richer `discover()` installer
 //! probe): the scan + the self-healing reconcile must reason over the exact same
-//! file set, and the per-tool directory shapes are fixed.
+//! file set. But WHERE to walk comes from the one source registry
+//! (`discovery::data_dir_candidates_from`), because a second list drifts: this
+//! module used to hard-code `~/.codex` while the registry honoured `CODEX_HOME`,
+//! so a relocated codex was reported as installed and never read.
 //!
 //! Four agents are walked: Claude Code, Codex, pi/omp, and Cursor. Cursor is the
 //! odd one — its conversations live in ONE global key/value DB rather than
@@ -14,6 +17,9 @@
 
 use std::path::{Path, PathBuf};
 
+use modelstat_parsers::discovery::{
+    agent_data_dirs_from_processes, application_data_roots, data_dir_candidates_from, SKIP_DIRS,
+};
 use modelstat_parsers::{
     parse_claude_code_jsonl, parse_claude_code_jsonl_streaming, parse_codex_rollout,
     parse_codex_rollout_streaming, parse_cursor_tracking_db, parse_pi_session,
@@ -80,24 +86,6 @@ fn is_rollout_jsonl(p: &Path) -> bool {
 /// disk walk.
 const CLAUDE_SEARCH_MAX_DEPTH: usize = 5;
 
-/// Directory names never worth descending: vendor caches, blob stores and VM
-/// images that hold no transcripts and plenty of gigabytes.
-const SKIP_DIRS: &[&str] = &[
-    "node_modules",
-    "blob_storage",
-    "Cache",
-    "Code Cache",
-    "GPUCache",
-    "CachedData",
-    "Crashpad",
-    "logs",
-    "claude-code-vm",
-    "Partitions",
-    "Service Worker",
-    "IndexedDB",
-    "Local Storage",
-];
-
 /// Where to hunt for Claude Code transcript trees, and the agent label sessions
 /// found under each should carry.
 ///
@@ -105,7 +93,10 @@ const SKIP_DIRS: &[&str] = &[
 /// the human used **Claude Desktop**, and `agent` names the tool the human
 /// used. Merging them would destroy a distinction nothing can recover later;
 /// keeping them apart can always be summed at read time.
-fn claude_search_roots(home: &Path) -> Vec<(PathBuf, Option<&'static str>, usize)> {
+fn claude_search_roots(
+    home: &Path,
+    process_dirs: &[(String, String)],
+) -> Vec<(PathBuf, Option<&'static str>, usize)> {
     // The CLI's own home.
     // Depth 0 for the homes: `<home>/.claude/projects` is an exact location, and
     // descending from a home that happens to lack `.claude` would walk the
@@ -113,28 +104,25 @@ fn claude_search_roots(home: &Path) -> Vec<(PathBuf, Option<&'static str>, usize
     // app-data roots below already own.
     let mut roots: Vec<(PathBuf, Option<&'static str>, usize)> =
         vec![(home.to_path_buf(), None, 0)];
-    // `CLAUDE_CONFIG_DIR` relocates that home; a user who set it would
-    // otherwise report nothing at all. It points AT the `.claude` dir, so the
-    // shape search starts at its parent.
-    if let Some(parent) = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(|c| Path::new(&c).parent().map(Path::to_path_buf))
-    {
-        roots.push((parent, None, 0));
-    }
-    // Data directories named by agents RUNNING right now. This is the only way
-    // to reach an install nothing on disk points at — a second Claude started
-    // with `--config-dir ~/.claude-instances/second` keeps its sessions
-    // somewhere no path list, and no application-data sweep, would look.
-    for (agent, dir) in modelstat_parsers::discovery::agent_data_dirs_from_processes() {
-        if agent == "claude_code" || agent == "claude_desktop" {
+    // Every place this agent's data can live — the known paths, the env vars
+    // that relocate them (`CLAUDE_HOME`), and the directory a RUNNING instance
+    // names on its command line, which is the only way to reach a second Claude
+    // started with `--config-dir ~/.claude-instances/second`. Each points AT a
+    // `.claude` dir, so the shape search starts one level up.
+    //
+    // Both agents, because the same format under a Desktop host is still a
+    // relocated install; the label is decided by artefacts below, never here.
+    for agent in ["claude_code", "claude_desktop"] {
+        for dir in data_dir_candidates_from(home, agent, process_dirs) {
             let path = PathBuf::from(&dir);
-            let label = desktop_host_label(&path);
-            // Searched as deeply as an application's own data dir: a relocated
-            // install is a full copy of the layout, so a Desktop instance
-            // nests its transcripts exactly as far down as the original.
-            roots.push((path, label, CLAUDE_SEARCH_MAX_DEPTH));
+            if let Some(parent) = path.parent().map(Path::to_path_buf) {
+                let label = desktop_host_label(&path).or_else(|| desktop_host_label(&parent));
+                // Searched as deeply as an application's own data dir: a
+                // relocated install is a full copy of the layout, so a Desktop
+                // instance nests its transcripts exactly as far down as the
+                // original.
+                roots.push((parent, label, CLAUDE_SEARCH_MAX_DEPTH));
+            }
         }
     }
 
@@ -144,11 +132,7 @@ fn claude_search_roots(home: &Path) -> Vec<(PathBuf, Option<&'static str>, usize
     // "Claude Dev", a fork is anything at all. So each one is probed for the
     // transcript shape, and whether it counts as a host is decided by what is
     // INSIDE it, never by what it is called.
-    for app_data in [
-        home.join("Library/Application Support"),
-        home.join(".config"),
-        home.join("AppData/Roaming"),
-    ] {
+    for app_data in application_data_roots(home) {
         for app in child_paths(&app_data) {
             let name = app.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') || SKIP_DIRS.contains(&name) || !app.is_dir() {
@@ -222,9 +206,21 @@ fn collect_claude_projects(
     }
 }
 
-/// Discover every scan job under `home` (the 3 active parsers). Test-injectable
-/// root; [`discover_jobs`] passes the real home.
+/// Discover every scan job under `home`, reading the RUNNING agents for
+/// relocated data directories. Test-injectable root; [`discover_jobs`] passes
+/// the real home.
 pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
+    discover_jobs_in_with(home, &agent_data_dirs_from_processes())
+}
+
+/// [`discover_jobs_in`] with the running-process reading supplied.
+///
+/// A process names an ABSOLUTE directory on this machine, which is the whole
+/// value of the probe in production and the whole problem in a test: a suite
+/// building a tree under a temp root would otherwise also discover whatever the
+/// developer happens to have open, and pass or fail on that. Tests pass `&[]`
+/// and get a discovery scoped to the tree they built.
+pub fn discover_jobs_in_with(home: &Path, process_dirs: &[(String, String)]) -> Vec<ScanJob> {
     let mut jobs = Vec::new();
 
     // Claude Code — ~/.claude/projects/<encoded-cwd>/<session>.jsonl, plus the
@@ -234,7 +230,7 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
     // `<app-data>/local-agent-mode-sessions/<a>/<b>/local_<c>/.claude/projects/...`
     // and were invisible for as long as only `$HOME` was walked. Anything else
     // hosting Claude Code the same way is picked up for free.
-    for (root, agent, depth) in claude_search_roots(home) {
+    for (root, agent, depth) in claude_search_roots(home, process_dirs) {
         collect_claude_projects(&root, depth, agent, &mut jobs);
     }
     // Belt and braces: one transcript, one job. Roots can overlap (a relocated
@@ -248,31 +244,34 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
     });
     jobs.dedup_by(|a, b| a.path == b.path);
 
-    // Codex — ~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl
-    for y in child_paths(&home.join(".codex/sessions")) {
-        for m in child_paths(&y) {
-            for d in child_paths(&m) {
-                for f in child_paths(&d) {
-                    if is_rollout_jsonl(&f) {
-                        jobs.push(ScanJob {
-                            path: f.to_string_lossy().into_owned(),
-                            kind: ParserKind::Codex,
-                            since_ms: None,
-                            agent_label: None,
-                        });
+    // Codex — <data-dir>/sessions/<y>/<m>/<d>/rollout-*.jsonl.
+    for data_dir in data_dir_candidates_from(home, "codex_cli", process_dirs) {
+        for y in child_paths(&PathBuf::from(&data_dir).join("sessions")) {
+            for m in child_paths(&y) {
+                for d in child_paths(&m) {
+                    for f in child_paths(&d) {
+                        if is_rollout_jsonl(&f) {
+                            jobs.push(ScanJob {
+                                path: f.to_string_lossy().into_owned(),
+                                kind: ParserKind::Codex,
+                                since_ms: None,
+                                agent_label: None,
+                            });
+                        }
                     }
                 }
             }
         }
     }
 
-    // pi / omp (Oh My Pi) — <home>/.{pi,omp}/agent/sessions/<p>/*.jsonl. OMP is Pi
-    // with its home relocated to ~/.omp; identical JSONL format + parser. One level
-    // deep by design: top-level <TS>_<uuid>.jsonl are the session transcripts,
-    // while nested <TS>_<uuid>/ dirs (subagent + tool logs) are skipped so a
-    // subagent's tokens aren't double-counted against its parent.
-    for root in [".pi/agent/sessions", ".omp/agent/sessions"] {
-        for proj in child_paths(&home.join(root)) {
+    // pi / omp (Oh My Pi) — <data-dir>/sessions/<p>/*.jsonl. OMP is Pi with its
+    // home relocated to ~/.omp; identical JSONL format + parser, and both homes
+    // are candidates for the one `pi` source. One level deep by design: top-level
+    // <TS>_<uuid>.jsonl are the session transcripts, while nested <TS>_<uuid>/
+    // dirs (subagent + tool logs) are skipped so a subagent's tokens aren't
+    // double-counted against its parent.
+    for data_dir in data_dir_candidates_from(home, "pi", process_dirs) {
+        for proj in child_paths(&PathBuf::from(&data_dir).join("sessions")) {
             if proj.is_dir() {
                 for f in child_paths(&proj) {
                     if is_jsonl(&f) {
@@ -289,10 +288,10 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
     }
 
     // Cursor — the chat store is ONE global key/value DB, not a directory of
-    // per-session transcripts: `<user-data>/User/globalStorage/state.vscdb`,
-    // whose location is per-OS. Workspace DBs hold no conversations.
-    for rel in CURSOR_DB_RELATIVE_PATHS {
-        let db = home.join(rel);
+    // per-session transcripts: `<data-dir>/User/globalStorage/state.vscdb`.
+    // Workspace DBs hold no conversations.
+    for data_dir in data_dir_candidates_from(home, "cursor", process_dirs) {
+        let db = PathBuf::from(&data_dir).join(CURSOR_DB_RELATIVE_PATH);
         if db.is_file() {
             jobs.push(ScanJob {
                 path: db.to_string_lossy().into_owned(),
@@ -304,20 +303,17 @@ pub fn discover_jobs_in(home: &Path) -> Vec<ScanJob> {
         }
     }
 
+    // One transcript, one job — the candidate lists overlap by design (a
+    // relocated home that a running process ALSO names, say), and scanning a
+    // file twice would parse and upload it twice every cycle.
+    jobs.sort_by(|a, b| a.path.cmp(&b.path));
+    jobs.dedup_by(|a, b| a.path == b.path);
+
     jobs
 }
 
-/// Where Cursor keeps its global storage, per platform. All three are probed —
-/// a wrong-platform path simply does not exist, and probing beats a `cfg!` when
-/// a user runs Cursor under a translation layer.
-const CURSOR_DB_RELATIVE_PATHS: &[&str] = &[
-    // macOS
-    "Library/Application Support/Cursor/User/globalStorage/state.vscdb",
-    // Linux
-    ".config/Cursor/User/globalStorage/state.vscdb",
-    // Windows (%APPDATA% sits under the user profile)
-    "AppData/Roaming/Cursor/User/globalStorage/state.vscdb",
-];
+/// Cursor's chat store, relative to its data directory.
+const CURSOR_DB_RELATIVE_PATH: &str = "User/globalStorage/state.vscdb";
 
 /// Discover every scan job under the real `$HOME`.
 pub fn discover_jobs() -> Vec<ScanJob> {
@@ -387,6 +383,105 @@ fn mtime_ms(path: &str) -> u128 {
 mod tests {
     use super::*;
 
+    /// No agent is running, so discovery sees exactly the tree the test built.
+    pub(super) const NO_PROCESSES: &[(String, String)] = &[];
+
+    /// Serialize every test in this module against the process-global env.
+    ///
+    /// One of them sets `CODEX_HOME`, and a relocation env var names an ABSOLUTE
+    /// directory — so while it is set, every other test's discovery finds that
+    /// directory too, whatever root it built. The lock is taken by the READERS
+    /// as well as the writer for exactly that reason.
+    pub(super) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Discovery over a test's own tree, with nothing of this machine in it.
+    pub(super) fn jobs_in(home: &Path) -> Vec<ScanJob> {
+        let _g = env_lock();
+        discover_jobs_in_with(home, NO_PROCESSES)
+    }
+
+    /// A RELOCATED install is scanned, not just reported.
+    ///
+    /// The escape hatch used to be gated to `claude_code`/`claude_desktop`, so a
+    /// codex, pi or Cursor running from a directory no path list names was
+    /// DETECTED by the discovery probe — it shows up as an install on the
+    /// dashboard — and then never read. That is the worst of the two failure
+    /// modes: the tool is visibly present and spends nothing.
+    #[test]
+    fn a_relocated_install_of_any_agent_is_walked_not_merely_detected() {
+        let home = std::env::temp_dir().join(format!("modelstat-reloc-{}", std::process::id()));
+        let elsewhere =
+            std::env::temp_dir().join(format!("modelstat-elsewhere-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        let mk = |p: PathBuf| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"{}").unwrap();
+        };
+        // Three agents, each living somewhere no known path points at, each
+        // named only by the command line of the process running it.
+        mk(elsewhere.join("codex-alt/sessions/2026/07/16/rollout-r.jsonl"));
+        mk(elsewhere.join("pi-alt/sessions/p/r.jsonl"));
+        mk(elsewhere.join("cursor-alt/User/globalStorage/state.vscdb"));
+        let processes: Vec<(String, String)> = [
+            ("codex_cli", "codex-alt"),
+            ("pi", "pi-alt"),
+            ("cursor", "cursor-alt"),
+        ]
+        .iter()
+        .map(|(a, d)| {
+            (
+                (*a).to_string(),
+                elsewhere.join(d).to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+
+        let jobs = {
+            let _g = env_lock();
+            discover_jobs_in_with(&home, &processes)
+        };
+        for kind in [ParserKind::Codex, ParserKind::Pi, ParserKind::Cursor] {
+            assert_eq!(
+                jobs.iter().filter(|j| j.kind == kind).count(),
+                1,
+                "{kind:?} relocated outside every known path must still be scanned"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// The env vars that relocate a home are honoured where the SCAN looks, not
+    /// only where the installer probe looks. They used to be honoured in exactly
+    /// one of the two places.
+    #[test]
+    fn the_relocation_env_vars_reach_the_scan() {
+        let home = std::env::temp_dir().join(format!("modelstat-envreloc-{}", std::process::id()));
+        let codex_home = home.join("relocated-codex");
+        let _ = std::fs::remove_dir_all(&home);
+        let f = codex_home.join("sessions/2026/07/16/rollout-e.jsonl");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, b"{}").unwrap();
+
+        // Held across the set/scan/unset, or a concurrent test discovers the
+        // relocated tree this one just pointed the env at.
+        let _g = env_lock();
+        std::env::set_var("CODEX_HOME", &codex_home);
+        let jobs = discover_jobs_in_with(&home, NO_PROCESSES);
+        std::env::remove_var("CODEX_HOME");
+
+        assert_eq!(
+            jobs.iter().filter(|j| j.kind == ParserKind::Codex).count(),
+            1,
+            "CODEX_HOME is in the source registry — the scan must read the same registry"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn walks_the_transcript_roots_and_tags_the_parser() {
         let home = std::env::temp_dir().join(format!("modelstat-jobs-{}", std::process::id()));
@@ -403,7 +498,7 @@ mod tests {
         mk(".pi/agent/sessions/p/b.jsonl");
         mk(".omp/agent/sessions/p/c.jsonl");
 
-        let jobs = discover_jobs_in(&home);
+        let jobs = jobs_in(&home);
         assert_eq!(jobs.len(), 4);
         assert!(jobs
             .iter()
@@ -425,12 +520,13 @@ mod tests {
     fn missing_roots_yield_no_jobs() {
         let home = std::env::temp_dir().join(format!("modelstat-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        assert!(discover_jobs_in(&home).is_empty());
+        assert!(jobs_in(&home).is_empty());
     }
 }
 
 #[cfg(test)]
 mod cursor_discovery_tests {
+    use super::tests::jobs_in;
     use super::*;
 
     /// Cursor's chat store is discovered where it actually lives, on every
@@ -438,17 +534,20 @@ mod cursor_discovery_tests {
     /// life — the docs claimed an env flag gated it, and no such flag existed.
     #[test]
     fn cursor_global_storage_is_discovered_on_each_platform_layout() {
-        for rel in CURSOR_DB_RELATIVE_PATHS {
+        // The three platform layouts, now derived from the ONE source registry
+        // rather than a second list that could drift from it.
+        for app_data in ["Library/Application Support", ".config", "AppData/Roaming"] {
+            let rel = format!("{app_data}/Cursor/{CURSOR_DB_RELATIVE_PATH}");
             let home = std::env::temp_dir().join(format!(
                 "modelstat-disco-{}-{}",
                 std::process::id(),
                 rel.replace(['/', ' '], "_")
             ));
-            let db = home.join(rel);
+            let db = home.join(&rel);
             std::fs::create_dir_all(db.parent().unwrap()).unwrap();
             std::fs::write(&db, b"not-a-real-db").unwrap();
 
-            let jobs = discover_jobs_in(&home);
+            let jobs = jobs_in(&home);
             let cursor: Vec<_> = jobs
                 .iter()
                 .filter(|j| j.kind == ParserKind::Cursor)
@@ -480,7 +579,7 @@ mod cursor_discovery_tests {
         )
         .unwrap();
 
-        let jobs = discover_jobs_in(&home);
+        let jobs = jobs_in(&home);
         let hosted: Vec<_> = jobs.iter().filter(|j| j.agent_label.is_some()).collect();
         assert_eq!(hosted.len(), 1, "found regardless of the app's name");
         assert_eq!(hosted[0].agent_label.as_deref(), Some("claude_desktop"));
@@ -501,7 +600,7 @@ mod cursor_discovery_tests {
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("s1.jsonl"), b"{}").unwrap();
 
-        let jobs = discover_jobs_in(&home);
+        let jobs = jobs_in(&home);
         assert_eq!(jobs.len(), 1);
         assert_eq!(
             jobs[0].agent_label, None,
@@ -515,9 +614,7 @@ mod cursor_discovery_tests {
         let home =
             std::env::temp_dir().join(format!("modelstat-disco-empty-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
-        assert!(!discover_jobs_in(&home)
-            .iter()
-            .any(|j| j.kind == ParserKind::Cursor));
+        assert!(!jobs_in(&home).iter().any(|j| j.kind == ParserKind::Cursor));
         std::fs::remove_dir_all(&home).ok();
     }
 }
