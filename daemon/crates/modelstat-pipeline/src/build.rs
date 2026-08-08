@@ -730,6 +730,7 @@ mod tests {
                 cache_read: 0,
                 reasoning: 0,
             }),
+            tokens_unmapped: std::collections::BTreeMap::new(),
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: vec![],

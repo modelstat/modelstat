@@ -154,6 +154,7 @@ mod tests {
                 slug_source: Some(SLUG_SOURCE_PATH_SHAPE.to_string()),
             }),
             tokens: None,
+            tokens_unmapped: std::collections::BTreeMap::new(),
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: Vec::new(),

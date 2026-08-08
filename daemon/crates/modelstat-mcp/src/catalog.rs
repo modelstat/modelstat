@@ -6,6 +6,18 @@
 
 use serde_json::{json, Value};
 
+/// The values this OFFLINE fallback happens to know about.
+///
+/// Every one of these sets is owned by the SERVER, which enumerates them in the
+/// live catalog and grows them without asking us. They are advertised in each
+/// parameter's DESCRIPTION — where a crawler and a reading agent both see them —
+/// and never as a JSON-Schema `enum`, which would make this stale copy reject an
+/// argument the server added yesterday and answers perfectly well. A client that
+/// reached a live catalog never sees any of this.
+///
+/// Genuinely fixed vocabularies keep their `enum`; see
+/// `server_owned_sets_are_not_closed_here` below.
+///
 /// Named time windows the range-aware tools accept.
 pub const RANGES: [&str; 6] = ["today", "7d", "30d", "90d", "mtd", "ytd"];
 /// Dimensions `explore` can group / stack by.
@@ -31,8 +43,7 @@ fn range_props() -> Value {
     json!({
         "range": {
             "type": "string",
-            "enum": RANGES,
-            "description": "Named time window (ignored when from/to given). Omit range AND from/to for all-time."
+            "description": format!("Named time window (ignored when from/to given). Omit range AND from/to for all-time. The live server enumerates the valid values; known here: {}.", RANGES.join(", "))
         },
         "from": { "type": "string", "description": "RFC3339 inclusive lower bound (overrides `range`)" },
         "to": { "type": "string", "description": "RFC3339 exclusive upper bound (overrides `range`)" }
@@ -66,9 +77,9 @@ pub fn static_tools() -> Vec<Value> {
             "name": "explore",
             "description": "The analytics workhorse (event/segment grain): group-by (and optionally stack-by) any dimension, pick a metric, filter, get back cells + whole-set totals. Time series: group_by=day|hour. Leaderboards: group_by=model|tool|session|identity. The `taxonomy` filter takes AND-of-OR groups [[idA,idB],[idC]] (AND across groups, OR within; a flat array is one OR-group) — resolve ids first with find_taxonomy / find_projects. This is how you answer cross-cutting questions like 'total $ debugging the acme project': find both ids, then explore with taxonomy:[[proj],[debug]]. Costs are exact decimal USD strings.",
             "inputSchema": { "type": "object", "properties": with_range(json!({
-                "group_by": { "type": "string", "enum": DIMENSIONS, "default": "day" },
-                "stack_by": { "type": "string", "enum": DIMENSIONS, "description": "Optional second dimension; each cell carries `stack`." },
-                "metric": { "type": "string", "enum": METRICS, "default": "cost" },
+                "group_by": { "type": "string", "default": "day", "description": format!("Dimension to group by. The live server enumerates the valid values; known here: {}.", DIMENSIONS.join(", ")) },
+                "stack_by": { "type": "string", "description": format!("Optional second dimension; each cell carries `stack`. Same open set as group_by; known here: {}.", DIMENSIONS.join(", ")) },
+                "metric": { "type": "string", "default": "cost", "description": format!("Metric to compute. The live server enumerates the valid values; known here: {}.", METRICS.join(", ")) },
                 "taxonomy": taxonomy_filter,
                 "providers": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"anthropic\"]" },
                 "models": { "type": "array", "items": { "type": "string" } },
@@ -188,7 +199,8 @@ mod tests {
         for t in &tools {
             assert_eq!(t["inputSchema"]["type"], "object");
         }
-        // explore exposes the metric enum + a limit cap of 500.
+        // explore keeps OUR defaults and OUR limit cap — those are facts about
+        // this client, not about the server's vocabulary.
         let explore = &tools[1];
         assert_eq!(
             explore["inputSchema"]["properties"]["metric"]["default"],
@@ -199,12 +211,52 @@ mod tests {
             500
         );
         // Range props are merged into overview.
-        assert!(tools[0]["inputSchema"]["properties"]["range"]["enum"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("7d")));
+        assert!(
+            tools[0]["inputSchema"]["properties"]["range"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("7d")
+        );
         // session_insights requires session_ids.
         assert_eq!(tools[3]["inputSchema"]["required"][0], "session_ids");
+    }
+
+    /// This catalog is a STALE COPY that only runs when the live one is
+    /// unreachable, and the server owns every one of these vocabularies. An
+    /// `enum` here would make a months-old npm install reject `group_by=week`
+    /// the day the server learns it — the offline fallback refusing work the
+    /// backend does perfectly well, which is the opposite of a fallback.
+    ///
+    /// The known values still ship, in the DESCRIPTION, so the two jobs this
+    /// catalog exists for both survive: a crawler indexing the published source
+    /// still sees the surface, and an agent reading the schema still gets told
+    /// what to pass.
+    #[test]
+    fn server_owned_sets_are_not_closed_here() {
+        let tools = static_tools();
+        for t in &tools {
+            let Some(props) = t["inputSchema"]["properties"].as_object() else {
+                continue;
+            };
+            for (name, schema) in props {
+                assert!(
+                    schema.get("enum").is_none(),
+                    "{}.{name} closes a set this catalog does not own",
+                    t["name"]
+                );
+            }
+        }
+        // …and the values are still discoverable where a reader will find them.
+        let explore = &tools[1]["inputSchema"]["properties"];
+        for (param, known) in [
+            ("group_by", DIMENSIONS.as_slice()),
+            ("metric", METRICS.as_slice()),
+        ] {
+            let desc = explore[param]["description"].as_str().unwrap_or_default();
+            for value in known {
+                assert!(desc.contains(value), "{param} description omits {value}");
+            }
+        }
     }
 
     #[test]

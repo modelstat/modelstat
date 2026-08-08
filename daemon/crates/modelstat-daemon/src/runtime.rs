@@ -606,6 +606,12 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         s.bump_stat("files_scanned", tallies.files_scanned as u64);
         s.bump_stat("files_unchanged", tallies.files_unchanged as u64);
         s.bump_stat("files_silent", tallies.files_silent as u64);
+        s.bump_stat("files_failed", tallies.files_failed as u64);
+        s.bump_stat(
+            "records_skipped",
+            tallies.skipped_kinds.values().sum::<u64>(),
+        );
+        s.bump_skipped_kinds(tallies.skipped_kinds.clone());
         // Files only: this sweep's events + segments were already folded in per
         // batch by `on_uploaded`, and counting them twice would inflate the row.
         s.bump_run(
@@ -742,6 +748,7 @@ mod tests {
             cwd: cwd.map(Into::into),
             git: None,
             tokens: None,
+            tokens_unmapped: std::collections::BTreeMap::new(),
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: Vec::new(),

@@ -4,6 +4,8 @@
 //! summarisation is the daemon pipeline's job (M3), which keeps parsers cheap
 //! and deterministic.
 
+use std::collections::BTreeMap;
+
 use modelstat_wire::{RawEvent, ToolAction};
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +88,10 @@ pub struct ParseResult {
     /// enrichment pass. Empty for sources with no shell calls. NEVER shipped.
     pub script_contexts: Vec<LocalToolContext>,
     pub stats: ParseStats,
+    /// Every record this parse DROPPED, counted under the kind string the record
+    /// states about itself — see [`crate::skips`]. `stats.skipped` is the same
+    /// event as one number; this says which dialects it was.
+    pub skipped_kinds: BTreeMap<String, u64>,
     /// Source file path (for dedupe + replay).
     pub source_file: String,
 }

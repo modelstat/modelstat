@@ -7,8 +7,8 @@
 //! output excl. reasoning) — the double-billing fix (feature §7.1).
 //!
 //! Token counters live at `payload.info.last_token_usage` — see
-//! [`codex_last_token_usage`] for why that exact path, and why a missing counter
-//! is a hard error rather than a zero.
+//! [`codex_last_token_usage`] for why that exact path, and why a counter that
+//! has moved is reported rather than either zeroed or thrown.
 //!
 //! PARITY: the TS event_msg path falls back to `new Date().toISOString()` when a
 //! line has no timestamp. That is non-deterministic and non-replayable, so the
@@ -27,6 +27,7 @@ use serde_json::Value;
 
 use crate::git::{guess_repo_slug_from_path, path_guessed_git_context};
 use crate::line_reader::OffsetLines;
+use crate::skips::{numeric_leaves, unknown_record_event, SkipLedger, UnknownRecord};
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{
     hash_args, json_bytes, mcp_server_name, normalize_tool_name, split_observed_tool_name,
@@ -34,6 +35,12 @@ use crate::tool_hash::{
 };
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
 use crate::util::slice_utf16;
+
+/// `response_item` payload types this parser sees, understands, and deliberately
+/// does not turn into events — each one duplicates an `event_msg` it already
+/// reads. Listed rather than left to a catch-all so a payload type codex adds
+/// tomorrow falls through as UNKNOWN instead of joining a silent decline.
+const DECLINED_RESPONSE_ITEMS: &[&str] = &["message", "reasoning", "web_search_call"];
 
 fn is_tool_call_payload(pt: &str) -> bool {
     matches!(
@@ -87,14 +94,29 @@ fn take_message_text(buf: &mut Vec<String>) -> (Option<String>, Option<u64>) {
     message_text(&joined)
 }
 
-fn schema_drift(detail: &str) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!(
-            "codex token_count schema drift: {detail}. Refusing to record zero tokens — \
-             a silently-zeroed count under-reports real spend. Update the parser."
-        ),
-    )
+/// What one `token_count` line's `payload` says about token usage.
+#[derive(Debug, PartialEq, Eq)]
+enum CodexUsage {
+    /// `info` absent or null. Legitimate: codex also emits `token_count`
+    /// carrying only `rate_limits`. There is no usage to record, so the caller
+    /// emits NO event (a zero-token assistant turn is a phantom turn).
+    None,
+    /// All four counters read cleanly.
+    Mapped(TokenUsage),
+    /// `info` is present but the usage object or one of its four counters is
+    /// missing or non-numeric. `TokenUsageInfo::last_token_usage` is not
+    /// optional upstream, so this can only mean the format moved under us.
+    ///
+    /// The event is still emitted — with NO `tokens` and with whatever numbers
+    /// `info` did state carried verbatim in `tokens_unmapped`. Two earlier
+    /// designs were worse in opposite directions: defaulting the missing counter
+    /// to 0 was silent and permanently wrong (every codex event landed at zero
+    /// tokens), and failing the parse was loud but unrecoverable — the scan
+    /// never advanced the file's cursor, so the file re-parsed and re-failed
+    /// every cycle forever while everything before the bad line re-shipped with
+    /// it. Reporting "usage unknown, here are the numbers I found" is the only
+    /// one of the three that is both honest and terminating.
+    Drift(BTreeMap<String, u64>),
 }
 
 /// The token counters for ONE api call, read strictly from
@@ -107,37 +129,24 @@ fn schema_drift(detail: &str) -> std::io::Error {
 /// `total_token_usage` (a running session total): every `token_count` line
 /// becomes its own event and readers SUM them, so summing a cumulative counter
 /// would grow quadratically with turn count.
-///
-/// `Ok(None)` — `info` absent or null. Legitimate: codex also emits
-/// `token_count` carrying only `rate_limits`. There is no usage to record, so
-/// the caller emits NO event (a zero-token assistant turn is a phantom turn).
-///
-/// `Err` — `info` is present but the usage object or any of its four counters is
-/// missing or non-numeric. `TokenUsageInfo::last_token_usage` is not optional
-/// upstream, so this can only mean the format changed under us. That is a HARD
-/// failure by design: the daemon holds its cursor and retries, which is loud and
-/// recoverable, whereas defaulting to 0 is silent and permanently wrong. This is
-/// exactly the bug that made every codex event land with 0 tokens.
-fn codex_last_token_usage(p: &Value) -> std::io::Result<Option<TokenUsage>> {
+fn codex_last_token_usage(p: &Value) -> CodexUsage {
     let info = match p.get("info") {
-        None | Some(Value::Null) => return Ok(None),
+        None | Some(Value::Null) => return CodexUsage::None,
         Some(v) => v,
     };
-    let last = info
-        .get("last_token_usage")
-        .ok_or_else(|| schema_drift("payload.info.last_token_usage is missing"))?;
-    let field = |name: &str| -> std::io::Result<u64> {
-        last.get(name).and_then(Value::as_u64).ok_or_else(|| {
-            schema_drift(&format!(
-                "payload.info.last_token_usage.{name} is missing or not a number"
-            ))
-        })
+    let Some(last) = info.get("last_token_usage") else {
+        return CodexUsage::Drift(numeric_leaves(info));
     };
-    let input_tokens = field("input_tokens")?;
-    let cached = field("cached_input_tokens")?;
-    let output_tokens = field("output_tokens")?;
-    let reasoning = field("reasoning_output_tokens")?;
-    Ok(Some(TokenUsage {
+    let field = |name: &str| last.get(name).and_then(Value::as_u64);
+    let (Some(input_tokens), Some(cached), Some(output_tokens), Some(reasoning)) = (
+        field("input_tokens"),
+        field("cached_input_tokens"),
+        field("output_tokens"),
+        field("reasoning_output_tokens"),
+    ) else {
+        return CodexUsage::Drift(numeric_leaves(info));
+    };
+    CodexUsage::Mapped(TokenUsage {
         // Codex counts cached input INSIDE `input_tokens` and reasoning INSIDE
         // `output_tokens` (upstream's `non_cached_input()` subtracts the former).
         // Our buckets are DISJOINT, so split them out rather than double-bill.
@@ -148,7 +157,7 @@ fn codex_last_token_usage(p: &Value) -> std::io::Result<Option<TokenUsage>> {
         cache_creation: 0,
         cache_read: cached,
         reasoning,
-    }))
+    })
 }
 
 /// `rollout-<TS>-<UUID>.jsonl` → the session uuid.
@@ -274,13 +283,14 @@ fn output_indicates_error(p: &Value) -> bool {
 
 pub fn parse_codex_rollout(ctx: &ParserContext) -> std::io::Result<ParseResult> {
     let mut sink = Sink::collect();
-    let (tool_calls, script_contexts, stats) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: sink.take_collected(),
         tool_calls,
         script_contexts,
         stats,
+        skipped_kinds: skips.into_counts(),
         source_file: ctx.source_file.clone(),
     })
 }
@@ -290,13 +300,14 @@ pub fn parse_codex_rollout_streaming(
     emit: &mut dyn FnMut(Vec<RawEvent>),
 ) -> std::io::Result<ParseResult> {
     let mut sink = Sink::stream(emit);
-    let (tool_calls, script_contexts, stats) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: Vec::new(),
         tool_calls,
         script_contexts,
         stats,
+        skipped_kinds: skips.into_counts(),
         source_file: ctx.source_file.clone(),
     })
 }
@@ -304,13 +315,19 @@ pub fn parse_codex_rollout_streaming(
 fn parse_inner(
     ctx: &ParserContext,
     sink: &mut Sink,
-) -> std::io::Result<(Vec<ToolCallDraft>, Vec<LocalToolContext>, ParseStats)> {
+) -> std::io::Result<(
+    Vec<ToolCallDraft>,
+    Vec<LocalToolContext>,
+    ParseStats,
+    SkipLedger,
+)> {
     let mut tool_calls: Vec<ToolCallDraft> = Vec::new();
     let mut script_contexts: Vec<LocalToolContext> = Vec::new();
 
     let mut raw_lines: u64 = 0;
     let mut emitted: u64 = 0;
     let mut skipped: u64 = 0;
+    let mut skips = SkipLedger::default();
 
     let file = File::open(&ctx.source_file)?;
     let mut lines = OffsetLines::new(BufReader::new(file), ctx.byte_offset_start);
@@ -507,8 +524,43 @@ fn parse_inner(
                 continue;
             }
 
-            // message / reasoning / web_search_call — not tool data.
-            skipped += 1;
+            // Modelled and declined: codex repeats every message and its
+            // reasoning as a `response_item` alongside the `event_msg` this
+            // parser reads, so taking these too would double each one. A
+            // DECISION, not a failure — it stays out of the ledger.
+            if DECLINED_RESPONSE_ITEMS.contains(&pt) {
+                skipped += 1;
+                continue;
+            }
+            // Anything else under `response_item` is a payload type nothing here
+            // models.
+            skips.drop_record(&ctx.source_file, &format!("response_item/{pt}"));
+            match (
+                session_id.clone(),
+                line_ts.clone().or_else(|| last_ts.clone()),
+            ) {
+                (Some(sid), Some(ts)) => {
+                    sink.push(unknown_record_event(UnknownRecord {
+                        kind: pt,
+                        source_event_id: source_event_id(
+                            &ctx.device_id,
+                            &EventSource::File {
+                                file: &ctx.source_file,
+                                byte_offset: offset,
+                            },
+                        ),
+                        agent: "codex_cli",
+                        provider: "openai",
+                        session_id: sid,
+                        ts,
+                        turn_index: Some(turn_index),
+                        source_file: &ctx.source_file,
+                        source_byte_offset: Some(offset),
+                    }));
+                    emitted += 1;
+                }
+                _ => skipped += 1,
+            }
             continue;
         }
 
@@ -544,9 +596,20 @@ fn parse_inner(
                 // No usage on this line (rate-limits-only `token_count`): emit
                 // nothing. The pending tool-call aggregate stays pending and
                 // rides the next assistant event, and `turn_index` does not move.
-                let Some(tokens) = codex_last_token_usage(p)? else {
-                    skipped += 1;
-                    continue;
+                let (tokens, tokens_unmapped) = match codex_last_token_usage(p) {
+                    CodexUsage::None => {
+                        skipped += 1;
+                        continue;
+                    }
+                    CodexUsage::Mapped(t) => (Some(t), BTreeMap::new()),
+                    CodexUsage::Drift(found) => {
+                        // The round trip happened; only our reading of its
+                        // counters failed. The event ships stating no usage
+                        // (never a fabricated zero) and carrying the numbers the
+                        // line did state, so the cost is recoverable later.
+                        skips.drop_record(&ctx.source_file, "event_msg/token_count");
+                        (None, found)
+                    }
                 };
                 let slug = guess_repo_slug_from_path(cwd.as_deref());
                 let git = path_guessed_git_context(slug.clone(), None);
@@ -570,7 +633,8 @@ fn parse_inner(
                     parent_event_id: None,
                     cwd: cwd.clone(),
                     git,
-                    tokens: Some(tokens),
+                    tokens,
+                    tokens_unmapped,
                     duration_ms: None,
                     tool_calls: std::mem::take(&mut pending_aggregate),
                     files_touched: Vec::new(),
@@ -637,6 +701,7 @@ fn parse_inner(
                     cwd: cwd.clone(),
                     git: None,
                     tokens: None,
+                    tokens_unmapped: BTreeMap::new(),
                     duration_ms: None,
                     tool_calls: BTreeMap::new(),
                     files_touched: Vec::new(),
@@ -650,11 +715,60 @@ fn parse_inner(
                 emitted += 1;
                 continue;
             }
-            skipped += 1;
+            // An `event_msg` payload type nothing here models. `ts` is already
+            // resolved above, so the only question left is the session.
+            skips.drop_record(&ctx.source_file, &format!("event_msg/{ptype}"));
+            match session_id.clone() {
+                Some(sid) => {
+                    sink.push(unknown_record_event(UnknownRecord {
+                        kind: ptype,
+                        source_event_id: source_event_id(
+                            &ctx.device_id,
+                            &EventSource::File {
+                                file: &ctx.source_file,
+                                byte_offset: offset,
+                            },
+                        ),
+                        agent: "codex_cli",
+                        provider: "openai",
+                        session_id: sid,
+                        ts,
+                        turn_index: Some(turn_index),
+                        source_file: &ctx.source_file,
+                        source_byte_offset: Some(offset),
+                    }));
+                    emitted += 1;
+                }
+                None => skipped += 1,
+            }
             continue;
         }
 
-        skipped += 1;
+        // A top-level `type` nothing here models — the envelope itself is new.
+        skips.drop_record(&ctx.source_file, kind);
+        match (session_id.clone(), last_ts.clone()) {
+            (Some(sid), Some(ts)) => {
+                sink.push(unknown_record_event(UnknownRecord {
+                    kind,
+                    source_event_id: source_event_id(
+                        &ctx.device_id,
+                        &EventSource::File {
+                            file: &ctx.source_file,
+                            byte_offset: offset,
+                        },
+                    ),
+                    agent: "codex_cli",
+                    provider: "openai",
+                    session_id: sid,
+                    ts,
+                    turn_index: Some(turn_index),
+                    source_file: &ctx.source_file,
+                    source_byte_offset: Some(offset),
+                }));
+                emitted += 1;
+            }
+            _ => skipped += 1,
+        }
     }
 
     Ok((
@@ -665,6 +779,7 @@ fn parse_inner(
             emitted_events: emitted,
             skipped,
         },
+        skips,
     ))
 }
 
@@ -696,7 +811,9 @@ mod tests {
             },
             "rate_limits": null
         });
-        let t = codex_last_token_usage(&p).unwrap().expect("usage present");
+        let CodexUsage::Mapped(t) = codex_last_token_usage(&p) else {
+            panic!("usage present");
+        };
         // Disjoint buckets: cached is carved out of input, reasoning out of output.
         assert_eq!(t.input, 60, "input excludes the 40 cached");
         assert_eq!(t.output, 400, "output excludes the 600 reasoning");
@@ -713,26 +830,39 @@ mod tests {
         // Codex emits `token_count` carrying only `rate_limits`. That is not a
         // zero-token turn — it is no turn at all, so the caller emits no event.
         let p = json!({ "type": "token_count", "rate_limits": { "primary_used_percent": 12.5 } });
-        assert!(codex_last_token_usage(&p).unwrap().is_none());
+        assert_eq!(codex_last_token_usage(&p), CodexUsage::None);
         let explicit_null = json!({ "type": "token_count", "info": null });
-        assert!(codex_last_token_usage(&explicit_null).unwrap().is_none());
+        assert_eq!(codex_last_token_usage(&explicit_null), CodexUsage::None);
     }
 
+    /// Moved counters are REPORTED, never zeroed and never thrown.
+    ///
+    /// Zeroing is silent and permanently wrong. Throwing was loud but did not
+    /// terminate: the scan skipped the cursor push for a file whose parse
+    /// errored, so the file re-parsed, re-failed, and re-shipped its whole
+    /// readable prefix every cycle, forever. What survives is the numbers.
     #[test]
-    fn moved_counters_error_instead_of_recording_zeros() {
-        // Fail loud on upstream schema drift: silently zeroing under-reports spend.
+    fn moved_counters_are_reported_not_zeroed_and_not_thrown() {
         let renamed = json!({
             "type": "token_count",
             "info": { "last_token_usage": { "prompt_tokens": 100, "completion_tokens": 50 } }
         });
-        let err = codex_last_token_usage(&renamed).expect_err("must not default to 0");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("input_tokens"), "{err}");
+        let CodexUsage::Drift(found) = codex_last_token_usage(&renamed) else {
+            panic!("a renamed counter is drift");
+        };
+        // The upstream's OWN names, at their own paths — nothing normalised, so
+        // a reader can grep codex's source for the string we reported.
+        assert_eq!(found["last_token_usage.prompt_tokens"], 100);
+        assert_eq!(found["last_token_usage.completion_tokens"], 50);
 
         let usage_gone = json!({ "type": "token_count", "info": { "model_context_window": 1 } });
-        let err = codex_last_token_usage(&usage_gone).expect_err("must not default to 0");
-        assert!(err.to_string().contains("last_token_usage"), "{err}");
+        let CodexUsage::Drift(found) = codex_last_token_usage(&usage_gone) else {
+            panic!("a vanished usage object is drift");
+        };
+        assert_eq!(found["model_context_window"], 1);
 
+        // A counter that stopped being a number takes the same path — and the
+        // string it became is NOT carried: only numeric leaves ride the wire.
         let not_a_number = json!({
             "type": "token_count",
             "info": { "last_token_usage": {
@@ -740,6 +870,13 @@ mod tests {
                 "output_tokens": 50, "reasoning_output_tokens": 0
             }}
         });
-        assert!(codex_last_token_usage(&not_a_number).is_err());
+        let CodexUsage::Drift(found) = codex_last_token_usage(&not_a_number) else {
+            panic!("a non-numeric counter is drift");
+        };
+        assert_eq!(found["last_token_usage.output_tokens"], 50);
+        assert!(
+            !found.contains_key("last_token_usage.input_tokens"),
+            "a string leaf must never ride an unvalidated shape onto the wire"
+        );
     }
 }

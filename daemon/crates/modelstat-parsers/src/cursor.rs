@@ -27,6 +27,7 @@
 //! Per plan D6 we open a byte-snapshot COPY read-only (read file → temp → open),
 //! never the live file, so we never lock a DB Cursor has open.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -34,6 +35,7 @@ use modelstat_redact::redact;
 use modelstat_wire::{source_event_id, EventSource, RawEvent};
 use rusqlite::{Connection, OpenFlags};
 
+use crate::skips::{unknown_record_event, SkipLedger, UnknownRecord};
 use crate::types::{ParseResult, ParseStats, ParserContext};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -79,6 +81,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
     });
 
     let mut events: Vec<RawEvent> = Vec::new();
+    let mut skips = SkipLedger::default();
     let mut current_composer = String::new();
     let mut turn_index: u64 = 0;
     let mut saw_user_prompt = false;
@@ -87,7 +90,34 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
         let kind = match b.kind {
             BUBBLE_TYPE_USER => "user_message",
             BUBBLE_TYPE_ASSISTANT => "assistant_message",
-            _ => continue,
+            // A bubble type this parser has no arm for. Cursor's discriminator
+            // is a bare integer, so the ledger key is that integer as written —
+            // there is no name to report, and inventing one would be a guess
+            // about a record we by definition do not understand. This exact
+            // branch is where the `ai_code_hashes` move went to die.
+            other => {
+                let observed = other.to_string();
+                skips.drop_record(&ctx.source_file, &observed);
+                if !b.composer_id.is_empty() && !b.created_at.is_empty() {
+                    events.push(unknown_record_event(UnknownRecord {
+                        kind: &observed,
+                        source_event_id: source_event_id(
+                            &ctx.device_id,
+                            &EventSource::LineUuid {
+                                line_uuid: &b.bubble_id,
+                            },
+                        ),
+                        agent: "cursor",
+                        provider: "cursor",
+                        session_id: b.composer_id.clone(),
+                        ts: b.created_at.clone(),
+                        turn_index: Some(turn_index),
+                        source_file: &ctx.source_file,
+                        source_byte_offset: None,
+                    }));
+                }
+                continue;
+            }
         };
         let text = b.text.trim();
         if text.is_empty() || b.composer_id.is_empty() || b.created_at.is_empty() {
@@ -148,6 +178,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             // Every observed bubble reports `{input:0, output:0}` — state no
             // usage rather than record zeros as fact.
             tokens: None,
+            tokens_unmapped: BTreeMap::new(),
             duration_ms: None,
             tool_calls: std::collections::BTreeMap::new(),
             files_touched: Vec::new(),
@@ -176,6 +207,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             emitted_events: emitted,
             skipped: raw_lines.saturating_sub(emitted),
         },
+        skipped_kinds: skips.into_counts(),
         source_file: ctx.source_file.clone(),
     })
 }

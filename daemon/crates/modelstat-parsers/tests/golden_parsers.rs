@@ -35,11 +35,22 @@ fn tree_dir() -> String {
     format!("{}/tests/fixtures/tree", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Recreate `/tmp/modelstat-fixtures` byte-for-byte from the committed inputs.
+/// Recreate `/tmp/modelstat-fixtures` byte-for-byte from the committed inputs,
+/// ONCE per process.
+///
+/// The fixed base path is shared by every test in this binary and `cargo test`
+/// runs them on several threads, so a per-test wipe-and-copy has one test
+/// deleting the tree another is mid-copy into — an `fs::copy` that fails on a
+/// path that existed a microsecond ago. Doing it once behind a `OnceLock` keeps
+/// the single-owner property the fixed path needs while letting any number of
+/// tests depend on the tree.
 fn materialize_tree() {
-    let src_root = tree_dir();
-    let _ = std::fs::remove_dir_all(BASE);
-    copy_tree(Path::new(&src_root), Path::new(BASE));
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let src_root = tree_dir();
+        let _ = std::fs::remove_dir_all(BASE);
+        copy_tree(Path::new(&src_root), Path::new(BASE));
+    });
 }
 
 fn copy_tree(src: &Path, dst: &Path) {
@@ -221,6 +232,108 @@ fn parser_golden_parity() {
             parse_pi_session(&ctx_api(&pi)).unwrap(),
             |emit| parse_pi_session_streaming(&ctx_api(&pi), emit).unwrap(),
             "pi",
+        );
+    }
+}
+
+/// What the REAL fixtures were silently dropping before anything counted it.
+///
+/// Every kind below is real agent output, not an invented shape: four record
+/// types Claude Desktop writes and two codex event kinds, none of which any
+/// parser arm had ever mentioned. They went to a bare `continue`, so the scan
+/// reported success and nothing anywhere said a dialect had gone unread — the
+/// exact failure that hid Cursor's schema move for weeks.
+///
+/// Pinned here so a parser that starts UNDERSTANDING one of these has to say so
+/// by editing this list, and a parser that starts dropping something new fails
+/// this test on the way in.
+#[test]
+fn the_real_fixtures_name_every_record_no_parser_arm_reads() {
+    materialize_tree();
+
+    let desktop = parse_claude_code_jsonl(
+        &ctx(&format!(
+            "{BASE}/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl"
+        ))
+        .with_agent_label(Some("claude_desktop".to_string())),
+    )
+    .unwrap();
+    assert_eq!(
+        desktop.skipped_kinds,
+        [
+            ("ai-title".to_string(), 5),
+            ("attachment".to_string(), 4),
+            ("last-prompt".to_string(), 3),
+            ("mode".to_string(), 1),
+        ]
+        .into_iter()
+        .collect(),
+        "Claude Desktop's unmodelled record types, by its own name for each"
+    );
+    // `queue-operation` appears 4 times in the same file and is deliberately
+    // absent: it is modelled and declined, which is a decision, not a failure.
+    assert!(!desktop.skipped_kinds.contains_key("queue-operation"));
+    // Only the records that DATE themselves become events — an undated record
+    // cannot be placed in a conversation, so it reports through the tally alone.
+    let unknown_events: Vec<&str> = desktop
+        .events
+        .iter()
+        .filter(|e| e.kind != "user_message" && e.kind != "assistant_message")
+        .map(|e| e.kind.as_str())
+        .collect();
+    assert_eq!(unknown_events, ["attachment"; 4]);
+    assert!(
+        desktop
+            .events
+            .iter()
+            .filter(|e| e.kind == "attachment")
+            .all(|e| e.content_excerpt.is_none() && e.content_bytes.is_none()),
+        "an unknown shape ships the fact it existed and none of what it said"
+    );
+
+    let codex = parse_codex_rollout(&ctx(&format!(
+        "{BASE}/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl"
+    )))
+    .unwrap();
+    assert_eq!(
+        codex.skipped_kinds,
+        [
+            ("event_msg/task_complete".to_string(), 1),
+            ("event_msg/task_started".to_string(), 1),
+        ]
+        .into_iter()
+        .collect(),
+        "codex's tally qualifies by envelope; the EVENT carries the bare kind"
+    );
+    // `response_item/message` and `/reasoning` duplicate the `event_msg` rows
+    // this parser already reads — declined on purpose, so never counted.
+    assert!(!codex.skipped_kinds.contains_key("response_item/message"));
+
+    // The three parsers whose fixtures this build understands completely.
+    for (label, res) in [
+        (
+            "claude",
+            parse_claude_code_jsonl(&ctx(&format!(
+                "{BASE}/claude/11111111-1111-1111-1111-111111111111.jsonl"
+            )))
+            .unwrap(),
+        ),
+        (
+            "pi",
+            parse_pi_session(&ctx_api(&format!(
+                "{BASE}/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl"
+            )))
+            .unwrap(),
+        ),
+        (
+            "cursor",
+            parse_cursor_tracking_db(&ctx(&format!("{BASE}/cursor/state.vscdb"))).unwrap(),
+        ),
+    ] {
+        assert!(
+            res.skipped_kinds.is_empty(),
+            "{label}: every record in this fixture has an arm — got {:?}",
+            res.skipped_kinds
         );
     }
 }

@@ -109,6 +109,24 @@ pub struct RawEvent {
     pub git: Option<GitContext>,
     #[serde(default)]
     pub tokens: Option<TokenUsage>,
+    /// Counters the source stated that do not map onto [`TokenUsage`]'s five
+    /// buckets, keyed by their path in the source object (`last_token_usage.
+    /// input_tokens`) with the source's own names, verbatim.
+    ///
+    /// Absent in the ordinary case. It fills when an upstream moves its token
+    /// schema: the parser then has numbers it cannot honestly bucket, and the
+    /// choice is to keep them here or throw them away. Throwing them away is
+    /// what "default the missing counter to 0" amounted to, and it cost a full
+    /// fleet re-scan — the events were already priced wrong and the true numbers
+    /// were gone. Kept, they can be re-bucketed later without re-reading anyone's
+    /// disk.
+    ///
+    /// NUMBERS ONLY, and that is structural rather than a simplification: a
+    /// drifted object is a shape nothing has validated, so only its numeric
+    /// leaves are taken and any string in it is left behind — an unknown shape
+    /// must never become a hole the redactor does not cover.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tokens_unmapped: BTreeMap<String, u64>,
     #[serde(default)]
     pub duration_ms: Option<u64>,
     #[serde(default)]
@@ -504,6 +522,7 @@ mod tests {
             cwd: None,
             git: None,
             tokens: None,
+            tokens_unmapped: BTreeMap::new(),
             duration_ms: None,
             tool_calls: BTreeMap::new(),
             files_touched: vec![],

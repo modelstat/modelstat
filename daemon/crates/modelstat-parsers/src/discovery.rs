@@ -166,6 +166,99 @@ pub enum Strategy {
     ProcessProbe,
 }
 
+/// Directory names never worth descending: vendor caches, blob stores and VM
+/// images that hold no transcripts and plenty of gigabytes.
+pub const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "blob_storage",
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "CachedData",
+    "Crashpad",
+    "logs",
+    "claude-code-vm",
+    "Partitions",
+    "Service Worker",
+    "IndexedDB",
+    "Local Storage",
+];
+
+/// Where applications keep their data, per platform — NOT a list of app names.
+///
+/// All three platforms are returned regardless of which one we are on. A
+/// `cfg!` here would be a claim about the machine, and it is wrong often enough
+/// to matter: translation layers, mounted volumes and test harnesses all put a
+/// foreign layout under a real home. A path for the wrong platform simply does
+/// not exist, which costs one `read_dir` that fails.
+#[must_use]
+pub fn application_data_roots(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join("Library/Application Support"),
+        home.join(".config"),
+        home.join("AppData/Roaming"),
+    ]
+}
+
+/// Every directory this device might keep `agent`'s data in, for `home`.
+///
+/// ONE list, consulted by everything that looks for an agent's files. It used to
+/// be two: `sources()` honoured `CODEX_HOME`, `PI_HOME`, `OMP_HOME` and
+/// `XDG_CONFIG_HOME`, while the scan's own job discovery hard-coded `~/.codex`
+/// and friends — so a user who relocated codex had the install REPORTED and its
+/// sessions never read, which is the worst of both (the dashboard says the tool
+/// is there and it never spends a token).
+///
+/// Three sources, in the order they were learned: the known per-platform paths,
+/// the environment variables that relocate them, and the data directory a
+/// RUNNING instance names on its own command line — the last being the only way
+/// to reach an install nothing on disk points at.
+#[must_use]
+pub fn data_dir_candidates_in(home: &Path, agent: &str) -> Vec<String> {
+    data_dir_candidates_from(home, agent, &agent_data_dirs_from_processes())
+}
+
+/// [`data_dir_candidates_in`] with the running-process reading supplied.
+///
+/// The probe is a parameter because it is the one input that is not a function
+/// of `home`: it reports absolute paths on THIS machine, which is exactly the
+/// point in production (a relocated install can live anywhere) and exactly wrong
+/// for a caller working over a root of its own. A test passing `&[]` gets a
+/// discovery scoped to the tree it built, instead of one that finds whatever the
+/// developer happens to have open.
+#[must_use]
+pub fn data_dir_candidates_from(
+    home: &Path,
+    agent: &str,
+    process_dirs: &[(String, String)],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut add = |c: String| {
+        if !c.is_empty() && seen.insert(c.clone()) {
+            out.push(c);
+        }
+    };
+    for spec in sources().iter().filter(|s| s.agent == agent) {
+        // Every platform's paths, for the same reason `application_data_roots`
+        // returns all three.
+        for raw in spec.macos.iter().chain(spec.linux).chain(spec.windows) {
+            add(expand_path_with_home(home, raw));
+        }
+        for env in spec.data_dir_env {
+            if let Ok(v) = std::env::var(env) {
+                add(v);
+            }
+        }
+    }
+    for (probed_agent, dir) in process_dirs {
+        if probed_agent == agent {
+            add(dir.clone());
+        }
+    }
+    out
+}
+
 /// Options for a discovery pass.
 #[derive(Debug, Clone, Default)]
 pub struct DiscoveryOptions {
@@ -266,6 +359,11 @@ pub fn discover(options: &DiscoveryOptions) -> DiscoveryOutput {
         }
     }
 
+    // (4) file signatures — a transcript store nobody enumerated.
+    if !options.skip.contains(&Strategy::FileSignatures) {
+        installations.extend(probe_file_signatures());
+    }
+
     // (6) application registry (macOS `system_profiler`) — DROPPED (§22).
 
     // Identity probes — best-effort, filesystem + keychain.
@@ -275,6 +373,117 @@ pub fn discover(options: &DiscoveryOptions) -> DiscoveryOutput {
         installations: dedupe_installs(installations),
         identities: dedupe_identities(identities),
     }
+}
+
+/// How far below a candidate directory to look for a transcript before giving
+/// up. Four levels covers every layout observed — codex nests deepest at
+/// `sessions/<y>/<m>/<d>/rollout-*.jsonl`.
+const FILE_SIGNATURE_MAX_DEPTH: usize = 4;
+
+/// (4) File signatures — transcript stores nobody enumerated.
+///
+/// Every other strategy needs the tool to be in [`sources()`] first: a known
+/// path, a known binary name, a known process. So a tool that ships tomorrow is
+/// invisible until somebody adds it here and cuts a release, and that release
+/// cadence is the thing this strategy exists to remove.
+///
+/// The signature is STRUCTURAL and deliberately thin — a directory under a
+/// user's home or an application-data root that holds `.jsonl` files a few
+/// levels down. That is the shape every JSONL agent's store has, and it is all
+/// we can honestly claim to recognise. Nothing is parsed and nothing is read;
+/// this reports "there is a transcript-shaped store here, called this", which is
+/// exactly the fact a human needs to decide whether a parser is worth writing.
+///
+/// The agent name is the DIRECTORY's own name, because that is the only name
+/// anything states. A single leading `.` is dropped — the dotfile convention is
+/// filesystem grammar, not part of what the tool is called, and reporting `.foo`
+/// and `foo` as two tools would be worse than either. The wire carries `agent`
+/// as a plain string precisely so a name no build of ours knows can ride it.
+///
+/// Directories a known source already claims are left out: they are reported by
+/// the strategies that understand them, and a second entry under a different
+/// name would split one install in two.
+fn probe_file_signatures() -> Vec<DetectedInstallation> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let home = PathBuf::from(home);
+    let claimed: BTreeSet<String> = sources()
+        .iter()
+        .flat_map(|s| s.macos.iter().chain(s.linux).chain(s.windows))
+        .map(|raw| expand_path_with_home(&home, raw))
+        .collect();
+
+    let mut roots = application_data_roots(&home);
+    roots.push(home.clone());
+    roots
+        .iter()
+        .flat_map(|root| file_signature_installs(root, &claimed))
+        .collect()
+}
+
+/// The transcript-shaped children of one directory, as installations.
+fn file_signature_installs(root: &Path, claimed: &BTreeSet<String>) -> Vec<DetectedInstallation> {
+    let mut out = Vec::new();
+    for candidate in child_dirs(root) {
+        let name = candidate
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let agent = name.strip_prefix('.').unwrap_or(name);
+        if agent.is_empty() || SKIP_DIRS.contains(&name) {
+            continue;
+        }
+        let path = candidate.to_string_lossy().into_owned();
+        if claimed.contains(&path) || !holds_transcripts(&candidate, FILE_SIGNATURE_MAX_DEPTH) {
+            continue;
+        }
+        out.push(DetectedInstallation {
+            agent: agent.to_string(),
+            install_method: "unknown".to_string(),
+            binary_path: None,
+            data_dir: Some(path),
+            version: None,
+            detected_via: vec!["file_signatures".to_string()],
+        });
+    }
+    out
+}
+
+/// Does `dir` hold a `.jsonl` file within `depth` levels? Stops at the first
+/// one — the question is whether the shape is there, not how much of it.
+fn holds_transcripts(dir: &Path, depth: usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut subdirs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ty) = entry.file_type() else { continue };
+        if ty.is_file() {
+            if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                return true;
+            }
+        } else if ty.is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !SKIP_DIRS.contains(&name.as_str()) {
+                subdirs.push(path);
+            }
+        }
+    }
+    depth > 0 && subdirs.iter().any(|d| holds_transcripts(d, depth - 1))
+}
+
+/// Immediate subdirectories of `dir` (empty when it is not readable).
+fn child_dirs(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One running process, reduced to what discovery may look at.
@@ -523,31 +732,77 @@ fn env_or(name: &str, default: impl FnOnce() -> String) -> String {
 /// Expand `$XDG_*`, `$HOME`, `$APPDATA`, `$LOCALAPPDATA`, and a leading `~`, then
 /// make the path absolute (matching the TS `expandPath` + `resolve`).
 fn expand_path(p: &str) -> String {
-    let home = home_dir().unwrap_or_default();
+    expand_path_with_home(Path::new(&home_dir().unwrap_or_default()), p)
+}
+
+/// [`expand_path`] against an explicit home.
+///
+/// The home is injected so a caller working over a test root — or any home that
+/// is not this process's — resolves every home-relative form inside it.
+fn expand_path_with_home(home: &Path, p: &str) -> String {
+    let home = home.to_string_lossy().into_owned();
+    // `$APPDATA`, `$LOCALAPPDATA` and the XDG pair are PLATFORM BASE
+    // DIRECTORIES: they say where *this user's* home keeps application data. So
+    // they are read from the environment only when the home being expanded IS
+    // this user's, and derived from the given home otherwise. Without that split
+    // a caller working over an injected root asks for `<root>/AppData/Roaming`
+    // and gets the real `%APPDATA%` — which on Windows is always set, so the
+    // root it was handed is quietly ignored.
+    //
+    // The per-agent relocation variables (`CODEX_HOME`, `PI_HOME`, …) are a
+    // different thing and keep winning unconditionally: those name one tool's
+    // absolute directory, not a base the home derives.
+    let is_this_users_home = home_dir().is_some_and(|real| real == home);
+    let base = |var: &str, derived: String| {
+        if is_this_users_home {
+            env_or(var, || derived)
+        } else {
+            derived
+        }
+    };
     let mut s = p.to_string();
     s = s.replace(
         "$XDG_CONFIG_HOME",
-        &env_or("XDG_CONFIG_HOME", || format!("{home}/.config")),
+        &base("XDG_CONFIG_HOME", format!("{home}/.config")),
     );
     s = s.replace(
         "$XDG_DATA_HOME",
-        &env_or("XDG_DATA_HOME", || format!("{home}/.local/share")),
+        &base("XDG_DATA_HOME", format!("{home}/.local/share")),
     );
-    s = s.replace("$LOCALAPPDATA", &env_or("LOCALAPPDATA", String::new));
-    s = s.replace("$APPDATA", &env_or("APPDATA", String::new));
+    // An unset `%APPDATA%` falls back to what the variable MEANS rather than to
+    // the empty string, which used to turn `$APPDATA/Cursor` into the absolute
+    // `/Cursor` — a path on nobody's machine that silently probed nothing.
+    s = s.replace(
+        "$LOCALAPPDATA",
+        &base("LOCALAPPDATA", format!("{home}/AppData/Local")),
+    );
+    s = s.replace(
+        "$APPDATA",
+        &base("APPDATA", format!("{home}/AppData/Roaming")),
+    );
     s = s.replace("$HOME", &home);
     if let Some(rest) = s.strip_prefix('~') {
         s = format!("{home}{rest}");
     }
     // Resolve to absolute (relative to cwd) without requiring existence.
     let path = PathBuf::from(&s);
-    if path.is_absolute() {
-        s
+    let path = if path.is_absolute() {
+        path
     } else {
-        std::env::current_dir()
-            .map(|c| c.join(&path).to_string_lossy().into_owned())
-            .unwrap_or(s)
-    }
+        std::env::current_dir().map_or(path.clone(), |c| c.join(&path))
+    };
+    // Re-collect through `components()` so the separators are the platform's.
+    //
+    // The templates above are written with `/`, which Windows accepts but does
+    // not produce — and callers join onto these with `PathBuf`, which does. Two
+    // spellings of one directory then read as two: the same transcript is
+    // discovered under both, deduped under neither, and parsed and uploaded
+    // several times a cycle. Its scan cursor is keyed by that string too, so the
+    // second spelling never sees the first's progress.
+    path.components()
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn binary_lookup_dirs(os: Os) -> Vec<String> {
@@ -1173,6 +1428,73 @@ fn dedupe_identities(list: Vec<DetectedIdentity>) -> Vec<DetectedIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `FileSignatures` strategy was declared in [`Strategy`] and
+    /// implemented nowhere — `discover()` never consulted it, so the enum
+    /// variant was a promise the code did not keep. Its job is the one thing no
+    /// other strategy can do: find a tool that is in no list of ours.
+    #[test]
+    fn a_transcript_store_no_source_lists_is_found_by_its_shape() {
+        let root = std::env::temp_dir().join(format!("modelstat-sig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"{}").unwrap();
+        };
+        // A store shaped like every JSONL agent's, under a name nothing knows.
+        mk(".newagent/sessions/2026/a.jsonl");
+        // A directory with no transcripts at all is not a tool.
+        std::fs::create_dir_all(root.join(".just-config/settings")).unwrap();
+        // Deep enough to be past the depth cap.
+        mk(".toodeep/a/b/c/d/e/buried.jsonl");
+        // A cache the skip list prunes, transcripts or not.
+        mk(".cachey/node_modules/pkg/x.jsonl");
+
+        let found = file_signature_installs(&root, &BTreeSet::new());
+        let agents: Vec<&str> = found.iter().map(|i| i.agent.as_str()).collect();
+        assert_eq!(
+            agents,
+            ["newagent"],
+            "the DIRECTORY's own name, dot stripped — nothing else states one"
+        );
+        assert_eq!(found[0].detected_via, ["file_signatures"]);
+        assert!(found[0].data_dir.as_deref().unwrap().ends_with(".newagent"));
+
+        // A directory a known source already claims belongs to that source, not
+        // to a second entry under a different name.
+        let claimed = BTreeSet::from([root.join(".newagent").to_string_lossy().into_owned()]);
+        assert!(file_signature_installs(&root, &claimed).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An injected home means EVERY home-relative form resolves inside it.
+    ///
+    /// `%APPDATA%` is always set on Windows, so honouring it while expanding
+    /// somebody else's home sent discovery to the real roaming profile and
+    /// quietly ignored the root it was handed — caught by the Windows CI lane,
+    /// invisible on macOS and Linux where the variable is usually unset.
+    #[test]
+    fn platform_base_dirs_follow_the_home_they_are_given() {
+        let root = std::env::temp_dir().join("modelstat-not-a-real-home");
+        for (raw, tail) in [
+            ("$APPDATA/Cursor", "AppData/Roaming/Cursor"),
+            ("$LOCALAPPDATA/Cursor", "AppData/Local/Cursor"),
+            ("$XDG_CONFIG_HOME/codex", ".config/codex"),
+            ("$XDG_DATA_HOME/codex", ".local/share/codex"),
+            ("~/.claude", ".claude"),
+            ("$HOME/.claude", ".claude"),
+        ] {
+            // Compared as PATHS: the expansion emits the platform's separators,
+            // which is the whole point of the normalisation it ends with.
+            assert_eq!(
+                PathBuf::from(expand_path_with_home(&root, raw)),
+                root.join(tail).components().collect::<PathBuf>(),
+                "{raw} escaped the home it was given"
+            );
+        }
+    }
 
     #[test]
     fn classify_install_method_cases() {

@@ -1860,6 +1860,7 @@ name = "modelstat-parsers"
 version = "1.17.4"
 dependencies = [
  "chrono",
+ "modelstat-log",
  "modelstat-redact",
  "modelstat-wire",
  "regex",

@@ -96,6 +96,37 @@ pub struct ScanTallies {
     /// way): the parser matched the artefact, understood none of it, and the
     /// silence was indistinguishable from an empty file. Loud now.
     pub files_silent: usize,
+    /// Files whose parse ERRORED. The cursor is deliberately left where it was
+    /// — never advance past bytes nobody read — which means the file retries
+    /// next cycle at full parse cost. Counted so that retry is visible rather
+    /// than a silent treadmill: a number that climbs every cycle is a file the
+    /// daemon cannot read at all, not a transient.
+    pub files_failed: usize,
+    /// Records no parser arm could read, by the kind string the source states
+    /// about itself — the per-scan fold of every parse's
+    /// [`modelstat_parsers::SkipLedger`].
+    pub skipped_kinds: BTreeMap<String, u64>,
+}
+
+/// One log line per distinct (file, error) per process.
+///
+/// The daemon re-scans on a timer, so an unreadable file would otherwise print
+/// the same line every cycle for as long as it sits on disk. The pair is the key
+/// rather than the path alone: a file that starts failing DIFFERENTLY has
+/// changed, and that is worth saying again.
+fn warn_parse_failure(path: &str, error: &str) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    let mut guard = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(format!("{path}\u{0}{error}")) {
+        modelstat_log::log_warn!(
+            "parse failed for {path}: {error} — its cursor stays put (nothing advances past \
+             unread bytes), so this file retries every cycle until it is readable"
+        );
+    }
 }
 
 /// Where per-file scan cursors live. The daemon backs this with `RuntimeState`
@@ -546,14 +577,24 @@ where
         let mut r = match parse_handle.await {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                modelstat_log::log_error!("parse failed for {}: {e}", job.path);
+                // The cursor is NOT queued below, and that is correct: nothing
+                // may advance past bytes nobody read. The cost is that the file
+                // re-parses every cycle until it is readable, so the retry is
+                // counted and named ONCE — a log line per cycle for a file that
+                // will never parse trains its reader to stop looking.
+                tallies.files_failed += 1;
+                warn_parse_failure(&job.path, &e.to_string());
                 continue;
             }
             Err(join) => {
-                modelstat_log::log_error!("parse task panicked for {}: {join}", job.path);
+                tallies.files_failed += 1;
+                warn_parse_failure(&job.path, &join.to_string());
                 continue;
             }
         };
+        for (kind, n) in std::mem::take(&mut r.skipped_kinds) {
+            *tallies.skipped_kinds.entry(kind).or_insert(0) += n;
+        }
         // Summarise each command's script/bash FILES into the drafts' redacted
         // abstracts — best-effort + additive; a failure leaves them empty and never
         // blocks the upload. Runs before the drafts buffer so the enriched version
@@ -763,6 +804,7 @@ mod tests {
             cwd: None,
             git: None,
             tokens: None,
+            tokens_unmapped: std::collections::BTreeMap::new(),
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: Vec::new(),
@@ -820,8 +862,29 @@ mod tests {
                 tool_calls: Vec::new(),
                 script_contexts: Vec::new(),
                 stats: ParseStats::default(),
+                skipped_kinds: std::collections::BTreeMap::new(),
                 source_file: j.path.clone(),
             })
+        }
+    }
+
+    /// A parse seam that streams `events` and THEN fails — a file whose readable
+    /// prefix is fine and whose tail the parser chokes on.
+    fn parse_failing_after(
+        events: Vec<RawEvent>,
+    ) -> impl Fn(&ScanJob, &mut dyn FnMut(Vec<RawEvent>)) -> std::io::Result<ParseResult>
+           + Send
+           + Sync
+           + Clone
+           + 'static {
+        move |_j: &ScanJob, emit: &mut dyn FnMut(Vec<RawEvent>)| {
+            if !events.is_empty() {
+                emit(events.clone());
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed tail",
+            ))
         }
     }
 
@@ -845,6 +908,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 script_contexts: Vec::new(),
                 stats: ParseStats::default(),
+                skipped_kinds: std::collections::BTreeMap::new(),
                 source_file: j.path.clone(),
             })
         }
@@ -910,6 +974,72 @@ mod tests {
         // Both files' cursors advanced only after their events committed.
         assert!(cursors.get_cursor("/a.jsonl").is_some());
         assert!(cursors.get_cursor("/b.jsonl").is_some());
+    }
+
+    /// A file whose TAIL a parser chokes on must not re-ship its confirmed
+    /// prefix, and must not do so again next cycle, and again forever.
+    ///
+    /// The cursor deliberately does NOT advance on a parse error — nothing may
+    /// move past bytes nobody read — so the file re-parses every cycle. That is
+    /// correct and it is also the whole cost: the `shipped_below` floor is what
+    /// keeps the re-parse from turning into a re-SHIP. This pins both halves,
+    /// twice over, because "it re-uploads the same 60 bytes every cycle forever"
+    /// is a bug you only see on the second pass.
+    #[tokio::test]
+    async fn a_parse_error_retries_without_re_shipping_the_confirmed_prefix() {
+        let resilient = healthy();
+        let mut git = NoGit;
+        let sink = RecordingSink::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        cursors.set_cursor("/a.jsonl", confirmed_through(60));
+        // Everything the parser gets through sits BELOW the confirmed floor —
+        // it is exactly the prefix an earlier scan already uploaded.
+        let already_shipped = vec![
+            at(ev("s1", "2026-07-16T10:00:00.000Z"), 10),
+            at(ev("s1", "2026-07-16T10:00:01.000Z"), 20),
+        ];
+
+        for pass in 1..=2 {
+            let t = run_scan_over_jobs(
+                vec![job("/a.jsonl")],
+                "dev1",
+                "9.9.9",
+                "local",
+                opts(Some(12), false),
+                &resilient,
+                &NoEmbedder,
+                &AnsweringRedactor,
+                &mut git,
+                None,
+                parse_failing_after(already_shipped.clone()),
+                checksum,
+                |e| e,
+                &no_exists,
+                &no_read,
+                &sink,
+                &mut cursors,
+                &mut obs,
+                &Accounts::new(),
+            )
+            .await;
+
+            assert_eq!(t.files_failed, 1, "pass {pass}: the failure is COUNTED");
+            assert!(!t.held, "pass {pass}: a bad file is not a hold");
+            assert_eq!(
+                t.batches_spooled, 0,
+                "pass {pass}: the floor kept the confirmed prefix off the wire"
+            );
+            assert!(
+                sink.offered().is_empty(),
+                "pass {pass}: not even offered — re-summarising it is the expensive half"
+            );
+            assert_eq!(
+                cursors.get_cursor("/a.jsonl").map(|c| c.size),
+                Some(60),
+                "pass {pass}: an errored parse vouches for no new bytes, so the floor holds"
+            );
+        }
     }
 
     #[tokio::test]

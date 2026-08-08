@@ -50,11 +50,23 @@ export type GitContext = z.infer<typeof GitContext>;
 export const RawEvent = z.object({
   source_event_id: z.string(),
   ts: z.string().datetime({ offset: true }),
-  kind: z.enum(EVENT_KINDS),
+  /** The turn's category. `EVENT_KINDS` is the vocabulary the daemon MEANS to
+   * emit, not the set of values that can arrive: a parser that meets a record
+   * type it has no arm for reports the type VERBATIM here rather than dropping
+   * the record, which is how an upstream schema move becomes visible instead of
+   * silent. Validated as a string for the same reason `modelstat-wire` does —
+   * shape is the contract, membership is a question for the reader. */
+  kind: z.string().max(120),
 
   // Attribution
-  agent: z.enum(AGENTS),
-  provider: z.enum(PROVIDERS),
+  /** `AGENTS` is the roster of tools we have SEEN, and new ones ship weekly.
+   * Discovery finds a tool by artefact shape rather than by name, so a value
+   * here can legitimately be one no build of this package has heard of. */
+  agent: z.string().max(120),
+  /** `PROVIDERS` likewise. A multi-vendor harness (pi) names whatever vendor its
+   * own config names, and folding an unlisted one to `unknown` does not merely
+   * lose detail — it breaks the join to the account that paid for the tokens. */
+  provider: z.string().max(120),
   model: z.string().max(120).nullable(),
   session_id: z.string().max(120), // agent-local session id (UUID in most cases)
   turn_index: z.number().int().nonnegative().nullable(),
@@ -66,6 +78,17 @@ export const RawEvent = z.object({
 
   // Resource usage
   tokens: TokenUsage.nullable(),
+  /** Counters the source stated that do not map onto TokenUsage's five buckets,
+   * keyed by their path in the source object with the source's own names.
+   * Absent in the ordinary case; it fills when an upstream moves its token
+   * schema, so the numbers survive to be re-bucketed instead of being lost
+   * behind a fabricated zero. Numeric leaves only — a drifted shape is one
+   * nothing has validated, and only its numbers are safe to carry.
+   *
+   * `.optional()` rather than `.default({})`: the daemon omits the key entirely
+   * when there is nothing to say, so an `{}` in the type would describe a value
+   * the wire never carries. */
+  tokens_unmapped: z.record(z.string(), z.number().int().nonnegative()).optional(),
   duration_ms: z.number().int().nonnegative().nullable(),
 
   // Tool calls (aggregate only)
@@ -150,7 +173,8 @@ export const Segment = z.object({
   /** sha256-based deterministic id — see @modelstat/core/ids.ts segmentId(). */
   segment_id: z.string().max(64),
   session_id: z.string().max(120),
-  agent: z.enum(AGENTS),
+  /** Open set — see `RawEvent.agent`. */
+  agent: z.string().max(120),
   started_at: z.string().datetime({ offset: true }),
   ended_at: z.string().datetime({ offset: true }),
   /** Pre-redacted abstract, ≤ 512 chars. Never contains PII. */
@@ -292,8 +316,8 @@ export const ToolCallWire = z.object({
   /** Segment containing source_event_id — filled by the daemon at
    * batch-build time when known, else null. */
   segment_id: z.string().max(64).nullable().default(null),
-  /** The agent that made the call (AGENTS enum). */
-  agent: z.enum(AGENTS),
+  /** The agent that made the call. Open set — see `RawEvent.agent`. */
+  agent: z.string().max(120),
   /** `builtin` or `mcp:<server>`. */
   server: z.string().max(120),
   /** Bare tool name (`Bash`, `create_pr`) — normalised vendor identifier. */
@@ -491,7 +515,11 @@ export type RedactionPolicy = z.infer<typeof RedactionPolicy>;
 
 /** One detected tool install on a device. */
 export const DetectedInstallation = z.object({
-  agent: z.enum(AGENTS),
+  /** Open set — see `RawEvent.agent`. Discovery probes by artefact shape, so a
+   * transcript store under a name nothing has enumerated is reported under that
+   * name rather than not reported at all. */
+  agent: z.string().max(120),
+  /** Closed: WE classify the install method, so the set is ours to fix. */
   install_method: z.enum(INSTALL_METHODS),
   binary_path: z.string().nullable(),
   data_dir: z.string().nullable(),
@@ -502,7 +530,9 @@ export type DetectedInstallation = z.infer<typeof DetectedInstallation>;
 
 /** A source-account identity detected on the device. */
 export const DetectedIdentity = z.object({
-  provider: z.enum(PROVIDERS),
+  /** Open set — see `RawEvent.provider`. The key-fingerprint probe reports the
+   * provider name a user's own config states, which is not ours to enumerate. */
+  provider: z.string().max(120),
   provider_account_id: z.string().max(200),
   provider_account_label: z.string().max(200).nullable(),
   /** Human-facing labels — what the user recognises the account by.

@@ -126,6 +126,13 @@ pub fn fold_discovery(stored: &Accounts, detected: &[(String, String)], now_ms: 
 /// be at or after `observed_since` — otherwise part of this session ran under a
 /// login we never saw, and the honest answer is to say nothing and let the
 /// server surface it as needing an account.
+///
+/// The lookup is a plain string match on the provider, which makes the two sides
+/// of it a contract: the probe writes the provider name a user's config states,
+/// and the parser must write the SAME name onto the events. pi's parser used to
+/// fold anything outside a fixed table to `unknown` while the probe stored the
+/// real name, so those two never met and a whole class of user could not be
+/// attributed at all — see `provider_of` in `modelstat_parsers::pi`.
 #[must_use]
 pub fn account_for_session<'a>(
     accounts: &'a Accounts,
@@ -144,7 +151,7 @@ pub fn account_for_session<'a>(
 /// providerAccountId)` — the pair the server translates into an identity. A
 /// session is OMITTED (never sent empty) whenever we cannot name its account:
 ///
-/// * no probe for its provider (`zhipu`, `xai`, …) — nothing was ever read;
+/// * no probe for its provider — nothing was ever read for it;
 /// * any of its events predate [`AccountSnapshot::observed_since`] — the install
 ///   backlog and the pre-switch case, where today's login says nothing about who
 ///   ran it;
@@ -229,6 +236,40 @@ mod tests {
             provider_account_id: id.into(),
             observed_since: since,
         }
+    }
+
+    /// The join is a plain string match, so the probe's vocabulary and the
+    /// parser's have to be the same one.
+    ///
+    /// The key-fingerprint probe reports whatever provider name a user's own
+    /// config states, and pi's parser used to fold anything outside a fixed
+    /// table to `unknown`. A user on a vendor the table never listed therefore
+    /// had their key filed under the real name and every one of their events
+    /// stamped `unknown` — two records of the same fact that could never meet.
+    /// Now that the parser ships the transcript's own string, they do.
+    #[test]
+    fn a_provider_the_table_never_listed_now_joins_its_account() {
+        // What `probe_provider_key_identities` writes: the config's own key,
+        // lowercased. Nothing about it is in any enum we ship.
+        let accounts = fold_discovery(
+            &Accounts::new(),
+            &[("zhipu".into(), "key:abc123".into())],
+            1_000,
+        );
+
+        // What the pi parser now stamps on the event: the same string.
+        let events = vec![ev("s1", "zhipu", "2026-07-16T10:00:00.000Z")];
+        let installs = session_installs_for(&events, &accounts).expect("the session is nameable");
+        assert_eq!(installs["s1"]["provider"], "zhipu");
+        assert_eq!(installs["s1"]["provider_account_id"], "key:abc123");
+
+        // The old behaviour, spelled out: an event folded to `unknown` reaches
+        // no account, because nothing is ever stored under that name.
+        let folded = vec![ev("s2", "unknown", "2026-07-16T10:00:00.000Z")];
+        assert!(
+            session_installs_for(&folded, &accounts).is_none(),
+            "collapsing an unlisted vendor to `unknown` severs it from its own key"
+        );
     }
 
     #[test]
@@ -319,6 +360,7 @@ mod tests {
             cwd: None,
             git: None,
             tokens: None,
+            tokens_unmapped: std::collections::BTreeMap::new(),
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: Vec::new(),

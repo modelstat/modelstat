@@ -391,6 +391,7 @@ mod tests {
             cwd: None,
             git: None,
             tokens: Some(TokenUsage::default()),
+            tokens_unmapped: std::collections::BTreeMap::new(),
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: Vec::new(),
