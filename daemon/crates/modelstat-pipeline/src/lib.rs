@@ -26,5 +26,8 @@ pub use passes::{CognitionTags, THINKING_HEADROOM_TOKENS};
 pub use resilient::{
     preflight, PreflightReport, ResilientSummarizer, SummarizeOutcome, Summarizer, DEFAULT_COOLDOWN,
 };
-pub use segment::{cosine_distance, segment_turns, turn_meta, turn_surface, TurnMeta};
+pub use segment::{
+    cosine_distance, install_calibration, installed_calibration, segment_turns, segment_turns_with,
+    turn_meta, turn_surface, Calibration, TurnMeta, CALIBRATION_CONFIG_KIND,
+};
 pub use session_metadata::{build_session_metadata, LinkExtractor};
