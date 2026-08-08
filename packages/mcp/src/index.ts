@@ -53,6 +53,20 @@ import {
 } from "./widget.js";
 import { healWire, runWire } from "./wire.js";
 
+/**
+ * The values this OFFLINE fallback happens to know about.
+ *
+ * Every one of these sets is owned by the server, which enumerates them in the
+ * live catalog and grows them without asking us. So they are advertised in each
+ * parameter's DESCRIPTION — where a crawler and a reading agent both see them —
+ * and never as a JSON-Schema `enum`, which would make this stale copy reject an
+ * argument the server added yesterday and answers perfectly well. A client
+ * running against a live catalog never sees these at all.
+ *
+ * Genuinely fixed vocabularies keep their `enum`. The Rust mirror of this
+ * catalog (`daemon/crates/modelstat-mcp/src/catalog.rs`) carries the test that
+ * guards the distinction; the two files must stay byte-faithful.
+ */
 const RANGES = ["today", "7d", "30d", "90d", "mtd", "ytd"] as const;
 // Dimensions the explore tool can group/stack by — mirrors the server catalog.
 const DIMENSIONS = [
@@ -82,9 +96,7 @@ const METRICS = [
 const RANGE_PROPS = {
   range: {
     type: "string",
-    enum: [...RANGES],
-    description:
-      "Named time window (ignored when from/to given). Omit range AND from/to for all-time.",
+    description: `Named time window (ignored when from/to given). Omit range AND from/to for all-time. The live server enumerates the valid values; known here: ${RANGES.join(", ")}.`,
   },
   from: { type: "string", description: "RFC3339 inclusive lower bound (overrides `range`)" },
   to: { type: "string", description: "RFC3339 exclusive upper bound (overrides `range`)" },
@@ -112,13 +124,20 @@ const TOOLS: McpToolDecl[] = [
     inputSchema: {
       type: "object",
       properties: {
-        group_by: { type: "string", enum: [...DIMENSIONS], default: "day" },
+        group_by: {
+          type: "string",
+          default: "day",
+          description: `Dimension to group by. The live server enumerates the valid values; known here: ${DIMENSIONS.join(", ")}.`,
+        },
         stack_by: {
           type: "string",
-          enum: [...DIMENSIONS],
-          description: "Optional second dimension; each cell carries `stack`.",
+          description: `Optional second dimension; each cell carries \`stack\`. Same open set as group_by; known here: ${DIMENSIONS.join(", ")}.`,
         },
-        metric: { type: "string", enum: [...METRICS], default: "cost" },
+        metric: {
+          type: "string",
+          default: "cost",
+          description: `Metric to compute. The live server enumerates the valid values; known here: ${METRICS.join(", ")}.`,
+        },
         taxonomy: {
           type: "array",
           description:
