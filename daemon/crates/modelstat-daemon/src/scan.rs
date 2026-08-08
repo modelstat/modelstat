@@ -145,6 +145,20 @@ pub trait BatchSink {
 /// from these; tests pass `&mut ()`. Port of TS `ScanCallbacks` (minus the
 /// per-segment `onProgress`, which the pure batch builder doesn't surface).
 pub trait ScanObserver {
+    /// Fresh activity on a session this scan just read: newest event instant +
+    /// the agent + a human label (the cwd's last component). Fired per file per
+    /// session, deduped within the file — cheap, and it is the ONLY signal that
+    /// lets a UI answer "what is running right now".
+    fn on_session_activity(
+        &mut self,
+        session_id: &str,
+        agent: &str,
+        label: Option<&str>,
+        last_ms: i64,
+    ) {
+        let _ = (session_id, agent, label, last_ms);
+    }
+
     /// Before parsing each file — `index` 0-based, `total` = files discovered.
     fn on_file(&mut self, path: &str, index: usize, total: usize) {
         let _ = (path, index, total);
@@ -465,8 +479,33 @@ where
         });
         let mut held = false;
         let mut parsed_events = 0usize;
+        // Per-session newest instant seen in this file — feeds the live-session
+        // ledger after the loop (deduped here so the observer stays cheap).
+        let mut live_seen: BTreeMap<String, (String, Option<String>, i64)> = BTreeMap::new();
         while let Some(chunk) = rx.recv().await {
             parsed_events += chunk.len();
+            for e in &chunk {
+                if let Some(ms) = chrono::DateTime::parse_from_rfc3339(&e.ts)
+                    .ok()
+                    .map(|d| d.timestamp_millis())
+                {
+                    let label = e
+                        .cwd
+                        .as_deref()
+                        .and_then(|c| c.replace('\\', "/").rsplit('/').next().map(str::to_string))
+                        .filter(|s| !s.is_empty());
+                    let slot = live_seen
+                        .entry(e.session_id.clone())
+                        .or_insert_with(|| (e.agent.clone(), label.clone(), ms));
+                    if ms >= slot.2 {
+                        slot.0 = e.agent.clone();
+                        if label.is_some() {
+                            slot.1 = label;
+                        }
+                        slot.2 = ms;
+                    }
+                }
+            }
             for e in chunk {
                 // Parsed for its cross-line state, but already shipped — drop it
                 // before the buffer so it costs no summarise + no upload. An event
@@ -531,6 +570,9 @@ where
             Some(redactor),
         )
         .await;
+        for (sid, (agent, label, ms)) in &live_seen {
+            observer.on_session_activity(sid, agent, label.as_deref(), *ms);
+        }
         // A WHOLE read (no byte floor, no watermark) of a non-empty file that
         // produced NOTHING is a dialect we no longer understand, not an empty
         // file — the difference between "nothing to say" and "could not read"

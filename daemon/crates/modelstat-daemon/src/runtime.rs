@@ -197,6 +197,16 @@ impl StatusObserver<'_> {
     }
 }
 impl ScanObserver for StatusObserver<'_> {
+    fn on_session_activity(
+        &mut self,
+        session_id: &str,
+        agent: &str,
+        label: Option<&str>,
+        last_ms: i64,
+    ) {
+        self.with(|s| s.note_live(session_id, agent, label, last_ms));
+    }
+
     fn on_file(&mut self, path: &str, index: usize, total: usize) {
         let _ = path;
         // How much is LEFT, including the one starting now — the number that
@@ -344,17 +354,16 @@ impl crate::uploader::UploadObserver for UploadStatusObserver {
 /// ships raw events and 0 segments; local / self-hosted ship both), so this can
 /// never read a misleading "0 segments".
 fn shipped_line(s: &Status, in_flight: u64) -> String {
-    let sent = s
-        .stats
-        .get("events_uploaded")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        + in_flight;
-    let mut line = format!("{} events sent", thousands(sent));
+    // Position only — the events figure lives in ONE place (the totals row /
+    // `stats.events_uploaded`). This line used to carry it too, and after any
+    // restart the pass counter, the lifetime counter and this message all
+    // rendered the same number three times with one word.
+    let _ = in_flight;
     if s.progress_total > 0 {
-        line.push_str(&format!(" · file {}/{}", s.progress_done, s.progress_total));
+        format!("shipping · file {}/{}", s.progress_done, s.progress_total)
+    } else {
+        "shipping batches".to_string()
     }
-    line
 }
 
 /// `12345` → `"12,345"`. The tray menu and `modelstat status` are read at a
@@ -990,34 +999,42 @@ mod tests {
         obs.on_uploaded(1000, 0);
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("1,000 events sent · file 3/71")
+            Some("shipping · file 3/71")
         );
         obs.on_uploaded(1000, 0); // same batch size, DIFFERENT line
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("2,000 events sent · file 3/71")
+            Some("shipping · file 3/71")
         );
     }
 
     #[test]
-    fn the_upload_line_counts_events_in_every_mode() {
-        // Cloud ships raw events with 0 segments; local / self-hosted ship both.
-        // Counting events keeps the line honest in both — it can never read the
-        // misleading "0 segments" a segment-only counter produced in cloud mode.
+    fn the_upload_line_owns_position_and_the_stats_own_the_count() {
+        // The message used to carry the events figure too — and after any
+        // restart the pass counter, the lifetime counter and this message all
+        // rendered the same number under one word ("events"), which read as
+        // duplicate rows in the tray. One owner per fact now: the message says
+        // WHERE the upload is, `stats.events_uploaded` says HOW MUCH shipped.
         use crate::uploader::UploadObserver;
         let (status, mut obs) = upload_observer();
 
         obs.on_pass_start(2);
         obs.on_uploaded(120, 3); // segment batch (local / self-hosted)
-        assert_eq!(
-            status.lock().unwrap().message.as_deref(),
-            Some("120 events sent")
-        );
+        {
+            let s = status.lock().unwrap();
+            assert_eq!(s.message.as_deref(), Some("shipping batches"));
+            assert_eq!(
+                s.stats.get("events_uploaded").and_then(Value::as_u64),
+                Some(120),
+                "the count still exists — in exactly one place"
+            );
+        }
 
         obs.on_uploaded(0, 0); // raw event batch (cloud), 0 segments
         assert_eq!(
             status.lock().unwrap().message.as_deref(),
-            Some("120 events sent")
+            Some("shipping batches"),
+            "a zero-segment cloud batch cannot regress the line"
         );
     }
 

@@ -122,7 +122,31 @@ pub struct Status {
     pub uploading: Option<UploadingNow>,
     /// The sweep in progress, or `None` between sweeps.
     pub run: Option<RunProgress>,
+    /// Sessions with fresh transcript activity, keyed by session id — the
+    /// daemon SEES this within a second of a write (watcher → scan) and used
+    /// to keep it to itself, which is why the tray could count three kinds of
+    /// "events" and still not answer "is anything running right now?".
+    pub live: BTreeMap<String, LiveSession>,
 }
+
+/// One recently-active session, as the scan observed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveSession {
+    /// The agent the human used (verbatim from the event).
+    pub agent: String,
+    /// A human-readable place: the session cwd's last path component, else the
+    /// agent name. Local-only (last-status.json never leaves the machine).
+    pub label: String,
+    /// Newest event timestamp seen for this session, epoch ms.
+    pub last_ms: i64,
+}
+
+/// How many live entries the snapshot carries, newest first. The tray shows a
+/// one-line summary; this bounds the file, not the truth.
+const LIVE_CAP: usize = 8;
+/// Activity older than this drops out of the ledger — "live" means minutes,
+/// not this morning.
+pub const LIVE_WINDOW_MS: i64 = 15 * 60 * 1000;
 
 impl Default for Status {
     fn default() -> Self {
@@ -139,11 +163,65 @@ impl Default for Status {
             busy_since_ms: None,
             uploading: None,
             run: None,
+            live: BTreeMap::new(),
         }
     }
 }
 
 impl Status {
+    /// Record fresh activity on a session. Keeps the newest instant per
+    /// session, drops entries outside [`LIVE_WINDOW_MS`] (judged against the
+    /// newest activity seen, so a machine waking from sleep prunes correctly
+    /// without consulting a wall clock here), and caps the ledger.
+    pub fn note_live(&mut self, session_id: &str, agent: &str, label: Option<&str>, last_ms: i64) {
+        let entry = self
+            .live
+            .entry(session_id.to_string())
+            .or_insert_with(|| LiveSession {
+                agent: agent.to_string(),
+                label: label.unwrap_or(agent).to_string(),
+                last_ms,
+            });
+        if last_ms >= entry.last_ms {
+            entry.last_ms = last_ms;
+            entry.agent = agent.to_string();
+            if let Some(l) = label {
+                entry.label = l.to_string();
+            }
+        }
+        let newest = self
+            .live
+            .values()
+            .map(|l| l.last_ms)
+            .max()
+            .unwrap_or(last_ms);
+        self.live
+            .retain(|_, l| newest - l.last_ms <= LIVE_WINDOW_MS);
+        while self.live.len() > LIVE_CAP {
+            // BTreeMap has no cheap "remove oldest by value" — the cap is tiny,
+            // so a scan for the stalest key is fine.
+            if let Some(oldest) = self
+                .live
+                .iter()
+                .min_by_key(|(_, l)| l.last_ms)
+                .map(|(k, _)| k.clone())
+            {
+                self.live.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// The live ledger as snapshot rows, newest first.
+    fn live_rows(&self) -> Vec<Value> {
+        let mut rows: Vec<&LiveSession> = self.live.values().collect();
+        rows.sort_by_key(|l| std::cmp::Reverse(l.last_ms));
+        rows.iter()
+            .map(|l| json!({ "agent": l.agent, "label": l.label, "last_ms": l.last_ms }))
+            .collect()
+    }
+
     pub fn set_phase(&mut self, phase: Phase, message: impl Into<String>) {
         self.phase = phase;
         self.message = Some(message.into());
@@ -281,6 +359,7 @@ impl Status {
             "active": self.busy_since_ms.is_some(),
             "message": self.message,
             "busy_since_ms": self.busy_since_ms,
+            "live": self.live_rows(),
             "uploading": self.uploading.as_ref().map(|u| json!({
                 "sessions": u.sessions,
                 "uploads": u.uploads,
@@ -340,6 +419,34 @@ pub fn write_last_status(path: &Path, snapshot: &Value, written_at: &str) -> std
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_live_ledger_keeps_newest_prunes_stale_and_caps() {
+        let mut s = Status::default();
+        s.note_live("s1", "claude_code", Some("modelstat"), 1_000_000);
+        s.note_live("s1", "claude_code", None, 1_000_500); // newer, keeps label
+        s.note_live("s2", "cursor", Some("web"), 1_000_200);
+        assert_eq!(s.live["s1"].last_ms, 1_000_500);
+        assert_eq!(s.live["s1"].label, "modelstat");
+        // Snapshot rows come newest-first.
+        let rows = s.live_rows();
+        assert_eq!(rows[0]["label"], "modelstat");
+        assert_eq!(rows[1]["agent"], "cursor");
+        // Activity far in the future prunes everything stale relative to it.
+        s.note_live("s3", "codex", None, 1_000_500 + LIVE_WINDOW_MS + 1);
+        assert_eq!(
+            s.live.len(),
+            1,
+            "only the fresh session survives the window"
+        );
+        // The cap holds under a burst of distinct sessions.
+        for i in 0..30 {
+            s.note_live(&format!("b{i}"), "claude_code", None, 2_000_000 + i);
+        }
+        assert!(s.live.len() <= 9, "capped (8 + the survivor at most)");
+    }
+
     use super::*;
 
     #[test]
