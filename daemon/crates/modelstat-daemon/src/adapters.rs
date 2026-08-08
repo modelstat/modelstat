@@ -54,15 +54,16 @@ impl BatchSink for Spool {
     }
 }
 
-/// A [`BatchSink`] that stamps the REDACTOR mode a batch was actually built
-/// under before parking it. The stamp has to happen here, at the spool door:
+/// A [`BatchSink`] that stamps the modes a batch was actually BUILT under
+/// before parking it. The stamps have to happen here, at the spool door:
 /// batches wait in the spool for arbitrarily long, and stamping at upload time
-/// (as `summarizer_mode` still does) would label a batch with whatever the
-/// setting is by then — the exact drift `redactor_mode` exists to make
-/// answerable ("was THIS batch scrubbed on the box?").
+/// would label a batch with whatever the settings are by then — the exact
+/// drift these fields exist to make answerable ("was THIS batch scrubbed on
+/// the box? WHERE was it summarised?").
 pub struct StampedSink<'a> {
     pub spool: &'a Spool,
     pub redactor_mode: String,
+    pub summarizer_mode: String,
 }
 
 impl BatchSink for StampedSink<'_> {
@@ -73,6 +74,7 @@ impl BatchSink for StampedSink<'_> {
             segment_count: batch.segment_count,
         };
         stamped.batch.redactor_mode = Some(self.redactor_mode.clone());
+        stamped.batch.summarizer_mode = Some(self.summarizer_mode.clone());
         self.spool.accept(&stamped)
     }
 }

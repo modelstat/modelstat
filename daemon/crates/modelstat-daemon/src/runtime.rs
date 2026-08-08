@@ -129,8 +129,13 @@ pub struct Daemon {
     pub device_id: String,
     pub machine_id: String,
     /// The install-time summariser mode, resolved ONCE (a change bounces the
-    /// service): `local` / `self-hosted` / `cloud`.
+    /// service): `local` / `self-hosted` / `cloud`. Boot-constant BY CONTRACT —
+    /// it decides batch shape and engine wiring, which are built here.
     pub mode: String,
+    /// The redactor mode the CURRENT `redactor` handle was built for. The scan
+    /// compares it to the live setting each cycle and rebuilds on drift, so a
+    /// mode switch takes effect without depending on the CLI's service bounce.
+    pub redactor_mode_built: StdMutex<String>,
     /// Auto-update dedup (§13): the `(verdict, target)` keys already acted on this
     /// process, so a heartbeat every 10s never stacks a second self-update.
     pub handled_updates: Arc<StdMutex<std::collections::HashSet<String>>>,
@@ -164,6 +169,7 @@ impl Daemon {
             device_id,
             machine_id,
             mode,
+            redactor_mode_built: StdMutex::new(config.redactor_mode()),
             config,
             handled_updates: Arc::new(StdMutex::new(std::collections::HashSet::new())),
         }))
@@ -483,6 +489,10 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     let sink = crate::adapters::StampedSink {
         spool: &daemon.spool,
         redactor_mode: daemon.config.redactor_mode(),
+        // `daemon.mode`, not a fresh config read: the batch SHAPE (raw vs
+        // segments) was decided by the mode this process booted with, and the
+        // stamp must name the mode that actually built it.
+        summarizer_mode: daemon.mode.clone(),
     };
     let sink = &sink;
     let mut observer = StatusObserver {
@@ -504,6 +514,26 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
             tail_hash: c.tail_hash,
         })
     };
+
+    // A changed redactor setting takes effect at the next scan, not the next
+    // service bounce: the handle rebuilds when the stored mode drifts from the
+    // one it was built for. (The summariser mode stays boot-constant — it
+    // decides batch shape and engine wiring — and `modelstat mode` bounces.)
+    {
+        let want = daemon.config.redactor_mode();
+        let mut built = daemon
+            .redactor_mode_built
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if *built != want {
+            modelstat_log::log_info!(
+                "redactor mode {} → {want} — rebuilding the redactor",
+                *built
+            );
+            daemon.redactor.set(build_redactor(&daemon.config));
+            *built = want;
+        }
+    }
 
     // Snapshot the model handles for this scan: a mid-scan self-heal swap must
     // not change which embedder half a session was built with.
@@ -557,6 +587,7 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     daemon.with_status(|s| {
         s.bump_stat("files_scanned", tallies.files_scanned as u64);
         s.bump_stat("files_unchanged", tallies.files_unchanged as u64);
+        s.bump_stat("files_silent", tallies.files_silent as u64);
         // Files only: this sweep's events + segments were already folded in per
         // batch by `on_uploaded`, and counting them twice would inflate the row.
         s.bump_run(

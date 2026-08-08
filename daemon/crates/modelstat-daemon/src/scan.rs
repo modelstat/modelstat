@@ -90,6 +90,12 @@ pub struct ScanTallies {
     /// buffered files' cursors were left un-advanced and will be retried next
     /// cycle.
     pub held: bool,
+    /// Files read WHOLE that parsed to nothing at all — no events, no tool
+    /// calls — while plainly containing bytes. Exactly the shape of an
+    /// upstream schema move (Cursor's `ai_code_hashes` sat dead for weeks this
+    /// way): the parser matched the artefact, understood none of it, and the
+    /// silence was indistinguishable from an empty file. Loud now.
+    pub files_silent: usize,
 }
 
 /// Where per-file scan cursors live. The daemon backs this with `RuntimeState`
@@ -458,7 +464,9 @@ where
             parse_one(&job_owned, &mut emit)
         });
         let mut held = false;
+        let mut parsed_events = 0usize;
         while let Some(chunk) = rx.recv().await {
+            parsed_events += chunk.len();
             for e in chunk {
                 // Parsed for its cross-line state, but already shipped — drop it
                 // before the buffer so it costs no summarise + no upload. An event
@@ -523,6 +531,24 @@ where
             Some(redactor),
         )
         .await;
+        // A WHOLE read (no byte floor, no watermark) of a non-empty file that
+        // produced NOTHING is a dialect we no longer understand, not an empty
+        // file — the difference between "nothing to say" and "could not read"
+        // is the one the Cursor dead-schema weeks were lost to. Incremental
+        // reads legitimately parse to nothing new, so they don't count.
+        let read_whole = shipped_below == 0 && job.since_ms.is_none();
+        let file_has_bytes = cs.as_ref().is_some_and(|c| c.size > 0);
+        if read_whole && file_has_bytes && parsed_events == 0 && r.tool_calls.is_empty() {
+            tallies.files_silent += 1;
+            modelstat_log::log_warn!(
+                "{} parsed to NOTHING ({:?}, {} bytes) — if this repeats, the \
+                 app's transcript schema has likely moved and this daemon needs \
+                 a parser update",
+                job.path,
+                job.kind,
+                cs.as_ref().map(|c| c.size).unwrap_or(0)
+            );
+        }
         // Drafts deliberately take NO `shipped_below` floor. A draft's
         // status/latency/result-size are filled in-place when its `tool_result`
         // line is paired, which can happen many lines — and scans — after the

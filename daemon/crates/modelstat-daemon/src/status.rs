@@ -275,6 +275,10 @@ impl Status {
         json!({
             "device_id": device_id,
             "status": self.phase.as_str(),
+            // Stated by the WRITER, which knows: readers used to re-derive
+            // "working right now" from an allowlist of phase names, so every
+            // new phase silently rendered as idle in the tray.
+            "active": self.busy_since_ms.is_some(),
             "message": self.message,
             "busy_since_ms": self.busy_since_ms,
             "uploading": self.uploading.as_ref().map(|u| json!({

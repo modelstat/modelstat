@@ -23,13 +23,15 @@
 //!
 //! # Why windows are exact here
 //!
-//! Attention is BANDED at [`BAND`] tokens: a token only ever attends within ±128 of
-//! itself. So a window that gives its interior tokens at least [`BAND`] tokens of
-//! context on each side computes exactly what the whole-input pass would. Measured:
-//! 100.00% label agreement against whole-input at windows of 4096/2048/1024/512.
-//! Unlike the BERT path this replaced, chunking is not an approximation traded for
-//! speed — it IS the fast path, and [`WINDOW`]/[`OVERLAP`] were chosen by
-//! measurement (2048/256 beat both larger windows and smaller ones).
+//! Attention is BANDED: a token only ever attends within ±band of itself, where
+//! the band is the CHECKPOINT's `sliding_window` (read at load — see
+//! [`WindowPlan`]; never compiled in, so a future checkpoint with a wider band
+//! refuses to load rather than silently mis-windowing). A window that gives its
+//! interior tokens at least one band of context on each side computes exactly
+//! what the whole-input pass would. Measured at band 128: 100.00% label
+//! agreement against whole-input at windows of 4096/2048/1024/512, with
+//! 2048/256 fastest. Unlike the BERT path this replaced, chunking is not an
+//! approximation traded for speed — it IS the fast path.
 //!
 //! # Why CPU
 //!
@@ -50,12 +52,14 @@
 //! (37 → 8,797 tokens), M4 Pro, release build, three runs each. Resident memory
 //! once the run settled:
 //!
-//!     setting                    idle RSS     inference
-//!     (defaults)                   3.37 GB        4.9 s
-//!     prepacking off               2.55 GB        4.3 s   ← shipped
-//!     CPU arena off                4.09 GB        4.9 s
-//!     memory pattern off           3.34 GB        4.6 s
-//!     intra-op spinning off        3.37 GB        4.9 s
+//! ```text
+//! setting                    idle RSS     inference
+//! (defaults)                   3.37 GB        4.9 s
+//! prepacking off               2.55 GB        4.3 s   ← shipped
+//! CPU arena off                4.09 GB        4.9 s
+//! memory pattern off           3.34 GB        4.6 s
+//! intra-op spinning off        3.37 GB        4.9 s
+//! ```
 //!
 //! Only prepacking moved the number: **−0.82 GB (−24%), and slightly FASTER**, so
 //! there is no trade to weigh.
@@ -82,23 +86,51 @@ use tokenizers::Tokenizer;
 
 use crate::pii::{PiiModel, PiiToken};
 
-/// Attention band — a token attends within ±this many tokens. From the
-/// checkpoint's `sliding_window`, and the reason windowed inference is exact.
-pub const BAND: usize = 128;
-/// Tokens per forward pass. Measured against 512/1024/4096 on a 9k-token turn;
-/// this was fastest. Not a correctness knob — any value ≥ 2·[`BAND`] is exact —
-/// so it can be retuned on evidence without touching the output.
-pub const WINDOW: usize = 2048;
-/// Tokens two neighbouring windows share. Must be ≥ [`BAND`] or interior tokens
-/// near a seam would see less context than the whole-input pass gives them, and
-/// the exactness argument above collapses.
-pub const OVERLAP: usize = 256;
+/// The window geometry for one checkpoint: its attention band (a token attends
+/// within ±band of itself) and the window/overlap derived from it.
+///
+/// Derived AT LOAD from the checkpoint's own `sliding_window` — never compiled
+/// in. A constant here would be a claim about every future checkpoint, and a
+/// checkpoint with a wider band would make windowed inference silently
+/// inexact: the same failure family as the BERT 512-position leak, minus the
+/// error. A checkpoint that doesn't state its band refuses to load instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowPlan {
+    /// From the checkpoint's `sliding_window`.
+    pub band: usize,
+    /// Tokens per forward pass. `max(2048, 4·band)` — 2048 was measured fastest
+    /// against 512/1024/4096 at band 128; wider bands scale it up so a window
+    /// still amortises its overlap. Not a correctness knob: any value that
+    /// leaves `overlap ≥ band` and `window > overlap` is exact.
+    pub window: usize,
+    /// Tokens two neighbouring windows share: `2·band`, the measured operating
+    /// point at band 128 (256). Must be ≥ band or interior tokens near a seam
+    /// see less context than the whole-input pass gives them, and the
+    /// exactness argument collapses.
+    pub overlap: usize,
+}
 
-const _: () = assert!(
-    OVERLAP >= BAND,
-    "overlap must cover the attention band, or windowing stops being exact"
-);
-const _: () = assert!(WINDOW > OVERLAP, "windows must advance");
+impl WindowPlan {
+    /// The plan for a checkpoint with the given attention band.
+    pub fn for_band(band: usize) -> Result<Self, String> {
+        if band == 0 {
+            return Err("checkpoint declares a zero attention band".into());
+        }
+        let plan = WindowPlan {
+            band,
+            window: 2048usize.max(4 * band),
+            overlap: 2 * band,
+        };
+        // The exactness invariants, checked where the numbers are born rather
+        // than assumed downstream.
+        if plan.overlap < plan.band || plan.window <= plan.overlap {
+            return Err(format!(
+                "window geometry degenerate for band {band}: {plan:?}"
+            ));
+        }
+        Ok(plan)
+    }
+}
 
 /// Logit units subtracted from the background class before decoding — a thumb on
 /// the scale toward *finding* a span.
@@ -152,6 +184,8 @@ pub struct PrivacyFilter {
     background_penalty: f32,
     /// The id of the outside/background class (`"O"`).
     background_id: usize,
+    /// Window geometry derived from THIS checkpoint's `sliding_window`.
+    plan: WindowPlan,
 }
 
 impl PrivacyFilter {
@@ -174,6 +208,15 @@ impl PrivacyFilter {
             .iter()
             .position(|l| l == "O")
             .ok_or("checkpoint has no background class")?;
+        // The band comes from the checkpoint, like the labels: windowed
+        // inference is exact only relative to the model's real attention reach,
+        // so a checkpoint that doesn't state it refuses to load rather than
+        // classify with silently-wrong seams.
+        let band = cfg
+            .get("sliding_window")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("checkpoint config has no sliding_window — cannot window exactly")?;
+        let plan = WindowPlan::for_band(usize::try_from(band).map_err(|e| e.to_string())?)?;
 
         let tokenizer =
             Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
@@ -204,7 +247,13 @@ impl PrivacyFilter {
             id2label,
             background_penalty: recall_bias,
             background_id,
+            plan,
         })
+    }
+
+    /// The window geometry in force — derived from the loaded checkpoint.
+    pub fn window_plan(&self) -> WindowPlan {
+        self.plan
     }
 
     /// Label one window: `[1, T]` ids in, one label id per token out.
@@ -309,7 +358,7 @@ impl PrivacyFilter {
         let words = enc.get_tokens();
 
         let mut labels: Vec<usize> = Vec::with_capacity(ids.len());
-        for (start, end) in plan_windows(ids.len(), WINDOW, OVERLAP) {
+        for (start, end) in plan_windows(ids.len(), self.plan.window, self.plan.overlap) {
             let window = self.label_window(&ids[start..end])?;
             // Keep the earlier window's answer across the overlap: those tokens
             // were decoded with more left context.
@@ -402,8 +451,24 @@ mod tests {
 
     #[test]
     fn every_token_lands_in_a_window() {
-        for len in [0usize, 1, 5, WINDOW - 1, WINDOW, WINDOW + 1, 9_013, 65_537] {
-            let plan = plan_windows(len, WINDOW, OVERLAP);
+        // The shipped checkpoint's geometry (band 128), as WindowPlan derives it.
+        let wp = WindowPlan::for_band(128).unwrap();
+        assert_eq!(
+            (wp.window, wp.overlap),
+            (2048, 256),
+            "the measured operating point"
+        );
+        for len in [
+            0usize,
+            1,
+            5,
+            wp.window - 1,
+            wp.window,
+            wp.window + 1,
+            9_013,
+            65_537,
+        ] {
+            let plan = plan_windows(len, wp.window, wp.overlap);
             if len == 0 {
                 assert!(plan.is_empty());
                 continue;
@@ -411,7 +476,7 @@ mod tests {
             let mut covered = vec![false; len];
             for &(a, b) in &plan {
                 assert!(b > a && b <= len, "bad window {a}..{b} for len {len}");
-                assert!(b - a <= WINDOW, "window {a}..{b} is wider than one pass");
+                assert!(b - a <= wp.window, "window {a}..{b} is wider than one pass");
                 for c in covered[a..b].iter_mut() {
                     *c = true;
                 }
@@ -423,12 +488,51 @@ mod tests {
             for pair in plan.windows(2) {
                 let (prev, next) = (pair[0], pair[1]);
                 assert!(
-                    prev.1 - next.0 >= BAND,
+                    prev.1 - next.0 >= wp.band,
                     "windows {prev:?}/{next:?} share less than the attention band, \
                      so windowing is no longer exact"
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_wider_band_scales_the_geometry_and_keeps_the_invariants() {
+        // The case the compiled constants silently mishandled: a checkpoint
+        // with a wider attention reach. The plan must scale, not mis-window.
+        for band in [128usize, 256, 512, 1024, 4096] {
+            let wp = WindowPlan::for_band(band).unwrap();
+            assert!(wp.overlap >= wp.band, "band {band}");
+            assert!(wp.window > wp.overlap, "band {band}");
+            assert!(wp.window >= 2 * wp.band, "band {band}: interior context");
+        }
+        assert!(
+            WindowPlan::for_band(0).is_err(),
+            "a zero band cannot window"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_without_a_band_refuses_to_load() {
+        // A config.json with no sliding_window must fail the load — classifying
+        // with guessed seams is the leak class v21 existed to end.
+        let tmp = std::env::temp_dir().join(format!("modelstat-noband-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("config.json"),
+            br#"{"id2label": {"0": "O", "1": "S-secret"}}"#,
+        )
+        .unwrap();
+        let err = match PrivacyFilter::with_recall_bias(&tmp, 0.0) {
+            Err(e) => e,
+            Ok(_) => panic!("a checkpoint without a band must refuse to load"),
+        };
+        assert!(
+            err.contains("sliding_window"),
+            "the refusal must name what is missing: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

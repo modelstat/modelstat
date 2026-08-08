@@ -10,81 +10,58 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// The candidate watch dirs under the given roots, deduped (first-seen order) and
-/// filtered to those that exist. `is_darwin` adds the macOS App-Support dirs;
-/// `exists` is injected for testability. Byte-faithful to `resolveWatchDirs` —
-/// note it deliberately OMITS `.pi` (the TS list does too; the scan discovery
-/// covers pi, so the watcher mirrors the exact TS set).
-pub fn resolve_watch_dirs_in(
-    home: &Path,
-    xdg_config: &Path,
-    xdg_data: &Path,
-    is_darwin: bool,
-    exists: impl Fn(&Path) -> bool,
-) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = vec![
-        // universal (default HOME-rooted CLI data dirs)
-        home.join(".claude/projects"),
-        home.join(".codex/sessions"),
-        home.join(".cursor/ai-tracking"),
-        home.join(".gemini"),
-        home.join(".aider"),
-        // XDG / Linux
-        xdg_config.join("claude/projects"),
-        xdg_config.join("codex/sessions"),
-        xdg_config.join("Cursor/User/workspaceStorage"),
-        xdg_config.join("Code/User/workspaceStorage"),
-        xdg_config.join("Code - Insiders/User/workspaceStorage"),
-        xdg_data.join("claude/projects"),
-    ];
-    if is_darwin {
-        let app = home.join("Library/Application Support");
-        candidates.extend([
-            app.join("Cursor/User/workspaceStorage"),
-            app.join("Claude"),
-            app.join("Code/User/workspaceStorage"),
-            app.join("Windsurf/User/workspaceStorage"),
-            app.join("Zed"),
-        ]);
+/// The minimal covering set of directories to watch for the given discovered
+/// transcript paths.
+///
+/// Derived from DISCOVERY, never from an app-name list: the watcher's world
+/// must be exactly the scanner's, or an install discovery finds (relocated,
+/// renamed, newly supported) gets real-time capture silently downgraded to
+/// the 5-minute backstop. The old shape — a hard-coded list of well-known app
+/// dirs, "byte-faithful" to the TS daemon — was precisely that: discovery had
+/// been weakened to artefact shapes and running processes while the watcher
+/// still assumed the apps of one machine in 2025.
+///
+/// Coverage rule: each transcript's grandparent directory (so a Claude-style
+/// `root/<project>/<session>.jsonl` tree is one recursive watch at `root`,
+/// covering projects that don't exist yet), clamped to the parent when the
+/// grandparent would leave the tree unbounded ($HOME, its ancestors, or the
+/// filesystem root), then collapsed so nothing in the set is covered by an
+/// ancestor also in the set.
+pub fn covering_watch_dirs(paths: &[&Path], home: &Path) -> Vec<PathBuf> {
+    let too_broad = |d: &Path| d == home || home.starts_with(d);
+    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    for p in paths {
+        let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) else {
+            continue;
+        };
+        let candidate = match parent.parent() {
+            Some(gp) if !too_broad(gp) && !gp.as_os_str().is_empty() => gp.to_path_buf(),
+            _ if !too_broad(parent) => parent.to_path_buf(),
+            _ => continue,
+        };
+        dirs.insert(candidate);
     }
-    // Dedupe (preserve first-seen order), then keep only dirs that exist so the
-    // startup log reads cleanly on a fresh machine.
-    let mut seen = BTreeSet::new();
-    candidates
-        .into_iter()
-        .filter(|p| seen.insert(p.clone()))
-        .filter(|p| exists(p))
+    // Ancestor collapse: recursive watches make a covered child redundant.
+    let all = dirs.clone();
+    dirs.into_iter()
+        .filter(|d| !all.iter().any(|a| a != d && d.starts_with(a)))
         .collect()
 }
 
-/// The real watch dirs: `$HOME` + `$XDG_CONFIG_HOME`/`$XDG_DATA_HOME` (defaulted
-/// to `~/.config` and `~/.local/share`) + the OS, filtered by real existence.
-pub fn resolve_watch_dirs() -> Vec<PathBuf> {
-    let Some(home) = home_dir() else {
-        return Vec::new();
-    };
-    let xdg_config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"));
-    let xdg_data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share"));
-    resolve_watch_dirs_in(
-        &home,
-        &xdg_config,
-        &xdg_data,
-        cfg!(target_os = "macos"),
-        |p| p.exists(),
-    )
-}
-
-/// True for a transcript file the watcher acts on (a `.jsonl`) — the watch loop
-/// ignores every other change under the watched trees.
+/// True for a file change the watcher acts on — the observed transcript
+/// containers: `.jsonl` streams, and the SQLite stores Cursor keeps chat in
+/// (`.vscdb` + its WAL sidecars, which is where a live write actually lands).
+/// The `.jsonl`-only filter silently made the Cursor watch dead weight: its
+/// roots were watched, its writes never matched.
 pub fn is_transcript_file(path: &Path) -> bool {
-    path.extension().map(|e| e == "jsonl").unwrap_or(false)
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.ends_with(".jsonl")
+        || name.ends_with(".vscdb")
+        || name.ends_with(".vscdb-wal")
+        || name.ends_with(".vscdb-shm")
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var_os("USERPROFILE").filter(|s| !s.is_empty()))
@@ -98,7 +75,10 @@ fn home_dir() -> Option<PathBuf> {
 pub async fn watch_forever(daemon: std::sync::Arc<crate::runtime::Daemon>) {
     use notify::{Event, RecursiveMode, Watcher};
 
-    let dirs = resolve_watch_dirs();
+    let jobs = crate::discover_jobs::discover_jobs();
+    let paths: Vec<PathBuf> = jobs.iter().map(|j| PathBuf::from(&j.path)).collect();
+    let path_refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    let dirs = covering_watch_dirs(&path_refs, &home_dir().unwrap_or_default());
     let joined = dirs
         .iter()
         .map(|d| d.display().to_string())
@@ -174,51 +154,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolves_existing_dirs_deduped_and_omits_pi() {
-        let home = PathBuf::from("/home/dev");
-        let xdg_config = home.join(".config");
-        let xdg_data = home.join(".local/share");
-        // Pretend only two of the candidates exist.
-        let existing: BTreeSet<PathBuf> =
-            [home.join(".claude/projects"), home.join(".codex/sessions")]
-                .into_iter()
-                .collect();
-        let dirs = resolve_watch_dirs_in(&home, &xdg_config, &xdg_data, false, |p| {
-            existing.contains(p)
-        });
+    fn covering_set_is_the_grandparent_collapsed_by_ancestors() {
+        let home = Path::new("/home/dev");
+        let a = Path::new("/home/dev/.claude/projects/app-one/s1.jsonl");
+        let b = Path::new("/home/dev/.claude/projects/app-two/s2.jsonl");
+        let c = Path::new("/home/dev/.codex/sessions/r1.jsonl");
+        let dirs = covering_watch_dirs(&[a, b, c], home);
         assert_eq!(
             dirs,
-            vec![home.join(".claude/projects"), home.join(".codex/sessions")]
+            vec![
+                PathBuf::from("/home/dev/.claude/projects"),
+                PathBuf::from("/home/dev/.codex")
+            ],
+            "one recursive watch per tree — future project dirs are covered \
+             before they exist"
         );
-        // .pi is never a candidate (matches watch.ts).
-        assert!(!dirs.iter().any(|p| p.to_string_lossy().contains(".pi")));
     }
 
     #[test]
-    fn darwin_adds_app_support_dirs() {
-        let home = PathBuf::from("/Users/dev");
-        // Everything "exists" so we can see the full candidate set.
-        let linux = resolve_watch_dirs_in(
-            &home,
-            &home.join(".config"),
-            &home.join(".local/share"),
-            false,
-            |_| true,
+    fn a_relocated_install_is_watched_wherever_discovery_found_it() {
+        // The case the app-name list silently mishandled: discovery finds it
+        // (shape + process probe), so the watcher must cover it too.
+        let home = Path::new("/home/dev");
+        let odd = Path::new("/opt/tools/my-agent/data/projects/x/s.jsonl");
+        let dirs = covering_watch_dirs(&[odd], home);
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("/opt/tools/my-agent/data/projects")]
         );
-        let mac = resolve_watch_dirs_in(
-            &home,
-            &home.join(".config"),
-            &home.join(".local/share"),
-            true,
-            |_| true,
+    }
+
+    #[test]
+    fn the_watch_never_widens_to_home_or_its_ancestors() {
+        let home = Path::new("/home/dev");
+        // A transcript sitting one level under $HOME: grandparent would be
+        // $HOME itself — clamp to the parent instead of watching everything.
+        let shallow = Path::new("/home/dev/.aider/history.jsonl");
+        assert_eq!(
+            covering_watch_dirs(&[shallow], home),
+            vec![PathBuf::from("/home/dev/.aider")]
         );
-        assert!(mac.len() > linux.len());
-        assert!(mac
-            .iter()
-            .any(|p| p.ends_with("Library/Application Support/Zed")));
-        assert!(!linux
-            .iter()
-            .any(|p| p.to_string_lossy().contains("Application Support")));
+        // Directly in $HOME: nothing safe to watch; contribute nothing.
+        let in_home = Path::new("/home/dev/loose.jsonl");
+        assert!(covering_watch_dirs(&[in_home], home).is_empty());
+    }
+
+    #[test]
+    fn cursor_stores_and_their_wal_sidecars_are_watchable_events() {
+        // The .jsonl-only filter made the Cursor watch dead weight: roots
+        // watched, writes never matched — a live chat lands in the WAL first.
+        assert!(is_transcript_file(Path::new("/x/state.vscdb")));
+        assert!(is_transcript_file(Path::new("/x/state.vscdb-wal")));
+        assert!(is_transcript_file(Path::new("/x/state.vscdb-shm")));
+        assert!(is_transcript_file(Path::new("/x/s.jsonl")));
+        assert!(!is_transcript_file(Path::new("/x/notes.txt")));
     }
 
     #[test]

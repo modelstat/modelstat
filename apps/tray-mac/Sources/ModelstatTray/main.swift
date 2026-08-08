@@ -103,6 +103,9 @@ struct AnalyzedInfo: Decodable {
 
 struct LocalStatus: Decodable {
   let status: String?
+  /// Stated by the daemon (busy right now?) — the tray must not re-derive it
+  /// from phase names it happens to know.
+  let active: Bool?
   let message: String?
   /// Epoch ms when the work now in progress started, or nil when idle. A
   /// timestamp rather than a duration so this menu can tick the elapsed clock
@@ -589,7 +592,8 @@ final class TrayController: NSObject {
     // Pulse the leading dot while the agent is actively working so the
     // menu reads as alive even on the rare beat where the numbers don't
     // change. Steady dot when idle/watching/offline.
-    let dot = isActivePhase(phase) ? (spinnerTick % 2 == 0 ? "●" : "○") : "●"
+    let active = localLatest?.active ?? (localLatest?.busy_since_ms != nil)
+    let dot = active ? (spinnerTick % 2 == 0 ? "●" : "○") : "●"
 
     // The sweep detail row, recomputed every beat: how much work there is and
     // how much of it is done. The phase line above carries NO clock — it names
@@ -712,7 +716,9 @@ final class TrayController: NSObject {
   /// down and answer a different question — after a few days they read in the
   /// tens of thousands and say nothing about what is happening now.
   private func progressLine(_ local: LocalStatus?, phase: String) -> String {
-    guard let ls = local, Self.mirrorIsFresh(ls.written_at), isActivePhase(phase) else {
+    guard let ls = local, Self.mirrorIsFresh(ls.written_at),
+      ls.active ?? (ls.busy_since_ms != nil)
+    else {
       return ""
     }
     var bits: [String] = []
@@ -963,14 +969,6 @@ final class TrayController: NSObject {
     return String(format: "%dh %02dm", secs / 3600, (secs % 3600) / 60)
   }
 
-  private func isActivePhase(_ phase: String) -> Bool {
-    switch phase {
-    case "starting", "discovering", "scanning", "processing", "uploading":
-      return true
-    default:
-      return false
-    }
-  }
 
   private func fmtCount(_ n: Int) -> String {
     if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
