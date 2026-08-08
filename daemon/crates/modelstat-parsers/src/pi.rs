@@ -22,7 +22,7 @@ use crate::skips::{numeric_leaves, unknown_record_event, SkipLedger, UnknownReco
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
 use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
-use crate::util::slice_utf16;
+use crate::util::{slice_utf16, stated_duration_ms};
 
 /// The provider string the transcript states, lowercased, or `"unknown"` when it
 /// states none.
@@ -263,6 +263,7 @@ fn parse_inner(
                         session_id: sid,
                         ts: ts.to_string(),
                         turn_index: Some(current_turn),
+                        duration_ms: stated_duration_ms(&obj),
                         source_file: &ctx.source_file,
                         source_byte_offset: Some(offset),
                     }));
@@ -461,6 +462,7 @@ fn parse_inner(
                 session_id: session_id.clone().unwrap(),
                 ts: ml_timestamp.to_string(),
                 turn_index: Some(current_turn),
+                duration_ms: stated_duration_ms(&obj),
                 source_file: &ctx.source_file,
                 source_byte_offset: Some(offset),
             }));

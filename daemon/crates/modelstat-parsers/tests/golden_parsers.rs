@@ -442,3 +442,92 @@ fn regen_goldens() {
         &parse_cursor_tracking_db(&ctx(&format!("{BASE}/cursor/state.vscdb"))).unwrap(),
     );
 }
+
+/// Time parity, asserted on the REAL fixtures rather than on a shape: the two
+/// fields every derived wait is computed from must mean the same thing for
+/// every agent.
+///
+///   * `ts` — the instant the SOURCE stated, on every event. An event with an
+///     empty or unparseable instant does not merely lack a field: it parses as
+///     epoch 0 and lands in 1970, dragging the session's whole timeline with it.
+///   * `turn_index` — the ordinal of the TYPED PROMPT the event belongs to, for
+///     all four parsers. Codex used to count API round trips here instead, so
+///     this single-prompt rollout reported turns 0, 1 and 2.
+#[test]
+fn every_real_fixture_dates_every_event_and_numbers_turns_by_the_prompt() {
+    materialize_tree();
+
+    let codex_file = format!(
+        "{BASE}/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl"
+    );
+    let desktop_file = format!("{BASE}/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl");
+    let pi_file =
+        format!("{BASE}/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl");
+
+    let codex = parse_codex_rollout(&ctx(&codex_file)).unwrap();
+    let desktop = parse_claude_code_jsonl(
+        &ctx(&desktop_file).with_agent_label(Some("claude_desktop".to_string())),
+    )
+    .unwrap();
+    let pi = parse_pi_session(&ctx_api(&pi_file)).unwrap();
+    let cursor = parse_cursor_tracking_db(&ctx(&format!("{BASE}/cursor/state.vscdb"))).unwrap();
+
+    for (label, res) in [
+        ("codex", &codex),
+        ("claude_desktop", &desktop),
+        ("pi", &pi),
+        ("cursor", &cursor),
+    ] {
+        for e in &res.events {
+            assert!(
+                e.ts.len() >= 19 && e.ts.contains('T') && e.ts.starts_with("20"),
+                "{label}: event {} carries no stated instant ({:?})",
+                e.source_event_id,
+                e.ts
+            );
+            assert!(
+                e.turn_index.is_some(),
+                "{label}: event {} states no turn",
+                e.source_event_id
+            );
+        }
+        for c in &res.tool_calls {
+            assert!(
+                c.started_at.len() >= 19 && c.started_at.contains('T'),
+                "{label}: tool call {} starts at no stated instant",
+                c.external_call_id
+            );
+        }
+    }
+
+    // Codex: ONE typed prompt in this rollout, so one turn — including the
+    // records the parser models no arm for.
+    assert!(
+        codex.events.iter().all(|e| e.turn_index == Some(0)),
+        "one prompt is one turn: {:?}",
+        codex
+            .events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.turn_index))
+            .collect::<Vec<_>>()
+    );
+    // The duration codex measured for that turn — its own number, which nothing
+    // downstream can derive from the timestamps.
+    assert_eq!(
+        codex
+            .events
+            .iter()
+            .find(|e| e.kind == "task_complete")
+            .and_then(|e| e.duration_ms),
+        Some(6556),
+        "codex's stated turn duration reaches the wire"
+    );
+
+    // Claude Desktop: two typed prompts in this transcript, and the ordinal
+    // moves only at them — tool-result-only user lines inherit the turn.
+    assert_eq!(
+        desktop.events.iter().filter_map(|e| e.turn_index).max(),
+        Some(1),
+        "two prompts, turns 0 and 1"
+    );
+}
