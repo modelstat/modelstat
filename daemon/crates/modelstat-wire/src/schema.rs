@@ -179,15 +179,19 @@ fn default_tag_confidence() -> f64 {
     0.7
 }
 
-/// Privacy-preserving per-segment behavioral signal (counts/ratios only).
+/// Privacy-preserving per-segment behavioral signal (counts only).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SegmentBehavior {
     #[serde(default)]
     pub user_turns: u64,
     #[serde(default)]
     pub correction_count: u64,
-    #[serde(default)]
-    pub frustration: f64,
+    /// A 0-1 score the daemon NO LONGER PRODUCES — it is omitted, not zeroed,
+    /// so "no opinion" is distinguishable from "calm". The field survives for
+    /// the payloads already stored and for the server that still reads it; the
+    /// scoring belongs where it can be revised without a fleet release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frustration: Option<f64>,
 }
 
 /// A daemon-emitted segment — the sync unit (feature §17.3).

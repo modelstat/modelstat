@@ -43,21 +43,6 @@ use crate::prompts::{
 use crate::resilient::{ResilientSummarizer, SummarizeOutcome, Summarizer};
 use crate::segment::{parse_ts_ms, segment_turns, turn_meta, turn_surface};
 
-/// Substrings that mark a frustrated/blocked mood in a cognition emotion tag
-/// (matched case-insensitively). A generic linguistic cue set — NOT domain vocab.
-/// FROZEN (§18): a change shifts the behavior signal and needs a version bump.
-const FRUSTRATION_MARKERS: [&str; 9] = [
-    "frustrat",
-    "annoy",
-    "stuck",
-    "confus",
-    "irritat",
-    "block",
-    "stress",
-    "angr",
-    "overwhelm",
-];
-
 /// The result of building one session's segments.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildOutcome {
@@ -294,8 +279,8 @@ where
         format!("{redacted_text} {suffix}")
     };
 
-    // Privacy-preserving behavioral signal — counts/ratios only, never raw text.
-    let behavior = compute_behavior(slice, cog.as_ref());
+    // Privacy-preserving behavioral counts — never raw text, never a score.
+    let behavior = compute_behavior(slice);
 
     // Deterministic tags from event metadata, in the frozen order (§18).
     let mut tags: Vec<TaxonomyHintRooted> = Vec::new();
@@ -498,10 +483,16 @@ where
     }
 }
 
-/// Per-segment behavioral signal — counts/ratios only, never raw text.
+/// Per-segment behavioral COUNTS — never raw text, and never a score.
 /// `correction_count` = user messages that land right after an assistant message.
-/// `frustration` (0-1) rises with re-prompt density and negative cognition mood.
-fn compute_behavior(slice: &[&RawEvent], cognition: Option<&CognitionTags>) -> SegmentBehavior {
+///
+/// There is no `frustration` any more. It was `max(correction_count / 4, 0.8 if
+/// any emotion tag contains one of nine English stems)`: two hard-coded numbers
+/// and a substring list scoring an LLM's own free-text output, on a device that
+/// cannot revise either. Both inputs already ship — the counts here, the emotion
+/// tags in the abstract's `[Mood: …]` suffix and the `mood` hint — so the score
+/// is the server's to compute, where it can be changed without a fleet release.
+fn compute_behavior(slice: &[&RawEvent]) -> SegmentBehavior {
     let mut user_turns = 0u64;
     let mut correction_count = 0u64;
     let mut prev_was_assistant = false;
@@ -518,20 +509,10 @@ fn compute_behavior(slice: &[&RawEvent], cognition: Option<&CognitionTags>) -> S
             _ => {}
         }
     }
-    let frustrated_mood = cognition
-        .map(|c| {
-            c.emotions.iter().any(|e| {
-                let lower = e.to_lowercase();
-                FRUSTRATION_MARKERS.iter().any(|m| lower.contains(m))
-            })
-        })
-        .unwrap_or(false);
-    let raw = (correction_count as f64 / 4.0).max(if frustrated_mood { 0.8 } else { 0.0 });
-    let frustration = (raw.min(1.0) * 100.0).round() / 100.0;
     SegmentBehavior {
         user_turns,
         correction_count,
-        frustration,
+        frustration: None,
     }
 }
 
@@ -907,7 +888,9 @@ mod tests {
         let b = segs[0].behavior.as_ref().unwrap();
         assert_eq!(b.user_turns, 2);
         assert_eq!(b.correction_count, 1);
-        assert_eq!(b.frustration, 0.25); // 1/4, no frustrated mood
+        // The counts ship; the score does not. Omitted, not zeroed — a zero
+        // would read as "measured, and calm".
+        assert_eq!(b.frustration, None);
     }
 
     #[tokio::test]

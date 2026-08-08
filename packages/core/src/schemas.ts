@@ -177,8 +177,15 @@ export const Segment = z.object({
       /** User messages that land right after the assistant — a re-prompt /
        * correction proxy. */
       correction_count: z.number().int().nonnegative().default(0),
-      /** 0-1 frustration estimate (re-prompt density + negative mood tags). */
-      frustration: z.number().min(0).max(1).default(0),
+      /** 0-1 frustration estimate. The daemon NO LONGER PRODUCES this: it was
+       * `max(correction_count / 4, 0.8 if a mood tag matched one of nine
+       * English stems)` — hard-coded weights and a substring list scoring the
+       * model's own free text, on a device that cannot revise either. It is
+       * omitted rather than zeroed, so "no opinion" stays distinguishable from
+       * "calm"; the counts above and the `[Mood: …]` tags are the inputs, and
+       * scoring them is the server's job. Optional for payloads that predate
+       * the removal. */
+      frustration: z.number().min(0).max(1).optional(),
     })
     .optional(),
   /** Distilled "what the developer asked for / how they directed the AI" — from
