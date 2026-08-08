@@ -855,6 +855,7 @@ mod tests {
             remote_host: Some("github.com".into()),
             remote_slug: Some("acme/web".into()),
             branch: Some("main".into()),
+            slug_source: None,
         });
         e.files_touched = vec!["core/rust/main.rs".into(), "core/rust/lib.rs".into()];
         e.tool_calls = [("Bash".to_string(), 3u64), ("Read".to_string(), 1u64)]

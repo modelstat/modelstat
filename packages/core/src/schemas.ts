@@ -31,9 +31,18 @@ export type TokenUsage = z.infer<typeof TokenUsage>;
 /** Git context derived from cwd → nearest `.git`. */
 export const GitContext = z.object({
   remote_url: z.string().nullable(),
+  /** The forge host, and only when git itself named it (parsed out of
+   * `remote.origin.url`). Null everywhere else — a slug read off a directory
+   * layout says nothing about where the repo is hosted. */
   remote_host: z.string().nullable(), // "github.com"
   remote_slug: z.string().nullable(), // "org/repo"
   branch: z.string().nullable(),
+  /** How `remote_slug` was reached, so a fact and a guess are distinguishable:
+   * `git_remote` (the repo's configured remote — the only source that can also
+   * name a host), `repo_root_dir` (a real repo with no remote, keyed on its
+   * root directory name), `path_shape` (inferred from the cwd's shape, no repo
+   * reachable). Absent when there is no slug, and from daemons predating it. */
+  slug_source: z.string().max(40).optional(),
 });
 export type GitContext = z.infer<typeof GitContext>;
 

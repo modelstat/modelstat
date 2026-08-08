@@ -28,5 +28,6 @@ pub use param_shape::param_shape;
 pub use schema::{
     Fingerprint, GitContext, HeartbeatPayload, IngestBatch, RawEvent, RedactionReport,
     RegisterRequest, ScriptSummary, Segment, SegmentBehavior, TaxonomyHintRooted, TokenUsage,
-    ToolAction, ToolCallWire,
+    ToolAction, ToolCallWire, SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_PATH_SHAPE,
+    SLUG_SOURCE_REPO_ROOT_DIR,
 };

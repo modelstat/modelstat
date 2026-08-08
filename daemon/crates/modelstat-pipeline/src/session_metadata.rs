@@ -406,6 +406,7 @@ mod tests {
             remote_host: Some(host.into()),
             remote_slug: Some(slug.into()),
             branch: Some(branch.into()),
+            slug_source: None,
         }
     }
 

@@ -41,17 +41,37 @@ pub struct TokenUsage {
     pub reasoning: u64,
 }
 
-/// Git context — all four fields nullable (present, may be null).
+/// Where [`GitContext::remote_slug`] came from. The daemon reaches a slug three
+/// ways and they are not equally true: only [`SLUG_SOURCE_GIT_REMOTE`] read the
+/// repo's own configured remote. Stamped so the server can weigh a fact against
+/// a guess instead of receiving both as the same string.
+pub const SLUG_SOURCE_GIT_REMOTE: &str = "git_remote";
+/// The slug is the repo-ROOT directory name — a real repo on disk, but one with
+/// no configured remote, so it names no forge and no owner.
+pub const SLUG_SOURCE_REPO_ROOT_DIR: &str = "repo_root_dir";
+/// The slug was inferred from the SHAPE of the cwd (`…/projects/<a>/<b>`) with
+/// no repo reachable at all. A guess about a path, not an observation of git.
+pub const SLUG_SOURCE_PATH_SHAPE: &str = "path_shape";
+
+/// Git context — the four original fields nullable (present, may be null), plus
+/// the additive `slug_source` provenance marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitContext {
     #[serde(default)]
     pub remote_url: Option<String>,
+    /// The forge host, and ONLY when git itself named it (parsed out of
+    /// `remote.origin.url`). Null is the honest value everywhere else — a slug
+    /// that came from a path shape says nothing about where the repo is hosted.
     #[serde(default)]
     pub remote_host: Option<String>,
     #[serde(default)]
     pub remote_slug: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    /// One of the `SLUG_SOURCE_*` markers — how `remote_slug` was reached.
+    /// Absent on contexts that carry no slug (and from daemons predating it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug_source: Option<String>,
 }
 
 /// Redaction report — three guaranteed counters plus `pf_*` catchall keys.

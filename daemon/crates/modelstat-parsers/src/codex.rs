@@ -21,13 +21,11 @@ use std::io::BufReader;
 use std::sync::OnceLock;
 
 use modelstat_redact::redact;
-use modelstat_wire::{
-    source_event_id, tc_fallback_id, EventSource, GitContext, RawEvent, TokenUsage,
-};
+use modelstat_wire::{source_event_id, tc_fallback_id, EventSource, RawEvent, TokenUsage};
 use regex::Regex;
 use serde_json::Value;
 
-use crate::git::guess_repo_slug_from_path;
+use crate::git::{guess_repo_slug_from_path, path_guessed_git_context};
 use crate::line_reader::OffsetLines;
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{
@@ -551,16 +549,7 @@ fn parse_inner(
                     continue;
                 };
                 let slug = guess_repo_slug_from_path(cwd.as_deref());
-                let git = slug.as_ref().map(|s| GitContext {
-                    remote_url: None,
-                    remote_host: if s.contains('/') {
-                        Some("github.com".to_string())
-                    } else {
-                        None
-                    },
-                    remote_slug: Some(s.clone()),
-                    branch: None,
-                });
+                let git = path_guessed_git_context(slug.clone(), None);
                 // The prose codex streamed for this round trip, verbatim.
                 let (content_excerpt, content_bytes) = take_message_text(&mut agent_text);
                 sink.push(RawEvent {

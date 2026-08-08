@@ -36,9 +36,10 @@
       "cwd": "/Users/dev/projects/acme/myrepo",
       "git": {
         "remote_url": null,
-        "remote_host": "github.com",
+        "remote_host": null,
         "remote_slug": "acme/myrepo",
-        "branch": null
+        "branch": null,
+        "slug_source": "path_shape"
       },
       "tokens": {
         "input": 2,
