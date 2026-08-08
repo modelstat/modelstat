@@ -12,12 +12,31 @@ use regex::Regex;
 
 use crate::git::run_git;
 
-/// What the local git history says about one PR's fate.
+/// How `merged` was decided. One value today; a string rather than a bool so a
+/// second method (a forge API, a `gh` tool result) does not need a new field.
+pub const MERGE_METHOD_SUBJECT_REF: &str = "subject_ref_convention";
+
+/// What the local git history says about one PR's fate — WITH the evidence.
+///
+/// `merged` is not an observation, it is a reading of a convention: a commit
+/// subject that mentions `#<n>`. GitHub's default squash/merge templates write
+/// one, so the reading is usually right, and it is wrong in both directions —
+/// "Fix bug reported in #123" merges nothing, and a team with a custom squash
+/// template merges without ever writing the number. Shipping the bare boolean
+/// gave the server no way to notice either case, so the matched commit rides
+/// along: `merge_sha` + `merge_subject` are already-public repo facts (the same
+/// class as a slug), and `merge_method` names the reading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrOutcome {
     pub merged: bool,
     pub merged_at: Option<String>,
     pub reverted: bool,
+    /// The commit whose subject matched, when one did.
+    pub merge_sha: Option<String>,
+    /// That commit's subject line, verbatim — the text the claim rests on.
+    pub merge_subject: Option<String>,
+    /// Which reading produced `merged`; None when nothing matched.
+    pub merge_method: Option<&'static str>,
 }
 
 /// One parsed commit.
@@ -90,6 +109,9 @@ pub fn outcome_from_commits(commits: &[GitCommit], pr_number: u64) -> PrOutcome 
             merged: false,
             merged_at: None,
             reverted: false,
+            merge_sha: None,
+            merge_subject: None,
+            merge_method: None,
         },
         Some(merge) => PrOutcome {
             merged: true,
@@ -99,6 +121,11 @@ pub fn outcome_from_commits(commits: &[GitCommit], pr_number: u64) -> PrOutcome 
                 Some(merge.committed_at.clone())
             },
             reverted: is_reverted(commits, &merge.sha),
+            merge_sha: Some(merge.sha.clone()),
+            // Verbatim: a subject the server can re-read is what makes the
+            // convention checkable instead of trusted.
+            merge_subject: Some(merge.subject.clone()),
+            merge_method: Some(MERGE_METHOD_SUBJECT_REF),
         },
     }
 }
@@ -144,6 +171,24 @@ mod tests {
         assert!(outcome.merged);
         assert_eq!(outcome.merged_at.as_deref(), Some("2026-01-02T00:00:00Z"));
         assert!(outcome.reverted);
+        // The evidence for `merged` rides with it, verbatim.
+        assert_eq!(outcome.merge_sha.as_deref(), Some("aaaa"));
+        assert_eq!(outcome.merge_subject.as_deref(), Some("fix: thing (#123)"));
+        assert_eq!(outcome.merge_method, Some(MERGE_METHOD_SUBJECT_REF));
+    }
+
+    #[test]
+    fn a_prose_mention_is_shipped_with_the_subject_that_produced_it() {
+        // The convention's known false positive: a subject that merely TALKS
+        // about the PR. The daemon still reads it as merged (that is what the
+        // convention says), but the server now sees exactly what it read.
+        let commits = vec![commit("beef", "t", "fix: bug reported in #123", "")];
+        let outcome = outcome_from_commits(&commits, 123);
+        assert!(outcome.merged);
+        assert_eq!(
+            outcome.merge_subject.as_deref(),
+            Some("fix: bug reported in #123")
+        );
     }
 
     #[test]
@@ -161,7 +206,10 @@ mod tests {
             PrOutcome {
                 merged: false,
                 merged_at: None,
-                reverted: false
+                reverted: false,
+                merge_sha: None,
+                merge_subject: None,
+                merge_method: None,
             }
         );
     }

@@ -85,6 +85,16 @@ pub struct PullRequestRef {
     pub merged_at: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverted: Option<bool>,
+    /// The evidence behind `merged` — the commit whose subject matched, its
+    /// subject verbatim, and the name of the reading that matched
+    /// (`subject_ref_convention`). `merged` alone is a convention read as a
+    /// fact; these three let the server weigh it (see [`crate::git_outcome`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<String>,
 }
 
 /// An issue / ticket the session referenced.
@@ -259,6 +269,9 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merged: None,
             merged_at: None,
             reverted: None,
+            merge_sha: None,
+            merge_subject: None,
+            merge_method: None,
         });
         out.repos
             .push(repo_from(Some("github.com".into()), &slug, source));
@@ -274,6 +287,9 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merged: None,
             merged_at: None,
             reverted: None,
+            merge_sha: None,
+            merge_subject: None,
+            merge_method: None,
         });
         out.repos
             .push(repo_from(Some("gitlab.com".into()), &c[1], source));
@@ -290,6 +306,9 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merged: None,
             merged_at: None,
             reverted: None,
+            merge_sha: None,
+            merge_subject: None,
+            merge_method: None,
         });
         out.repos
             .push(repo_from(Some("bitbucket.org".into()), &slug, source));
@@ -368,6 +387,9 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
                 merged: None,
                 merged_at: None,
                 reverted: None,
+                merge_sha: None,
+                merge_subject: None,
+                merge_method: None,
             });
             out.repos
                 .push(repo_from(Some("github.com".into()), &slug, source));
@@ -477,6 +499,9 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
                     merged: None,
                     merged_at: None,
                     reverted: None,
+                    merge_sha: None,
+                    merge_subject: None,
+                    merge_method: None,
                 };
             }
             None => {
@@ -816,6 +841,9 @@ mod tests {
             merged: None,
             merged_at: None,
             reverted: None,
+            merge_sha: None,
+            merge_subject: None,
+            merge_method: None,
         };
         // Unenriched: the three keys are omitted entirely.
         let bare = serde_json::to_value(&pr).unwrap();
