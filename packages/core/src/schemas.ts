@@ -343,6 +343,13 @@ export const IngestBatch = z.object({
    * it, old servers ignore it; the server records it as the scope's last-seen
    * mode for ops-alert enrichment. */
   summarizer_mode: z.enum(["local", "self-hosted", "cloud"]).optional(),
+  /** Where this batch's layer-2 PII detection ran when it was BUILT: "local"
+   * (on-device model), "cloud" (modelstat's /v1/redact classifier), or
+   * "self-hosted" (the org's own endpoint). The layer-1 secret floor runs
+   * on-device in every mode. Stamped at the spool door, not at upload, so a
+   * batch that waited out a mode switch still names the mode that actually
+   * scrubbed it. Additive — old daemons omit it, old servers ignore it. */
+  redactor_mode: z.enum(["local", "self-hosted", "cloud"]).optional(),
 });
 export type IngestBatch = z.infer<typeof IngestBatch>;
 
