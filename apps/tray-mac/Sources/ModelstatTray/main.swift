@@ -65,17 +65,22 @@ struct AgentStats: Decodable {
   /// "Summariser" submenu — its title, checkmarks, and enabled state. nil on
   /// older daemons that don't report it yet.
   let summarizer: SummarizerInfo?
+  /// Where turns get SCRUBBED (cloud/local/self-hosted) — the redactor's
+  /// submenu twin. nil on older daemons that don't report it yet.
+  let redactor: SummarizerInfo?
 }
 
-/// Active summariser mode + (self-hosted only) endpoint, from `status --json`.
+/// Active summariser/redactor mode + (self-hosted only) endpoint, from
+/// `status --json`. One shape serves both settings — same fields, same
+/// submenu mechanics.
 struct SummarizerInfo: Decodable {
   /// "cloud" | "local" | "self-hosted".
   let mode: String?
   /// Self-hosted endpoint — present only in self-hosted mode.
   let url: String?
   let model: String?
-  /// True when MODELSTAT_SUMMARIZER_MODE is forcing the mode; a switch from the
-  /// tray would be masked by the env var, so the submenu disables itself.
+  /// True when the mode's env var is forcing it; a switch from the tray would
+  /// be masked by the env var, so the submenu disables itself.
   let env_override: Bool?
 }
 
@@ -234,6 +239,18 @@ final class TrayController: NSObject {
   private let modeSelfHostedMI = NSMenuItem(
     title: "Self-hosted — your endpoint…", action: #selector(switchModeSelfHosted),
     keyEquivalent: "")
+  /// "Redactor: <mode>" parent + submenu — where turns get SCRUBBED. The
+  /// layer-1 secret floor always runs on this machine; the submenu only moves
+  /// the layer-2 PII model (cloud is the default, local the privacy opt-out).
+  private let redactorMI = NSMenuItem(title: "Redactor", action: nil, keyEquivalent: "")
+  private let redactorSubmenu = NSMenu()
+  private let redactorCloudMI = NSMenuItem(
+    title: "Cloud — modelstat's servers", action: #selector(switchRedactorCloud), keyEquivalent: "")
+  private let redactorLocalMI = NSMenuItem(
+    title: "Local — on this machine…", action: #selector(switchRedactorLocal), keyEquivalent: "")
+  private let redactorSelfHostedMI = NSMenuItem(
+    title: "Self-hosted — your endpoint…", action: #selector(switchRedactorSelfHosted),
+    keyEquivalent: "")
   /// "Update now" — shown only when the server says this daemon is behind.
   private let updateMI = NSMenuItem(title: "Update now", action: #selector(updateNow), keyEquivalent: "u")
   /// Checkable "Auto-update" — reflects (and toggles) the daemon's setting.
@@ -333,6 +350,15 @@ final class TrayController: NSObject {
     summariserSubmenu.addItem(modeSelfHostedMI)
     summariserMI.submenu = summariserSubmenu
     menu.addItem(summariserMI)
+    // Redactor mode — the summariser submenu's twin.
+    redactorCloudMI.target = self
+    redactorLocalMI.target = self
+    redactorSelfHostedMI.target = self
+    redactorSubmenu.addItem(redactorCloudMI)
+    redactorSubmenu.addItem(redactorLocalMI)
+    redactorSubmenu.addItem(redactorSelfHostedMI)
+    redactorMI.submenu = redactorSubmenu
+    menu.addItem(redactorMI)
     updateMI.target = self
     autoUpdateMI.target = self
     updateMI.isHidden = true
@@ -524,6 +550,7 @@ final class TrayController: NSObject {
     renderUpdateItems()
     // Summariser mode is a local setting — render it regardless of pairing.
     renderSummariser()
+    renderRedactor()
     guard let s = latest else {
       setInfo(statusMI, "Loading…")
       return
@@ -750,6 +777,27 @@ final class TrayController: NSObject {
     for mi in [modeCloudMI, modeLocalMI, modeSelfHostedMI] { mi.isEnabled = !envLocked }
   }
 
+  /// The redactor twin of `renderSummariser`, off the same 15s poll. Hidden
+  /// entirely against a daemon too old to report the setting — a submenu that
+  /// can't apply is worse than none.
+  private func renderRedactor() {
+    guard let info = latest?.redactor else {
+      redactorMI.isHidden = true
+      return
+    }
+    redactorMI.isHidden = false
+    let mode = info.mode
+    let envLocked = info.env_override ?? false
+    redactorMI.title = mode.map { "Redactor: \(Self.modeLabel($0))" } ?? "Redactor"
+    if envLocked { redactorMI.title += " (env-locked)" }
+    redactorCloudMI.state = (mode == "cloud") ? .on : .off
+    redactorLocalMI.state = (mode == "local") ? .on : .off
+    redactorSelfHostedMI.state = (mode == "self-hosted") ? .on : .off
+    for mi in [redactorCloudMI, redactorLocalMI, redactorSelfHostedMI] {
+      mi.isEnabled = !envLocked
+    }
+  }
+
   /// Human label for a summariser mode string.
   private static func modeLabel(_ mode: String) -> String {
     switch mode {
@@ -795,13 +843,14 @@ final class TrayController: NSObject {
   }
 
   @objc private func switchModeSelfHosted() {
-    // Self-hosted needs a URL + model that can't be typed into a menu, so point
-    // the user at the one CLI command that sets them.
-    let cmd = "modelstat mode self-hosted --url <URL> --model <ID>"
+    // Self-hosted needs a URL that can't be typed into a menu, so point the
+    // user at the one CLI command that sets it. (`--model` is gone — the
+    // engine is ours; only its location is theirs.)
+    let cmd = "modelstat mode self-hosted --url <URL>"
     let alert = NSAlert()
     alert.messageText = "Self-hosted summarising needs an endpoint"
     alert.informativeText =
-      "Point modelstat at your org's OpenAI-compatible endpoint from a terminal:\n\n    "
+      "Point modelstat at your org's summariser engine from a terminal:\n\n    "
       + cmd + "\n\nRedaction still runs on your machine first."
     alert.addButton(withTitle: "Copy command")
     alert.addButton(withTitle: "OK")
@@ -809,6 +858,64 @@ final class TrayController: NSObject {
       let pb = NSPasteboard.general
       pb.clearContents()
       pb.setString(cmd, forType: .string)
+    }
+  }
+
+  // ── Redactor mode switching ─────────────────────────────────────
+  //
+  // Same shape as the summariser: shell out to `modelstat redactor <mode>`.
+  // The secret floor runs on-device in EVERY mode — these switches only move
+  // the layer-2 PII model.
+
+  @objc private func switchRedactorCloud() {
+    let alert = NSAlert()
+    alert.messageText = "Detect PII on modelstat's servers?"
+    alert.informativeText =
+      "Secrets, emails, keys and paths are always scrubbed on this machine first. "
+      + "In Cloud mode the scrubbed text is then checked for names, addresses and "
+      + "other PII on modelstat's servers, which return the matches and store "
+      + "nothing — the final redaction still happens here, and only redacted "
+      + "turns are uploaded.\n\nNo ~900 MB on-device model needed."
+    alert.addButton(withTitle: "Switch to Cloud")
+    alert.addButton(withTitle: "Cancel")
+    if alert.runModal() == .alertFirstButtonReturn { applyRedactor("cloud") }
+  }
+
+  @objc private func switchRedactorLocal() {
+    let alert = NSAlert()
+    alert.messageText = "Detect PII on this machine?"
+    alert.informativeText =
+      "Local mode downloads a ~900 MB model and spends this machine's CPU "
+      + "checking every turn for PII — nothing, not even scrubbed text, leaves "
+      + "before it is fully redacted.\n\nExpect real CPU use while a backlog "
+      + "catches up."
+    alert.addButton(withTitle: "Switch to Local")
+    alert.addButton(withTitle: "Cancel")
+    if alert.runModal() == .alertFirstButtonReturn { applyRedactor("local") }
+  }
+
+  @objc private func switchRedactorSelfHosted() {
+    let cmd = "modelstat redactor self-hosted --url <URL>"
+    let alert = NSAlert()
+    alert.messageText = "Self-hosted redaction needs an endpoint"
+    alert.informativeText =
+      "Point modelstat at your org's redactor service from a terminal:\n\n    "
+      + cmd + "\n\nThe secret floor still runs on this machine first."
+    alert.addButton(withTitle: "Copy command")
+    alert.addButton(withTitle: "OK")
+    if alert.runModal() == .alertFirstButtonReturn {
+      let pb = NSPasteboard.general
+      pb.clearContents()
+      pb.setString(cmd, forType: .string)
+    }
+  }
+
+  /// Persist a redactor switch via the CLI (which bounces the daemon), then
+  /// refresh shortly after so the checkmark catches up before the 15s poll.
+  private func applyRedactor(_ mode: String) {
+    runManaged(["redactor", mode])
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+      MainActor.assumeIsolated { self?.refreshStats() }
     }
   }
 
