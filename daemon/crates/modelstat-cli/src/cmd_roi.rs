@@ -41,8 +41,14 @@
 //! against each other; the rate is still the user's to supply, because this
 //! device holds no price table.
 //!
-//! The session→PR join is reference-based (a branch name, a pasted PR URL), so
-//! the rollup publishes its own token-weighted confidence next to the totals.
+//! The session→PR join is not uniform in strength: a session whose changed
+//! files overlap the PR's is a strong match, while one that merely MENTIONED
+//! the PR number is a guess — the number only exists after the work is done,
+//! so a mention usually marks review or follow-up, not authorship. So strength
+//! is reported per row (a `~` on the tokens cell for anything at or below
+//! [`WEAK_CONFIDENCE`]) and again in the rollup, as both a mean confidence and
+//! the SHARE OF VOLUME resting on weak matches — the mean alone hides one huge
+//! guess beside nine certainties.
 //! `unattributed` is DEVICE-WIDE — the scan reads every tool log on the
 //! machine, not just this repo's.
 //!
@@ -173,6 +179,9 @@ pub struct Row {
     /// one the table, the ratio and any dollars are built on.
     pub equiv_tokens: f64,
     pub sessions: u32,
+    /// How firm this row's token figure is: high when the session's changed
+    /// files overlapped the PR's, low when all that linked them was a mention
+    /// of the number. [`is_weak`] reads it; the table marks it.
     pub attribution_confidence: f64,
     /// `Some` iff a [`Calibration`] existed. Never synthesised.
     pub hours_p50: Option<f64>,
@@ -191,6 +200,12 @@ pub struct RoiView {
     /// diff was dropped. The header says so when it exceeds `rows.len()`, so a
     /// truncated table cannot be read as the whole window.
     pub window_total: usize,
+    /// Of those, how many were AI-assisted — a WINDOW count, taken before
+    /// `--limit` cut the table. `--limit` chooses which rows are listed; it
+    /// must never change what the header says the window held. Human-authored
+    /// is `window_total - window_ai`, so the two always sum to the announced
+    /// total.
+    pub window_ai: usize,
     pub unattributed: TokenMix,
     pub unattributed_sessions: u32,
     pub sessions_scanned: u32,
@@ -227,10 +242,15 @@ pub struct Totals {
     pub hours_per_mtok: Option<f64>,
     pub usd: Option<f64>,
     /// Token-weighted mean of the rows' `attribution_confidence`. `None` when
-    /// nothing was attributed. Printed because the join is reference-based, not
-    /// git-certain: a single-PR session scores 0.6 and a split one 0.3, so
-    /// reading these token figures as exact would overstate what they are.
+    /// nothing was attributed. Printed because the join is inferred, not
+    /// git-certain — file overlap is strong evidence, a bare PR mention is
+    /// weak — so reading these token figures as exact overstates what they are.
     pub confidence: Option<f64>,
+    /// Share of the attributed equivalent volume whose join is mention-only
+    /// ([`is_weak`]). `None` when nothing was attributed. Reported beside
+    /// `confidence` because a mean hides distribution: 0.72 can be nine
+    /// certain PRs, or one certain PR beside one large guess.
+    pub weak_share: Option<f64>,
 }
 
 impl RoiView {
@@ -270,6 +290,7 @@ impl RoiView {
             hours_per_mtok: hours.and_then(|h| per_mtok(h, equiv)),
             usd: self.usd_per_mtok.map(|rate| usd_for_tokens(equiv, rate)),
             confidence: weighted_confidence(&ai),
+            weak_share: weak_volume_share(&ai),
         }
     }
 }
@@ -319,6 +340,55 @@ pub fn weighted_confidence(rows: &[&Row]) -> Option<f64> {
             .sum::<f64>()
             / equiv
     })
+}
+
+/// The line between a token figure a reader can lean on and one they cannot.
+///
+/// [`attribution::PrSpend::attribution_confidence`] is a STRENGTH SCALE, not a
+/// category: file overlap plus a PR mention scores 1.0, strong overlap alone
+/// 0.9, a weak overlap band runs from just under 0.4 to 0.6, and a bare
+/// mention with no overlap at all is a flat 0.3 — the "discussed it, did not
+/// author it" case, which is the whole reason this join stopped trusting
+/// references. Below 0.3 means the mean itself is dominated by mentions. So at
+/// or below 0.3 the figure is weak evidence of who spent those tokens; above
+/// it, changed files back the claim.
+pub const WEAK_CONFIDENCE: f64 = 0.3;
+
+/// Whether a row's attributed tokens rest on a weak match. A row with nothing
+/// attributed is never weak — there is no figure to qualify, and the em-dash
+/// already says so.
+pub fn is_weak(equiv_tokens: f64, confidence: f64) -> bool {
+    equiv_tokens > 0.0 && confidence <= WEAK_CONFIDENCE
+}
+
+/// Share of the attributed equivalent volume that came from weak matches.
+/// `None` when nothing was attributed.
+///
+/// By VOLUME, not by row: the question a reader is asking is how much of the
+/// spend figure above is inferred, and one 11M-token guess among nine small
+/// certainties dominates that answer while being one row in ten.
+pub fn weak_volume_share(rows: &[&Row]) -> Option<f64> {
+    let equiv: f64 = rows.iter().map(|r| r.equiv_tokens).sum();
+    (equiv > 0.0).then(|| {
+        rows.iter()
+            .filter(|r| is_weak(r.equiv_tokens, r.attribution_confidence))
+            .map(|r| r.equiv_tokens)
+            .sum::<f64>()
+            / equiv
+    })
+}
+
+/// The window's AI-assisted count, and the prefix `--limit` lists.
+///
+/// The count is taken over the WHOLE window, before the cut: `--limit` chooses
+/// how many rows are printed and nothing else. Counting after it made the
+/// header describe the table while the total beside it described the window —
+/// two different populations, one sentence.
+pub fn window_split<T>(window: &[T], limit: usize, is_ai: impl Fn(&T) -> bool) -> (usize, &[T]) {
+    (
+        window.iter().filter(|p| is_ai(p)).count(),
+        &window[..limit.min(window.len())],
+    )
 }
 
 /// Labels still needed before [`calibrate_hours`] will return anything.
@@ -431,6 +501,12 @@ pub fn render_human(view: &RoiView) -> String {
 
     // Header: the split, how thick the baseline behind `units` is, and whether
     // the table is the whole window or a slice of it.
+    //
+    // The AI/human counts are the WINDOW's, never the table's. Reading them off
+    // `totals()` counted only the rows `--limit` let through, so `--limit 6`
+    // announced "3 AI-assisted, 3 human-authored" of a 23-PR window: three
+    // numbers in one sentence, two describing a different population from the
+    // third.
     let shown = if view.window_total > view.rows.len() {
         format!(", showing {} of {}", view.rows.len(), view.window_total)
     } else {
@@ -439,7 +515,11 @@ pub fn render_human(view: &RoiView) -> String {
     out.push_str(&format!(
         "{} — {} AI-assisted PRs, {} human-authored, {}d{shown}  \
          (baseline: {} human anchors)\n",
-        view.slug, t.ai_prs, t.human_prs, view.days, view.anchor_n
+        view.slug,
+        view.window_ai,
+        view.window_total.saturating_sub(view.window_ai),
+        view.days,
+        view.anchor_n
     ));
 
     if view.rows.is_empty() {
@@ -448,24 +528,36 @@ pub fn render_human(view: &RoiView) -> String {
         // ONE token column, and it is the equivalent. Four class columns would
         // turn a per-PR table into a spreadsheet; the classes live one line
         // below the rollup's headline, where the sum is what a reader audits.
-        let mut head = format!("\n  {:>6}  {:<5} {:>7} {:>5} {:>9}", "PR", "who", "units", "pct", "tokens");
+        // The unnamed one-char column after `tokens` is the match-strength
+        // mark — a header for it would be wider than the mark.
+        let mut head = format!(
+            "\n  {:>6}  {:<5} {:>7} {:>5} {:>9} ",
+            "PR", "who", "units", "pct", "tokens"
+        );
         if hours_on {
             head.push_str(&format!(" {:>7}", "hours"));
         }
         if usd_rate.is_some() {
             head.push_str(&format!(" {:>9}", "usd"));
         }
-        out.push_str(&head);
+        out.push_str(head.trim_end());
         out.push('\n');
 
         for r in &view.rows {
             let mut line = format!(
-                "  {:>6}  {:<5} {:>7.2} {:>4.0}% {:>9}",
+                "  {:>6}  {:<5} {:>7.2} {:>4.0}% {:>9}{}",
                 format!("#{}", r.pr_number),
                 if r.ai_assisted { "AI" } else { "human" },
                 r.units,
                 r.percentile * 100.0,
                 fmt_equiv(r.equiv_tokens),
+                // Abuts the number so the mark reads as belonging to it, and
+                // the digits stay column-aligned whether marked or not.
+                if is_weak(r.equiv_tokens, r.attribution_confidence) {
+                    '~'
+                } else {
+                    ' '
+                },
             );
             if hours_on {
                 // `hours_p50` is Some for every row whenever a Calibration
@@ -487,8 +579,19 @@ pub fn render_human(view: &RoiView) -> String {
                     }
                 ));
             }
-            out.push_str(&line);
+            // The mark column leaves a trailing space on unmarked rows when no
+            // hours/usd column follows it.
+            out.push_str(line.trim_end());
             out.push('\n');
+        }
+        // One legend line, and only where there is a token figure to qualify:
+        // with nothing attributed anywhere, the mark never appears and
+        // explaining it is noise.
+        if view.rows.iter().any(|r| r.equiv_tokens > 0.0) {
+            out.push_str(&format!(
+                "  ~ = weak attribution (confidence ≤ {WEAK_CONFIDENCE:.2}): mention-only, with \
+                 little or no changed-file overlap behind it\n"
+            ));
         }
     }
 
@@ -544,14 +647,28 @@ pub fn render_human(view: &RoiView) -> String {
             }
         }
     }
-    // The join is reference-based, so say how firm it is before anyone quotes
-    // the number above.
+    // The join is inferred, so say how firm it is — and how much of the volume
+    // rests on the weak kind — before anyone quotes the number above.
     if let Some(c) = t.confidence {
-        kv(
-            &mut out,
-            "attribution:",
-            &format!("{c:.2} mean confidence (session→PR references)"),
-        );
+        let weak = match t.weak_share {
+            Some(w) => format!(
+                " — {:.0}% of volume from weak (mention-only) matches",
+                w * 100.0
+            ),
+            None => String::new(),
+        };
+        kv(&mut out, "attribution:", &format!("{c:.2} mean confidence{weak}"));
+        // Past half, the headline spend figure is mostly a guess about which
+        // sessions produced these PRs, and a reader who quotes it should know
+        // that before they do.
+        if t.weak_share.is_some_and(|w| w > 0.5) {
+            kv(
+                &mut out,
+                "caution:",
+                "most of this spend is inferred from PR mentions, not file overlap \
+                 — treat the per-PR token figures as indicative",
+            );
+        }
     }
     // Device-wide, NOT this repo: the session scan reads every tool log on the
     // machine. Labelling it as repo-scoped would understate the denominator by
@@ -652,8 +769,20 @@ pub fn render_json(view: &RoiView) -> Value {
         "repo": view.slug,
         "days": view.days,
         "anchor_n": view.anchor_n,
+        // The WINDOW, before `--limit`: `prs` below is a slice, and a consumer
+        // that counted the split off `totals` would inherit exactly the bug the
+        // header had.
+        "window": {
+            "merged_prs": view.window_total,
+            "ai_prs": view.window_ai,
+            "human_prs": view.window_total.saturating_sub(view.window_ai),
+            "shown": view.rows.len(),
+        },
         "spend_available": view.spend_available,
         "usd_per_mtok": view.usd_per_mtok,
+        // Published so a consumer can reproduce the human table's `~` mark from
+        // `attribution_confidence` instead of guessing where weak begins.
+        "weak_confidence_threshold": WEAK_CONFIDENCE,
         // Published, not implied: these are Anthropic-family list RATIOS, not
         // prices, and a consumer on another provider needs to see them to know
         // whether the equivalent means anything for their fleet.
@@ -681,6 +810,9 @@ pub fn render_json(view: &RoiView) -> Value {
             "session_count": t.sessions,
             "tokens_per_effort_unit": t.tokens_per_unit,
             "attribution_confidence": t.confidence,
+            // What share of `equiv_tokens` above rests on a mention-only match.
+            // The mean alone cannot say: it averages the guess away.
+            "attribution_weak_volume_share": t.weak_share,
             // Device-wide, not repo-scoped: the session scan reads every tool
             // log on this machine, across every repo.
             "unattributed_device": {
@@ -853,9 +985,11 @@ pub fn cmd_roi(args: &[String]) -> ExitCode {
         .filter(|p| within_days(&p.merged_at, opts.days, now))
         .collect();
     let window_total = in_window.len();
-    let rows: Vec<Row> = in_window
-        .into_iter()
-        .take(opts.limit)
+    // The split is counted over the whole window; `--limit` only decides how
+    // much of it is printed.
+    let (window_ai, shown) = window_split(&in_window, opts.limit, |p| !human.contains(&p.pr_number));
+    let rows: Vec<Row> = shown
+        .iter()
         .filter_map(|p| {
             // A PR whose diff will not read is dropped, not zeroed: a row of
             // zeros would enter the rollup as free work.
@@ -891,6 +1025,7 @@ pub fn cmd_roi(args: &[String]) -> ExitCode {
         anchor_n: mined.anchors.len(),
         rows,
         window_total,
+        window_ai,
         unattributed: spend.unattributed,
         unattributed_sessions: spend.unattributed_sessions,
         sessions_scanned: spend.sessions_scanned,
@@ -963,6 +1098,7 @@ mod tests {
             days: 30,
             anchor_n: 50,
             window_total: rows.len(),
+            window_ai: rows.iter().filter(|r| r.ai_assisted).count(),
             rows,
             unattributed: mix_of(2_000_000),
             unattributed_sessions: 4,
@@ -1098,6 +1234,165 @@ mod tests {
         assert!(!render_human(&v).contains("showing"), "untruncated");
         v.window_total = 34;
         assert!(render_human(&v).contains("showing 1 of 34"), "{v:?}");
+    }
+
+    // ── the header describes the window, not the table ──────────────
+
+    #[test]
+    fn window_split_counts_the_whole_window_and_cuts_only_the_slice() {
+        // Five AI, four human — the shape `--limit 6` used to misreport.
+        let window: Vec<bool> = (0..9).map(|i| i % 2 == 0).collect();
+        let (ai_6, shown_6) = window_split(&window, 6, |ai| *ai);
+        let (ai_100, shown_100) = window_split(&window, 100, |ai| *ai);
+        assert_eq!((ai_6, ai_100), (5, 5));
+        // Only the slice moves.
+        assert_eq!(shown_6.len(), 6);
+        assert_eq!(shown_100.len(), 9, "a limit past the end cannot overrun");
+        assert_eq!(window_split(&window, 0, |ai| *ai).1.len(), 0);
+        assert_eq!(window_split::<bool>(&[], 6, |ai| *ai), (0, &[][..]));
+    }
+
+    #[test]
+    fn the_header_counts_the_window_however_small_the_limit() {
+        let window: Vec<Row> = (0..9)
+            .map(|i| row(100 + i, i % 2 == 0, 1.0, 1_000_000))
+            .collect();
+
+        // Exactly what `cmd_roi` does: split the window, then take the slice.
+        let header_at = |limit: usize| {
+            let (window_ai, shown) = window_split(&window, limit, |r| r.ai_assisted);
+            let mut v = view(shown.to_vec());
+            v.window_total = window.len();
+            v.window_ai = window_ai;
+            render_human(&v).lines().next().unwrap().to_string()
+        };
+        let six = header_at(6);
+        let hundred = header_at(100);
+
+        assert!(six.contains("5 AI-assisted PRs, 4 human-authored"), "{six}");
+        // The counts are the window's at every limit; only `showing` moves.
+        assert_eq!(
+            six.split_once(", 30d").unwrap().0,
+            hundred.split_once(", 30d").unwrap().0,
+            "--limit changed the split:\n{six}\n{hundred}"
+        );
+        assert!(six.contains("showing 6 of 9"), "{six}");
+        assert!(!hundred.contains("showing"), "{hundred}");
+        // Pre-fix the six-row table reported its own 3/3 split beside a
+        // window total of 9 — three numbers, two populations.
+        assert!(!six.contains("3 AI-assisted"), "counted the table:\n{six}");
+        // And the two halves still sum to the total the same line announces.
+        let mut v = view(vec![row(1, true, 1.0, 0)]);
+        v.window_total = 23;
+        v.window_ai = 9;
+        assert!(
+            render_human(&v).contains("9 AI-assisted PRs, 14 human-authored"),
+            "{v:?}"
+        );
+    }
+
+    // ── how firm each row's tokens are ──────────────────────────────
+
+    #[test]
+    fn a_weak_row_is_marked_and_one_legend_line_says_what_the_mark_means() {
+        let mut weak = row(41, true, 2.0, 4_000_000);
+        weak.attribution_confidence = 0.2;
+        let text = render_human(&view(vec![weak, row(42, true, 2.0, 4_000_000)]));
+        assert!(line(&text, "#41").ends_with('~'), "unmarked weak row:\n{text}");
+        assert!(!line(&text, "#42").contains('~'), "marked a strong row:\n{text}");
+        // The mark does not cost the number its column.
+        assert!(line(&text, "#41").contains("806k eq~"), "{text}");
+        assert!(line(&text, "#42").contains("806k eq"), "{text}");
+        // Exactly one legend line, and it names the threshold from the constant.
+        let legend: Vec<&str> = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("~ ="))
+            .collect();
+        assert_eq!(legend.len(), 1, "{text}");
+        assert!(legend[0].contains("confidence ≤ 0.30"), "{}", legend[0]);
+
+        // The threshold is inclusive: 0.30 is the mention-only score.
+        let mut edge = row(43, true, 2.0, 4_000_000);
+        edge.attribution_confidence = WEAK_CONFIDENCE;
+        assert!(line(&render_human(&view(vec![edge])), "#43").ends_with('~'));
+
+        // Nothing attributed is not a weak match — and with no token figure
+        // anywhere, the mark never appears, so the legend stays away.
+        let none = render_human(&view(vec![row(44, true, 2.0, 0)]));
+        assert!(!line(&none, "#44").contains('~'), "{none}");
+        assert!(!none.contains("~ ="), "legend with nothing to qualify:\n{none}");
+        assert!(!is_weak(0.0, 0.0), "no tokens is not a weak attribution");
+    }
+
+    #[test]
+    fn the_rollup_names_the_weak_share_and_cautions_only_past_half() {
+        let mut weak = row(1, true, 1.0, 1_000_000);
+        weak.attribution_confidence = 0.2;
+        // 1M raw weak against 4M raw strong, one shape ⇒ 20% of the volume.
+        let text = render_human(&view(vec![weak.clone(), row(2, true, 1.0, 4_000_000)]));
+        let att = line(&text, "attribution:");
+        assert!(att.contains("0.76 mean confidence"), "{att}");
+        assert!(
+            att.contains("20% of volume from weak (mention-only) matches"),
+            "{att}"
+        );
+        assert!(!text.contains("caution:"), "cautioned under half:\n{text}");
+
+        // One big guess beside a small certainty: 90% of the volume is weak.
+        let mut big_weak = row(3, true, 1.0, 9_000_000);
+        big_weak.attribution_confidence = 0.1;
+        let text = render_human(&view(vec![row(2, true, 1.0, 1_000_000), big_weak]));
+        assert!(line(&text, "attribution:").contains("90% of volume"), "{text}");
+        let caution = line(&text, "caution:");
+        assert!(caution.contains("inferred from PR mentions"), "{caution}");
+        assert!(caution.contains("not file overlap"), "{caution}");
+        assert_eq!(text.matches("caution:").count(), 1, "{text}");
+
+        // By VOLUME, not by row — and never a share of nothing.
+        assert_eq!(view(vec![weak]).totals().weak_share, Some(1.0));
+        assert_eq!(view(vec![row(9, true, 1.0, 0)]).totals().weak_share, None);
+        assert_eq!(weak_volume_share(&[]), None);
+        // A half-and-half split is not "mostly" — the caution stays shut.
+        let mut half = row(4, true, 1.0, 4_000_000);
+        half.attribution_confidence = 0.3;
+        let t = view(vec![half, row(5, true, 1.0, 4_000_000)]).totals();
+        assert_eq!(t.weak_share, Some(0.5));
+        assert!(!render_human(&view(Vec::new())).contains("caution:"));
+    }
+
+    #[test]
+    fn json_publishes_the_window_split_the_confidence_and_the_weak_share() {
+        let mut weak = row(1, true, 1.0, 1_000_000);
+        weak.attribution_confidence = 0.2;
+        let mut v = view(vec![weak, row(2, true, 1.0, 4_000_000)]);
+        v.window_total = 23;
+        v.window_ai = 9;
+        let doc = render_json(&v);
+
+        // The window, not the slice `prs` carries.
+        assert_eq!(doc["window"]["merged_prs"], 23);
+        assert_eq!(doc["window"]["ai_prs"], 9);
+        assert_eq!(doc["window"]["human_prs"], 14);
+        assert_eq!(doc["window"]["shown"], 2);
+
+        // Per-PR strength as a number, plus the threshold that turns it into
+        // the table's `~`, so a consumer can reproduce the mark exactly.
+        assert!(close(doc["prs"][0]["attribution_confidence"].as_f64().unwrap(), 0.2));
+        assert!(close(doc["prs"][1]["attribution_confidence"].as_f64().unwrap(), 0.9));
+        assert!(close(doc["weak_confidence_threshold"].as_f64().unwrap(), 0.3));
+        assert!(close(
+            doc["totals"]["attribution_weak_volume_share"].as_f64().unwrap(),
+            0.2
+        ));
+
+        // Nothing attributed ⇒ an explicit null, not a zero share that would
+        // read as "none of this is guesswork".
+        let empty = render_json(&view(vec![row(1, true, 1.0, 0)]));
+        assert!(empty["totals"]["attribution_weak_volume_share"].is_null());
+        assert!(empty["totals"]
+            .as_object()
+            .unwrap()
+            .contains_key("attribution_weak_volume_share"));
     }
 
     #[test]
