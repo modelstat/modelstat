@@ -3,12 +3,18 @@
 //!
 //! Two things make this defensible rather than a vibe:
 //!
-//! 1. **The model is never asked for hours.** It is handed 5–8 of this repo's
-//!    real human PRs with their measured `active_minutes` and asked only to
-//!    place the target among them, on `0..1`. The minutes come from
-//!    [`crate::calibrate`], from the anchors, not from the model. A model that
-//!    is systematically optimistic about absolute durations cannot express that
-//!    bias through this interface.
+//! 1. **The model is never asked for hours, and is never shown any.** It is
+//!    handed 5–8 of this repo's real human PRs as SHAPES — files and line
+//!    counts — and asked only to place the target among them, on `0..1`. It
+//!    could not express an opinion about duration through this interface if it
+//!    had one.
+//!
+//!    The references used to carry each anchor's measured `active_minutes`,
+//!    and selection used to require it. Both are gone. The number correlates
+//!    with change size at ρ 0.11–0.24 (see [`crate::units`]), so showing it
+//!    fed the model noise — and requiring it was worse than useless: on a
+//!    squash-merging repo no anchor has it, so erpc's 50 human anchors yielded
+//!    ZERO references and [`judge`] declined on every single PR.
 //! 2. **The crate never opens a socket.** [`Scorer`] is injected — the daemon
 //!    passes a loopback or org self-hosted client, tests pass a closure. That
 //!    is also why the whole path is testable with zero network.
@@ -72,18 +78,27 @@ impl JudgedFeatures {
     }
 }
 
-/// The anchors worth showing the model: human-authored, with measured effort,
-/// spread evenly across the repo's effort range rather than clustered. Pure.
+/// The anchors worth showing the model: human-authored, spread evenly across
+/// the repo's SIZE range rather than clustered. Pure.
+///
+/// Selected by authorship alone. Requiring `active_minutes` — as this did —
+/// selects on whether per-PR commit clustering happened to work, which is a
+/// property of the repo's merge strategy and nothing else: squash merges leave
+/// one commit, one commit clusters into nothing, and the reference table comes
+/// back empty on the majority of real repositories.
 ///
 /// Even spacing is the point. Eight anchors drawn from the fat middle would
-/// give the model no idea what "hard for this team" looks like, and every
+/// give the model no idea what "large for this team" looks like, and every
 /// target would land near the median.
 pub fn reference_anchors(anchors: &[AnchorPr]) -> Vec<&AnchorPr> {
-    let mut usable: Vec<&AnchorPr> = anchors
-        .iter()
-        .filter(|a| !a.ai_assisted && a.active_minutes.is_some_and(|m| m > 0))
-        .collect();
-    usable.sort_by_key(|a| (a.active_minutes.unwrap_or(0), a.pr_number));
+    let mut usable: Vec<&AnchorPr> = anchors.iter().filter(|a| !a.ai_assisted).collect();
+    usable.sort_by_key(|a| {
+        (
+            a.lines_added.saturating_add(a.lines_deleted),
+            a.files_changed,
+            a.pr_number,
+        )
+    });
     let n = usable.len();
     if n <= MAX_REFERENCE_ANCHORS {
         return usable;
@@ -103,19 +118,16 @@ pub fn build_prompt(target: &DiffFeatures, anchors: &[AnchorPr]) -> String {
     p.push_str(
         "You are sizing one merged pull request against pull requests from the SAME repository.\n\
          Do not estimate hours. Only place the TARGET relative to the REFERENCES below.\n\n\
-         REFERENCES (human-authored merged PRs from this repo; active_minutes was measured from\n\
-         their own commit timestamps, clustered into work sessions):\n",
+         REFERENCES (human-authored merged PRs from this repo, smallest first):\n",
     );
     for (i, a) in refs.iter().enumerate() {
-        let m = a.active_minutes.unwrap_or(0);
         p.push_str(&format!(
-            "  ref {}: files={} +{}/-{} commits={} active={}min\n",
+            "  ref {}: files={} +{}/-{} commits={}\n",
             i + 1,
             a.files_changed,
             a.lines_added,
             a.lines_deleted,
             a.commit_count.unwrap_or(0),
-            m,
         ));
     }
     let langs = target
@@ -282,20 +294,26 @@ mod tests {
 
     #[test]
     fn reference_anchors_spread_across_the_range_and_skip_ai_prs() {
-        let mut set: Vec<AnchorPr> = (1..=20).map(|i| anchor(i, 10, 100, Some(i as u32 * 10))).collect();
+        // Churn 20..400, one per PR. None of them has usable clustering — the
+        // ordinary case on a squash-merging repo, and it must still work.
+        let mut set: Vec<AnchorPr> = (1..=20).map(|i| anchor(i, 10, i * 10, None)).collect();
         set.push(AnchorPr {
             ai_assisted: true,
-            ..anchor(99, 10, 100, Some(45))
+            ..anchor(99, 10, 45, Some(45))
         });
-        set.push(anchor(98, 10, 100, None));
         let refs = reference_anchors(&set);
         assert_eq!(refs.len(), MAX_REFERENCE_ANCHORS);
-        assert!(refs.iter().all(|a| !a.ai_assisted && a.active_minutes.is_some()));
-        // Endpoints of the human distribution are always shown.
-        assert_eq!(refs[0].active_minutes, Some(10));
-        assert_eq!(refs[refs.len() - 1].active_minutes, Some(200));
-        let mins: Vec<u32> = refs.iter().map(|a| a.active_minutes.unwrap()).collect();
-        assert!(mins.windows(2).all(|w| w[0] < w[1]), "{mins:?}");
+        assert!(refs.iter().all(|a| !a.ai_assisted));
+        assert!(
+            refs.iter().all(|a| a.active_minutes.is_none()),
+            "an anchor without measured minutes is still a perfectly good reference"
+        );
+        // Endpoints of the human size distribution are always shown.
+        let churn = |a: &AnchorPr| a.lines_added + a.lines_deleted;
+        assert_eq!(churn(refs[0]), 20);
+        assert_eq!(churn(refs[refs.len() - 1]), 400);
+        let sizes: Vec<u64> = refs.iter().map(|a| churn(a)).collect();
+        assert!(sizes.windows(2).all(|w| w[0] < w[1]), "{sizes:?}");
     }
 
     #[test]
@@ -305,14 +323,14 @@ mod tests {
             called.set(true);
             Some(r#"{"category":"feature","novelty_0_1":0.5,"boilerplate_fraction_0_1":0.5,"relative_position_0_1":0.5}"#.into())
         };
-        let thin: Vec<AnchorPr> = (1..=4).map(|i| anchor(i, 5, 50, Some(60))).collect();
+        let thin: Vec<AnchorPr> = (1..=4).map(|i| anchor(i, 5, 50, None)).collect();
         assert!(judge(&scorer, &DiffFeatures::default(), &thin).is_none());
         assert!(!called.get(), "a thin baseline must not reach the model");
     }
 
     #[test]
     fn prompt_shows_references_and_never_source_text() {
-        let anchors: Vec<AnchorPr> = (1..=6).map(|i| anchor(i, 4, 40, Some(i as u32 * 30))).collect();
+        let anchors: Vec<AnchorPr> = (1..=6).map(|i| anchor(i, 4, i * 40, Some(30))).collect();
         let target = crate::diff::features_from(
             "10\t2\tsrc/secret/token_store.rs",
             "diff --git a/src/secret/token_store.rs b/src/secret/token_store.rs\n\
@@ -320,8 +338,11 @@ mod tests {
              +    let api_key = \"sk-live-DEADBEEF\";\n",
         );
         let p = build_prompt(&target, &anchors);
-        assert!(p.contains("ref 1: files=4 +40/-40"), "{p}");
-        assert!(p.contains("active=30min"));
+        assert!(p.contains("ref 1: files=4 +40/-40 commits=4"), "{p}");
+        assert!(
+            !p.contains("active=") && !p.contains("min\n"),
+            "measured minutes are noise and must not reach the model:\n{p}"
+        );
         assert!(p.contains("languages=rs:1"));
         for leak in ["token_store", "sk-live", "api_key", "TokenStore"] {
             assert!(!p.contains(leak), "prompt leaked {leak:?}:\n{p}");
