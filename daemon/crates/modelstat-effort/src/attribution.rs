@@ -10,31 +10,58 @@
 //!                                             │
 //!                       claude_code / codex / pi / cursor parsers
 //!                                             │
-//!                                     RawEvent (tokens + references)
+//!                    RawEvent (tokens + references + cwd + ts)
 //!                                             │
-//!                     group by session_id ──▶ dedupe_session_metadata
+//!            group by session_id ──▶ token mix, [start, end], cwds
 //!                                             │
-//!             1 PR ──▶ whole mix           n PRs ──▶ even split PER CLASS
-//!             0 PRs ─▶ unattributed (mix) / unattributed_sessions
+//!        git: files the window changed  ×  files each merged PR changed
+//!                                             │
+//!            overlap × time proximity ──▶ score ──▶ split PER CLASS,
+//!                                                   PROPORTIONAL to score
+//!                                             │
+//!             no match ─▶ unattributed (mix) / unattributed_sessions
 //! ```
 //!
-//! ## Attribution is a claim, and it says how strong it is
+//! ## A session is joined to the PR it AUTHORED, not the one it mentioned
 //!
-//! A session names the PRs it worked on the same way the daemon's
-//! session-metadata pass learns them: the parsers mine each turn's full text for
-//! public reference shapes into [`modelstat_wire::RawEvent::references`], and
-//! `modelstat_parsers::dedupe_session_metadata` folds a session's blobs into one
-//! ranked, deduped set. The rank (`git` > `tool` > `content` > `model`) is the
-//! parsers' own; [`source_confidence`] is this module's reading of it as a
-//! number, so a consumer can weigh a git-deterministic attribution against one
-//! that came out of prose.
+//! The first cut of this module joined on PR references alone — the numbers and
+//! URLs the parsers mine out of turn text into
+//! [`modelstat_wire::RawEvent::references`]. That is backwards, and visibly so:
+//! a PR number does not exist while the work is being done. The branch and the
+//! commits come first and the PR is opened afterwards, so a reference in a
+//! transcript overwhelmingly marks a session that DISCUSSED an already-open PR
+//! (a review, a follow-up, "look at #1037") rather than the one that wrote it.
+//! Attributing spend that way attaches the denominator to the wrong numerator,
+//! and on this device it inverted the headline: AI-authored PRs showed no spend
+//! while human-authored PRs showed all of it.
+//!
+//! The join that survives real repositories is CHANGED-FILE OVERLAP plus TIME
+//! PROXIMITY. Matching the session's own commit SHAs would be simpler and does
+//! not work: squash merging — which is the dominant convention, and the only one
+//! some repos use — rewrites them, so a session's local shas never appear on the
+//! mainline. What squashing cannot rewrite is WHICH FILES changed. A session
+//! that authored a PR touched substantially the same files, shortly before that
+//! PR merged, and both halves of that sentence are already readable on-device:
+//!
+//!   * the session side from `git log --since --until --numstat` over the
+//!     session's window (plus [`COMMIT_GRACE_MS`], because work is committed a
+//!     little after the talking stops) — the same read the daemon's
+//!     session-metadata pass makes to build its `FileRef`s;
+//!   * the PR side from a bounded `git show --numstat -m --first-parent` on the
+//!     merge commit, cached per `(repo, merge sha)` for the whole call.
+//!
+//! [`file_overlap`] is the Jaccard index of the two sets, [`time_proximity`]
+//! decays it with the gap to the merge, and the product is the match SCORE that
+//! both selects the PR and weights the split. References still matter, but only
+//! as a second signal layered on top: see [`CONFIDENCE_MENTION_ONLY`] for the
+//! case that produced the inversion.
 //!
 //! Nothing here is a guess dressed as a measurement. A session that resolves to
 //! no PR is NOT quietly dropped into the nearest one: its tokens land in
 //! [`SpendSummary::unattributed`] and its existence in
 //! `unattributed_sessions`, because on a real machine that number is large
-//! (exploration, reading, ops work, sessions whose PR is never mentioned) and
-//! hiding it would make every per-PR figure look better than it is.
+//! (exploration, reading, ops work, sessions whose repo is not on this disk)
+//! and hiding it would make every per-PR figure look better than it is.
 //!
 //! ## The denominator is input-equivalent tokens, not raw tokens
 //!
@@ -49,19 +76,28 @@
 //! ## Privacy
 //!
 //! [`PrSpend`] and [`SpendSummary`] carry a repo slug, a PR number and counts.
-//! No path, no prompt, no diff, no commit message, no author. Transcript paths
-//! and turn text exist inside this module for the length of one parse and are
-//! dropped.
+//! No path, no prompt, no diff, no commit message, no author. Transcript paths,
+//! turn text, working directories and the two changed-file sets the join is
+//! computed from all exist inside this module for the length of one call and
+//! are dropped. No type that leaves this module has a field a path could be
+//! stored in.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::rc::Rc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use modelstat_parsers::discovery::data_dir_candidates_in;
+use modelstat_parsers::git::resolve_repo_root;
+use modelstat_parsers::git_anchors::select_anchor_commits;
+use modelstat_parsers::git_files::collect_files_changed;
+use modelstat_parsers::git_outcome::parse_git_log;
 use modelstat_parsers::{
     dedupe_session_metadata, detect_references, parse_claude_code_jsonl_streaming,
     parse_codex_rollout_streaming, parse_cursor_tracking_db, parse_pi_session_streaming,
-    DetectedRefs, ParserContext,
+    AnchorConfig, DetectedRefs, GitResolver, ParserContext,
 };
 use modelstat_wire::{RawEvent, TokenUsage};
 use serde::Serialize;
@@ -168,24 +204,53 @@ impl TokenMix {
         self.reasoning = self.reasoning.saturating_add(o.reasoning);
     }
 
-    /// Share `i` of `n` when one session is split across several PRs.
+    /// Split into one share per weight, PROPORTIONAL to the weights.
     ///
-    /// Every CLASS is divided on its own and carries its own remainder to the
-    /// first shares, so the `n` shares sum back to `self` EXACTLY, class by
-    /// class. Splitting the equivalent instead would let a PR's headline number
+    /// Every CLASS is apportioned on its own by largest remainder — floor each
+    /// exact share, then hand the leftover units to the largest fractional
+    /// parts — so the `n` shares sum back to `self` EXACTLY, class by class.
+    /// Plain integer division would quietly evaporate up to `n-1` tokens per
+    /// class, and evaporating spend is the one rounding this module must not
+    /// do. Splitting the equivalent instead would let a share's headline number
     /// drift from the classes printed beside it; here it cannot, because the
     /// equivalent is always recomputed from a mix that adds up.
     ///
+    /// The weights are the join's match scores ([`PrMatch`]), so a session that
+    /// touched nine of PR A's files and one of PR B's is charged that way. An
+    /// earlier version split EVENLY and said so; the even split was a
+    /// placeholder for exactly this. Weights that are all zero, negative or
+    /// non-finite fall back to even — the caller asked for `n` shares and gets
+    /// `n` shares.
+    ///
     /// Private, and every caller has already established `n >= 1`.
-    fn share(&self, i: u64, n: u64) -> Self {
-        let part = |total: u64| total / n + u64::from(i < total % n);
-        Self {
-            input: part(self.input),
-            output: part(self.output),
-            cache_creation: part(self.cache_creation),
-            cache_read: part(self.cache_read),
-            reasoning: part(self.reasoning),
+    fn split(&self, weights: &[f64]) -> Vec<Self> {
+        let n = weights.len();
+        if n == 0 {
+            return Vec::new();
         }
+        let mut w: Vec<f64> = weights
+            .iter()
+            .map(|x| if x.is_finite() && *x > 0.0 { *x } else { 0.0 })
+            .collect();
+        let mut sum: f64 = w.iter().sum();
+        if !(sum > 0.0) {
+            w = vec![1.0; n];
+            sum = n as f64;
+        }
+        let input = apportion(self.input, &w, sum);
+        let output = apportion(self.output, &w, sum);
+        let cache_creation = apportion(self.cache_creation, &w, sum);
+        let cache_read = apportion(self.cache_read, &w, sum);
+        let reasoning = apportion(self.reasoning, &w, sum);
+        (0..n)
+            .map(|i| Self {
+                input: input[i],
+                output: output[i],
+                cache_creation: cache_creation[i],
+                cache_read: cache_read[i],
+                reasoning: reasoning[i],
+            })
+            .collect()
     }
 }
 
@@ -223,9 +288,16 @@ pub struct PrSpend {
     pub equiv_tokens: f64,
     /// Sessions that contributed, including ones split across several PRs.
     pub session_count: u32,
-    /// Token-weighted mean of the contributing sessions' confidences — how much
-    /// of this figure rests on a deterministic reference rather than prose. See
-    /// [`source_confidence`] and [`SPLIT_PENALTY`].
+    /// Token-weighted mean of the contributing matches' confidences — how much
+    /// of this figure rests on a measured file overlap rather than on a PR
+    /// number somebody typed.
+    ///
+    /// Above [`CONFIDENCE_MENTION_ONLY`] the figure is backed by file overlap;
+    /// at or below it, by mentions alone. The weight is each match's own share
+    /// of the spend, so a session that gave this PR a tenth of its tokens
+    /// speaks a tenth as loudly — there is deliberately no further discount for
+    /// a split session, which would discount that dilution twice. See
+    /// [`CONFIDENCE_OVERLAP_AND_REFERENCE`] for the layers.
     pub attribution_confidence: f64,
 }
 
@@ -247,17 +319,22 @@ pub struct SpendSummary {
 }
 
 /// A reference the repo's own git state produced — a branch, a remote, a commit.
+///
+/// These four rank how reliably the REFERENCE ITSELF was detected. They are no
+/// longer the attribution confidence — provenance of a mention says nothing
+/// about who wrote the PR, which is the whole defect this module was rebuilt to
+/// fix — but they still weight the split among mention-only matches, so a
+/// git-deterministic mention outweighs one a model re-read out of prose.
 pub const CONFIDENCE_GIT: f64 = 1.0;
-/// A reference a tool invocation named (a `gh pr` call, a checkout).
+/// A reference a tool invocation named (a `gh pr` call, a checkout). See
+/// [`CONFIDENCE_GIT`].
 pub const CONFIDENCE_TOOL: f64 = 0.8;
-/// A reference mined out of turn text — a PR URL somebody pasted or wrote.
+/// A reference mined out of turn text — a PR URL somebody pasted or wrote. See
+/// [`CONFIDENCE_GIT`].
 pub const CONFIDENCE_CONTENT: f64 = 0.6;
-/// A reference an on-device model reported. Weakest: re-parsed free text.
+/// A reference an on-device model reported. Weakest: re-parsed free text. See
+/// [`CONFIDENCE_GIT`].
 pub const CONFIDENCE_MODEL: f64 = 0.4;
-
-/// Applied when a session's tokens are split across several PRs: the split is
-/// even, so no single PR's share is as trustworthy as an undivided one.
-pub const SPLIT_PENALTY: f64 = 0.5;
 
 /// The parsers' source rank (`git` > `tool` > `content` > `model`) as a weight.
 ///
@@ -277,14 +354,16 @@ pub fn source_confidence(source: &str) -> f64 {
 /// Local session spend attributed to pull requests over the last `days` days.
 ///
 /// Best-effort by construction. No agent installed, an unreadable data
-/// directory, a transcript a parser chokes on, no `$HOME` — each degrades to
-/// less data, never to an error and never to a panic. An empty
-/// [`SpendSummary`] is a truthful answer for a machine with no session logs.
+/// directory, a transcript a parser chokes on, a repo that is not on this disk,
+/// no `$HOME` — each degrades to less data, never to an error and never to a
+/// panic. An empty [`SpendSummary`] is a truthful answer for a machine with no
+/// session logs.
 ///
 /// Bounded: only transcripts written within the window are opened (an older
 /// file cannot hold a newer event), every parse streams in ≤256-event chunks
-/// and keeps nothing but per-session counters, and events outside the window
-/// are dropped as they arrive.
+/// and keeps nothing but per-session counters, events outside the window are
+/// dropped as they arrive, and every git read the join makes is capped, timed
+/// out and memoised for the length of the call — see `RepoIndex`.
 #[must_use]
 pub fn spend_by_pr(days: u32) -> SpendSummary {
     let Some(home) = home_dir() else {
@@ -317,20 +396,26 @@ pub fn spend_by_pr(days: u32) -> SpendSummary {
         };
     }
 
-    finish(sessions)
+    finish(sessions, &mut RepoIndex::reading_git())
 }
 
 /// [`spend_by_pr`]'s pure core: the same aggregation over events a caller
 /// already holds, with no clock, no filesystem and no window (the caller's
 /// slice IS the window). This is where the split, the confidence and the
 /// unattributed accounting live.
+///
+/// The file-overlap half of the join needs a repo on disk, so this path runs
+/// with an offline index and every attribution it makes is mention-only. That
+/// is the honest reading, not a degraded one: with no repo to measure against
+/// there is no overlap to find. `join`, [`file_overlap`] and [`time_proximity`]
+/// are the pure functions to exercise the measured layers.
 #[must_use]
 pub fn spend_by_pr_events(events: &[RawEvent]) -> SpendSummary {
     let mut sessions: BTreeMap<String, SessionAcc> = BTreeMap::new();
     for e in events {
         fold_event(&mut sessions, e);
     }
-    finish(sessions)
+    finish(sessions, &mut RepoIndex::offline())
 }
 
 /// One session, reduced to what attribution needs. Never holds an event.
@@ -339,6 +424,14 @@ struct SessionAcc {
     mix: TokenMix,
     /// The reference blobs this session's turns carried, folded once at the end.
     parts: Vec<DetectedRefs>,
+    /// Epoch-ms of the first and last timestamped turn: the window the
+    /// changed-file capture reads, and the instant the merge-time decay is
+    /// measured from.
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    /// The working directories the session's turns reported, deduped. LOCAL
+    /// ONLY — used to find the repo on disk and never returned in any shape.
+    cwds: Vec<String>,
 }
 
 /// Collapse a session's accumulated reference parts once they pass this many.
@@ -348,13 +441,18 @@ struct SessionAcc {
 /// early loses nothing except applying its own 100-PR cap sooner.
 const PARTS_COLLAPSE_AT: usize = 512;
 
-/// Add one event's tokens and references to its session.
+/// Distinct working directories kept per session. An agent that wanders is
+/// still one session; past a handful of directories the extra ones buy no
+/// repos and cost a git resolve each.
+const CWDS_PER_SESSION_MAX: usize = 4;
+
+/// Add one event's tokens, references, window and working directory to its
+/// session.
 ///
 /// Only the channels that can yield a [`PullRequestRef`](modelstat_parsers::PullRequestRef)
-/// are read. The daemon's pass also folds each event's git context and branch
-/// tickets, but those produce repos and issue keys — never a PR — so they cannot
-/// move an attribution and are not paid for here. (`source_confidence` still maps
-/// `git`/`tool`, because a blob a caller built or replayed may carry either.)
+/// are read for references. The daemon's pass also folds each event's git
+/// context and branch tickets, but those produce repos and issue keys — never a
+/// PR — so they cannot move an attribution and are not paid for here.
 fn fold_event(sessions: &mut BTreeMap<String, SessionAcc>, e: &RawEvent) {
     let acc = sessions.entry(e.session_id.clone()).or_default();
 
@@ -362,6 +460,20 @@ fn fold_event(sessions: &mut BTreeMap<String, SessionAcc>, e: &RawEvent) {
         // Class for class. Summing any two of them here is what this module
         // used to do, and what it must never do again.
         acc.mix.add(TokenMix::from(t));
+    }
+
+    // Parsed, not string-compared: a transcript may stamp a local offset, and
+    // ISO-8601 only sorts lexically within one offset. A turn we cannot place in
+    // time simply does not move the window.
+    if let Some(ms) = parse_iso_ms(&e.ts) {
+        acc.start_ms = Some(acc.start_ms.map_or(ms, |s| s.min(ms)));
+        acc.end_ms = Some(acc.end_ms.map_or(ms, |s| s.max(ms)));
+    }
+
+    if let Some(cwd) = e.cwd.as_deref().filter(|c| !c.is_empty()) {
+        if acc.cwds.len() < CWDS_PER_SESSION_MAX && !acc.cwds.iter().any(|c| c == cwd) {
+            acc.cwds.push(cwd.to_string());
+        }
     }
 
     match &e.references {
@@ -404,61 +516,57 @@ struct PrAcc {
     conf_sum: f64,
 }
 
-/// Turn per-session counters into the summary: attribute, split, sort.
-fn finish(sessions: BTreeMap<String, SessionAcc>) -> SpendSummary {
+/// Turn per-session counters into the summary: join, split, sort.
+fn finish(sessions: BTreeMap<String, SessionAcc>, repos: &mut RepoIndex) -> SpendSummary {
     let mut out = SpendSummary::default();
     // Keyed on the lowercased slug — forge slugs are case-insensitive, and two
     // spellings of one repo must not read as two repos.
     let mut acc: BTreeMap<(String, u64), PrAcc> = BTreeMap::new();
 
+    // Learn every repo an agent has worked in on this device BEFORE joining any
+    // session, so a session that ran outside a repo — the ordinary shape for a
+    // harness driving subagents from a parent directory — can still be measured
+    // against the repo it names. Order matters: a later session's cwd is what
+    // teaches an earlier session where its repo lives.
+    for session in sessions.values() {
+        repos.learn(&session.cwds);
+    }
+
     for (_session_id, session) in sessions {
         out.sessions_scanned = out.sessions_scanned.saturating_add(1);
-        let prs = session_prs(session.parts);
+        let refs = session_prs(session.parts);
+        let windows = repos.windows(&session.cwds, &refs, session.start_ms, session.end_ms);
+        let matches = join(session.end_ms.unwrap_or(0), &windows, &refs);
 
-        if prs.is_empty() {
+        if matches.is_empty() {
             out.unattributed.add(session.mix);
             out.unattributed_sessions = out.unattributed_sessions.saturating_add(1);
             continue;
         }
 
-        // An EVEN split. File-overlap weighting would be better — a session that
-        // touched nine of PR A's files and one of PR B's did not spend half its
-        // tokens on each — but the overlap needs `FileRef`s, and those are built
-        // by the daemon's session-metadata pass from per-repo `git --numstat`
-        // reads, not by this path. Inventing a weight from what IS here (turn
-        // counts, mention counts) would be a guess wearing a measurement's
-        // clothes, and an even split at least states its own error honestly via
-        // SPLIT_PENALTY.
-        let n = prs.len() as u64;
+        let weights: Vec<f64> = matches.iter().map(|m| m.score).collect();
+        let shares = session.mix.split(&weights);
 
-        for (i, (slug, number, confidence)) in prs.into_iter().enumerate() {
-            // Each CLASS is split on its own, and each carries its own
-            // remainder to the first PRs, so the shares sum EXACTLY to what the
-            // session spent: integer division would quietly evaporate up to n-1
-            // tokens per class, and evaporating spend is the one rounding this
-            // module must not do. Splitting the equivalent instead would let a
-            // share's headline number disagree with its own classes.
-            let share = session.mix.share(i as u64, n);
-            let confidence = if n > 1 {
-                confidence * SPLIT_PENALTY
-            } else {
-                confidence
-            };
-
-            let entry = acc.entry((slug.to_lowercase(), number)).or_default();
+        for (m, share) in matches.into_iter().zip(shares) {
+            let entry = acc.entry((m.slug.to_lowercase(), m.number)).or_default();
             if entry.slug.is_empty() {
-                entry.slug = slug;
+                entry.slug = m.slug;
             }
             entry.mix.add(share);
             entry.sessions = entry.sessions.saturating_add(1);
-            // Weighted by RAW volume, as before: this weight only decides how
-            // loudly a session speaks in the confidence mean, and reweighting it
-            // would silently change an attribution figure this change is not
-            // about.
+            // Weighted by the RAW volume of THIS PR's share, which is what
+            // makes a further "divided session" discount wrong: a session that
+            // gave this PR a tenth of its tokens already speaks a tenth as
+            // loudly here. Scaling the confidence by the share as well — as an
+            // earlier cut did, and as the flat SPLIT_PENALTY before it did —
+            // discounts the same dilution twice, and drags a PR whose evidence
+            // is a measured file overlap down among the bare mentions. The
+            // layer's confidence is a statement about EVIDENCE; how much of the
+            // spend rests on it is what the weight says.
             let weight = share.raw_total();
             entry.weight = entry.weight.saturating_add(weight);
-            entry.conf_weighted += confidence * weight as f64;
-            entry.conf_sum += confidence;
+            entry.conf_weighted += m.confidence * weight as f64;
+            entry.conf_sum += m.confidence;
         }
     }
 
@@ -492,11 +600,16 @@ fn finish(sessions: BTreeMap<String, SessionAcc>) -> SpendSummary {
     out
 }
 
-/// The PRs one session resolved to, as `(slug, number, confidence)`.
+/// The PRs one session NAMED, as `(slug, number, reference confidence)`.
+///
+/// A mention is one of the two signals the join layers, never the whole answer
+/// on its own: see `join`. The confidence is [`source_confidence`] of the
+/// parsers' own rank, and is used to weight the split among mention-only
+/// matches — not as the attribution confidence, which the join decides.
 ///
 /// A PR with no slug is dropped: it names a number on an unknown repo, which
 /// cannot be joined to anything, and a session left with only those resolves to
-/// no PR at all — honestly unattributed rather than attributed to a guess.
+/// no PR by reference at all.
 fn session_prs(parts: Vec<DetectedRefs>) -> Vec<(String, u64, f64)> {
     dedupe_session_metadata(parts)
         .pull_requests
@@ -506,6 +619,794 @@ fn session_prs(parts: Vec<DetectedRefs>) -> Vec<(String, u64, f64)> {
             Some((slug, pr.number, source_confidence(&pr.source)))
         })
         .collect()
+}
+
+// ── The join: which PR did this session actually author? ─────────────────────
+
+/// Commits land a little AFTER the talking stops, so the changed-file capture
+/// extends the session's window by this much. Mirrors the daemon's own
+/// `session_metadata::COMMIT_GRACE_MS`: 4h covers "commit when you're done".
+pub const COMMIT_GRACE_MS: i64 = 4 * 60 * 60 * 1000;
+
+/// How long after a session a merge can still be that session's work.
+///
+/// The asymmetry is the whole point. A PR is opened and merged AFTER its branch
+/// is written, never before, so the candidate window runs FORWARD from the
+/// session's start; two weeks covers an ordinary review cycle.
+pub const JOIN_WINDOW_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+
+/// [`time_proximity`] at exactly [`JOIN_WINDOW_MS`]. A same-day merge is 1.0.
+pub const TIME_DECAY_AT_WINDOW: f64 = 0.3;
+
+/// Jaccard overlap below which a match is not a match.
+///
+/// Two large changesets sharing one incidental file — a lockfile, a shared
+/// constant, the module everybody edits — is coincidence, and coincidence is
+/// what the reference-only join was already full of.
+pub const MIN_FILE_OVERLAP: f64 = 0.15;
+
+/// At or above this overlap the session plainly did the PR's work.
+pub const STRONG_FILE_OVERLAP: f64 = 0.5;
+
+/// File overlap AND an explicit reference to the same PR: two independent
+/// signals agreeing, the strongest claim this module can make.
+pub const CONFIDENCE_OVERLAP_AND_REFERENCE: f64 = 1.0;
+
+/// Strong file overlap and no reference at all. Common, and correct: the PR did
+/// not exist yet while the session was writing it.
+pub const CONFIDENCE_STRONG_OVERLAP: f64 = 0.9;
+
+/// Ceiling of the weak-overlap band — an overlap above [`MIN_FILE_OVERLAP`] but
+/// below [`STRONG_FILE_OVERLAP`], scaled by the overlap from
+/// [`CONFIDENCE_MENTION_ONLY`] up to here.
+pub const CONFIDENCE_WEAK_OVERLAP_MAX: f64 = 0.6;
+
+/// A PR the session NAMED and whose files it did not touch.
+///
+/// This is the case that produced the inverted output this module was rebuilt
+/// to fix, so it is deliberately the weakest layer that still attributes
+/// anything. A session that mentions a PR number and changes none of its files
+/// is, on the evidence, DISCUSSING that PR — reviewing it, quoting it, being
+/// asked to look at it — not authoring it. The spend is still reported rather
+/// than dropped, because it was really spent; it is reported as the thin claim
+/// it is. Flat, whatever the reference's provenance: how reliably a mention was
+/// DETECTED says nothing about who wrote the code.
+pub const CONFIDENCE_MENTION_ONLY: f64 = 0.3;
+
+/// Split weight a mention-only match carries before [`source_confidence`]
+/// scales it. Deliberately the overlap floor: the weakest thing that counts as
+/// a match at all, so any measured overlap outweighs any number of bare
+/// mentions.
+const MENTION_ONLY_SCORE: f64 = MIN_FILE_OVERLAP;
+
+/// One merged PR a session could have authored. `files` is local only.
+#[derive(Clone)]
+struct PrCandidate {
+    number: u64,
+    merged_at_ms: i64,
+    files: Rc<BTreeSet<String>>,
+}
+
+/// One repo a session can be measured against: the slug PRs are keyed on, what
+/// changed in the repo during the session's window, and the PRs that merged in
+/// the join window. Local only — neither file set leaves this module.
+#[derive(Clone)]
+struct RepoWindow {
+    slug: String,
+    files: Rc<BTreeSet<String>>,
+    candidates: Vec<PrCandidate>,
+}
+
+/// One (session, PR) pair the join accepted.
+struct PrMatch {
+    slug: String,
+    number: u64,
+    /// Overlap × time proximity for a measured match, a floor value for a bare
+    /// mention. Drives the proportional split and the share-scaled confidence;
+    /// never returned.
+    score: f64,
+    confidence: f64,
+}
+
+/// Jaccard index of two changed-file sets — `|A ∩ B| / |A ∪ B|`. Pure.
+///
+/// Symmetric on purpose. Containment (`|A ∩ B| / |B|`) would score every small
+/// PR merged inside a long session's window as a perfect match, which is how a
+/// week-long session ends up claiming every PR that landed while it ran.
+#[must_use]
+pub fn file_overlap(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let intersection = a.intersection(b).count();
+    if intersection == 0 {
+        return 0.0;
+    }
+    // |A ∪ B| = |A| + |B| - |A ∩ B|; the intersection is bounded by both sizes,
+    // so this cannot underflow.
+    intersection as f64 / (a.len() + b.len() - intersection) as f64
+}
+
+/// How much a merge `gap_ms` after a session ended still looks like that
+/// session's work: 1.0 at or before the session's end, decaying exponentially
+/// to [`TIME_DECAY_AT_WINDOW`] at [`JOIN_WINDOW_MS`]. Pure.
+#[must_use]
+pub fn time_proximity(gap_ms: i64) -> f64 {
+    if gap_ms <= 0 {
+        return 1.0;
+    }
+    // tau solves exp(-window / tau) = TIME_DECAY_AT_WINDOW.
+    let tau = JOIN_WINDOW_MS as f64 / -TIME_DECAY_AT_WINDOW.ln();
+    (-(gap_ms as f64) / tau).exp()
+}
+
+/// Layer the signals, strongest first, into the PRs one session is charged for.
+/// Pure — every git read has already happened.
+///
+/// ```text
+///   file overlap AND a reference  → CONFIDENCE_OVERLAP_AND_REFERENCE  (1.0)
+///   strong file overlap alone     → CONFIDENCE_STRONG_OVERLAP         (0.9)
+///   weak-but-above-floor overlap  → scaled by overlap, ceiling
+///                                   CONFIDENCE_WEAK_OVERLAP_MAX       (0.6)
+///   a reference alone             → CONFIDENCE_MENTION_ONLY           (0.3)
+///   nothing                       → no match; the caller reports the
+///                                   session as unattributed
+/// ```
+fn join(end_ms: i64, windows: &[RepoWindow], refs: &[(String, u64, f64)]) -> Vec<PrMatch> {
+    // Keyed on the lowercased slug for the same reason `finish` is: one repo,
+    // however it was spelled, is one repo.
+    let mut out: BTreeMap<(String, u64), PrMatch> = BTreeMap::new();
+
+    for w in windows {
+        if w.files.is_empty() {
+            continue;
+        }
+        for c in &w.candidates {
+            let overlap = file_overlap(&w.files, &c.files);
+            if overlap < MIN_FILE_OVERLAP {
+                continue;
+            }
+            let referenced = refs
+                .iter()
+                .any(|(slug, number, _)| *number == c.number && slug.eq_ignore_ascii_case(&w.slug));
+            let confidence = if referenced {
+                CONFIDENCE_OVERLAP_AND_REFERENCE
+            } else if overlap >= STRONG_FILE_OVERLAP {
+                CONFIDENCE_STRONG_OVERLAP
+            } else {
+                // The weak band starts where a bare mention ends: a measured
+                // overlap, however thin, is a stronger claim than a name in a
+                // sentence. That ordering IS the thesis of this join.
+                CONFIDENCE_MENTION_ONLY
+                    + (CONFIDENCE_WEAK_OVERLAP_MAX - CONFIDENCE_MENTION_ONLY)
+                        * (overlap / STRONG_FILE_OVERLAP)
+            };
+            out.insert(
+                (w.slug.to_lowercase(), c.number),
+                PrMatch {
+                    slug: w.slug.clone(),
+                    number: c.number,
+                    score: overlap * time_proximity(c.merged_at_ms.saturating_sub(end_ms)),
+                    confidence,
+                },
+            );
+        }
+    }
+
+    // Mentions the files did not corroborate. `or_insert_with` is load bearing:
+    // a PR already matched by overlap keeps its measured score and confidence,
+    // and the mention only raised it to 1.0 above.
+    for (slug, number, source) in refs {
+        out.entry((slug.to_lowercase(), *number))
+            .or_insert_with(|| PrMatch {
+                slug: slug.clone(),
+                number: *number,
+                score: MENTION_ONLY_SCORE * source,
+                confidence: CONFIDENCE_MENTION_ONLY,
+            });
+    }
+
+    out.into_values().collect()
+}
+
+/// Split `total` into `weights.len()` whole units proportional to `weights`,
+/// summing back to `total` EXACTLY. Pure.
+///
+/// Largest remainder: floor every exact share, then hand the leftover units to
+/// the largest fractional parts, ties to the lower index so the answer is
+/// deterministic. `sum` is `weights.iter().sum()`, passed in because
+/// [`TokenMix::split`] computes it once and apportions five classes with it.
+fn apportion(total: u64, weights: &[f64], sum: f64) -> Vec<u64> {
+    let n = weights.len();
+    if n <= 1 {
+        return vec![total; n];
+    }
+    if total == 0 {
+        return vec![0; n];
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut fractions: Vec<(f64, usize)> = Vec::with_capacity(n);
+    let mut assigned: u64 = 0;
+    for (i, w) in weights.iter().enumerate() {
+        let exact = total as f64 * (w / sum);
+        // f64 stops counting whole tokens above 2^53; clamping to what is left
+        // keeps the invariant that no share exceeds the total, and the
+        // remainder loop below hands back whatever the floor dropped.
+        let (floor, fraction) = if exact.is_finite() && exact >= 0.0 {
+            let f = exact.floor();
+            ((f as u64).min(total - assigned), exact - f)
+        } else {
+            (0, 0.0)
+        };
+        assigned += floor;
+        fractions.push((fraction, i));
+        out.push(floor);
+    }
+    let mut rest = total - assigned;
+    fractions.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    // `% n` rather than a bare index: `rest` is at most `n - 1` in exact
+    // arithmetic, and this stays terminating and correct if float slop ever
+    // leaves more.
+    let mut k = 0usize;
+    while rest > 0 {
+        out[fractions[k % n].1] += 1;
+        rest -= 1;
+        k += 1;
+    }
+    out
+}
+
+// ── The git side: bounded, memoised repo reads ───────────────────────────────
+
+/// First-parent commits walked per repo to enumerate merged PRs. Matches the
+/// anchor miner's own window, so the two agree on which merges exist.
+const MAX_HISTORY: &str = "2000";
+
+/// The log format `parse_git_log` reads: sha, committer date, subject. The body
+/// field it also accepts is deliberately NOT asked for — the join has no use for
+/// a commit message, so none is ever read into this process.
+const LOG_FORMAT: &str = "--format=%H\u{1f}%cI\u{1f}%s\u{1e}";
+
+/// Stdout ceiling for one repo's first-parent walk (~150 bytes a commit).
+const LOG_MAX_BYTES: usize = 512 * 1024;
+
+/// Stdout ceiling for one PR's numstat. One row per file, so ~4k files.
+const NUMSTAT_MAX_BYTES: usize = 256 * 1024;
+
+/// Paths kept from one session window. A window that changed more files than
+/// this is churn, not a PR, and the tail cannot move a Jaccard.
+const SESSION_FILES_MAX: usize = 4_000;
+
+/// Repos one session is measured against.
+const REPOS_PER_SESSION_MAX: usize = 4;
+
+/// Directories the sibling-repo probe looks in.
+const SEARCH_DIRS_MAX: usize = 8;
+
+/// Distinct slugs the sibling-repo probe will look up in one call. Most of what
+/// reaches it is path-shaped noise from the reference miner, and the answer for
+/// a slug is the same however many sessions ask for it.
+const MAX_SLUG_PROBES: usize = 128;
+
+/// Ceiling on one repo's merged-PR walk. It is the join's FIRST question about
+/// a repo and the answer decides whether anything else is worth asking: a repo
+/// that cannot list its own merges in a second cannot serve this join at all.
+const HISTORY_TIMEOUT: Duration = Duration::from_millis(1_200);
+
+/// Ceiling on one merged PR's numstat. A healthy repo answers in tens of
+/// milliseconds; a partial clone that has to fetch the blobs first does not
+/// answer at all, and waiting four seconds to find that out — once per
+/// candidate PR — is how a bounded command stops being one.
+const NUMSTAT_TIMEOUT: Duration = Duration::from_millis(1_200);
+
+/// Ceiling on the affordability probe that precedes a repo's FIRST window read.
+/// See [`RepoIndex::changed_files`].
+const CANARY_TIMEOUT: Duration = Duration::from_millis(1_000);
+
+/// A single git call for one repo taking longer than this drops that repo from
+/// the rest of the join.
+///
+/// Measured, not guessed. On this device a 1,200-commit repo answers every
+/// question in tens of milliseconds while seven repos beside it take SECONDS TO
+/// MINUTES for the same reads — a date-ranged `--numstat` gives git no revision
+/// bound, and a partial clone has to fetch blobs before it can diff at all.
+/// Without the quarantine the first such repo eats the whole budget and every
+/// repo after it, including the one the user asked about, silently degrades to
+/// mention-only. A healthy repo never trips it.
+const SLOW_REPO_CALL: Duration = Duration::from_millis(1_200);
+
+/// Whole-join backstop. The per-repo quarantine is what actually keeps the
+/// command responsive; this only bounds a machine pathological in some way the
+/// quarantine does not model.
+const JOIN_BUDGET: Duration = Duration::from_secs(30);
+
+/// PR diffs read per call. The cache means this counts DISTINCT merges rather
+/// than (session, PR) pairs.
+const MAX_PR_DIFFS: usize = 400;
+
+/// One repo's merged-PR index: the slug PRs are keyed on, and every merge the
+/// first-parent walk reached as `(number, merge sha, merged-at ms)`.
+struct RepoHistory {
+    slug: String,
+    prs: Vec<(u64, String, i64)>,
+}
+
+/// Every git read the join makes, bounded and memoised for one call.
+///
+/// The memoisation is not an optimisation, it is what makes the join viable: a
+/// PR merged inside a busy fortnight is a candidate for dozens of sessions, and
+/// one `git show` per (session, PR) pair on a repo with hundreds of PRs turns a
+/// two-second command into a minute of subprocesses.
+///
+/// `RepoIndex::offline` is the same type with git switched off, which is what
+/// keeps `spend_by_pr_events` hermetic.
+struct RepoIndex {
+    enabled: bool,
+    resolver: GitResolver,
+    /// repo root → its merged-PR index. `None` caches "not a repo this can
+    /// read", so a dead root is probed once rather than once per session.
+    repos: HashMap<String, Option<Rc<RepoHistory>>>,
+    /// (repo root, merge sha) → the PR's changed paths.
+    pr_files: HashMap<(String, String), Rc<BTreeSet<String>>>,
+    /// (repo root, since ms, until ms) → the window's changed paths.
+    window_files: HashMap<(String, i64, i64), Rc<BTreeSet<String>>>,
+    /// lowercased slug → repo root, learned from the sessions' own cwds.
+    by_slug: HashMap<String, String>,
+    /// Directories a repo nobody `cd`-ed into might sit under.
+    search_dirs: Vec<String>,
+    /// Slugs already probed and not found, so the probe runs once each.
+    missing: HashSet<String>,
+    /// Roots quarantined by [`SLOW_REPO_CALL`].
+    slow: HashSet<String>,
+    /// Roots whose window read has already been probed for affordability.
+    canaried: HashSet<String>,
+    deadline: Instant,
+    diffs_read: usize,
+    /// Windows handed straight back instead of read from git, so `finish` — the
+    /// composition of the join, the split and the confidence mean — is testable
+    /// without a repo on disk.
+    #[cfg(test)]
+    seeded: Vec<RepoWindow>,
+}
+
+/// Append `s` if it is new and there is room. Small N, so a linear scan beats a
+/// set plus its allocation.
+fn push_unique(v: &mut Vec<String>, s: String, cap: usize) {
+    if v.len() < cap && !v.contains(&s) {
+        v.push(s);
+    }
+}
+
+impl RepoIndex {
+    fn reading_git() -> Self {
+        Self::new(true)
+    }
+
+    /// No git at all: every session resolves by reference alone.
+    fn offline() -> Self {
+        Self::new(false)
+    }
+
+    /// Offline, but with the windows a session's repo WOULD have produced.
+    #[cfg(test)]
+    fn seeded(windows: Vec<RepoWindow>) -> Self {
+        Self {
+            seeded: windows,
+            ..Self::new(false)
+        }
+    }
+
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            resolver: GitResolver::new(),
+            repos: HashMap::new(),
+            pr_files: HashMap::new(),
+            window_files: HashMap::new(),
+            by_slug: HashMap::new(),
+            search_dirs: Vec::new(),
+            missing: HashSet::new(),
+            slow: HashSet::new(),
+            canaried: HashSet::new(),
+            deadline: Instant::now() + JOIN_BUDGET,
+            diffs_read: 0,
+            #[cfg(test)]
+            seeded: Vec::new(),
+        }
+    }
+
+    /// Is there no point shelling out again at all?
+    fn spent(&self) -> bool {
+        !self.enabled || Instant::now() >= self.deadline
+    }
+
+    /// Is this repo still worth asking? See [`SLOW_REPO_CALL`].
+    fn usable(&self, root: &str) -> bool {
+        !self.spent() && !self.slow.contains(root)
+    }
+
+    /// Record what one git call for `root` cost, quarantining the repo when the
+    /// call took as long as `limit` — which, for a call that timed out, is
+    /// exactly what happened. Fed the elapsed time of EVERY git call including
+    /// the failures: a timeout is the most informative measurement there is.
+    fn charge(&mut self, root: &str, elapsed: Duration, limit: Duration) {
+        if elapsed >= limit {
+            self.slow.insert(root.to_string());
+        }
+    }
+
+    /// Record where a session ran: the repo it sits in, keyed by slug, and the
+    /// directories a sibling repo could sit in. Idempotent.
+    ///
+    /// Deliberately does NOT build the repo's history: this runs for every
+    /// session before any of them is joined, and a first-parent walk of a repo
+    /// no session turns out to need is a second of subprocess for nothing.
+    /// [`Self::slug_at`] is one cached `git config` read instead.
+    fn learn(&mut self, cwds: &[String]) {
+        if !self.enabled {
+            return;
+        }
+        for cwd in cwds {
+            let path = Path::new(cwd);
+            for dir in [Some(path), path.parent()].into_iter().flatten() {
+                push_unique(
+                    &mut self.search_dirs,
+                    dir.to_string_lossy().into_owned(),
+                    SEARCH_DIRS_MAX,
+                );
+            }
+            let Some(root) = resolve_repo_root(Some(cwd)) else {
+                continue;
+            };
+            if let Some(slug) = self.slug_at(&root) {
+                self.by_slug.entry(slug.to_lowercase()).or_insert(root);
+            }
+        }
+    }
+
+    /// The remote slug of the repo at `root`, or `None`. One
+    /// `git config --get remote.origin.url`, cached per path by the resolver
+    /// itself — cheap enough to ask about a directory that turns out not to
+    /// matter.
+    fn slug_at(&mut self, root: &str) -> Option<String> {
+        if !self.usable(root) {
+            return None;
+        }
+        let started = Instant::now();
+        let ctx = self.resolver.resolve(Some(root));
+        self.charge(root, started.elapsed(), SLOW_REPO_CALL);
+        ctx?.remote_slug
+    }
+
+    /// One repo's merged-PR index, read at most once per root.
+    fn history(&mut self, root: &str) -> Option<Rc<RepoHistory>> {
+        if let Some(hit) = self.repos.get(root) {
+            return hit.clone();
+        }
+        let built = self.read_history(root).map(Rc::new);
+        self.repos.insert(root.to_string(), built.clone());
+        built
+    }
+
+    fn read_history(&mut self, root: &str) -> Option<RepoHistory> {
+        // No remote slug ⇒ no key to attribute against ⇒ nothing to join. This
+        // also runs first because it is the cheaper of the two reads, and it
+        // quarantines a repo whose git is unresponsive before the walk.
+        let slug = self.slug_at(root)?;
+        if !self.usable(root) {
+            return None;
+        }
+        let started = Instant::now();
+        let log = run_git(
+            &["log", "--first-parent", "-n", MAX_HISTORY, LOG_FORMAT],
+            root,
+            LOG_MAX_BYTES,
+            HISTORY_TIMEOUT,
+        );
+        self.charge(root, started.elapsed(), HISTORY_TIMEOUT);
+        let log = log?;
+        // The parsers' own readers decide which subjects name a PR and keep the
+        // newest occurrence of each, so this join and the anchor miner cannot
+        // disagree about which merges exist. `select_anchor_commits` applies no
+        // cap of its own; `AnchorConfig::default()` sets no date cutoff.
+        let prs = select_anchor_commits(&parse_git_log(&log), &AnchorConfig::default())
+            .into_iter()
+            .filter_map(|(number, c)| Some((number, c.sha.clone(), parse_iso_ms(&c.committed_at)?)))
+            .collect();
+        Some(RepoHistory { slug, prs })
+    }
+
+    /// The repo root a slug lives at, or `None`.
+    ///
+    /// Learned roots first. Failing that the repo may simply sit NEXT TO a
+    /// directory an agent has run in — a harness driving subagents from a parent
+    /// directory never has the repo as its own cwd, which is the ordinary shape
+    /// on a real machine — so `<known dir>/<repo name>` is probed and accepted
+    /// ONLY when git confirms the remote slug. A name match alone would be a
+    /// guess, and a guess here silently attributes one repo's spend to another.
+    ///
+    /// Every step is deliberately cheap, because most of what reaches here is
+    /// not a repo at all: the reference miner also yields path-shaped "slugs"
+    /// (`erpc/networks.go`, `plans/notes.md`) and a long session can name
+    /// dozens. A missing `.git` costs one `stat`, a present one costs a cached
+    /// `git config`, each slug is probed once, and the whole call is capped.
+    fn root_for_slug(&mut self, slug: &str) -> Option<String> {
+        let key = slug.to_lowercase();
+        if let Some(hit) = self.by_slug.get(&key) {
+            return Some(hit.clone());
+        }
+        if self.spent() || self.missing.len() >= MAX_SLUG_PROBES || !self.missing.insert(key.clone())
+        {
+            return None;
+        }
+        let name = key.rsplit('/').next().unwrap_or_default().to_string();
+        if name.is_empty() {
+            return None;
+        }
+        for dir in self.search_dirs.clone() {
+            let candidate = Path::new(&dir).join(&name);
+            if !candidate.join(".git").exists() {
+                continue;
+            }
+            let candidate = candidate.to_string_lossy().into_owned();
+            if self
+                .slug_at(&candidate)
+                .is_some_and(|s| s.eq_ignore_ascii_case(slug))
+            {
+                self.by_slug.insert(key, candidate.clone());
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// The repos this session can be measured against, each carrying the files
+    /// its window changed and the PRs that merged in the join window.
+    fn windows(
+        &mut self,
+        cwds: &[String],
+        refs: &[(String, u64, f64)],
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+    ) -> Vec<RepoWindow> {
+        #[cfg(test)]
+        if !self.seeded.is_empty() {
+            return self.seeded.clone();
+        }
+        // A session nothing timestamped cannot be placed against a merge date,
+        // and a window is the only thing the file capture can read.
+        let (Some(start), Some(end)) = (start_ms, end_ms) else {
+            return Vec::new();
+        };
+        if self.spent() {
+            return Vec::new();
+        }
+
+        let mut roots: Vec<String> = Vec::new();
+        for cwd in cwds {
+            if let Some(r) = resolve_repo_root(Some(cwd)) {
+                push_unique(&mut roots, r, REPOS_PER_SESSION_MAX);
+            }
+        }
+        for (slug, _, _) in refs {
+            if roots.len() >= REPOS_PER_SESSION_MAX {
+                break;
+            }
+            if let Some(r) = self.root_for_slug(slug) {
+                push_unique(&mut roots, r, REPOS_PER_SESSION_MAX);
+            }
+        }
+
+        let until = end.saturating_add(COMMIT_GRACE_MS);
+        let last_merge = end.saturating_add(JOIN_WINDOW_MS);
+        let mut out = Vec::new();
+        for root in roots {
+            // Cheapest discriminator first, every time. The merged-PR walk is
+            // one bounded `git log` per repo for the whole call; the candidate
+            // shortlist off it is free; only then is the window read — which is
+            // the expensive one, because `--since/--until` makes git traverse
+            // — worth paying for.
+            let Some(history) = self.history(&root) else {
+                continue;
+            };
+            let shortlist: Vec<&(u64, String, i64)> = history
+                .prs
+                .iter()
+                .filter(|(_, _, merged_ms)| *merged_ms >= start && *merged_ms <= last_merge)
+                .collect();
+            if shortlist.is_empty() {
+                continue;
+            }
+            let files = self.changed_files(&root, start, until);
+            if files.is_empty() {
+                continue;
+            }
+            let mut candidates = Vec::new();
+            for (number, sha, merged_ms) in shortlist {
+                let pr_files = self.merge_files(&root, sha);
+                if pr_files.is_empty() {
+                    continue;
+                }
+                candidates.push(PrCandidate {
+                    number: *number,
+                    merged_at_ms: *merged_ms,
+                    files: pr_files,
+                });
+            }
+            if candidates.is_empty() {
+                continue;
+            }
+            out.push(RepoWindow {
+                slug: history.slug.clone(),
+                files,
+                candidates,
+            });
+        }
+        out
+    }
+
+    /// The paths changed in `root` during `[since_ms, until_ms]`. Memoised.
+    ///
+    /// The parsers' own read, so this join and the daemon's `FileRef`s are built
+    /// from exactly the same git call rather than two that could drift.
+    ///
+    /// Preceded, once per repo, by the SAME read through this module's own
+    /// runner under a tighter cap. `collect_files_changed` stops at four
+    /// seconds, and four seconds is the right ceiling for a daemon pass and the
+    /// wrong one for a command a person is waiting on — especially multiplied by
+    /// every session that names the repo. The probe answers in tens of
+    /// milliseconds on a healthy repo; a repo that needs longer is retired by
+    /// [`Self::charge`] and never asked again.
+    fn changed_files(&mut self, root: &str, since_ms: i64, until_ms: i64) -> Rc<BTreeSet<String>> {
+        let key = (root.to_string(), since_ms, until_ms);
+        if let Some(hit) = self.window_files.get(&key) {
+            return hit.clone();
+        }
+        let mut set = BTreeSet::new();
+        if let (true, Some(since), Some(until)) =
+            (self.usable(root), ms_to_iso(since_ms), ms_to_iso(until_ms))
+        {
+            if self.canaried.insert(root.to_string()) {
+                let started = Instant::now();
+                let _ = run_git(
+                    &[
+                        "-c",
+                        "core.quotePath=false",
+                        "log",
+                        &format!("--since={since}"),
+                        &format!("--until={until}"),
+                        "--numstat",
+                        "--no-renames",
+                        "--format=%H",
+                        "-n",
+                        MAX_HISTORY,
+                    ],
+                    root,
+                    NUMSTAT_MAX_BYTES,
+                    CANARY_TIMEOUT,
+                );
+                self.charge(root, started.elapsed(), CANARY_TIMEOUT);
+            }
+            if self.usable(root) {
+                let started = Instant::now();
+                let changes = collect_files_changed(root, &since, &until);
+                self.charge(root, started.elapsed(), SLOW_REPO_CALL);
+                for c in changes
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(SESSION_FILES_MAX)
+                {
+                    set.insert(c.path);
+                }
+            }
+        }
+        let files = Rc::new(set);
+        self.window_files.insert(key, files.clone());
+        files
+    }
+
+    /// One merged PR's changed paths, memoised per `(root, merge sha)` — THE
+    /// cache the whole join rests on.
+    ///
+    /// An exhausted budget caches an empty set rather than retrying: a bounded
+    /// command that degrades must degrade once, not once per session.
+    fn merge_files(&mut self, root: &str, sha: &str) -> Rc<BTreeSet<String>> {
+        let key = (root.to_string(), sha.to_string());
+        if let Some(hit) = self.pr_files.get(&key) {
+            return hit.clone();
+        }
+        let mut set = BTreeSet::new();
+        if self.usable(root) && self.diffs_read < MAX_PR_DIFFS {
+            self.diffs_read += 1;
+            let started = Instant::now();
+            // `--format=` is why no commit message is read. `-m --first-parent`
+            // gives a true merge's diff against mainline, and is a no-op on a
+            // squash merge's single parent — which is the case that matters,
+            // since squashing is what made a sha-based join impossible.
+            let out = run_git(
+                &[
+                    "-c",
+                    "core.quotePath=false",
+                    "show",
+                    "--numstat",
+                    "--format=",
+                    "-m",
+                    "--first-parent",
+                    "--no-renames",
+                    sha,
+                ],
+                root,
+                NUMSTAT_MAX_BYTES,
+                NUMSTAT_TIMEOUT,
+            );
+            self.charge(root, started.elapsed(), SLOW_REPO_CALL);
+            for row in crate::diff::parse_numstat(out.as_deref().unwrap_or_default()) {
+                set.insert(row.path.to_string());
+            }
+        }
+        let files = Rc::new(set);
+        self.pr_files.insert(key, files.clone());
+        files
+    }
+}
+
+/// Run `git` in `cwd`, reading at most `max_bytes` of stdout and killing the
+/// child past `timeout`. `None` on spawn failure, timeout, or empty output — a
+/// bad sha writes to stderr, which is `/dev/null`.
+///
+/// ponytail: a near-copy of `diff::run_git_bounded`, which is private to that
+/// module. Upgrade path: promote one of the two the moment a third caller wants
+/// it.
+fn run_git(args: &[&str], cwd: &str, max_bytes: usize, timeout: Duration) -> Option<String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::with_capacity(8 * 1024);
+        let _ = (&mut stdout).take(max_bytes as u64).read_to_end(&mut buf);
+        buf
+    });
+    let start = Instant::now();
+    let timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break true;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break true;
+            }
+        }
+    };
+    let buf = reader.join().ok()?;
+    (!timed_out && !buf.is_empty()).then(|| String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// An ISO-8601 instant as epoch-ms, or `None` when it cannot be placed in time.
+///
+/// Parsed rather than compared as a string: a transcript may stamp a local
+/// offset (`+02:00`), and ISO-8601 only sorts lexically within one offset.
+fn parse_iso_ms(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|d| d.timestamp_millis())
+}
+
+/// Epoch-ms as an ISO-8601 instant. Only ever fed to `git --since/--until`.
+fn ms_to_iso(ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 // ── Discovery ────────────────────────────────────────────────────────────────
@@ -650,9 +1551,7 @@ fn window_start_ms(days: u32) -> i64 {
 /// unparseable or absent timestamp cannot be placed in time and is excluded —
 /// the alternative is counting a years-old turn against this month.
 fn in_window(ts: &str, since_ms: i64) -> bool {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|d| d.timestamp_millis() >= since_ms)
-        .unwrap_or(false)
+    parse_iso_ms(ts).is_some_and(|ms| ms >= since_ms)
 }
 
 #[cfg(test)]
@@ -751,14 +1650,15 @@ mod tests {
         // 150 fresh input at 1x + 15 output at 5x.
         assert_equiv(pr.equiv_tokens, 150.0 + 75.0);
         assert_eq!(pr.session_count, 1);
-        assert_eq!(pr.attribution_confidence, CONFIDENCE_CONTENT);
+        // No repo to measure against, so this is a mention and reads as one.
+        assert_eq!(pr.attribution_confidence, CONFIDENCE_MENTION_ONLY);
         assert_eq!(s.unattributed, TokenMix::default());
         assert_eq!(s.unattributed_sessions, 0);
         assert_eq!(s.sessions_scanned, 1);
     }
 
     #[test]
-    fn two_pr_session_splits_evenly_and_halves_confidence() {
+    fn two_mentioned_prs_split_evenly_when_no_files_corroborate() {
         let s = spend_by_pr_events(&[ev(
             "s1",
             "landing https://github.com/acme/api/pull/1 then https://github.com/acme/api/pull/2",
@@ -781,7 +1681,9 @@ mod tests {
             assert_equiv(pr.equiv_tokens, 75.0);
             assert_eq!(
                 pr.attribution_confidence,
-                CONFIDENCE_CONTENT * SPLIT_PENALTY
+                // Neither PR's files were checked, so both are mentions. The
+                // split halves the TOKENS, not the strength of the evidence.
+                CONFIDENCE_MENTION_ONLY
             );
             assert_eq!(pr.session_count, 1);
         }
@@ -859,31 +1761,67 @@ mod tests {
     }
 
     #[test]
-    fn confidence_follows_source_rank() {
-        for (source, expected) in [
+    fn source_rank_is_a_split_weight_and_no_longer_the_confidence() {
+        for (source, weight) in [
             ("git", CONFIDENCE_GIT),
             ("tool", CONFIDENCE_TOOL),
             ("content", CONFIDENCE_CONTENT),
             ("model", CONFIDENCE_MODEL),
             ("something_new", CONFIDENCE_MODEL),
         ] {
+            assert_eq!(source_confidence(source), weight, "{source}");
+            // However reliably the NUMBER was read, a mention the files do not
+            // corroborate is still only a mention.
             let s = spend_by_pr_events(&[ev_sourced("s1", source, 10, 1)]);
             assert_eq!(s.by_pr.len(), 1, "{source}");
-            assert_eq!(s.by_pr[0].attribution_confidence, expected, "{source}");
+            assert_eq!(
+                s.by_pr[0].attribution_confidence, CONFIDENCE_MENTION_ONLY,
+                "{source}"
+            );
         }
     }
 
     #[test]
-    fn strongest_source_in_a_session_wins() {
-        // The same PR seen from prose and from a git-sourced blob: the stronger
-        // provenance sets the confidence, matching the parsers' own dedupe.
-        let s = spend_by_pr_events(&[
-            ev("s1", "see https://github.com/acme/api/pull/42", 10, 1),
-            ev_sourced("s1", "git", 10, 1),
-        ]);
-        assert_eq!(s.by_pr.len(), 1);
-        assert_eq!(s.by_pr[0].attribution_confidence, CONFIDENCE_GIT);
-        assert_eq!(s.by_pr[0].mix.raw_total(), 22);
+    fn the_strongest_source_for_one_pr_survives_the_fold() {
+        // The same PR seen from prose and from a git-sourced blob resolves to
+        // the stronger provenance, as the parsers' own dedupe does.
+        let git: DetectedRefs = serde_json::from_value(json!({
+            "repos": [],
+            "pull_requests": [{"slug": "acme/api", "number": 42, "source": "git", "confidence": 0.9}],
+            "issues": [],
+        }))
+        .unwrap();
+        let prose = detect_references("see https://github.com/acme/api/pull/42", "content");
+        assert_eq!(
+            session_prs(vec![prose, git]),
+            vec![("acme/api".to_string(), 42, CONFIDENCE_GIT)]
+        );
+    }
+
+    #[test]
+    fn a_stronger_source_takes_a_bigger_share_of_a_split_mention() {
+        // Neither PR is corroborated by files, so the only thing separating
+        // them is how the mention was detected.
+        let mut e = bare("s1", 1_000, 0);
+        e.references = Some(json!({
+            "repos": [],
+            "pull_requests": [
+                {"slug": "acme/api", "number": 1, "source": "git", "confidence": 0.9},
+                {"slug": "acme/api", "number": 2, "source": "model", "confidence": 0.9},
+            ],
+            "issues": [],
+        }));
+        let s = spend_by_pr_events(&[e]);
+        assert_eq!(s.by_pr.len(), 2);
+        let git = s.by_pr.iter().find(|p| p.pr_number == 1).unwrap();
+        let model = s.by_pr.iter().find(|p| p.pr_number == 2).unwrap();
+        assert!(
+            git.mix.input > model.mix.input,
+            "git {} vs model {}",
+            git.mix.input,
+            model.mix.input
+        );
+        assert_eq!(git.mix.input + model.mix.input, 1_000);
     }
 
     #[test]
@@ -1098,7 +2036,7 @@ mod tests {
         let s = spend_by_pr_events(&[e]);
         assert_eq!(s.by_pr.len(), 1);
         assert_eq!(s.by_pr[0].pr_number, 7);
-        assert_eq!(s.by_pr[0].attribution_confidence, CONFIDENCE_CONTENT);
+        assert_eq!(s.by_pr[0].attribution_confidence, CONFIDENCE_MENTION_ONLY);
     }
 
     #[test]
@@ -1145,7 +2083,7 @@ mod tests {
         assert_eq!(s.by_pr[0].mix.raw_total(), 0);
         assert_equiv(s.by_pr[0].equiv_tokens, 0.0);
         // Weighted mean is undefined at zero weight; the plain mean stands in.
-        assert_eq!(s.by_pr[0].attribution_confidence, CONFIDENCE_CONTENT);
+        assert_eq!(s.by_pr[0].attribution_confidence, CONFIDENCE_MENTION_ONLY);
     }
 
     #[test]
@@ -1175,7 +2113,8 @@ mod tests {
             assert!(pr.equiv_tokens <= pr.mix.raw_total() as f64 * W_OUTPUT);
             assert!(pr.session_count >= 1);
             assert!(
-                pr.attribution_confidence > 0.0 && pr.attribution_confidence <= CONFIDENCE_GIT,
+                pr.attribution_confidence > 0.0
+                    && pr.attribution_confidence <= CONFIDENCE_OVERLAP_AND_REFERENCE,
                 "confidence {} out of range",
                 pr.attribution_confidence
             );
@@ -1193,5 +2132,299 @@ mod tests {
     fn zero_day_window_is_safe() {
         let s = spend_by_pr(0);
         assert!(s.unattributed_sessions <= s.sessions_scanned);
+    }
+
+    // ── the join: file overlap, time proximity, layering ────────────────────
+
+    const DAY_MS: i64 = 86_400_000;
+
+    /// A fixed instant to hang the synthetic windows off. The value is
+    /// irrelevant — only the gaps to the merge dates matter.
+    const T0: i64 = 1_800_000_000_000;
+
+    fn files(paths: &[&str]) -> Rc<BTreeSet<String>> {
+        Rc::new(paths.iter().map(|p| (*p).to_string()).collect())
+    }
+
+    /// One repo window with one candidate PR.
+    fn one_window(
+        slug: &str,
+        session: &[&str],
+        number: u64,
+        pr: &[&str],
+        merged_at_ms: i64,
+    ) -> RepoWindow {
+        RepoWindow {
+            slug: slug.into(),
+            files: files(session),
+            candidates: vec![PrCandidate {
+                number,
+                merged_at_ms,
+                files: files(pr),
+            }],
+        }
+    }
+
+    /// `spend_by_pr_events`, but with the repo windows git would have produced.
+    fn spend_with(events: &[RawEvent], windows: Vec<RepoWindow>) -> SpendSummary {
+        let mut sessions: BTreeMap<String, SessionAcc> = BTreeMap::new();
+        for e in events {
+            fold_event(&mut sessions, e);
+        }
+        finish(sessions, &mut RepoIndex::seeded(windows))
+    }
+
+    #[test]
+    fn file_overlap_is_the_jaccard_index() {
+        let a = files(&["a", "b", "c"]);
+        assert_eq!(file_overlap(&a, &a), 1.0, "identical sets");
+        assert_eq!(file_overlap(&a, &files(&["x", "y"])), 0.0, "disjoint sets");
+        // Two shared out of four distinct.
+        assert_eq!(file_overlap(&a, &files(&["b", "c", "d"])), 0.5);
+        // A superset is NOT a perfect match — three shared out of five.
+        assert!((file_overlap(&a, &files(&["a", "b", "c", "d", "e"])) - 0.6).abs() < 1e-12);
+        // Nothing to compare against is not a match, it is no measurement.
+        assert_eq!(file_overlap(&a, &files(&[])), 0.0);
+        assert_eq!(file_overlap(&files(&[]), &files(&[])), 0.0);
+    }
+
+    #[test]
+    fn time_proximity_decays_from_one_to_the_window_floor() {
+        assert_eq!(time_proximity(0), 1.0, "merged as the session ended");
+        assert_eq!(time_proximity(-DAY_MS), 1.0, "merged during the session");
+        assert!((time_proximity(JOIN_WINDOW_MS) - TIME_DECAY_AT_WINDOW).abs() < 1e-9);
+        let gaps = [0, DAY_MS, 3 * DAY_MS, 7 * DAY_MS, JOIN_WINDOW_MS];
+        for w in gaps.windows(2) {
+            assert!(
+                time_proximity(w[0]) > time_proximity(w[1]),
+                "not monotone at {}..{}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn a_distant_merge_scores_below_a_same_day_one() {
+        let paths = ["a.rs", "b.rs"];
+        let near = join(T0, &[one_window("acme/api", &paths, 1, &paths, T0)], &[]);
+        let far = join(
+            T0,
+            &[one_window("acme/api", &paths, 1, &paths, T0 + 12 * DAY_MS)],
+            &[],
+        );
+        assert_eq!((near.len(), far.len()), (1, 1));
+        assert!(
+            far[0].score < near[0].score * 0.5,
+            "{} vs {}",
+            far[0].score,
+            near[0].score
+        );
+        // Recency moves the SHARE, never the strength of the evidence: the same
+        // files changed either way.
+        assert_eq!(far[0].confidence, near[0].confidence);
+    }
+
+    #[test]
+    fn the_floor_rejects_one_shared_file_between_large_changesets() {
+        // Twenty files each, one in common — the lockfile every PR touches.
+        let session: BTreeSet<String> = (0..20).map(|i| format!("src/s{i}.rs")).collect();
+        let mut pr: BTreeSet<String> = (0..19).map(|i| format!("src/p{i}.rs")).collect();
+        pr.insert("src/s0.rs".into());
+        let overlap = file_overlap(&session, &pr);
+        assert!(overlap < MIN_FILE_OVERLAP, "coincidence scored {overlap}");
+        let w = RepoWindow {
+            slug: "acme/api".into(),
+            files: Rc::new(session),
+            candidates: vec![PrCandidate {
+                number: 1,
+                merged_at_ms: T0,
+                files: Rc::new(pr),
+            }],
+        };
+        assert!(join(T0, &[w], &[]).is_empty(), "coincidence became a match");
+    }
+
+    #[test]
+    fn layers_run_strongest_first() {
+        let paths = ["a.rs", "b.rs", "c.rs", "d.rs"];
+        let refs = vec![("acme/api".to_string(), 7, CONFIDENCE_CONTENT)];
+
+        // 1. the files AND the transcript agree.
+        let m = join(T0, &[one_window("acme/api", &paths, 7, &paths, T0)], &refs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].confidence, CONFIDENCE_OVERLAP_AND_REFERENCE);
+
+        // 2. the files alone — the ordinary shape, because the PR did not exist
+        //    yet while the session was writing it.
+        let m = join(T0, &[one_window("acme/api", &paths, 9, &paths, T0)], &[]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].confidence, CONFIDENCE_STRONG_OVERLAP);
+
+        // 3. the transcript alone: PR 9's files are untouched, and the PR the
+        //    session NAMES is not a candidate at all.
+        let m = join(T0, &[one_window("acme/api", &paths, 9, &["z.rs"], T0)], &refs);
+        assert_eq!(m.len(), 1, "an unshared file must not match");
+        assert_eq!((m[0].number, m[0].confidence), (7, CONFIDENCE_MENTION_ONLY));
+    }
+
+    #[test]
+    fn a_weak_overlap_lands_between_a_mention_and_a_strong_match() {
+        let owned: Vec<String> = (0..10).map(|i| format!("s{i}.rs")).collect();
+        let session: Vec<&str> = owned.iter().map(String::as_str).collect();
+        // Two of the session's ten files plus one of its own: 2 shared, 11
+        // distinct — above the floor, well below strong.
+        let thin = ["s0.rs", "s1.rs", "z.rs"];
+        // Five of the ten: still weak, but twice the evidence.
+        let thick = ["s0.rs", "s1.rs", "s2.rs", "s3.rs", "s4.rs", "z.rs"];
+
+        let m = join(T0, &[one_window("acme/api", &session, 1, &thin, T0)], &[]);
+        assert_eq!(m.len(), 1);
+        let thin_conf = m[0].confidence;
+        let m = join(T0, &[one_window("acme/api", &session, 1, &thick, T0)], &[]);
+        assert_eq!(m.len(), 1);
+        let thick_conf = m[0].confidence;
+
+        for c in [thin_conf, thick_conf] {
+            assert!(
+                c > CONFIDENCE_MENTION_ONLY && c < CONFIDENCE_WEAK_OVERLAP_MAX,
+                "weak-band confidence {c} escaped its band"
+            );
+        }
+        // Scaled by the overlap, so more shared files reads stronger.
+        assert!(thin_conf < thick_conf);
+    }
+
+    #[test]
+    fn disjoint_file_sets_leave_the_session_unattributed() {
+        let w = one_window("acme/api", &["a.rs"], 1, &["b.rs"], T0);
+        let s = spend_with(&[bare("s1", 100, 10)], vec![w]);
+        assert!(s.by_pr.is_empty());
+        assert_eq!(s.unattributed.raw_total(), 110);
+        assert_eq!(s.unattributed_sessions, 1);
+        assert_eq!(s.sessions_scanned, 1);
+    }
+
+    // ── the split ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn proportional_shares_sum_exactly_to_the_original_in_every_class() {
+        let mix = TokenMix {
+            input: 101,
+            output: 7,
+            cache_creation: 1_000,
+            cache_read: 65_537,
+            reasoning: 2,
+        };
+        for weights in [
+            vec![1.0],
+            vec![1.0, 1.0, 1.0],
+            vec![0.7, 0.2, 0.1],
+            vec![0.93, 0.07],
+            vec![3.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            // Degenerate weights must still return n shares that add up.
+            vec![0.0, 0.0],
+            vec![f64::NAN, 1.0],
+            vec![-1.0, 2.0],
+        ] {
+            let shares = mix.split(&weights);
+            assert_eq!(shares.len(), weights.len(), "weights {weights:?}");
+            let mut summed = TokenMix::default();
+            for s in &shares {
+                summed.add(*s);
+            }
+            assert_eq!(summed, mix, "weights {weights:?} lost a class");
+        }
+    }
+
+    #[test]
+    fn a_bigger_score_takes_a_bigger_share() {
+        let mix = TokenMix {
+            input: 1_000,
+            ..TokenMix::default()
+        };
+        let shares = mix.split(&[0.9, 0.1]);
+        assert_eq!((shares[0].input, shares[1].input), (900, 100));
+        // An even split is still exact, and its remainder is deterministic.
+        let shares = TokenMix {
+            input: 10,
+            ..TokenMix::default()
+        }
+        .split(&[1.0, 1.0, 1.0]);
+        assert_eq!(
+            shares.iter().map(|s| s.input).collect::<Vec<_>>(),
+            vec![4, 3, 3]
+        );
+    }
+
+    // ── the regression this whole module was rebuilt for ────────────────────
+
+    #[test]
+    fn an_authored_pr_outranks_one_the_session_merely_mentioned() {
+        // The defect in miniature. One session, two erpc PRs: 1016 is the one it
+        // actually wrote — its window changed exactly that PR's files — and 1031
+        // is one somebody asked it to look at. The reference-only join gave 1016
+        // nothing and 1031 the entire session.
+        let authored = [
+            "consensus/executor.go",
+            "consensus/policy.go",
+            "common/config.go",
+        ];
+        let events = [ev(
+            "s1",
+            "while you are in there, look at https://github.com/erpc/erpc/pull/1031",
+            1_000,
+            0,
+        )];
+        let end = parse_iso_ms(&events[0].ts).unwrap();
+
+        // Before: the mention took everything and the authored PR did not exist.
+        let before = spend_by_pr_events(&events);
+        assert_eq!(before.by_pr.len(), 1);
+        assert_eq!(before.by_pr[0].pr_number, 1031);
+        assert_eq!(before.by_pr[0].mix.input, 1_000);
+
+        let after = spend_with(
+            &events,
+            vec![RepoWindow {
+                slug: "erpc/erpc".into(),
+                files: files(&authored),
+                candidates: vec![
+                    PrCandidate {
+                        number: 1016,
+                        merged_at_ms: end + 2 * DAY_MS,
+                        files: files(&authored),
+                    },
+                    PrCandidate {
+                        number: 1031,
+                        merged_at_ms: end + DAY_MS,
+                        files: files(&["docs/readme.md", "scripts/release.sh"]),
+                    },
+                ],
+            }],
+        );
+
+        assert_eq!(after.by_pr.len(), 2);
+        // Ranked by spend, and the authored PR is now first.
+        assert_eq!(after.by_pr[0].pr_number, 1016);
+        let authored_pr = &after.by_pr[0];
+        let mentioned = after.by_pr.iter().find(|p| p.pr_number == 1031).unwrap();
+
+        assert!(
+            authored_pr.mix.input > 8 * mentioned.mix.input,
+            "authored {} vs mentioned {}",
+            authored_pr.mix.input,
+            mentioned.mix.input
+        );
+        // Still exact: every token is somewhere.
+        assert_eq!(authored_pr.mix.input + mentioned.mix.input, 1_000);
+        // And the evidence reads for what it is on both rows: a measured file
+        // overlap on one, a name in a sentence on the other. Splitting the
+        // session blurs neither.
+        assert_eq!(
+            authored_pr.attribution_confidence,
+            CONFIDENCE_STRONG_OVERLAP
+        );
+        assert_eq!(mentioned.attribution_confidence, CONFIDENCE_MENTION_ONLY);
     }
 }
