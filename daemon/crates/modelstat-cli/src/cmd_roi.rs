@@ -651,9 +651,12 @@ pub fn render_human(view: &RoiView) -> String {
     // rests on the weak kind — before anyone quotes the number above.
     if let Some(c) = t.confidence {
         let weak = match t.weak_share {
+            // `w` is a ratio of f64 sums, so a share that is zero to the printed
+            // precision can arrive as a tiny negative from rounding — clamp before
+            // formatting so it never renders as `-0%`.
             Some(w) => format!(
                 " — {:.0}% of volume from weak (mention-only) matches",
-                w * 100.0
+                (w * 100.0).max(0.0)
             ),
             None => String::new(),
         };
