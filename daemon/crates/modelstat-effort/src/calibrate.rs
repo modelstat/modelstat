@@ -1,595 +1,474 @@
-//! Turning a relative placement into minutes — pure, no I/O, no model.
+//! Tier 2 — **hours, and only against real labels**.
 //!
-//! The numbers come from the repo, not from a judge and not from a vendor
-//! table: [`estimate`] reads `relative_position_0_1` as a QUANTILE of this
-//! repo's own human-authored `active_minutes` distribution. A `0.8` placement
-//! on a team whose hard PRs run four hours means four hours; on a team whose
-//! hard PRs run three days it means three days. The model never had to know.
+//! [`crate::units`] produces a dimensionless ratio. Turning a ratio into a
+//! duration needs a constant of proportionality, and there is exactly one
+//! honest place to get it: durations a human on this team wrote down. Not
+//! `active_minutes` (Spearman ρ 0.11–0.24 against change size across three real
+//! repos — see [`crate::units`]), not `span_ms` (wall clock, which is the thing
+//! effort exists to replace), and not a vendor table.
 //!
-//! Two rules keep it honest:
+//! So the whole module is one gate:
 //!
-//! * **Thin baselines do not get a number.** Below [`MIN_ANCHORS`] usable
-//!   anchors the result is [`Confidence::Insufficient`] with a deliberately
-//!   3×-either-side interval. A confident median drawn from four samples is
-//!   worse than no answer, because it looks like an answer.
-//! * **Width is earned.** The interval starts at the repo's own observed
-//!   spread and widens with anchor scarcity and judge uncertainty. It is never
-//!   a fixed ±30%.
+//! * fewer than [`crate::MIN_LABELS`] labels ⇒ [`calibrate_hours`] returns
+//!   `None`, and no hours exist anywhere in the API. It does not degrade to a
+//!   guess. A number that looks like an estimate but is a default is worse than
+//!   a blank, because a blank cannot be pasted into a slide.
+//! * [`crate::MIN_LABELS`] or more ⇒ a [`Calibration`], and every hours figure
+//!   is published next to that calibration's own measured error.
 //!
-//! One consequence is worth stating plainly: a repo that squash-merges
-//! everything has no effort ground truth at all. A squash merge has a single
-//! parent, so there is no branch commit range to cluster into work sessions,
-//! so every anchor arrives with `active_minutes: None` however many human PRs
-//! the repo has merged. Such a repo gets [`Confidence::Insufficient`] and a
-//! size-only interval — NOT an effort figure back-derived from `span_ms`.
-//! Wall-clock is the measure this whole engine exists to replace, and it does
-//! not become a measure of effort by being the only number left.
+//! ## The error is leave-one-out, not in-sample
+//!
+//! A two-parameter curve fitted to eight points and then scored on those same
+//! eight points describes the fitting, not the predicting. So
+//! [`Calibration::median_abs_pct_error`] and [`Calibration::spearman_rho`] are
+//! computed by refitting `n` times, each time holding one label out and
+//! predicting it.
+//!
+//! Measured on this module's fixtures, LOO runs **1.03–1.15× the in-sample
+//! error** (n = 8..40, noise 0–0.7). That gap is real but modest, and the
+//! honest reading is that the RATIO is not the interesting number — two
+//! parameters simply cannot overfit very hard, and the fixtures' wobble is a
+//! smooth function of the index, so part of it is genuinely learnable. The
+//! interesting number is the absolute one: label sets whose units carry no
+//! information report ~95% LOO error and a NEGATIVE `spearman_rho`, which is
+//! the calibration saying, in the only two fields it has, that it cannot rank
+//! this repo's PRs. In-sample fitting would have reported the same set at 87%
+//! and left the sign of the correlation unexamined.
+//!
+//! The interval in [`estimate_hours`] comes from that same LOO residual spread,
+//! so a calibration that predicts badly reports a wide interval — automatically,
+//! and without anyone choosing a ±30%.
+//!
+//! ## The invariant, in types
+//!
+//! [`Calibration`] and [`HoursEstimate`] have private fields, no public
+//! constructor, and derive `Serialize` but deliberately **not** `Deserialize`.
+//! A `Calibration` therefore cannot be produced by a struct literal, by
+//! `Default`, or by parsing JSON — only by handing [`calibrate_hours`] enough
+//! labels. And [`estimate_hours`] takes one by reference. Together that makes
+//! "hours without labels" unrepresentable rather than merely discouraged.
 
-use modelstat_wire::AnchorPr;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::diff::DiffFeatures;
-use crate::judge::JudgedFeatures;
+use crate::labels::MIN_LABELS;
+use crate::units::quantile;
 
-/// Usable human anchors below which no confident estimate is produced.
-pub const MIN_ANCHORS: usize = 5;
+/// Clamp on the fitted exponent of `minutes = scale · units^exponent`.
+///
+/// A negative exponent says bigger PRs are quicker, which is a small-sample
+/// artefact and never a finding; past 2.0 the fit has latched onto one large
+/// outlier. Clamping is honest here because the clamp shows up in the LOO
+/// error — a repo whose labels really do want a wild exponent gets a large
+/// reported error rather than a silently wrong curve.
+const EXPONENT_MIN: f64 = 0.0;
+const EXPONENT_MAX: f64 = 2.0;
 
-/// Ceiling on any reported minute value (~10 work-weeks). Past this the answer
-/// is "nobody knows", and an unbounded extrapolation only hides that.
-const MAX_MINUTES: f64 = 100_000.0;
+/// Bounds on any reported hours figure: a minute, and ten work-weeks.
+const MIN_HOURS: f64 = 1.0 / 60.0;
+const MAX_HOURS: f64 = 1_600.0;
 
-/// Half-width, in log space, of the [`Confidence::Insufficient`] interval:
-/// `ln(3)` ⇒ `[centre/3, centre*3]`.
-const INSUFFICIENT_SPREAD: f64 = 3.0;
+/// Units below this are treated as this before the power law, so a degenerate
+/// `0.0` cannot become `ln(0) = -inf`.
+const MIN_UNITS: f64 = 1e-4;
 
-/// Floor and ceiling on the repo-derived base half-width. The floor stops a
-/// freakishly uniform anchor set from claiming ±5% precision; the ceiling stops
-/// one outlier PR from making every interval useless.
-const BASE_W_MIN: f64 = 0.35;
-const BASE_W_MAX: f64 = 1.6;
+/// Log-space half-width bounds for the p10..p90 interval. The floor stops a
+/// suspiciously tidy label set from claiming ±10% predictive accuracy; the
+/// ceiling stops a hopeless one from reporting an interval so wide it is
+/// indistinguishable from silence (`p90/p10 ≈ 24×` at the top).
+const HALF_WIDTH_MIN: f64 = 0.10;
+const HALF_WIDTH_MAX: f64 = 1.6;
 
-/// Scarcity multiplier is `1 + SCARCITY_K / n`: 2.2× at five anchors, 1.3× at
-/// twenty, 1.12× at fifty. Anchors are the whole evidence base, so their count
-/// is the dominant term.
-const SCARCITY_K: f64 = 6.0;
+/// Normal-theory conversion from a median absolute deviation to an 80%
+/// interval: `σ = MAD / 0.6745`, and the 10th/90th percentiles sit at
+/// `±1.2816 σ`.
+const MAD_TO_SIGMA: f64 = 1.0 / 0.6745;
+const Z_90: f64 = 1.2816;
 
-/// Judge uncertainty (`0..=1`) adds up to this much width.
-const UNCERTAINTY_GAIN: f64 = 0.5;
-
-/// Overall cap on the half-width (`p90/p10 ≈ 20×`).
-const W_MAX: f64 = 1.5;
-
-/// Uncertainty assumed when there is no judge at all — the size prior knows
-/// churn and nothing else.
-const FALLBACK_UNCERTAINTY: f64 = 1.0;
-
-/// Points needed before the log-log regression is trusted over a plain median.
-const MIN_REGRESSION_POINTS: usize = 3;
-
-/// Slope clamp for `ln(minutes) ~ ln(1 + churn)`. Negative slopes ("bigger PRs
-/// are quicker") are an artefact of a small sample, never a finding; above 1.5
-/// the fit has latched onto one huge PR.
-const SLOPE_MIN: f64 = 0.0;
-const SLOPE_MAX: f64 = 1.5;
-
-/// With no anchors at all: a flat "~an hour per hundred lines, floor a quarter
-/// hour, ceiling a working day".
-// ponytail: a literal industry rule of thumb, and the only number in this crate
-// not derived from the repo. It exists so a first-run repo gets *something*;
-// the moment five anchors land it is never consulted again.
-const NO_ANCHOR_BASE_MINUTES: f64 = 15.0;
-const NO_ANCHOR_MINUTES_PER_LINE: f64 = 0.6;
-const NO_ANCHOR_CEILING: f64 = 480.0;
-
-/// How much the baseline can be trusted. Ordered — `Insufficient < Good` — so
-/// a degraded path can cap it with [`Ord::min`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Confidence {
-    /// Fewer than [`MIN_ANCHORS`] usable human anchors. Read the interval, not
-    /// the median.
-    Insufficient,
-    Low,
-    Moderate,
-    Good,
+/// A fitted units→minutes law, plus how badly it predicts.
+///
+/// `minutes = scale · units^exponent`, and it exists only because someone
+/// labelled at least [`crate::MIN_LABELS`] PRs by hand. Private fields with no
+/// public constructor: see the module docs on the invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Calibration {
+    scale: f64,
+    exponent: f64,
+    n: usize,
+    median_abs_pct_error: f64,
+    spearman_rho: f64,
 }
 
-impl Confidence {
-    fn from_anchor_count(n: usize) -> Self {
-        match n {
-            0..=4 => Confidence::Insufficient,
-            5..=11 => Confidence::Low,
-            12..=24 => Confidence::Moderate,
-            _ => Confidence::Good,
-        }
+impl Calibration {
+    /// Minutes at one unit.
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+    /// The power law's exponent. Typically below 1 — effort is sublinear in
+    /// apparent size.
+    pub fn exponent(&self) -> f64 {
+        self.exponent
+    }
+    /// Labels the fit used.
+    pub fn n(&self) -> usize {
+        self.n
+    }
+    /// Median `|predicted − actual| / actual`, as a percent, **leave-one-out**.
+    /// Publish this next to every hours figure; it is the honest half.
+    pub fn median_abs_pct_error(&self) -> f64 {
+        self.median_abs_pct_error
+    }
+    /// Rank correlation between the leave-one-out predictions and the labels.
+    /// Says whether the curve gets the ORDER right, which often matters more
+    /// than whether it gets the magnitude right.
+    pub fn spearman_rho(&self) -> f64 {
+        self.spearman_rho
     }
 }
 
-/// The answer. Five integers and an enum — no paths, no source, no messages,
-/// nothing derived from a commit body. This is the only `Serialize` type the
-/// crate exposes, and that is deliberate: it is the only one that could ever be
-/// safe to transmit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EffortEstimate {
-    pub p10_minutes: u32,
-    pub p50_minutes: u32,
-    pub p90_minutes: u32,
-    /// Usable human anchors this was calibrated on. Ships with the estimate so
-    /// a reader can discount it without having to trust `confidence` alone.
-    pub anchor_n: usize,
-    pub confidence: Confidence,
+/// An hours interval. The only way to hold one is to have had a
+/// [`Calibration`], because [`estimate_hours`] is the only constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct HoursEstimate {
+    p10: f64,
+    p50: f64,
+    p90: f64,
 }
 
-/// Human-authored anchors' measured effort, ascending. AI-assisted PRs are
-/// excluded: they are the thing being measured, so folding them into the
-/// baseline would quietly define AI speedup as zero.
-fn human_minutes(anchors: &[AnchorPr]) -> Vec<f64> {
-    let mut v: Vec<f64> = anchors
-        .iter()
-        .filter(|a| !a.ai_assisted)
-        .filter_map(|a| a.active_minutes.filter(|m| *m > 0).map(f64::from))
-        .collect();
-    v.sort_by(f64::total_cmp);
-    v
-}
-
-/// Type-7 quantile with linear interpolation. `sorted` must be non-empty.
-fn quantile(sorted: &[f64], q: f64) -> f64 {
-    debug_assert!(!sorted.is_empty());
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
+impl HoursEstimate {
+    pub fn p10(&self) -> f64 {
+        self.p10
     }
-    let pos = q.clamp(0.0, 1.0) * (n - 1) as f64;
-    let lo = pos.floor() as usize;
-    let hi = (lo + 1).min(n - 1);
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+    pub fn p50(&self) -> f64 {
+        self.p50
+    }
+    pub fn p90(&self) -> f64 {
+        self.p90
+    }
 }
 
-fn clamp_minutes(x: f64) -> f64 {
-    if x.is_finite() {
-        x.clamp(1.0, MAX_MINUTES)
+/// Least squares of `y` on `x`, returning `(intercept, clamped slope)` through
+/// the centroid. `None` on fewer than two points.
+///
+/// A zero-variance `x` (every labelled PR the same size) is not a failure: the
+/// slope is unidentifiable, so the fit degenerates to the geometric mean of the
+/// labels, which is the correct answer to "these are all the same size".
+fn fit(pts: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let n = pts.len();
+    if n < 2 {
+        return None;
+    }
+    let nf = n as f64;
+    let mx = pts.iter().map(|p| p.0).sum::<f64>() / nf;
+    let my = pts.iter().map(|p| p.1).sum::<f64>() / nf;
+    let mut sxx = 0.0;
+    let mut sxy = 0.0;
+    for (x, y) in pts {
+        let dx = x - mx;
+        sxx += dx * dx;
+        sxy += dx * (y - my);
+    }
+    let slope = if sxx > f64::EPSILON {
+        (sxy / sxx).clamp(EXPONENT_MIN, EXPONENT_MAX)
     } else {
-        1.0
+        0.0
+    };
+    let intercept = my - slope * mx;
+    (intercept.is_finite() && slope.is_finite()).then_some((intercept, slope))
+}
+
+/// Average ranks, ties shared. `1..=n`.
+fn ranks(v: &[f64]) -> Vec<f64> {
+    let n = v.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&a, &b| v[a].total_cmp(&v[b]));
+    let mut out = vec![0.0; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j + 1 < n && v[idx[j + 1]] == v[idx[i]] {
+            j += 1;
+        }
+        let avg = (i + j) as f64 / 2.0 + 1.0;
+        for &k in &idx[i..=j] {
+            out[k] = avg;
+        }
+        i = j + 1;
+    }
+    out
+}
+
+fn pearson(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len();
+    if n < 2 || n != y.len() {
+        return 0.0;
+    }
+    let nf = n as f64;
+    let mx = x.iter().sum::<f64>() / nf;
+    let my = y.iter().sum::<f64>() / nf;
+    let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+    for (xi, yi) in x.iter().zip(y) {
+        let (dx, dy) = (xi - mx, yi - my);
+        sxy += dx * dy;
+        sxx += dx * dx;
+        syy += dy * dy;
+    }
+    let d = (sxx * syy).sqrt();
+    if d > 0.0 {
+        (sxy / d).clamp(-1.0, 1.0)
+    } else {
+        0.0
     }
 }
 
-fn round_u32(x: f64) -> u32 {
-    clamp_minutes(x).round() as u32
+/// Spearman rank correlation. `0.0` when either side is constant — no
+/// information, which is not the same as disagreement.
+fn spearman(a: &[f64], b: &[f64]) -> f64 {
+    pearson(&ranks(a), &ranks(b))
 }
 
-/// Assemble the estimate from a centre and a log-space half-width.
+/// Fit `minutes = scale · units^exponent` on hand-labelled PRs.
 ///
-/// Working in log space is what guarantees `0 < p10 ≤ p50 ≤ p90`: the interval
-/// is multiplicative, so it cannot cross zero however wide it gets. The
-/// `.max()` chain re-establishes the ordering after rounding, where a narrow
-/// interval could otherwise collapse (`p10=0.6, p50=1.0` both round to 1).
-fn build(centre: f64, half_width: f64, anchor_n: usize, confidence: Confidence) -> EffortEstimate {
-    let w = half_width.max(0.0);
-    let p50 = clamp_minutes(centre);
-    let p10 = round_u32(p50 * (-w).exp());
-    let p50r = round_u32(p50).max(p10);
-    let p90 = round_u32(p50 * w.exp()).max(p50r);
-    EffortEstimate {
-        p10_minutes: p10,
-        p50_minutes: p50r,
-        p90_minutes: p90,
-        anchor_n,
-        confidence,
-    }
-}
-
-/// The interval half-width for a repo with `samples.len()` anchors and a judge
-/// of the given uncertainty.
-fn half_width(samples: &[f64], uncertainty: f64) -> f64 {
-    // Start from what this repo's own PRs actually do: the p10..p90 ratio of
-    // the anchor distribution, halved into a log half-width.
-    let lo = quantile(samples, 0.1).max(1.0);
-    let hi = quantile(samples, 0.9).max(lo);
-    let base = ((hi / lo).ln() / 2.0).clamp(BASE_W_MIN, BASE_W_MAX);
-    let scarcity = 1.0 + SCARCITY_K / samples.len() as f64;
-    let judge = 1.0 + UNCERTAINTY_GAIN * uncertainty.clamp(0.0, 1.0);
-    (base * scarcity * judge).min(W_MAX)
-}
-
-/// Deliberately wide, explicitly unconfident.
-fn insufficient(centre: f64, anchor_n: usize) -> EffortEstimate {
-    build(
-        centre,
-        INSUFFICIENT_SPREAD.ln(),
-        anchor_n,
-        Confidence::Insufficient,
-    )
-}
-
-/// Place a judged PR on this repo's own effort distribution.
-///
-/// With fewer than [`MIN_ANCHORS`] usable human anchors the judge's placement
-/// is ignored entirely — there is nothing to place it *on* — and the result
-/// falls back to [`size_prior`] at [`Confidence::Insufficient`].
-pub fn estimate(
-    anchors: &[AnchorPr],
-    judged: &JudgedFeatures,
-    target: &DiffFeatures,
-) -> EffortEstimate {
-    let samples = human_minutes(anchors);
-    if samples.len() < MIN_ANCHORS {
-        return insufficient(size_prior(target, anchors), samples.len());
-    }
-    let centre = quantile(&samples, judged.relative_position_0_1);
-    build(
-        centre,
-        half_width(&samples, judged.uncertainty()),
-        samples.len(),
-        Confidence::from_anchor_count(samples.len()),
-    )
-}
-
-/// The no-judge path: centre the interval on [`size_prior`] directly.
-///
-/// The prior is already in minutes and already bounded by what the repo has
-/// actually done, so it is used as-is rather than re-projected onto the
-/// anchors' empirical distribution. Round-tripping it through the CDF would
-/// snap every answer back inside the observed range — a PR seven times larger
-/// than anything in the baseline would be reported as costing exactly as much
-/// as the largest anchor, which is the one thing we know it does not.
-///
-/// Capped at [`Confidence::Low`] however many anchors there are. Churn is a
-/// weak predictor of effort — that is the entire reason the judge exists — so a
-/// size-only answer never gets to look well-supported.
-pub fn estimate_from_size(anchors: &[AnchorPr], target: &DiffFeatures) -> EffortEstimate {
-    let samples = human_minutes(anchors);
-    let centre = size_prior(target, anchors);
-    if samples.len() < MIN_ANCHORS {
-        return insufficient(centre, samples.len());
-    }
-    build(
-        centre,
-        half_width(&samples, FALLBACK_UNCERTAINTY),
-        samples.len(),
-        Confidence::from_anchor_count(samples.len()).min(Confidence::Low),
-    )
-}
-
-/// Minutes predicted from churn alone, by log-log OLS over the repo's human
-/// anchors: `ln(minutes) = a + b·ln(1 + added + deleted)`. Pure.
-///
-/// Logs, not raw lines, because effort-vs-size is sublinear and both axes are
-/// heavy-tailed — a linear fit is dictated by the single biggest PR, and can
-/// predict negative minutes. Logs also make the prediction positive by
-/// construction.
-///
-/// The target is measured by RAW churn even though [`DiffFeatures`] knows which
-/// lines were generated: an [`AnchorPr`] carries no path information, so the
-/// anchors could not be discounted the same way, and discounting only one side
-/// of a regression biases every prediction downward.
-pub fn size_prior(target: &DiffFeatures, anchors: &[AnchorPr]) -> f64 {
-    let churn = target.churn() as f64;
-    let x = (churn + 1.0).ln();
-    let pts: Vec<(f64, f64)> = anchors
+/// `None` below [`crate::MIN_LABELS`] usable pairs — and *usable* means a
+/// positive, finite unit score and a non-zero minute label, because both axes
+/// are logged. This is the gate the whole two-tier design rests on: there is no
+/// other constructor for [`Calibration`], so no path to hours skips it.
+pub fn calibrate_hours(units: &[(f64, u32)]) -> Option<Calibration> {
+    // (ln units, ln minutes). Logs on both axes: effort-vs-size is a power law,
+    // and a linear fit on heavy-tailed data is dictated by its largest point.
+    let pts: Vec<(f64, f64)> = units
         .iter()
-        .filter(|a| !a.ai_assisted)
-        .filter_map(|a| {
-            let m = a.active_minutes.filter(|m| *m > 0)?;
-            let anchor_churn = a.lines_added.saturating_add(a.lines_deleted) as f64;
-            Some(((anchor_churn + 1.0).ln(), f64::from(m).ln()))
-        })
+        .filter(|(u, m)| u.is_finite() && *u > 0.0 && *m > 0)
+        .map(|(u, m)| (u.ln(), f64::from(*m).ln()))
         .collect();
-
-    if pts.is_empty() {
-        return (NO_ANCHOR_BASE_MINUTES + NO_ANCHOR_MINUTES_PER_LINE * churn)
-            .clamp(NO_ANCHOR_BASE_MINUTES, NO_ANCHOR_CEILING);
+    if pts.len() < MIN_LABELS {
+        return None;
     }
+    let (intercept, exponent) = fit(&pts)?;
 
-    let n = pts.len() as f64;
-    let ybar = pts.iter().map(|p| p.1).sum::<f64>() / n;
-    if pts.len() < MIN_REGRESSION_POINTS {
-        // Too few points to see a slope; the geometric mean of what we have is
-        // the honest answer, and it ignores `churn` rather than pretending to.
-        return clamp_minutes(ybar.exp());
+    // Leave-one-out: refit without each point and predict it. This is the only
+    // error figure that describes prediction rather than fitting.
+    let mut held_out = Vec::with_capacity(pts.len());
+    let mut predicted = Vec::with_capacity(pts.len());
+    let mut abs_pct = Vec::with_capacity(pts.len());
+    let mut rest = Vec::with_capacity(pts.len() - 1);
+    for i in 0..pts.len() {
+        rest.clear();
+        rest.extend(pts.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, p)| *p));
+        let (a, b) = fit(&rest)?;
+        let ln_pred = a + b * pts[i].0;
+        let (pred, actual) = (ln_pred.exp(), pts[i].1.exp());
+        if !pred.is_finite() || !actual.is_finite() || actual <= 0.0 {
+            return None;
+        }
+        abs_pct.push((pred - actual).abs() / actual * 100.0);
+        predicted.push(ln_pred);
+        held_out.push(pts[i].1);
     }
+    abs_pct.sort_by(f64::total_cmp);
 
-    let xbar = pts.iter().map(|p| p.0).sum::<f64>() / n;
-    let sxx: f64 = pts.iter().map(|p| (p.0 - xbar).powi(2)).sum();
-    let sxy: f64 = pts.iter().map(|p| (p.0 - xbar) * (p.1 - ybar)).sum();
-    if sxx <= 1e-12 {
-        return clamp_minutes(ybar.exp());
+    let scale = intercept.exp();
+    scale.is_finite().then_some(Calibration {
+        scale,
+        exponent,
+        n: pts.len(),
+        median_abs_pct_error: quantile(&abs_pct, 0.5),
+        // Rank correlation is invariant under the log, so the log-space
+        // predictions rank exactly as the minute predictions would.
+        spearman_rho: spearman(&predicted, &held_out),
+    })
+}
+
+/// Half-width, in log space, of the reported interval.
+///
+/// Read straight off the calibration's own LOO error rather than a chosen
+/// multiplier: the median absolute percent error, pulled back into log space,
+/// IS the median absolute log residual, and the normal-theory constants above
+/// turn a MAD into an 80% interval. A calibration that predicts badly therefore
+/// reports a wide interval, and one that predicts well reports a narrow one,
+/// with nobody in the loop.
+fn half_width(median_abs_pct_error: f64) -> f64 {
+    let mad = (1.0 + median_abs_pct_error.max(0.0) / 100.0).ln();
+    if !mad.is_finite() {
+        return HALF_WIDTH_MAX;
     }
-    let b = (sxy / sxx).clamp(SLOPE_MIN, SLOPE_MAX);
-    let a = ybar - b * xbar;
-    let pred = (a + b * x).exp();
+    (mad * MAD_TO_SIGMA * Z_90).clamp(HALF_WIDTH_MIN, HALF_WIDTH_MAX)
+}
 
-    // Never extrapolate wildly past what the repo has actually done.
-    let observed: Vec<f64> = pts.iter().map(|p| p.1.exp()).collect();
-    let lo = observed.iter().copied().fold(f64::INFINITY, f64::min) * 0.5;
-    let hi = observed.iter().copied().fold(0.0_f64, f64::max) * 3.0;
-    clamp_minutes(pred.clamp(lo.min(hi), hi))
+fn clamp_hours(h: f64) -> f64 {
+    if h.is_finite() {
+        h.clamp(MIN_HOURS, MAX_HOURS)
+    } else {
+        MIN_HOURS
+    }
+}
+
+/// Hours for a PR of `units`, under a calibration someone earned with labels.
+///
+/// The interval is multiplicative (built in log space), so `0 < p10 ≤ p50 ≤
+/// p90` holds however wide it gets — it cannot cross zero, and a duration
+/// interval that could would be nonsense.
+pub fn estimate_hours(units: f64, cal: &Calibration) -> HoursEstimate {
+    let u = if units.is_finite() { units.max(MIN_UNITS) } else { MIN_UNITS };
+    let minutes = cal.scale * u.powf(cal.exponent);
+    let p50 = clamp_hours(minutes / 60.0);
+    let w = half_width(cal.median_abs_pct_error);
+    let p10 = clamp_hours(p50 * (-w).exp()).min(p50);
+    let p90 = clamp_hours(p50 * w.exp()).max(p50);
+    HoursEstimate { p10, p50, p90 }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests_support::{anchor, judged};
 
-    /// Twenty human anchors, 30..600 active minutes, churn tracking minutes.
-    fn baseline(n: u64) -> Vec<AnchorPr> {
-        (1..=n)
-            .map(|i| anchor(i, (i as u32).min(40), i * 25, Some(i as u32 * 30)))
+    /// `minutes = 90 · units^0.8`, perturbed by a deterministic pseudo-noise so
+    /// the fit has something to be wrong about.
+    fn synthetic(n: usize, noise: f64) -> Vec<(f64, u32)> {
+        (0..n)
+            .map(|i| {
+                let units = 0.25 + i as f64 * 0.35;
+                // Deterministic, sign-alternating, magnitude-varying. Not a PRNG;
+                // just a fixture that is not a straight line.
+                let wobble = 1.0 + noise * ((i as f64 * 2.399_963).sin());
+                let minutes = (90.0 * units.powf(0.8) * wobble).max(1.0);
+                (units, minutes.round() as u32)
+            })
             .collect()
     }
 
-    #[test]
-    fn interval_is_ordered_and_positive_everywhere() {
-        let anchors = baseline(20);
-        let target = DiffFeatures::default();
-        for n_anchors in [0, 1, 4, 5, 12, 20] {
-            let set = baseline(n_anchors);
-            for rel in [0.0, 0.01, 0.25, 0.5, 0.75, 0.99, 1.0] {
-                for (nov, boil) in [(0.0, 1.0), (0.5, 0.5), (1.0, 0.0)] {
-                    let e = estimate(&set, &judged(rel, nov, boil), &target);
-                    assert!(
-                        e.p10_minutes <= e.p50_minutes && e.p50_minutes <= e.p90_minutes,
-                        "n={n_anchors} rel={rel}: {e:?}"
-                    );
-                    assert!(e.p10_minutes >= 1, "{e:?}");
-                }
-            }
-        }
-        // And on the degenerate distribution where every anchor is identical.
-        let flat: Vec<AnchorPr> = (1..=8).map(|i| anchor(i, 3, 100, Some(90))).collect();
-        let e = estimate(&flat, &judged(0.5, 0.5, 0.5), &target);
-        assert!(e.p10_minutes < e.p50_minutes && e.p50_minutes < e.p90_minutes, "{e:?}");
-        assert_eq!(e.p50_minutes, 90);
-        let _ = anchors;
-    }
-
-    #[test]
-    fn p50_is_monotone_in_relative_position() {
-        let anchors = baseline(20);
-        let target = DiffFeatures::default();
-        let mut last = 0u32;
-        for step in 0..=20 {
-            let rel = step as f64 / 20.0;
-            let e = estimate(&anchors, &judged(rel, 0.4, 0.4), &target);
-            assert!(
-                e.p50_minutes >= last,
-                "rel={rel} gave {} after {last}",
-                e.p50_minutes
-            );
-            last = e.p50_minutes;
-        }
-        // And it actually spans the repo's range rather than hugging the median.
-        assert_eq!(estimate(&anchors, &judged(0.0, 0.4, 0.4), &target).p50_minutes, 30);
-        assert_eq!(estimate(&anchors, &judged(1.0, 0.4, 0.4), &target).p50_minutes, 600);
-    }
-
-    #[test]
-    fn a_squash_only_repo_has_no_effort_ground_truth() {
-        // The erpc shape: 13 human-authored anchors, every one squash-merged,
-        // so every `active_minutes` is None even though `span_ms` is present.
-        let squashed: Vec<AnchorPr> = (1..=13)
-            .map(|i| AnchorPr {
-                span_ms: Some(15_512_000),
-                ..anchor(i, 20, i * 200, None)
+    /// In-sample median absolute percent error of a calibration on the very
+    /// points it was fitted to — the number LOO exists to replace.
+    fn in_sample_error(cal: &Calibration, pts: &[(f64, u32)]) -> f64 {
+        let mut e: Vec<f64> = pts
+            .iter()
+            .map(|(u, m)| {
+                let pred = cal.scale * u.powf(cal.exponent);
+                let actual = f64::from(*m);
+                (pred - actual).abs() / actual * 100.0
             })
             .collect();
-        let target = DiffFeatures {
-            lines_added: 8_967,
-            lines_deleted: 2_604,
-            ..Default::default()
-        };
-        for e in [
-            estimate(&squashed, &judged(0.8, 0.6, 0.2), &target),
-            estimate_from_size(&squashed, &target),
-        ] {
-            assert_eq!(e.confidence, Confidence::Insufficient, "{e:?}");
-            assert_eq!(e.anchor_n, 0, "wall-clock anchors are not effort anchors: {e:?}");
-            assert!(e.p10_minutes < e.p50_minutes && e.p50_minutes < e.p90_minutes, "{e:?}");
-            assert!(e.p90_minutes >= e.p10_minutes * 8, "{e:?}");
-        }
-        // The judge is never consulted either — there is nothing to place against.
-        assert!(crate::judge::reference_anchors(&squashed).is_empty());
+        e.sort_by(f64::total_cmp);
+        quantile(&e, 0.5)
     }
 
     #[test]
-    fn fewer_than_five_anchors_never_returns_a_confident_number() {
-        let target = DiffFeatures::default();
-        for n in 0..MIN_ANCHORS as u64 {
-            let e = estimate(&baseline(n), &judged(0.5, 0.2, 0.8), &target);
-            assert_eq!(e.confidence, Confidence::Insufficient, "n={n}: {e:?}");
-            assert_eq!(e.anchor_n, n as usize);
-            // 3× either side of the centre, so nobody reads the median as fact.
-            assert!(
-                e.p90_minutes >= e.p10_minutes * 8,
-                "n={n} interval too tight: {e:?}"
-            );
-        }
-        // Five is the first count that earns a real answer.
-        let e = estimate(&baseline(5), &judged(0.5, 0.2, 0.8), &target);
-        assert_eq!(e.confidence, Confidence::Low);
-        assert_eq!(e.anchor_n, 5);
+    fn seven_labels_is_not_a_calibration_and_eight_is() {
+        assert!(calibrate_hours(&synthetic(MIN_LABELS - 1, 0.2)).is_none());
+        assert!(calibrate_hours(&synthetic(MIN_LABELS, 0.2)).is_some());
     }
 
     #[test]
-    fn ai_assisted_anchors_are_not_a_baseline() {
-        let ai: Vec<AnchorPr> = (1..=20)
-            .map(|i| AnchorPr {
-                ai_assisted: true,
-                ..anchor(i, 5, i * 25, Some(i as u32 * 30))
-            })
-            .collect();
-        let e = estimate(&ai, &judged(0.5, 0.5, 0.5), &DiffFeatures::default());
-        assert_eq!(e.confidence, Confidence::Insufficient);
-        assert_eq!(e.anchor_n, 0);
-    }
-
-    #[test]
-    fn anchors_without_measured_effort_are_skipped() {
-        let mut set = baseline(6);
-        set.extend((100..110).map(|i| anchor(i, 5, 500, None)));
-        let e = estimate(&set, &judged(0.5, 0.5, 0.5), &DiffFeatures::default());
-        assert_eq!(e.anchor_n, 6);
-    }
-
-    #[test]
-    fn confidence_rises_with_the_anchor_count() {
-        let target = DiffFeatures::default();
-        let conf = |n| estimate(&baseline(n), &judged(0.5, 0.5, 0.5), &target).confidence;
-        assert_eq!(conf(4), Confidence::Insufficient);
-        assert_eq!(conf(8), Confidence::Low);
-        assert_eq!(conf(15), Confidence::Moderate);
-        assert_eq!(conf(30), Confidence::Good);
-    }
-
-    #[test]
-    fn scarcity_and_judge_uncertainty_widen_the_interval() {
-        let target = DiffFeatures::default();
-        let width = |set: &[AnchorPr], nov, boil| {
-            let e = estimate(set, &judged(0.5, nov, boil), &target);
-            e.p90_minutes as f64 / e.p10_minutes as f64
-        };
-        let many = baseline(40);
-        let few = baseline(6);
+    fn unusable_pairs_do_not_count_toward_the_threshold() {
+        // Eight rows, but three are junk: zero minutes, zero units, NaN units.
+        let mut pts = synthetic(5, 0.1);
+        pts.push((1.0, 0));
+        pts.push((0.0, 60));
+        pts.push((f64::NAN, 60));
+        assert_eq!(pts.len(), 8);
         assert!(
-            width(&few, 0.5, 0.5) > width(&many, 0.5, 0.5),
-            "scarcity must widen"
+            calibrate_hours(&pts).is_none(),
+            "five real labels padded to eight is still five labels"
         );
-        // Novel + zero boilerplate is the least predictable combination.
+    }
+
+    #[test]
+    fn recovers_a_known_power_law() {
+        let cal = calibrate_hours(&synthetic(24, 0.0)).expect("clean fit");
+        assert_eq!(cal.n(), 24);
+        assert!((cal.scale() - 90.0).abs() < 1.0, "scale {}", cal.scale());
+        assert!((cal.exponent() - 0.8).abs() < 0.02, "exponent {}", cal.exponent());
+        assert!(cal.median_abs_pct_error() < 1.0, "{}", cal.median_abs_pct_error());
+        assert!(cal.spearman_rho() > 0.99, "{}", cal.spearman_rho());
+    }
+
+    #[test]
+    fn loo_error_exceeds_the_in_sample_error_it_replaces() {
+        let pts = synthetic(12, 0.55);
+        let cal = calibrate_hours(&pts).expect("noisy fit");
+        let in_sample = in_sample_error(&cal, &pts);
         assert!(
-            width(&many, 1.0, 0.0) > width(&many, 0.0, 1.0),
-            "judge uncertainty must widen"
+            cal.median_abs_pct_error() > in_sample,
+            "LOO {:.2}% must exceed in-sample {in_sample:.2}% — otherwise the \
+             reported error is describing the fit, not the prediction",
+            cal.median_abs_pct_error()
         );
     }
 
     #[test]
-    fn size_prior_recovers_a_known_power_law() {
-        // minutes = 2 * churn^0.8, churn 40..4000.
-        let anchors: Vec<AnchorPr> = (1..=25)
-            .map(|i| {
-                let churn = 40 * i;
-                let minutes = (2.0 * (churn as f64).powf(0.8)).round() as u32;
-                anchor(i, 5, churn / 2, Some(minutes))
-            })
+    fn labels_that_carry_no_signal_report_themselves_as_useless() {
+        // Minutes cycle independently of size: units predict nothing here.
+        let pts: Vec<(f64, u32)> = (0..12)
+            .map(|i| (0.25 + i as f64 * 0.35, [30u32, 400, 60, 700, 45, 250][i % 6]))
             .collect();
-        let target = DiffFeatures {
-            lines_added: 400,
-            lines_deleted: 400,
-            ..Default::default()
-        };
-        let expected = 2.0 * 800f64.powf(0.8);
-        let got = size_prior(&target, &anchors);
+        let cal = calibrate_hours(&pts).expect("a fit still exists, it is just bad");
         assert!(
-            (got - expected).abs() / expected < 0.2,
-            "size_prior {got:.1} vs {expected:.1}"
+            cal.median_abs_pct_error() > 60.0,
+            "an uninformative label set must LOOK uninformative: {}%",
+            cal.median_abs_pct_error()
+        );
+        assert!(
+            cal.spearman_rho() < 0.3,
+            "and must not claim it can rank: rho {}",
+            cal.spearman_rho()
+        );
+        // Which shows up where a reader will actually see it: the interval.
+        let h = estimate_hours(2.0, &cal);
+        assert!(h.p90() / h.p10() > 8.0, "{h:?}");
+    }
+
+    #[test]
+    fn a_wilder_label_set_reports_a_wider_interval() {
+        let tight = calibrate_hours(&synthetic(12, 0.05)).expect("tight");
+        let loose = calibrate_hours(&synthetic(12, 0.7)).expect("loose");
+        assert!(loose.median_abs_pct_error() > tight.median_abs_pct_error());
+        let (t, l) = (estimate_hours(2.0, &tight), estimate_hours(2.0, &loose));
+        assert!(
+            l.p90() / l.p10() > t.p90() / t.p10(),
+            "interval must follow the measured error, not a constant: {t:?} vs {l:?}"
         );
     }
 
     #[test]
-    fn size_prior_degrades_without_blowing_up() {
-        let target = DiffFeatures {
-            lines_added: 300,
-            lines_deleted: 100,
-            ..Default::default()
-        };
-        // No anchors: the flat rule of thumb, bounded.
-        let none = size_prior(&target, &[]);
-        assert!((15.0..=480.0).contains(&none), "{none}");
-        // Two anchors: their geometric mean, not a slope from two points.
-        let two = size_prior(&target, &[anchor(1, 2, 10, Some(40)), anchor(2, 2, 900, Some(160))]);
-        assert!((two - 80.0).abs() < 1.0, "{two}");
-        // A perverse anchor set (more lines, less time) cannot produce a
-        // negative slope, so the prediction stays inside the observed range.
-        let perverse: Vec<AnchorPr> = (1..=8)
-            .map(|i| anchor(i, 3, i * 200, Some(600 - i as u32 * 60)))
-            .collect();
-        let p = size_prior(&target, &perverse);
-        assert!((60.0..=1800.0).contains(&p), "{p}");
-    }
-
-    #[test]
-    fn size_fallback_is_capped_at_low_confidence() {
-        let anchors = baseline(40);
-        let target = DiffFeatures {
-            lines_added: 300,
-            lines_deleted: 200,
-            ..Default::default()
-        };
-        let e = estimate_from_size(&anchors, &target);
-        assert_eq!(e.confidence, Confidence::Low, "{e:?}");
-        assert_eq!(e.anchor_n, 40);
-        assert!(e.p10_minutes <= e.p50_minutes && e.p50_minutes <= e.p90_minutes);
-        // Wider than the judged path over the same anchors, because it knows less.
-        let judged_e = estimate(&anchors, &judged(0.5, 0.3, 0.7), &target);
-        let ratio = |e: &EffortEstimate| e.p90_minutes as f64 / e.p10_minutes as f64;
-        assert!(ratio(&e) > ratio(&judged_e), "{e:?} vs {judged_e:?}");
-        // Thin baseline still overrides.
-        assert_eq!(
-            estimate_from_size(&baseline(3), &target).confidence,
-            Confidence::Insufficient
-        );
-    }
-
-    #[test]
-    fn size_fallback_may_exceed_the_largest_anchor() {
-        // baseline(20) tops out at 600 minutes for 1000 lines of churn. A PR
-        // eight times larger than anything in the baseline must not be reported
-        // as costing exactly what the largest anchor cost — the regression is
-        // allowed to extrapolate (bounded at 3× the biggest observed anchor).
-        let anchors = baseline(20);
-        let huge = DiffFeatures {
-            lines_added: 6_000,
-            lines_deleted: 2_000,
-            ..Default::default()
-        };
-        let e = estimate_from_size(&anchors, &huge);
-        assert!(e.p50_minutes > 600, "{e:?}");
-        assert!(e.p50_minutes <= 1_800, "bounded at 3x the largest anchor: {e:?}");
-        assert!(e.p10_minutes <= e.p50_minutes && e.p50_minutes <= e.p90_minutes);
-        // …and a small PR still lands well below it.
-        let small = DiffFeatures {
-            lines_added: 20,
-            lines_deleted: 5,
-            ..Default::default()
-        };
-        assert!(estimate_from_size(&anchors, &small).p50_minutes < e.p50_minutes);
-    }
-
-    #[test]
-    fn quantile_interpolates_between_order_statistics() {
-        let s = [10.0, 20.0, 45.0, 90.0, 400.0];
-        assert_eq!(quantile(&s, 0.0), 10.0);
-        assert_eq!(quantile(&s, 1.0), 400.0);
-        assert_eq!(quantile(&s, 0.5), 45.0);
-        // pos = 0.13 * 4 = 0.52, between s[0] and s[1].
-        assert!((quantile(&s, 0.13) - 15.2).abs() < 1e-9);
-        // Out-of-range quantiles clamp instead of indexing past the end.
-        assert_eq!(quantile(&s, -3.0), 10.0);
-        assert_eq!(quantile(&s, 7.0), 400.0);
-        assert_eq!(quantile(&[7.0], 0.9), 7.0);
-        // Monotone in q, which is what makes p50 monotone in placement.
-        let mut prev = f64::MIN;
-        for step in 0..=100 {
-            let v = quantile(&s, step as f64 / 100.0);
-            assert!(v >= prev, "q={step}");
-            prev = v;
+    fn intervals_are_ordered_and_finite_for_any_units() {
+        let cal = calibrate_hours(&synthetic(16, 0.3)).expect("fit");
+        for units in [0.0, 1e-9, 0.01, 1.0, 7.5, 1e6, f64::INFINITY, f64::NAN] {
+            let h = estimate_hours(units, &cal);
+            assert!(h.p10() <= h.p50() && h.p50() <= h.p90(), "{units}: {h:?}");
+            assert!(h.p10() > 0.0 && h.p90().is_finite(), "{units}: {h:?}");
+            assert!(h.p90() <= MAX_HOURS, "{units}: {h:?}");
         }
     }
 
     #[test]
-    fn estimate_is_serializable_and_holds_only_numbers() {
-        let e = estimate(&baseline(20), &judged(0.6, 0.5, 0.5), &DiffFeatures::default());
-        let json = serde_json::to_value(e).unwrap();
+    fn hours_rise_with_units() {
+        let cal = calibrate_hours(&synthetic(16, 0.2)).expect("fit");
+        let (a, b) = (estimate_hours(1.0, &cal), estimate_hours(4.0, &cal));
+        assert!(b.p50() > a.p50(), "{b:?} vs {a:?}");
+    }
+
+    #[test]
+    fn identical_sized_labels_degenerate_to_their_geometric_mean() {
+        // Unidentifiable slope: every PR the same size, minutes all over.
+        let pts: Vec<(f64, u32)> = (0..10).map(|i| (2.0, 30 + i * 10)).collect();
+        let cal = calibrate_hours(&pts).expect("degenerate but valid");
+        assert_eq!(cal.exponent(), 0.0);
+        // Geometric mean of 30..120 ≈ 70.6 minutes ⇒ ~1.18 h, flat in units.
+        let h = estimate_hours(2.0, &cal);
+        assert!((h.p50() - 70.6 / 60.0).abs() < 0.05, "{h:?}");
+        assert_eq!(estimate_hours(9.0, &cal).p50(), h.p50());
+    }
+
+    #[test]
+    fn the_calibration_serializes_as_five_numbers() {
+        let cal = calibrate_hours(&synthetic(10, 0.2)).expect("fit");
+        let json = serde_json::to_value(cal).unwrap();
         let keys: Vec<&str> = json.as_object().unwrap().keys().map(|k| k.as_str()).collect();
         assert_eq!(
             keys,
-            vec![
-                "p10_minutes",
-                "p50_minutes",
-                "p90_minutes",
-                "anchor_n",
-                "confidence"
-            ]
+            vec!["scale", "exponent", "n", "median_abs_pct_error", "spearman_rho"]
         );
-        assert_eq!(json["confidence"], serde_json::json!("moderate"));
+        let hours = serde_json::to_value(estimate_hours(1.0, &cal)).unwrap();
+        let hkeys: Vec<&str> = hours.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(hkeys, vec!["p10", "p50", "p90"]);
     }
 }

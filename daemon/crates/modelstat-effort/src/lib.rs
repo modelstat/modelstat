@@ -1,68 +1,113 @@
-//! On-device PR effort estimation, calibrated on the repo's own history.
-//!
-//! The question this answers is "how long would a human have taken on this?",
-//! and the only defensible answer is one drawn from how long humans on THIS
-//! team actually took. So the pipeline is:
+//! On-device PR effort estimation that never reports a number it cannot
+//! justify.
 //!
 //! ```text
-//!   git show ──▶ DiffFeatures ─┐
-//!                              ├─▶ Scorer ──▶ JudgedFeatures ─┐
-//!   repo's human AnchorPrs ────┘   (relative placement only)   ├─▶ EffortEstimate
-//!                              └────────────────────────────────┘
-//!                                   (size_prior when no judge)
+//!   git show ──▶ DiffFeatures ─┬────────────────────────┐
+//!                              │                        ▼
+//!   repo's human AnchorPrs ────┼─▶ Scorer ──▶ Judged ─▶ EffortUnits   (Tier 1, always)
+//!                              │                        │
+//!   >= 8 hand-written labels ──┴─▶ Calibration ────────▶ HoursEstimate (Tier 2, sometimes)
 //! ```
 //!
-//! * [`diff`] reads the commit locally. Paths are classified and dropped.
-//! * [`judge`] asks an INJECTED [`Scorer`] to place the PR among 5–8 of the
-//!   repo's real human PRs. It never asks for hours, and this crate never opens
-//!   a socket.
-//! * [`calibrate`] maps that placement onto the anchors' measured
-//!   `active_minutes`, widening the interval for anchor scarcity and judge
-//!   uncertainty — and refusing to sound confident below five anchors.
+//! ## Two tiers, and why the boundary is a hard one
 //!
-//! Privacy: the only [`serde::Serialize`] types here are [`EffortEstimate`] and
-//! [`Confidence`] — five integers and an enum. [`DiffFeatures`] and
-//! [`JudgedFeatures`] deliberately do not implement it, so no source text,
-//! path, or commit message can reach a wire through this crate.
+//! Local git contains no per-PR human-effort ground truth. That is a
+//! measurement, not an opinion: per-PR commit clustering covers 0–17% of PRs on
+//! real repositories because squash merging destroys branch history, and the
+//! author-stream fallback that does reach ~100% coverage correlates with change
+//! size at Spearman ρ 0.11–0.24 — below plain lines-of-code (~0.30) and
+//! saturated at its own session ceiling. See [`units`] for the table.
+//!
+//! So the crate reports what it can measure and refuses what it cannot:
+//!
+//! * **Tier 1, [`EffortUnits`].** Always available, no labels needed.
+//!   Dimensionless and repo-relative — `1.0` is this repo's median
+//!   human-authored PR. Never call it hours, minutes, or dollars, because it
+//!   isn't one.
+//! * **Tier 2, [`HoursEstimate`].** Only with at least [`MIN_LABELS`] PRs a
+//!   human labelled by hand ([`LabelStore`]), and always published next to the
+//!   calibration's own leave-one-out error.
+//!
+//! Below the threshold the API does not degrade to a guess: [`EffortReport`]
+//! carries `hours: None`. And the refusal is structural — [`Calibration`] and
+//! [`HoursEstimate`] have private fields, no public constructor, and no
+//! `Deserialize`, so the only way to hold hours is to have earned a
+//! [`Calibration`] from real labels.
+//!
+//! ## Privacy
+//!
+//! The `Serialize` types are exactly the numeric report shapes:
+//! [`EffortReport`], [`EffortUnits`], [`HoursEstimate`], [`Calibration`] — plus
+//! [`LabelStore`], which never leaves the device. [`DiffFeatures`] and
+//! [`JudgedFeatures`] deliberately do NOT implement it, so no source text,
+//! path, or commit message can reach a wire through this crate. Paths are read
+//! locally (the only way to tell a lockfile from a parser) and dropped.
 
 pub mod calibrate;
 pub mod diff;
 pub mod judge;
+pub mod labels;
+pub mod units;
 
-pub use calibrate::{
-    estimate, estimate_from_size, size_prior, Confidence, EffortEstimate, MIN_ANCHORS,
-};
+pub use calibrate::{calibrate_hours, estimate_hours, Calibration, HoursEstimate};
 pub use diff::{classify_path, diff_features, parse_numstat, DiffFeatures, PathClass};
 pub use judge::{build_prompt, parse_reply, JudgedFeatures, Scorer};
+pub use labels::{Label, LabelStore, MIN_LABELS};
+pub use units::{effort_units, EffortUnits};
 
 use modelstat_wire::AnchorPr;
+use serde::Serialize;
 
-/// Estimate the human effort one merged PR represents, in minutes, as an
-/// interval calibrated on `anchors`.
+/// What one merged PR cost, at whatever fidelity the evidence supports.
 ///
-/// `None` only when the local repo cannot be read (bad `cwd`, unknown sha, git
-/// timeout) — never for a missing or broken judge, which degrades to
-/// [`size_prior`] instead.
+/// `units` is always present. `hours` and `calibration` are `Some` together or
+/// `None` together, and `None` is the normal case: it means nobody on this
+/// device has labelled [`MIN_LABELS`] PRs yet, so the honest answer to "how
+/// many hours?" is that we do not know.
+///
+/// Both `Option`s serialize as explicit `null` rather than being omitted. A
+/// consumer must be able to SEE that hours are absent; a missing key reads as
+/// an older schema, and reconstructing hours from `units` on the far side is
+/// exactly the mistake the type is shaped to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct EffortReport {
+    pub units: EffortUnits,
+    pub hours: Option<HoursEstimate>,
+    pub calibration: Option<Calibration>,
+}
+
+/// Score one merged PR from the local repo.
+///
+/// `None` only when the repo cannot be read (bad `cwd`, unknown sha, git
+/// timeout) — never for a missing or broken judge, which degrades to the
+/// size-and-structure score, and never for missing labels, which degrade to
+/// Tier 1 alone.
 pub fn estimate_pr_effort(
     cwd: &str,
     merge_sha: &str,
     anchors: &[AnchorPr],
     scorer: Option<&dyn Scorer>,
-) -> Option<EffortEstimate> {
+    calibration: Option<&Calibration>,
+) -> Option<EffortReport> {
     let target = diff::diff_features(cwd, merge_sha)?;
-    Some(estimate_with(&target, anchors, scorer))
+    Some(estimate_with(&target, anchors, scorer, calibration))
 }
 
-/// The judge-then-calibrate half of [`estimate_pr_effort`], split out so the
-/// whole decision path is exercisable without a repo on disk.
+/// The judge-then-score half of [`estimate_pr_effort`], split out so the whole
+/// decision path is exercisable without a repo on disk.
 pub fn estimate_with(
     target: &DiffFeatures,
     anchors: &[AnchorPr],
     scorer: Option<&dyn Scorer>,
-) -> EffortEstimate {
-    match scorer.and_then(|s| judge::judge(s, target, anchors)) {
-        Some(j) => calibrate::estimate(anchors, &j, target),
-        None => calibrate::estimate_from_size(anchors, target),
+    calibration: Option<&Calibration>,
+) -> EffortReport {
+    let judged = scorer.and_then(|s| judge::judge(s, target, anchors));
+    let units = units::effort_units(target, judged.as_ref(), anchors);
+    EffortReport {
+        // The invariant, in one line: hours exist iff a Calibration does.
+        hours: calibration.map(|c| calibrate::estimate_hours(units.units, c)),
+        calibration: calibration.copied(),
+        units,
     }
 }
 
@@ -73,6 +118,10 @@ pub(crate) mod tests_support {
 
     /// A human-authored anchor with symmetric churn (`lines` added AND
     /// deleted, so `churn == 2 * lines`).
+    ///
+    /// `active_minutes` is still a parameter because [`AnchorPr`] still carries
+    /// the field — it is an observation on the wire. Nothing in this crate
+    /// reads it, and tests pass `None` unless they are asserting that.
     pub fn anchor(pr_number: u64, files: u32, lines: u64, active_minutes: Option<u32>) -> AnchorPr {
         AnchorPr {
             pr_number,
@@ -118,14 +167,43 @@ diff --git a/src/consensus/vote.rs b/src/consensus/vote.rs
 ";
 
     fn repo_anchors(n: u64) -> Vec<AnchorPr> {
-        (1..=n)
-            .map(|i| anchor(i, (i as u32).min(30), i * 30, Some(i as u32 * 25)))
+        (1..=n).map(|i| anchor(i, (i as u32).min(30), i * 30, None)).collect()
+    }
+
+    /// `n` labels on a plausible units→minutes law.
+    fn labels(n: usize) -> Vec<(f64, u32)> {
+        (0..n)
+            .map(|i| {
+                let u = 0.3 + i as f64 * 0.4;
+                (u, (75.0 * u.powf(0.85)).round() as u32)
+            })
             .collect()
     }
 
     const GOOD_REPLY: &str = r#"{"category":"feature","novelty_0_1":0.6,
         "boilerplate_fraction_0_1":0.2,"risk_domains":["consensus"],
         "relative_position_0_1":0.75}"#;
+
+    #[test]
+    fn seven_labels_gives_no_hours_and_eight_gives_hours() {
+        let anchors = repo_anchors(20);
+        let target = diff::features_from(NUMSTAT, DIFF);
+
+        let seven = calibrate_hours(&labels(MIN_LABELS - 1));
+        assert!(seven.is_none(), "seven labels must not calibrate");
+        let below = estimate_with(&target, &anchors, None, seven.as_ref());
+        assert!(below.hours.is_none() && below.calibration.is_none());
+        // Tier 1 is unaffected — that is the point of two tiers.
+        assert!(below.units.units > 0.0 && below.units.anchor_n == 20);
+
+        let eight = calibrate_hours(&labels(MIN_LABELS)).expect("eight labels calibrate");
+        let above = estimate_with(&target, &anchors, None, Some(&eight));
+        let hours = above.hours.expect("eight labels must produce hours");
+        assert!(hours.p10() <= hours.p50() && hours.p50() <= hours.p90(), "{hours:?}");
+        assert_eq!(above.calibration.map(|c| c.n()), Some(MIN_LABELS));
+        // Same PR, same units, both sides of the threshold.
+        assert_eq!(above.units, below.units);
+    }
 
     #[test]
     fn fake_scorer_drives_the_whole_path_with_no_network() {
@@ -137,17 +215,15 @@ diff --git a/src/consensus/vote.rs b/src/consensus/vote.rs
             Some(GOOD_REPLY.to_string())
         };
 
-        let e = estimate_with(&target, &anchors, Some(&scorer));
-
-        // 0.75 of a 25..500-minute distribution, interpolated: s[14]=375,
-        // s[15]=400, pos = 0.75*19 = 14.25 ⇒ 381.25.
-        assert_eq!(e.p50_minutes, 381);
-        assert_eq!(e.anchor_n, 20);
-        assert_eq!(e.confidence, Confidence::Moderate);
-        assert!(e.p10_minutes < e.p50_minutes && e.p50_minutes < e.p90_minutes, "{e:?}");
+        let r = estimate_with(&target, &anchors, Some(&scorer), None);
+        assert!(r.units.judged, "{r:?}");
+        assert_eq!(r.units.anchor_n, 20);
+        assert!(r.units.units > 0.0 && r.units.units.is_finite(), "{r:?}");
+        assert!(r.hours.is_none(), "no labels, no hours — ever");
 
         let prompt = prompt_seen.borrow();
-        assert!(prompt.contains("ref 1: files=1 +30/-30 commits=4 active=25min"), "{prompt}");
+        assert!(prompt.contains("ref 1: files=1 +30/-30 commits=4"), "{prompt}");
+        assert!(!prompt.contains("active="), "minutes must not reach the model:\n{prompt}");
         assert!(prompt.contains("files=3 +244/-50"), "{prompt}");
         assert!(prompt.contains("churn by kind: test=70 config=4 docs=0 generated=0 other=220"));
         for leak in ["vote.rs", "consensus/", "quorum", "threshold", "Voter"] {
@@ -156,33 +232,76 @@ diff --git a/src/consensus/vote.rs b/src/consensus/vote.rs
     }
 
     #[test]
-    fn a_missing_broken_or_silent_judge_degrades_to_the_size_prior() {
+    fn a_missing_broken_or_silent_judge_degrades_to_the_unjudged_score() {
         let anchors = repo_anchors(20);
         let target = diff::features_from(NUMSTAT, DIFF);
         let silent = |_: &str| -> Option<String> { None };
         let broken = |_: &str| -> Option<String> { Some("I'd rather not.".to_string()) };
 
-        let expected = estimate_from_size(&anchors, &target);
+        let expected = estimate_with(&target, &anchors, None, None);
+        assert!(!expected.units.judged);
         for scorer in [None, Some(&silent as &dyn Scorer), Some(&broken as &dyn Scorer)] {
-            let e = estimate_with(&target, &anchors, scorer);
-            assert_eq!(e, expected, "every degraded path lands on the size prior");
-            assert_eq!(e.confidence, Confidence::Low);
-            assert!(e.p10_minutes <= e.p50_minutes && e.p50_minutes <= e.p90_minutes);
+            let r = estimate_with(&target, &anchors, scorer, None);
+            assert_eq!(r, expected, "every degraded path lands on the same units");
         }
     }
 
     #[test]
-    fn a_thin_baseline_is_insufficient_even_with_a_perfect_judge() {
+    fn a_thin_baseline_still_produces_units_and_says_so() {
         let target = diff::features_from(NUMSTAT, DIFF);
         let scorer = |_: &str| -> Option<String> { Some(GOOD_REPLY.to_string()) };
-        let e = estimate_with(&target, &repo_anchors(4), Some(&scorer));
-        assert_eq!(e.confidence, Confidence::Insufficient);
-        assert_eq!(e.anchor_n, 4);
-        assert!(e.p90_minutes >= e.p10_minutes * 8, "{e:?}");
+        let r = estimate_with(&target, &repo_anchors(4), Some(&scorer), None);
+        assert_eq!(r.units.anchor_n, 4);
+        assert!(!r.units.judged, "four anchors is nothing to place against");
+        assert!(r.units.units > 0.0);
+    }
+
+    #[test]
+    fn the_report_serializes_as_units_hours_calibration_with_explicit_nulls() {
+        let anchors = repo_anchors(20);
+        let target = diff::features_from(NUMSTAT, DIFF);
+
+        let bare = serde_json::to_value(estimate_with(&target, &anchors, None, None)).unwrap();
+        let keys: Vec<&str> = bare.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, vec!["units", "hours", "calibration"]);
+        assert_eq!(bare["hours"], serde_json::json!(null));
+        assert_eq!(bare["calibration"], serde_json::json!(null));
+        let unit_keys: Vec<&str> = bare["units"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            unit_keys,
+            vec!["units", "percentile_vs_human_anchors", "judged", "anchor_n"]
+        );
+
+        let cal = calibrate_hours(&labels(MIN_LABELS)).unwrap();
+        let full = serde_json::to_value(estimate_with(&target, &anchors, None, Some(&cal))).unwrap();
+        let hkeys: Vec<&str> = full["hours"].as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(hkeys, vec!["p10", "p50", "p90"]);
+        let ckeys: Vec<&str> = full["calibration"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            ckeys,
+            vec!["scale", "exponent", "n", "median_abs_pct_error", "spearman_rho"]
+        );
+
+        // No minutes key anywhere: the wire says units or it says hours.
+        let text = serde_json::to_string(&full).unwrap();
+        assert!(!text.contains("minutes"), "{text}");
     }
 
     #[test]
     fn unreadable_repo_is_none_not_a_panic() {
-        assert!(estimate_pr_effort("/nope-modelstat-effort", "HEAD", &repo_anchors(20), None).is_none());
+        assert!(
+            estimate_pr_effort("/nope-modelstat-effort", "HEAD", &repo_anchors(20), None, None)
+                .is_none()
+        );
     }
 }

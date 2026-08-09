@@ -4,8 +4,8 @@
 //! way to tell a lockfile from a hand-written parser — and then dropped: a
 //! [`DiffFeatures`] holds counts, file extensions and a structure-only excerpt,
 //! and deliberately does NOT implement `Serialize`, so no code path can put one
-//! on a wire by accident. The only serializable type this crate exposes is
-//! [`crate::EffortEstimate`], which is five integers and an enum.
+//! on a wire by accident. The serializable types this crate exposes are the
+//! numeric report shapes in [`crate::units`] and [`crate::calibrate`].
 //!
 //! Best-effort like every other git read in this workspace: bounded
 //! (`--format=` so git never even prints the message, a byte ceiling on stdout,
@@ -90,18 +90,13 @@ pub struct DiffFeatures {
 }
 
 impl DiffFeatures {
-    /// Total churn. The unit both the size prior and the anchors speak.
+    /// Total churn — the unit the anchor population speaks.
+    ///
+    /// Raw, undiscounted. The per-class weighting that turns this into an
+    /// effort signal lives in [`crate::units`], because it needs weights an
+    /// `AnchorPr` cannot carry.
     pub fn churn(&self) -> u64 {
         self.lines_added.saturating_add(self.lines_deleted)
-    }
-
-    /// Churn that is neither generated nor pure docs — the part a human plainly
-    /// typed. Reported to the judge, deliberately NOT used by the size prior
-    /// (see [`crate::calibrate::size_prior`]).
-    pub fn authored_lines(&self) -> u64 {
-        self.churn()
-            .saturating_sub(self.generated_lines)
-            .saturating_sub(self.doc_lines)
     }
 }
 
@@ -388,14 +383,16 @@ pub fn features_from(numstat: &str, diff: &str) -> DiffFeatures {
     };
     let mut langs: Vec<(String, u32)> = Vec::new();
     for row in &rows {
-        let churn = row.added.unwrap_or(0) + row.deleted.unwrap_or(0);
+        // Saturating, like the totals below: a numstat is untrusted input, and
+        // this crate's contract is "degrade, never panic".
+        let churn = row.added.unwrap_or(0).saturating_add(row.deleted.unwrap_or(0));
         f.lines_added = f.lines_added.saturating_add(row.added.unwrap_or(0));
         f.lines_deleted = f.lines_deleted.saturating_add(row.deleted.unwrap_or(0));
         match classify_path(row.path) {
-            PathClass::Test => f.test_lines += churn,
-            PathClass::Config => f.config_lines += churn,
-            PathClass::Doc => f.doc_lines += churn,
-            PathClass::Generated => f.generated_lines += churn,
+            PathClass::Test => f.test_lines = f.test_lines.saturating_add(churn),
+            PathClass::Config => f.config_lines = f.config_lines.saturating_add(churn),
+            PathClass::Doc => f.doc_lines = f.doc_lines.saturating_add(churn),
+            PathClass::Generated => f.generated_lines = f.generated_lines.saturating_add(churn),
             PathClass::Source => {}
         }
         let file = row.path.rsplit('/').next().unwrap_or(row.path);
@@ -597,8 +594,7 @@ mod tests {
         assert_eq!(f.config_lines, 10);
         assert_eq!(f.generated_lines, 1000);
         assert_eq!(f.doc_lines, 3);
-        // 1163 total − 1000 generated − 3 docs.
-        assert_eq!(f.authored_lines(), 160);
+        assert_eq!(f.churn(), 1163);
         assert_eq!(f.languages[0], ("rs".to_string(), 2));
     }
 

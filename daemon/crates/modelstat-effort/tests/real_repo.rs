@@ -10,7 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use modelstat_effort::{diff_features, estimate_pr_effort, Confidence, Scorer};
+use modelstat_effort::{
+    calibrate_hours, diff_features, estimate_pr_effort, LabelStore, Scorer, MIN_LABELS,
+};
 use modelstat_wire::AnchorPr;
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
@@ -128,19 +130,56 @@ fn reads_a_real_commit_and_estimates_against_real_anchors() {
                  "risk_domains":[],"relative_position_0_1":0.5}"#
             .to_string())
     };
-    let e = estimate_pr_effort(&cwd, &sha, &anchors, Some(&scorer as &dyn Scorer))
-        .expect("estimate for a readable commit");
-    assert_eq!(e.anchor_n, 12);
-    assert_eq!(e.confidence, Confidence::Moderate);
-    // Median of 20..240 by tens: pos = 0.5 * 11 = 5.5 ⇒ (120 + 140) / 2.
-    assert_eq!(e.p50_minutes, 130);
-    assert!(e.p10_minutes < e.p50_minutes && e.p50_minutes < e.p90_minutes, "{e:?}");
+    let r = estimate_pr_effort(&cwd, &sha, &anchors, Some(&scorer as &dyn Scorer), None)
+        .expect("report for a readable commit");
+    assert_eq!(r.units.anchor_n, 12);
+    assert!(r.units.judged, "{r:?}");
+    assert!(r.units.units > 0.0 && r.units.units.is_finite(), "{r:?}");
+    assert!(
+        (0.0..=1.0).contains(&r.units.percentile_vs_human_anchors),
+        "{r:?}"
+    );
+    assert!(
+        r.hours.is_none() && r.calibration.is_none(),
+        "no labels on this device — hours must not exist: {r:?}"
+    );
 
-    // No scorer at all still yields a real, ordered, low-confidence estimate.
-    let fallback = estimate_pr_effort(&cwd, &sha, &anchors, None).expect("fallback estimate");
-    assert_eq!(fallback.confidence, Confidence::Low);
-    assert!(fallback.p10_minutes <= fallback.p50_minutes);
-    assert!(fallback.p50_minutes <= fallback.p90_minutes);
+    // No scorer at all still yields real units on the same anchors.
+    let fallback =
+        estimate_pr_effort(&cwd, &sha, &anchors, None, None).expect("fallback report");
+    assert!(!fallback.units.judged);
+    assert!(fallback.units.units > 0.0);
+    assert!(fallback.hours.is_none());
 
+    // Tier 2, end to end through the on-disk store: label eight PRs, calibrate,
+    // and only then do hours appear for the very same commit.
+    let labels_path = dir.join("labels.json");
+    let mut store = LabelStore::load(&labels_path);
+    for i in 0..MIN_LABELS as u64 {
+        let units = 0.4 + i as f64 * 0.3;
+        let minutes = (80.0 * units.powf(0.85)).round() as u32;
+        store.add_label("acme/scratch", i + 1, minutes, "2026-08-09T10:00:00.000Z");
+    }
+    store.save(&labels_path);
+
+    let reloaded = LabelStore::load(&labels_path);
+    let pairs: Vec<(f64, u32)> = reloaded
+        .labels_for_repo("acme/scratch")
+        .enumerate()
+        .map(|(i, (_, l))| (0.4 + i as f64 * 0.3, l.minutes))
+        .collect();
+    assert_eq!(pairs.len(), MIN_LABELS);
+    let cal = calibrate_hours(&pairs).expect("eight labels calibrate");
+
+    let calibrated = estimate_pr_effort(&cwd, &sha, &anchors, None, Some(&cal))
+        .expect("calibrated report");
+    let hours = calibrated.hours.expect("hours once a calibration exists");
+    assert!(hours.p10() <= hours.p50() && hours.p50() <= hours.p90(), "{hours:?}");
+    assert!(hours.p50() > 0.0 && hours.p90().is_finite(), "{hours:?}");
+    assert_eq!(calibrated.calibration.map(|c| c.n()), Some(MIN_LABELS));
+    assert_eq!(
+        calibrated.units, fallback.units,
+        "labels change what can be REPORTED, never what was measured"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
