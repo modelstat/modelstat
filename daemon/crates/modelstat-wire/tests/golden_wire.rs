@@ -95,6 +95,14 @@ fn ingest_batch_accepts_and_roundtrips() {
         batch.session_titles.as_ref().unwrap()["11111111-1111-1111-1111-111111111111"],
         "Ingest retry matrix"
     );
+    let anchors = batch.repo_anchors.as_ref().unwrap();
+    assert_eq!(anchors.len(), 1);
+    assert_eq!(anchors[0].slug, "acme/api");
+    assert_eq!(anchors[0].host.as_deref(), Some("github.com"));
+    assert_eq!(anchors[0].anchors.len(), 1);
+    assert_eq!(anchors[0].anchors[0].pr_number, 421);
+    assert_eq!(anchors[0].anchors[0].span_ms, Some(259_200_000));
+    assert_eq!(anchors[0].anchors[0].commit_count, Some(7));
 }
 
 #[test]
