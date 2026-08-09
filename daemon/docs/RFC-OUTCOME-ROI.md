@@ -89,7 +89,7 @@ value($) = hours_p50 × loaded_rate ($/hr, org-set, default $120) × realized_mu
 | Decision | Rationale |
 |---|---|
 | **Denominate spend in dollars, never tokens.** | Tokens are not fungible: an Opus token, a GPT-5 token and a local-3B token are different goods at different prices doing different work. The daemon already prices every turn in dollars on-device (`prices/`), so dollars are the only unit that survives cross-model aggregation. Token counts stay on the wire as evidence, never as numerator or denominator. |
-| **Numerator = shipped outcomes, not activity.** | Sessions, turns and abstracts measure *effort in*. The numerator counts only work that landed: merged PRs and direct-to-main commit ranges (§5a), discounted by whether it *stayed* landed (§8). |
+| **Numerator = shipped outcomes, not activity.** | Sessions, turns and abstracts measure *effort in*. The numerator counts only work that landed: merged PRs, discounted by whether it *stayed* landed (§8). |
 | **Default headline is `$ per unit`, not `hours returned per $`.** | This reverses the first draft. "Hours returned per dollar" is legible to finance precisely because it asserts something we cannot support from git (§1). `$ per unit` asserts only what the data holds: spend divided by a within-repo effort ranking. It is comparable to *itself* — this repo, last month vs this month — which is the comparison that actually steers spend. |
 | **Hours are a *view*, gated on labels, never the default.** | The dashboard surfaces hours only for repos that cleared the threshold, and never without the calibration error beside the number (§7b). A tenant with no labels sees units and is told, in one line, what it would take to see hours. |
 | **Seat cost included.** | Subscription seats (Claude Max, Cursor, Copilot) are real spend the token meter never sees. The org configures seat $/person/month server-side; the daemon ships nothing new for this. |
@@ -97,13 +97,13 @@ value($) = hours_p50 × loaded_rate ($/hr, org-set, default $120) × realized_mu
 
 ## 4. Attribution ledger
 
-The ledger is the join table: `spend rows (sessions) ⟷ outcome rows (merged PRs / commit ranges)`.
+The ledger is the join table: `spend rows (sessions) ⟷ outcome rows (merged PRs)`.
 **Measurement did not touch this section**; it is arithmetic over device facts and stands as
 first drafted.
 
-**Unit of account: the merged PR.** For direct-to-main workflows (no PR ever exists) the unit is
-a *commit range*: the session's commits to one repo, grouped per session (§5a). One ledger row =
-one (session, outcome) edge with a dollar amount and a confidence.
+**Unit of account: the merged PR.** One ledger row = one (session, outcome) edge with a dollar
+amount and a confidence. Trunk-based teams who merge to main with no PR are outside the join —
+per-session commit capture was drafted for them and dropped (§5a).
 
 **The device half already exists.** The session→PR edge is `SessionMetadata`
 (`daemon/crates/modelstat-parsers/src/references.rs` — repos, pull_requests, issues, files;
@@ -146,30 +146,19 @@ waste, but it is also not a shipped outcome.
 
 ## 5. Device contracts (this repo)
 
-Two additive extensions, both in the established Zod-parity serde style
+One additive extension, in the established Zod-parity serde style
 (`daemon/crates/modelstat-wire/src/schema.rs` header comment: `.optional()` ⇒
 `skip_serializing_if = "Option::is_none"`, `.default()` ⇒ `#[serde(default)]`; caps in UTF-8
 bytes per `daemon/crates/modelstat-wire/src/caps.rs`). Existing golden fixtures keep parsing.
 
-### 5a. `SessionMetadata.commits` — direct-to-main attribution
+### 5a. Rejected — per-session commit capture
 
-```
-CommitRef {
-  slug:         Option<String>   // cap 200, the repo it landed in
-  sha:          String           // hex, 7..=64 chars
-  committed_at: String           // ISO-8601
-  source:       String           // default "git"
-}
-SessionMetadata.commits: Vec<CommitRef>   // cap 100, default empty
-```
-
-`PullRequestRef` covers PR-flow teams; trunk-based teams merge to main with no PR number to
-reference, so today their shipped work is invisible to the join. The pass already computes the
-session's commit-capture window — session span + `COMMIT_GRACE_MS` (4h, capped at the next
-session's start so two sessions never double-claim a commit;
-`daemon/crates/modelstat-pipeline/src/session_metadata.rs`) — and already runs git in that window
-for `FileRef`s. `commits` records the SHAs the same window read observes. A SHA + timestamp is the
-same safety class as a slug: a public repo fact.
+A `SessionMetadata.commits` array (one sha + timestamp per commit in the session's window) was
+drafted here to give trunk-based teams a unit of account, and briefly shipped as a device type.
+It is gone. The server attributes shipped work per-PR and drops the field on ingest (`store-ch`
+migration `0006_drop_commits_json.sql`), so the capture was an extra bounded `git log` per repo
+per session producing data nothing reads. Direct-to-main work stays outside the ledger until the
+server grows a commit-range outcome row; the device half is small and can return with it.
 
 ### 5b. `IngestBatch.repo_anchors` — human-authored PRs, mined on-device
 
@@ -435,13 +424,13 @@ the training set.
 
 | Phase | Ships | Gate to next |
 |---|---|---|
-| **P1 — Ledger + AI/human split + units** (no labels, no hours) | §4 join on existing `SessionMetadata` + §5a `commits`; cost splitting; abandoned bucket; §5b/§6 anchor mining with the trailer rule; AI-vs-human split and `$ per unit` on the dashboard; §7a `EffortUnits`. Nothing here needs a human label, and the split needs no model at all. | Join coverage ≥70% of spend on pilot orgs; unit rankings stable across re-scores (§7c). |
+| **P1 — Ledger + AI/human split + units** (no labels, no hours) | §4 join on existing `SessionMetadata`; cost splitting; abandoned bucket; §5b/§6 anchor mining with the trailer rule; AI-vs-human split and `$ per unit` on the dashboard; §7a `EffortUnits`. Nothing here needs a human label, and the split needs no model at all. | Join coverage ≥70% of spend on pilot orgs; unit rankings stable across re-scores (§7c). |
 | **P2 — Label capture + calibrated hours** | §7b `LabelStore`, sampled author-only label prompt, `calibrate_hours`, LOOCV error, hours view gated at `MIN_LABELS = 8`. | ≥8 labels on pilot repos **and** `median_abs_pct_error` below the publish threshold. Repos that miss it stay on units — that is a normal outcome, not a failure to work around. |
 | **P3 — Realized multipliers** | §8 revert/churn/defect discounts; provisional-value windows in the UI. | Discounts stable across a full 30-day window on pilot data. |
 | **P4 — Continuous calibration** | Re-fit on new labels; drift detection pulls the hours view off when error crosses the threshold; anchor refresh re-runs the split and the normalization (§7c). | Label-drift and anchor-refresh paths exercised end-to-end on pilots, including the un-publish direction. |
 | **P5 — Routing labels** | Model/work-type routing trained on §11 rows. | — |
 
-Device-side, only P1/P2 touch this repo: §5's two additive wire types and the
+Device-side, only P1/P2 touch this repo: §5's additive `repo_anchors` wire type and the
 `modelstat-effort` crate (whose only `Serialize` types are the five-scalar `Calibration`, the
 three-float `HoursEstimate` and `EffortUnits`). P3 consumes signals the daemon already ships
 (`merged`/`reverted`/`FileRef` — `references.rs`, `git_outcome.rs`). The privacy boundary is

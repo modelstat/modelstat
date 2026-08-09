@@ -1,6 +1,6 @@
 /**
- * Per-session metadata pass — assembles the repos, pull requests, commits,
- * and issues a session touched, then ships one {@link SessionMetadata} per
+ * Per-session metadata pass — assembles the repos, pull requests, issues,
+ * and files a session touched, then ships one {@link SessionMetadata} per
  * session on the ingest batch (under `session_metadata[session_id]`).
  *
  * This is the on-device half of the spend→outcome join. It fuses four
@@ -11,7 +11,7 @@
  *   2. `resolveGit` — an injected, best-effort read of the repo on disk for
  *      the session's cwds (authoritative remote slug/host; wires up the
  *      otherwise-dormant `git.ts`). Cwd-cached by the caller.
- *   3. redacted content — PR/issue/commit URLs surviving in the segment
+ *   3. redacted content — PR/issue URLs surviving in the segment
  *      abstracts + event excerpts (deterministic regex, never raw text).
  *   4. the on-device model — a single best-effort call per session over the
  *      redacted abstracts, whose free-text reply is re-parsed deterministically
