@@ -5,6 +5,7 @@
 //! orchestration + main loop compose them.
 
 pub mod adapters;
+pub mod anchors;
 pub mod authoritative_git;
 pub mod claude_settings;
 pub mod discover_jobs;
