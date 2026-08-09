@@ -6,7 +6,7 @@
 //! `authed_json_get` SPA-safe GET), so the only new logic — the result mapping +
 //! URL building — is factored into pure helpers with unit tests.
 
-use modelstat_ingest::{DeviceApi, UploadResult};
+use modelstat_ingest::{DeviceApi, HoldScope, UploadResult};
 use modelstat_pipeline::{
     build_for_one_session, BuildOutcome, Embedder, ResilientSummarizer, Summarizer,
 };
@@ -22,13 +22,24 @@ use crate::uploader::{BatchUploader, Hold as UploadHold};
 
 /// Map an `upload_batch` result to the never-drop outcome the drain expects: a
 /// confirmed commit → the server-accepted count; anything else → HOLD (the
-/// spooled file stays put and the next pass retries it). Logged loudly.
+/// spooled file stays put and the next pass retries it), carrying WHOSE fault it
+/// was so the drain knows whether the rest of the queue may still be tried.
+/// Logged loudly.
 fn upload_outcome(result: UploadResult) -> Result<u64, UploadHold> {
     match result {
         UploadResult::Commit(resp) => Ok(resp.accepted),
-        UploadResult::Hold(reason) => {
-            modelstat_log::log_warn!("batch upload held — {reason}");
-            Err(UploadHold)
+        UploadResult::Hold { reason, scope } => {
+            match scope {
+                // Not an outage — a contract mismatch. This batch will never be
+                // accepted as written, so it must not read like a passing blip:
+                // the 14-hour silent stall was a `warn` in a log nobody tails.
+                HoldScope::Batch => modelstat_log::log_error!(
+                    "the server REFUSED this batch on its content — {reason}. It stays \
+                     queued (nothing is lost) and the rest of the queue continues."
+                ),
+                HoldScope::Wire => modelstat_log::log_warn!("batch upload held — {reason}"),
+            }
+            Err(UploadHold(scope))
         }
     }
 }
@@ -215,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_maps_to_accepted_count_hold_maps_to_hold() {
+    fn commit_maps_to_accepted_count_and_a_hold_carries_its_scope() {
         let commit = UploadResult::Commit(IngestResponse {
             accepted: 7,
             new_sessions: 0,
@@ -224,9 +235,22 @@ mod tests {
             raw_s3_key: None,
         });
         assert_eq!(upload_outcome(commit), Ok(7));
+        // An outage: the wire is at fault, so the drain should stop the pass.
         assert_eq!(
-            upload_outcome(UploadResult::Hold("offline".into())),
-            Err(UploadHold)
+            upload_outcome(UploadResult::Hold {
+                reason: "offline".into(),
+                scope: HoldScope::Wire,
+            }),
+            Err(UploadHold(HoldScope::Wire))
+        );
+        // A rejected payload: the scope must survive the mapping, or the drain
+        // cannot tell this from an outage and stalls the whole queue behind it.
+        assert_eq!(
+            upload_outcome(UploadResult::Hold {
+                reason: "invalid_json: unknown variant `thinking_level_change`".into(),
+                scope: HoldScope::Batch,
+            }),
+            Err(UploadHold(HoldScope::Batch))
         );
     }
 

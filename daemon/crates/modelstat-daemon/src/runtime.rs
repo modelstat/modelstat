@@ -310,9 +310,16 @@ impl crate::uploader::UploadObserver for UploadStatusObserver {
 
     fn on_pass_end(&mut self, outcome: &crate::uploader::DrainOutcome) {
         let depth = outcome.depth;
+        let rejected = outcome.rejected;
         self.with(|s| {
             s.set_queue(depth.batches);
             s.set_stat("segments_sending", json!(0));
+            // The count of batches the server refuses on their CONTENT, published
+            // where a human already looks: `modelstat status`, the tray, and the
+            // heartbeat the dashboard shows. The incident that added this line was
+            // invisible for 14 hours precisely because every surface kept saying
+            // "scanning" while nothing had shipped since the first refusal.
+            s.set_stat("batches_refused", json!(rejected));
             // Nothing left on the wire. Said explicitly, or a reader keeps
             // claiming "3 sessions uploading" through the whole backoff.
             s.start_upload_set(0, 0);
@@ -321,7 +328,14 @@ impl crate::uploader::UploadObserver for UploadStatusObserver {
             // 12 session files left" with "idle" while the scan is still going.
             if s.phase == Phase::Uploading {
                 let line = shipped_line(s, 0);
-                if depth.batches == 0 {
+                if rejected > 0 {
+                    // Never "idle" while the server is refusing work: that is the
+                    // lie that hid this failure.
+                    s.set_phase(
+                        Phase::Processing,
+                        format!("{line} — {rejected} batch(es) the server refused"),
+                    );
+                } else if depth.batches == 0 {
                     s.set_phase(Phase::Idle, line);
                 } else {
                     s.set_phase(Phase::Processing, line);
@@ -854,6 +868,7 @@ mod tests {
             events_uploaded: 0,
             segments_uploaded: segments,
             held,
+            rejected: 0,
             depth: crate::spool::SpoolDepth {
                 batches: left,
                 bytes: left * 100,

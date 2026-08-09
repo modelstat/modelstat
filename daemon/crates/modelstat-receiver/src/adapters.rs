@@ -5,7 +5,7 @@
 //! `upload_batch`'s never-drop matrix, so a non-commit HOLDS the batch (its
 //! events stay durably queued for the next tick).
 
-use modelstat_ingest::{DeviceApi, UploadResult};
+use modelstat_ingest::{DeviceApi, HoldScope, UploadResult};
 use modelstat_wire::IngestBatch;
 
 use crate::ingest::{DrainUploader, Hold};
@@ -13,8 +13,20 @@ use crate::ingest::{DrainUploader, Hold};
 fn upload_outcome(result: UploadResult) -> Result<u64, Hold> {
     match result {
         UploadResult::Commit(resp) => Ok(resp.accepted),
-        UploadResult::Hold(reason) => {
-            modelstat_log::log_warn!("SDK drain upload held — {reason}");
+        // The SDK drain rebuilds its batches from the durable local queue each
+        // tick rather than working a FIFO of finished files, so it has no
+        // head-of-line problem to solve and needs no scope split here — but a
+        // content refusal is still a contract mismatch, not a blip, so it is
+        // logged as an error.
+        UploadResult::Hold { reason, scope } => {
+            if scope == HoldScope::Batch {
+                modelstat_log::log_error!(
+                    "the server REFUSED an SDK batch on its content — {reason}. Its events \
+                     stay queued; this is a daemon/server contract mismatch."
+                );
+            } else {
+                modelstat_log::log_warn!("SDK drain upload held — {reason}");
+            }
             Err(Hold)
         }
     }
@@ -43,6 +55,12 @@ mod tests {
             raw_s3_key: None,
         });
         assert_eq!(upload_outcome(commit), Ok(3));
-        assert_eq!(upload_outcome(UploadResult::Hold("5xx".into())), Err(Hold));
+        assert_eq!(
+            upload_outcome(UploadResult::Hold {
+                reason: "5xx".into(),
+                scope: HoldScope::Wire,
+            }),
+            Err(Hold)
+        );
     }
 }

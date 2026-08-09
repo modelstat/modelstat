@@ -315,6 +315,19 @@ pub async fn cmd_sync(config: Arc<Config>, args: &[String]) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    if sent.rejected > 0 {
+        // Not an outage, and not success either: the server will not take these as
+        // written. Saying "✓ scan complete" here is what let a contract mismatch
+        // look like a healthy machine for 14 hours.
+        eprintln!(
+            "✗ scan complete, but the server REFUSED {} queued batch(es) on their \
+             content — they are saved on disk and nothing is lost, but they will not \
+             be accepted as written. This is a daemon/server contract mismatch; \
+             please report it with `modelstat --version`.",
+            sent.rejected
+        );
+        return ExitCode::FAILURE;
+    }
     println!("✓ scan complete — {} events uploaded", sent.events_uploaded);
     ExitCode::SUCCESS
 }

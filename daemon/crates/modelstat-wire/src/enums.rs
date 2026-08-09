@@ -63,7 +63,22 @@ pub const PROVIDERS: &[&str] = &[
     "unknown",
 ];
 
-/// Event categories (`kind` field). 5 entries.
+/// Event categories the parser arms MODEL (`kind` field). 5 entries.
+///
+/// **`kind` is an OPEN vocabulary on the wire — this is NOT a closed set.**
+/// [`crate::RawEvent::kind`] is a `String` on purpose: when a parser meets a
+/// record type no arm models, `unknown_record_event` (modelstat-parsers)
+/// deliberately forwards the source record's OWN spelling, so the fact that the
+/// turn existed is never lost. Every AI tool that invents a record type
+/// therefore puts a kind on the wire that is not listed here —
+/// `thinking_level_change`, `mcp_tool_selection`, `custom`, `title_change`,
+/// `attachment`, `compaction`, … are all live traffic today.
+///
+/// A consumer that models this field as a CLOSED enum rejects those batches, and
+/// because the uploader never drops, it then holds them forever: that is exactly
+/// how one unmodelled OMP record type silently stopped a device's ingest for 14
+/// hours. Read this field as a string; use [`is_modelled_event_kind`] only to ask
+/// "does the daemon model this?", never "is this allowed?".
 pub const EVENT_KINDS: &[&str] = &[
     "user_message",
     "assistant_message",
@@ -137,13 +152,22 @@ macro_rules! validator {
 
 validator!(is_valid_agent, AGENTS);
 validator!(is_valid_provider, PROVIDERS);
-validator!(is_valid_event_kind, EVENT_KINDS);
 validator!(is_valid_tool_call_status, TOOL_CALL_STATUSES);
 validator!(is_valid_os_family, OS_FAMILIES);
 validator!(is_valid_arch, ARCHES);
 validator!(is_valid_daemon_phase, DAEMON_PHASES);
 validator!(is_valid_install_method, INSTALL_METHODS);
 validator!(is_valid_summarizer_mode, SUMMARIZER_MODES);
+
+/// True if `v` is one of the kinds a parser arm MODELS ([`EVENT_KINDS`]).
+///
+/// **Not a validity check.** `kind` is an open vocabulary (see [`EVENT_KINDS`]):
+/// a `false` here means "the daemon forwarded a source record type it does not
+/// model", which is normal, expected traffic — not a malformed event. Never gate
+/// an upload or a deserialization on this.
+pub fn is_modelled_event_kind(v: &str) -> bool {
+    EVENT_KINDS.contains(&v)
+}
 
 #[cfg(test)]
 mod tests {
