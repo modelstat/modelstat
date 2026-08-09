@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use crate::config::{Config, FreshIdentity};
 use crate::ingest::{
-    classify_status, describe_error, ingest_backoff, jitter, retry_after, IngestResponse,
-    UploadDecision, UploadResult, INGEST_MAX_ATTEMPTS,
+    classify_status, describe_error, ingest_backoff, jitter, retry_after, HoldScope,
+    IngestResponse, UploadDecision, UploadResult, INGEST_MAX_ATTEMPTS,
 };
 use crate::machine_key::{build_fingerprint, intended_device_uuid};
 use modelstat_wire::{Fingerprint, IngestBatch, RegisterRequest};
@@ -474,12 +474,20 @@ impl DeviceApi {
         // batches would let a struggling one starve. Dropped on return.
         let _slot = self.gate.acquire().await;
         let mut last_fetch_error: Option<String> = None;
+        // The status of the last non-2xx answer, so the hold we finally return
+        // names WHOSE fault it was (see `HoldScope`). Without it the drain can
+        // only guess, and guessing "the server is down" for a batch the server
+        // will never accept stops every batch behind it.
+        let mut last_reject_status: Option<u16> = None;
         for attempt in 0..INGEST_MAX_ATTEMPTS {
             let Some(bearer) = self.config.bearer() else {
                 // No token — one-shot recovery, then retry. If recovery fails or
                 // is backing off, HOLD (never drop): retried next cycle.
                 if !self.recover_identity().await {
-                    return UploadResult::Hold("no_token".to_string());
+                    return UploadResult::Hold {
+                        reason: "no_token".to_string(),
+                        scope: HoldScope::Wire,
+                    };
                 }
                 continue;
             };
@@ -530,11 +538,15 @@ impl DeviceApi {
                     // Bearer revoked/rotated server-side — recover by machine-stable
                     // re-register, then retry with the fresh bearer.
                     if !self.recover_identity().await {
-                        return UploadResult::Hold("reauth_failed".to_string());
+                        return UploadResult::Hold {
+                            reason: "reauth_failed".to_string(),
+                            scope: HoldScope::Wire,
+                        };
                     }
                     continue;
                 }
                 UploadDecision::Backoff(base) => {
+                    last_reject_status = Some(status);
                     // 429 = over fair share, 503 = summariser at capacity. Both
                     // mean "you are asking for more than exists", so halve what
                     // we ask for. Other statuses are faults, not capacity, and
@@ -572,7 +584,11 @@ impl DeviceApi {
         let reason = last_fetch_error
             .map(|e| format!("network: {e}"))
             .unwrap_or_else(|| "max_attempts_exceeded".to_string());
-        UploadResult::Hold(reason)
+        // A batch the server answered 400/413/415/422 to is unshippable AS WRITTEN;
+        // saying so lets the drain keep the rest of the queue moving. Anything else
+        // — including "every attempt died at the socket" — is the wire's fault.
+        let scope = last_reject_status.map_or(HoldScope::Wire, HoldScope::for_status);
+        UploadResult::Hold { reason, scope }
     }
 }
 

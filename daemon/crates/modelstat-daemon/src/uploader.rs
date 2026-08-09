@@ -32,12 +32,14 @@
 //! land out of order. That is fine: every id is deterministic and the server
 //! upserts, so ordering was never load-bearing, only tidy.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 
 use crate::spool::{Spool, SpoolDepth, SpoolEntry};
+use modelstat_ingest::HoldScope;
 use modelstat_wire::IngestBatch;
 
 /// Batches in flight at once. Matched to the ingest client's own ceiling, so this
@@ -54,8 +56,11 @@ const BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
 
 /// A confirmed commit, or a hold to retry. Mirrors the scan's old contract so the
 /// never-drop matrix in `DeviceApi` is reused verbatim.
+///
+/// The [`HoldScope`] says whether the REST of the queue may still be tried this
+/// pass. It never authorises dropping anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hold;
+pub struct Hold(pub HoldScope);
 
 /// Ships one batch. Backed by `DeviceApi` in the daemon; a fake in tests.
 pub trait BatchUploader {
@@ -65,7 +70,7 @@ pub trait BatchUploader {
         &self,
         batch: &IngestBatch,
         raw: bool,
-    ) -> impl std::future::Future<Output = Result<u64, Hold>> + Send;
+    ) -> impl Future<Output = Result<u64, Hold>> + Send;
 }
 
 /// What one drain pass did — the numbers the tray and the lifetime counters read.
@@ -74,8 +79,14 @@ pub struct DrainOutcome {
     pub batches_uploaded: u64,
     pub events_uploaded: u64,
     pub segments_uploaded: u64,
-    /// The server would not take a batch; whatever is left stays spooled.
+    /// The WIRE would not take a batch, so the pass stopped early; whatever is
+    /// left stays spooled.
     pub held: bool,
+    /// Batches the server refused on their CONTENT this pass
+    /// ([`HoldScope::Batch`]). They are still on disk and still retried — but
+    /// they are not going to be accepted as written, so this is the number that
+    /// means "someone has to look": a daemon/server contract mismatch.
+    pub rejected: u64,
     /// What is still waiting after this pass.
     pub depth: SpoolDepth,
 }
@@ -101,7 +112,13 @@ pub trait UploadObserver {
 }
 impl UploadObserver for () {}
 
-/// Drain the spool once, oldest first, stopping at the first hold.
+/// Drain the spool once, oldest first, stopping at the first WIRE hold.
+///
+/// A batch the server refuses on its content ([`HoldScope::Batch`]) does NOT stop
+/// the pass: it stays on disk and the queue behind it keeps moving. That
+/// distinction is the difference between "one batch is stuck" and "this device
+/// stopped reporting" — with a single shared stop condition, one unmodelled
+/// record kind at the head of the spool held 98 batches for 14 hours.
 ///
 /// Pure of timing and scheduling — the caller owns the backoff — so the decision
 /// logic here is testable without sleeping.
@@ -146,9 +163,17 @@ where
             }
             // Nothing to send (vanished or quarantined — the spool logged it).
             None => continue,
-            // Stop: dropping the stream cancels what is still in flight and starts
-            // nothing new. Everything left is still on disk.
-            Some(Err(Hold)) => {
+            // The server rejected THIS payload and would reject it again; its
+            // siblings are unaffected, so keep the pass going. The file stays put
+            // (never dropped) and is retried on the next pass.
+            Some(Err(Hold(HoldScope::Batch))) => {
+                outcome.rejected += 1;
+                continue;
+            }
+            // The wire itself is the problem — stop. Dropping the stream cancels
+            // what is still in flight and starts nothing new. Everything left is
+            // still on disk.
+            Some(Err(Hold(HoldScope::Wire))) => {
                 outcome.held = true;
                 break;
             }
@@ -182,7 +207,9 @@ async fn ship_one<U: BatchUploader>(
                 "could not read spooled batch {}: {e} — leaving it for the next pass",
                 entry.path.display()
             );
-            return Some(Err(Hold));
+            // Unreadable on OUR side, not refused by the server: treat it as the
+            // wire being unavailable for this file and come back to it.
+            return Some(Err(Hold(HoldScope::Wire)));
         }
     };
     match uploader.upload(&spooled.batch, spooled.raw).await {
@@ -202,7 +229,7 @@ async fn ship_one<U: BatchUploader>(
                 segments: spooled.segment_count,
             }))
         }
-        Err(Hold) => Some(Err(Hold)),
+        Err(hold) => Some(Err(hold)),
     }
 }
 
@@ -228,6 +255,10 @@ where
         total.events_uploaded += pass.events_uploaded;
         total.segments_uploaded += pass.segments_uploaded;
         total.held = pass.held;
+        // Assigned, not accumulated: a refused batch is re-counted every pass, so
+        // the LAST pass's number is the honest "how many is the server still
+        // refusing" — summing would multiply one stuck batch by the pass count.
+        total.rejected = pass.rejected;
         total.depth = pass.depth;
         // A pass that held, or that emptied the queue, or that could ship nothing
         // at all (every entry quarantined) — any of these means going round again
@@ -278,7 +309,21 @@ where
         // A clean pass earns a fresh start: the next blip begins at the floor
         // rather than inheriting an hour-old ceiling.
         backoff = Duration::ZERO;
-        if outcome.depth.batches > 0 {
+        // Batches the server refuses by content stay queued, so `depth` alone no
+        // longer means "there is work to retry immediately" — going straight round
+        // on a pass that shipped NOTHING would spin the drain hot against a poison
+        // batch. Say it loudly (this is a contract mismatch a human must fix) and
+        // wait for a wake or the backstop, exactly like the idle case.
+        if outcome.rejected > 0 && outcome.batches_uploaded == 0 {
+            modelstat_log::log_error!(
+                "the server REFUSED {} of {} queued batch(es) on their content — they \
+                 stay on disk and nothing is lost, but they will not be accepted as \
+                 written: this is a daemon/server contract mismatch. Please report it \
+                 with the daemon version; `modelstat status` shows the count.",
+                outcome.rejected,
+                outcome.depth.batches
+            );
+        } else if outcome.depth.batches > 0 {
             continue; // more arrived while we worked — keep going
         }
         // Idle: sleep until a scan spools something, or re-check on the backstop
@@ -365,7 +410,7 @@ mod tests {
     impl BatchUploader for Offline {
         async fn upload(&self, _batch: &IngestBatch, _raw: bool) -> Result<u64, Hold> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
-            Err(Hold)
+            Err(Hold(HoldScope::Wire))
         }
     }
 
@@ -399,7 +444,7 @@ mod tests {
             }
             self.inflight.fetch_sub(1, Ordering::SeqCst);
             if batch.batch_id == self.refuse {
-                return Err(Hold);
+                return Err(Hold(HoldScope::Wire));
             }
             Ok(batch.events.len() as u64)
         }
@@ -477,6 +522,73 @@ mod tests {
         let out = drain_once(&s, &up, &mut ()).await;
         assert!(!out.held);
         assert_eq!(out.depth.batches, 0, "the queue drains completely");
+        let _ = std::fs::remove_dir_all(s.dir());
+    }
+
+    /// Rejects a named batch on its CONTENT (`HoldScope::Batch`) and commits the
+    /// rest — the shape of a server that will never accept one payload.
+    struct RejectsOneByContent {
+        reject: &'static str,
+    }
+    impl BatchUploader for RejectsOneByContent {
+        async fn upload(&self, batch: &IngestBatch, _raw: bool) -> Result<u64, Hold> {
+            if batch.batch_id == self.reject {
+                return Err(Hold(HoldScope::Batch));
+            }
+            Ok(batch.events.len() as u64)
+        }
+    }
+
+    /// THE incident, in one test: the OLDEST batch is one the server will never
+    /// accept (an unmodelled `kind` it 400s on). Every batch behind it must still
+    /// ship in the SAME pass.
+    ///
+    /// Before the scope split this was a total, silent outage — the pass stopped at
+    /// the head of the queue, so 98 batches sat spooled for 14 hours while the
+    /// daemon reported "scanning" and `segments_sent: 0`. The queue is deliberately
+    /// longer than `UPLOAD_FANOUT` so a pass that merely finishes its first
+    /// concurrent window cannot pass this test.
+    #[tokio::test]
+    async fn a_content_rejected_batch_does_not_block_the_queue_behind_it() {
+        let s = spool("rejected-head");
+        let total = UPLOAD_FANOUT * 3 + 1;
+        // b0 is oldest, and is the poison one.
+        for i in 0..total {
+            s.push(&batch(&format!("b{i}"), 1), false, 0).unwrap();
+        }
+        let up = RejectsOneByContent { reject: "b0" };
+        let out = drain_once(&s, &up, &mut ()).await;
+
+        assert_eq!(
+            out.batches_uploaded as usize,
+            total - 1,
+            "every batch behind the rejected one must ship in this same pass"
+        );
+        assert_eq!(out.rejected, 1, "the refusal is counted, never swallowed");
+        assert!(
+            !out.held,
+            "a content rejection is not an outage — it must not stop the pass"
+        );
+
+        // Never dropped: exactly the poison batch is still on disk, ready to be
+        // retried (and to succeed the moment the server understands it).
+        let left: Vec<String> = s
+            .list()
+            .unwrap()
+            .iter()
+            .filter_map(|e| s.load(e).unwrap())
+            .map(|b| b.batch.batch_id)
+            .collect();
+        assert_eq!(left, vec!["b0".to_string()], "left: {left:?}");
+
+        // And once the server accepts it, the queue is empty — no re-redaction.
+        let up = Accepting {
+            seen: Mutex::new(Vec::new()),
+        };
+        let out = drain_once(&s, &up, &mut ()).await;
+        assert_eq!(out.batches_uploaded, 1);
+        assert_eq!(out.rejected, 0);
+        assert_eq!(out.depth.batches, 0);
         let _ = std::fs::remove_dir_all(s.dir());
     }
 

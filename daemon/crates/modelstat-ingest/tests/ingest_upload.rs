@@ -152,7 +152,7 @@ async fn upload_batch_commits_and_routes() {
             assert_eq!(rc.updated_sessions, 2);
             assert_eq!(rc.batch_id, "batch_srv");
         }
-        UploadResult::Hold(why) => panic!("expected Commit, got Hold({why})"),
+        UploadResult::Hold { reason, .. } => panic!("expected Commit, got Hold({reason})"),
     }
     {
         let s = script.lock().unwrap();

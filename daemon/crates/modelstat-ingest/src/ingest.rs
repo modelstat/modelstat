@@ -53,6 +53,42 @@ pub struct IngestResponse {
     pub raw_s3_key: Option<String>,
 }
 
+/// Whose fault a hold is: the wire, or this one batch.
+///
+/// Both HOLD — nothing is ever dropped, and this does not change the retry
+/// ladder by one millisecond. The only question it answers is whether trying a
+/// DIFFERENT batch in the same pass is worth it. Without it the drain cannot
+/// tell "the server is down" from "the server refuses THIS payload", so it must
+/// assume the worst and stop the pass — which is how one unmodelled record kind
+/// (`thinking_level_change`, from an OMP transcript) held 98 batches behind it
+/// for 14 hours while the daemon reported itself healthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldScope {
+    /// The transport, or the server as a whole: network error, 5xx, 429, 408,
+    /// missing/refused credentials. The next batch would fail identically, so a
+    /// pass that sees this should stop and back off.
+    Wire,
+    /// The server rejected THIS payload on its content (400/413/415/422). Its
+    /// siblings are unaffected and must still get their turn — otherwise one
+    /// unshippable batch at the head of the queue is a total outage.
+    Batch,
+}
+
+impl HoldScope {
+    /// Classify a non-2xx status. A content rejection is batch-scoped; anything
+    /// that could equally befall the next batch is wire-scoped.
+    ///
+    /// 404/405 are deliberately [`Self::Wire`]: a missing route is a deployment
+    /// or proxy fault affecting every batch, not a complaint about this one.
+    #[must_use]
+    pub fn for_status(status: u16) -> Self {
+        match status {
+            400 | 413 | 415 | 422 => Self::Batch,
+            _ => Self::Wire,
+        }
+    }
+}
+
 /// The outcome of one [`super::DeviceApi::upload_batch`] call. A non-commit is
 /// ALWAYS a HOLD, never a permanent drop (feature §21.2): the caller retries the
 /// SAME batch next scan cycle, so good data is never discarded. (TS names the
@@ -65,7 +101,10 @@ pub enum UploadResult {
     /// Not accepted (no token / reauth failed / retries exhausted on any
     /// non-2xx / network). The reason is surfaced in the scan loop's
     /// `Upload failed: <reason>` status. Cursors do NOT advance.
-    Hold(String),
+    ///
+    /// `scope` says whether the queue may keep moving past it — see
+    /// [`HoldScope`]. It never means "drop this".
+    Hold { reason: String, scope: HoldScope },
 }
 
 impl UploadResult {
@@ -185,6 +224,24 @@ mod tests {
                 matches!(classify_status(s, 0), UploadDecision::Backoff(_)),
                 "status {s} must HOLD, never drop"
             );
+        }
+    }
+
+    /// The scope split must never be confused with dropping: every status above
+    /// still HOLDS. This only says who else may move on meanwhile.
+    #[test]
+    fn content_rejections_are_batch_scoped_everything_else_is_wire() {
+        for s in [400u16, 413, 415, 422] {
+            assert_eq!(
+                HoldScope::for_status(s),
+                HoldScope::Batch,
+                "status {s} rejects THIS payload; the queue behind it must keep moving"
+            );
+        }
+        // A missing route, throttling, an outage or a blip could hit any batch —
+        // stopping the pass is correct for these.
+        for s in [404u16, 405, 408, 426, 429, 500, 502, 503] {
+            assert_eq!(HoldScope::for_status(s), HoldScope::Wire, "status {s}");
         }
     }
 
