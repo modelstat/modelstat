@@ -20,6 +20,7 @@ pub mod tool_hash;
 pub mod types;
 
 pub mod git;
+pub mod git_commits;
 pub mod git_enrich;
 pub mod git_files;
 pub mod git_outcome;
@@ -60,8 +61,9 @@ pub use discovery::{
 };
 
 // The session-metadata surface the M4 pass consumes (feature §7.4): the pure
-// reference core + the git-enrichment seam + the two git-history read shapes.
+// reference core + the git-enrichment seam + the three git-history read shapes.
 pub use git::GitResolver;
+pub use git_commits::CommitInfo;
 pub use git_enrich::{GitEnrichment, RealGitEnrichment};
 pub use git_files::FileChange;
 pub use git_outcome::PrOutcome;

@@ -24,8 +24,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use modelstat_parsers::{
-    dedupe_files, dedupe_session_metadata, detect_branch_tickets, detect_references,
-    is_empty_session_metadata, DetectedRefs, FileRef, GitEnrichment, RepoRef, SessionMetadata,
+    dedupe_commits, dedupe_files, dedupe_session_metadata, detect_branch_tickets,
+    detect_references, is_empty_session_metadata, CommitRef, DetectedRefs, FileRef, GitEnrichment,
+    RepoRef, SessionMetadata,
 };
 use modelstat_wire::{RawEvent, Segment};
 
@@ -117,12 +118,13 @@ fn ms_to_iso(ms: i64) -> String {
 }
 
 /// Build one [`SessionMetadata`] per session from a batch's segments + events.
-/// Sessions whose channels surface no reference are omitted (shipping an empty
-/// map would only overwrite better server state). Returns a map suitable for
-/// `IngestBatch.session_metadata`.
+/// Sessions whose channels surface no reference at all are omitted (shipping an
+/// empty map would only overwrite better server state) — a session whose sole
+/// signal is a commit sha still ships, see `is_empty_session_metadata`.
+/// Returns a map suitable for `IngestBatch.session_metadata`.
 ///
-/// `git` is the injected best-effort git-enrichment seam (channels 2/5/6); `None`
-/// disables all three git channels. `extract_links` is the injected best-effort
+/// `git` is the injected best-effort git-enrichment seam (channels 2/5/6, four
+/// git reads); `None` disables it. `extract_links` is the injected best-effort
 /// model channel (4); `None` disables it. Both failing degrades gracefully — the
 /// deterministic channels stand on their own.
 pub async fn build_session_metadata<'g, 'o: 'g>(
@@ -307,15 +309,19 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
             }
         }
 
-        // 6. enrich with the files each resolved repo changed in the session
-        //    window (+ a commit-on-wrap grace, capped at the next session start).
+        // 6. enrich with what each resolved repo actually produced in the session
+        //    window: the files it changed and the commits it authored (+ a
+        //    commit-on-wrap grace, capped at the next session start). The commit
+        //    channel is the only handle on direct-to-main work — that spend names
+        //    no PR and mentions no issue, so every reference channel above misses
+        //    it entirely.
         if let Some(g) = git.as_deref_mut() {
             if !slug_to_cwd.is_empty() {
                 if let Some((since, until_raw)) = session_window(evs, segs) {
                     // `Date.parse(until)` is NaN only for a malformed timestamp;
                     // where TS would then throw in `toISOString` and drop the WHOLE
-                    // session, we skip only the files step and keep the metadata
-                    // found so far — no silent data loss.
+                    // session, we skip only the files/commits step and keep the
+                    // metadata found so far — no silent data loss.
                     if let Some(end_ms) = parse_iso_ms(&until_raw) {
                         let next_start = all_starts_ms.iter().copied().find(|m| *m > end_ms);
                         let until_ms = match next_start {
@@ -324,6 +330,7 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
                         };
                         let until = ms_to_iso(until_ms);
                         let mut file_refs: Vec<FileRef> = Vec::new();
+                        let mut commit_refs: Vec<CommitRef> = Vec::new();
                         for (slug, cwd) in &slug_to_cwd {
                             if let Some(changes) = g.collect_files_changed(cwd, &since, &until) {
                                 for c in changes {
@@ -336,11 +343,26 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
                                     });
                                 }
                             }
+                            if let Some(commits) = g.collect_commits(cwd, &since, &until) {
+                                for c in commits {
+                                    commit_refs.push(CommitRef {
+                                        slug: Some(slug.clone()),
+                                        sha: c.sha,
+                                        committed_at: c.committed_at,
+                                        source: "git".into(),
+                                    });
+                                }
+                            }
                         }
                         if !file_refs.is_empty() {
                             let mut combined = std::mem::take(&mut meta.files);
                             combined.extend(file_refs);
                             meta.files = dedupe_files(combined);
+                        }
+                        if !commit_refs.is_empty() {
+                            let mut combined = std::mem::take(&mut meta.commits);
+                            combined.extend(commit_refs);
+                            meta.commits = dedupe_commits(combined);
                         }
                     }
                 }
@@ -357,7 +379,7 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use modelstat_parsers::{FileChange, PrOutcome};
+    use modelstat_parsers::{CommitInfo, FileChange, PrOutcome};
     use modelstat_wire::GitContext;
     use std::collections::HashMap;
 
@@ -423,6 +445,8 @@ mod tests {
         outcomes: HashMap<(String, u64), PrOutcome>,
         files: HashMap<String, Vec<FileChange>>,
         files_calls: Vec<(String, String, String)>,
+        commits: HashMap<String, Vec<CommitInfo>>,
+        commits_calls: Vec<(String, String, String)>,
     }
     impl GitEnrichment for FakeGit {
         fn resolve_git(&mut self, cwd: Option<&str>) -> Option<GitContext> {
@@ -440,6 +464,16 @@ mod tests {
             self.files_calls
                 .push((cwd.to_string(), since.to_string(), until.to_string()));
             self.files.get(cwd).cloned()
+        }
+        fn collect_commits(
+            &mut self,
+            cwd: &str,
+            since: &str,
+            until: &str,
+        ) -> Option<Vec<CommitInfo>> {
+            self.commits_calls
+                .push((cwd.to_string(), since.to_string(), until.to_string()));
+            self.commits.get(cwd).cloned()
         }
     }
 
@@ -591,8 +625,8 @@ mod tests {
 
     #[tokio::test]
     async fn commit_grace_window_is_capped_at_next_session_start() {
-        // s1 ends 10:00; s2 starts 11:00 (< the 4h grace). s1's file capture
-        // `until` must be the next session's start, not end+4h.
+        // s1 ends 10:00; s2 starts 11:00 (< the 4h grace). s1's file + commit
+        // captures must both use the next session's start as `until`, not end+4h.
         let mut e1 = ev("s1", "2026-07-16T10:00:00.000Z");
         e1.cwd = Some("/repo".into());
         let e2 = ev("s2", "2026-07-16T11:00:00.000Z");
@@ -615,5 +649,107 @@ mod tests {
             .expect("files reads for /repo");
         assert_eq!(call.1, "2026-07-16T10:00:00.000Z"); // since = s1 window start
         assert_eq!(call.2, "2026-07-16T11:00:00.000Z"); // until capped at s2 start
+        let commit_call = fake
+            .commits_calls
+            .iter()
+            .find(|(cwd, _, _)| cwd == "/repo")
+            .expect("commit reads for /repo");
+        // The commit channel rides the SAME grace-extended window as the files
+        // channel — a commit must not be claimed by two adjacent sessions.
+        assert_eq!(commit_call, call);
+    }
+
+    fn commit_info(sha: &str, at: &str) -> CommitInfo {
+        CommitInfo {
+            sha: sha.into(),
+            committed_at: at.into(),
+        }
+    }
+
+    /// A session that pushed straight to `main`: no PR, no issue, no file
+    /// signal — only the repo git resolved and the commits it authored. It must
+    /// still ship, carrying slug-stamped commits (`is_empty_session_metadata`
+    /// counts `commits`, so the pass's skip check lets it through).
+    #[tokio::test]
+    async fn commits_channel_attaches_slug_stamped_refs() {
+        let mut e = ev("s1", "2026-07-16T10:00:00.000Z");
+        e.cwd = Some("/home/dev/api".into());
+        let mut fake = FakeGit::default();
+        fake.repos.insert(
+            "/home/dev/api".into(),
+            gitctx("acme/api", "github.com", "main"),
+        );
+        fake.commits.insert(
+            "/home/dev/api".into(),
+            vec![
+                commit_info("c0ffee1deadbee", "2026-07-16T10:30:00Z"),
+                commit_info("abc1234def", "2026-07-16T10:45:00Z"),
+            ],
+        );
+        let out = build_session_metadata(&[], &[e], Some(&mut fake), None).await;
+        let m = out.get("s1").expect("commits-only session still ships");
+        assert!(m.pull_requests.is_empty() && m.issues.is_empty() && m.files.is_empty());
+        assert_eq!(m.commits.len(), 2);
+        assert_eq!(m.commits[0].sha, "c0ffee1deadbee");
+        assert_eq!(m.commits[0].committed_at, "2026-07-16T10:30:00Z");
+        assert_eq!(m.commits[0].slug.as_deref(), Some("acme/api"));
+        assert_eq!(m.commits[0].source, "git");
+        assert_eq!(m.commits[1].sha, "abc1234def");
+    }
+
+    /// One session, two cwds — a repo and a worktree of it whose histories share
+    /// a commit. The sha must land once, not twice (double-counted spend).
+    #[tokio::test]
+    async fn duplicate_shas_across_repos_dedupe_once() {
+        let mut e1 = ev("s1", "2026-07-16T10:00:00.000Z");
+        e1.cwd = Some("/home/dev/api".into());
+        let mut e2 = ev("s1", "2026-07-16T10:05:00.000Z");
+        e2.cwd = Some("/home/dev/web".into());
+        let mut fake = FakeGit::default();
+        fake.repos.insert(
+            "/home/dev/api".into(),
+            gitctx("acme/api", "github.com", "main"),
+        );
+        fake.repos.insert(
+            "/home/dev/web".into(),
+            gitctx("acme/web", "github.com", "main"),
+        );
+        fake.commits.insert(
+            "/home/dev/api".into(),
+            vec![commit_info("deadbee0", "2026-07-16T10:30:00Z")],
+        );
+        fake.commits.insert(
+            "/home/dev/web".into(),
+            vec![
+                commit_info("DEADBEE0", "2026-07-16T10:30:00Z"),
+                commit_info("beef123", "2026-07-16T10:40:00Z"),
+            ],
+        );
+        let out = build_session_metadata(&[], &[e1, e2], Some(&mut fake), None).await;
+        let m = out.get("s1").expect("session present");
+        assert_eq!(m.commits.len(), 2);
+        // Same sha, different casing — first-seen copy wins, keeping the first
+        // repo's slug and casing.
+        assert_eq!(m.commits[0].sha, "deadbee0");
+        assert_eq!(m.commits[0].slug.as_deref(), Some("acme/api"));
+        assert_eq!(m.commits[1].sha, "beef123");
+        assert_eq!(m.commits[1].slug.as_deref(), Some("acme/web"));
+    }
+
+    /// Not a git repo / git timed out: the read returns None and the channel is
+    /// simply absent — never a panic, never a dropped session.
+    #[tokio::test]
+    async fn commit_read_failure_leaves_commits_empty() {
+        let mut e = ev("s1", "2026-07-16T10:00:00.000Z");
+        e.cwd = Some("/home/dev/api".into());
+        let mut fake = FakeGit::default();
+        fake.repos.insert(
+            "/home/dev/api".into(),
+            gitctx("acme/api", "github.com", "main"),
+        );
+        let out = build_session_metadata(&[], &[e], Some(&mut fake), None).await;
+        let m = out.get("s1").expect("repo ref still ships the session");
+        assert!(m.commits.is_empty());
+        assert_eq!(fake.commits_calls.len(), 1); // the read was attempted
     }
 }
