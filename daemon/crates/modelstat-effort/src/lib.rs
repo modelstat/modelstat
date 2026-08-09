@@ -43,6 +43,7 @@
 //! path, or commit message can reach a wire through this crate. Paths are read
 //! locally (the only way to tell a lockfile from a parser) and dropped.
 
+pub mod attribution;
 pub mod calibrate;
 pub mod diff;
 pub mod judge;
