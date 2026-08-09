@@ -1805,6 +1805,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "modelstat-effort"
+version = "1.19.0"
+dependencies = [
+ "modelstat-wire",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "modelstat-ingest"
 version = "1.19.0"
 dependencies = [

@@ -22,6 +22,7 @@ members = [
   "crates/modelstat-cli",
   "crates/modelstat-llm",
   "crates/modelstat-summarizer",
+  "crates/modelstat-effort",
 ]
 
 [workspace.package]
@@ -85,6 +86,7 @@ modelstat-update = { path = "crates/modelstat-update" }
 modelstat-mcp = { path = "crates/modelstat-mcp" }
 modelstat-daemon = { path = "crates/modelstat-daemon" }
 modelstat-llm = { path = "crates/modelstat-llm" }
+modelstat-effort = { path = "crates/modelstat-effort" }
 
 # Release profile: thin LTO + strip for small static binaries (plan §3).
 [profile.release]
