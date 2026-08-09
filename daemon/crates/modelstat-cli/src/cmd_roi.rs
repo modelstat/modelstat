@@ -22,13 +22,24 @@
 //!
 //! ## What the token figures are
 //!
-//! `total_tokens` is every token the session spent —
-//! [`modelstat_effort::attribution`]'s five buckets are disjoint, and
-//! `input_tokens` therefore INCLUDES cache writes and cache reads, which
-//! dominate on a long agent session. So the table's `tokens` column is total
-//! spend, not fresh prompt tokens, and `--usd-per-mtok` prices all of it at one
-//! rate: a blended figure, and the reason the rate is the user's to choose
-//! rather than a table this device carries.
+//! The five buckets a [`TokenMix`] carries are disjoint, and on a real agent
+//! session they are wildly lopsided: measured over 1,606 turns on this device,
+//! cache reads were 92.3% of raw tokens. They are re-counted on every turn and
+//! bill at roughly a tenth of fresh input, so a raw sum overstates
+//! billable-equivalent spend by ~5× and — the worse failure — destroys
+//! comparability: a PR touched during a long-context session outweighs an
+//! identical PR from a short one purely on context length, not on work done.
+//!
+//! So the headline denominator is INPUT-EQUIVALENT tokens
+//! ([`TokenMix::equiv_tokens`], weighted by the provider-family ratios named in
+//! [`modelstat_effort::attribution`]) and every raw class stays visible: the
+//! rollup prints the mix directly beneath the equivalent, and `--json` carries
+//! both plus the weights themselves. A derived number never replaces a measured
+//! one here — it sits next to it.
+//!
+//! `--usd-per-mtok` prices the EQUIVALENT. The weights normalise the classes
+//! against each other; the rate is still the user's to supply, because this
+//! device holds no price table.
 //!
 //! The session→PR join is reference-based (a branch name, a pasted PR URL), so
 //! the rollup publishes its own token-weighted confidence next to the totals.
@@ -47,7 +58,9 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use modelstat_effort::attribution::{self, PrSpend};
+use modelstat_effort::attribution::{
+    self, PrSpend, TokenMix, W_CACHE_READ, W_CACHE_WRITE, W_INPUT, W_OUTPUT,
+};
 use modelstat_effort::{calibrate_hours, estimate_pr_effort, Calibration, LabelStore, MIN_LABELS};
 use modelstat_ingest::home_path;
 use modelstat_parsers::git::resolve_repo_root;
@@ -153,9 +166,12 @@ pub struct Row {
     pub units: f64,
     pub percentile: f64,
     pub judged: bool,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub tokens: u64,
+    /// The raw per-class counts, never collapsed: a reader must be able to see
+    /// what the equivalent was derived from.
+    pub mix: TokenMix,
+    /// `mix` weighted into input-equivalents — the comparable figure, and the
+    /// one the table, the ratio and any dollars are built on.
+    pub equiv_tokens: f64,
     pub sessions: u32,
     pub attribution_confidence: f64,
     /// `Some` iff a [`Calibration`] existed. Never synthesised.
@@ -175,7 +191,7 @@ pub struct RoiView {
     /// diff was dropped. The header says so when it exceeds `rows.len()`, so a
     /// truncated table cannot be read as the whole window.
     pub window_total: usize,
-    pub unattributed_tokens: u64,
+    pub unattributed: TokenMix,
     pub unattributed_sessions: u32,
     pub sessions_scanned: u32,
     pub label_count: usize,
@@ -199,7 +215,10 @@ pub struct Totals {
     pub ai_prs: usize,
     pub human_prs: usize,
     pub units: f64,
-    pub tokens: u64,
+    /// Raw classes, summed. Kept whole so the rollup can show the reader what
+    /// the equivalent came from rather than asking them to trust it.
+    pub mix: TokenMix,
+    pub equiv_tokens: f64,
     pub sessions: u32,
     /// `None` when there is no effort to divide by — never `0.0`, which would
     /// read as "free".
@@ -221,7 +240,17 @@ impl RoiView {
         // negative zero and renders as `-0.00 effort units`. Real, and a
         // nonsense thing to show a user.
         let units: f64 = unsign_zero(ai.iter().map(|r| r.units).sum());
-        let tokens: u64 = ai.iter().map(|r| r.tokens).sum();
+        let mix = ai.iter().fold(TokenMix::default(), |mut m, r| {
+            m.input = m.input.saturating_add(r.mix.input);
+            m.output = m.output.saturating_add(r.mix.output);
+            m.cache_creation = m.cache_creation.saturating_add(r.mix.cache_creation);
+            m.cache_read = m.cache_read.saturating_add(r.mix.cache_read);
+            m.reasoning = m.reasoning.saturating_add(r.mix.reasoning);
+            m
+        });
+        // Summed off the rows, not recomputed from `mix`, so the rollup is
+        // exactly the column above it.
+        let equiv: f64 = unsign_zero(ai.iter().map(|r| r.equiv_tokens).sum());
         let sessions: u32 = ai.iter().map(|r| r.sessions).sum();
         // Hours exist iff every AI row carried one, which happens iff a
         // Calibration existed — the same gate, re-read off the data.
@@ -233,12 +262,13 @@ impl RoiView {
             ai_prs: ai.len(),
             human_prs: self.rows.len() - ai.len(),
             units,
-            tokens,
+            mix,
+            equiv_tokens: equiv,
             sessions,
-            tokens_per_unit: tokens_per_unit(tokens, units),
+            tokens_per_unit: tokens_per_unit(equiv, units),
             hours,
-            hours_per_mtok: hours.and_then(|h| per_mtok(h, tokens)),
-            usd: self.usd_per_mtok.map(|rate| usd_for_tokens(tokens, rate)),
+            hours_per_mtok: hours.and_then(|h| per_mtok(h, equiv)),
+            usd: self.usd_per_mtok.map(|rate| usd_for_tokens(equiv, rate)),
             confidence: weighted_confidence(&ai),
         }
     }
@@ -249,8 +279,8 @@ impl RoiView {
 /// Tokens spent per unit of effort delivered. `None` when the denominator is
 /// zero or unusable — dividing by no effort yields infinity, and printing that
 /// as an efficiency figure would be worse than printing nothing.
-pub fn tokens_per_unit(tokens: u64, units: f64) -> Option<f64> {
-    (units.is_finite() && units > 0.0).then(|| tokens as f64 / units)
+pub fn tokens_per_unit(equiv_tokens: f64, units: f64) -> Option<f64> {
+    (units.is_finite() && units > 0.0).then(|| equiv_tokens / units)
 }
 
 /// `-0.0` → `0.0`, everything else untouched. `-0.0 == 0.0` is true, so this
@@ -263,27 +293,31 @@ pub fn unsign_zero(x: f64) -> f64 {
     }
 }
 
-/// `value` per million tokens. `None` when no tokens were attributed.
-pub fn per_mtok(value: f64, tokens: u64) -> Option<f64> {
-    (tokens > 0).then(|| value / (tokens as f64 / 1e6))
+/// `value` per million input-equivalent tokens. `None` when none were
+/// attributed.
+pub fn per_mtok(value: f64, equiv_tokens: f64) -> Option<f64> {
+    (equiv_tokens > 0.0).then(|| value / (equiv_tokens / 1e6))
 }
 
-/// Dollars for `tokens` at `usd_per_mtok`. The only place money is ever
+/// Dollars for `equiv_tokens` at `usd_per_mtok`. The only place money is ever
 /// derived, and it is only ever called with a rate the user typed.
-pub fn usd_for_tokens(tokens: u64, usd_per_mtok: f64) -> f64 {
-    tokens as f64 / 1e6 * usd_per_mtok
+///
+/// The EQUIVALENT, not the raw total: a rate quoted per million input tokens
+/// applied to a raw sum that is 92% cache reads invents roughly 5× the spend.
+pub fn usd_for_tokens(equiv_tokens: f64, usd_per_mtok: f64) -> f64 {
+    equiv_tokens / 1e6 * usd_per_mtok
 }
 
-/// Token-weighted mean attribution confidence. Weighted by tokens, not by row,
-/// because one 300M-token PR joined on a pasted URL says more about how much of
-/// the total is guesswork than nine small PRs joined on a branch name.
+/// Token-weighted mean attribution confidence. Weighted by equivalent tokens,
+/// not by row, because one large PR joined on a pasted URL says more about how
+/// much of the total is guesswork than nine small PRs joined on a branch name.
 pub fn weighted_confidence(rows: &[&Row]) -> Option<f64> {
-    let tokens: u64 = rows.iter().map(|r| r.tokens).sum();
-    (tokens > 0).then(|| {
+    let equiv: f64 = rows.iter().map(|r| r.equiv_tokens).sum();
+    (equiv > 0.0).then(|| {
         rows.iter()
-            .map(|r| r.attribution_confidence * r.tokens as f64)
+            .map(|r| r.attribution_confidence * r.equiv_tokens)
             .sum::<f64>()
-            / tokens as f64
+            / equiv
     })
 }
 
@@ -321,6 +355,48 @@ pub fn fmt_tokens(n: u64) -> String {
         n if n >= 1_000 => format!("{:.0}k", n as f64 / 1e3),
         n => n.to_string(),
     }
+}
+
+/// Like [`fmt_tokens`], but `0` renders as `0`. The raw-mix line reads as a
+/// sum, and an em-dash inside a sum is not a number.
+fn fmt_count(n: u64) -> String {
+    if n == 0 {
+        "0".to_string()
+    } else {
+        fmt_tokens(n)
+    }
+}
+
+/// An input-equivalent figure, tagged so it can never be misread as a raw
+/// count: `806k eq`. Zero stays an em-dash — nothing was attributed.
+pub fn fmt_equiv(equiv: f64) -> String {
+    match equiv.round() as u64 {
+        0 => "—".to_string(),
+        n => format!("{} eq", fmt_tokens(n)),
+    }
+}
+
+/// The raw classes as one auditable line. Reasoning folds into `out` — it
+/// carries the same weight as output — so the four figures shown sum to the
+/// raw total printed beside them.
+fn fmt_raw_mix(m: &TokenMix) -> String {
+    format!(
+        "{} fresh / {} cache-write / {} cache-read / {} out  (raw total {})",
+        fmt_count(m.input),
+        fmt_count(m.cache_creation),
+        fmt_count(m.cache_read),
+        fmt_count(m.output.saturating_add(m.reasoning)),
+        fmt_count(m.raw_total()),
+    )
+}
+
+/// Width of the rollup's label column. One width for every line, so adding a
+/// label cannot silently misalign the block.
+const LABEL_W: usize = 23;
+
+/// One `  label   value` rollup line.
+fn kv(out: &mut String, label: &str, value: &str) {
+    out.push_str(&format!("  {:<w$}{}\n", label, value, w = LABEL_W));
 }
 
 fn fmt_usd(v: f64) -> String {
@@ -369,6 +445,9 @@ pub fn render_human(view: &RoiView) -> String {
     if view.rows.is_empty() {
         out.push_str("\n  (no merged PRs in this window)\n");
     } else {
+        // ONE token column, and it is the equivalent. Four class columns would
+        // turn a per-PR table into a spreadsheet; the classes live one line
+        // below the rollup's headline, where the sum is what a reader audits.
         let mut head = format!("\n  {:>6}  {:<5} {:>7} {:>5} {:>9}", "PR", "who", "units", "pct", "tokens");
         if hours_on {
             head.push_str(&format!(" {:>7}", "hours"));
@@ -386,7 +465,7 @@ pub fn render_human(view: &RoiView) -> String {
                 if r.ai_assisted { "AI" } else { "human" },
                 r.units,
                 r.percentile * 100.0,
-                fmt_tokens(r.tokens),
+                fmt_equiv(r.equiv_tokens),
             );
             if hours_on {
                 // `hours_p50` is Some for every row whenever a Calibration
@@ -401,9 +480,10 @@ pub fn render_human(view: &RoiView) -> String {
                 // free"; it means nothing was attributed to it. Say that once.
                 line.push_str(&format!(
                     " {:>9}",
-                    match r.tokens {
-                        0 => "—".to_string(),
-                        n => fmt_usd(usd_for_tokens(n, rate)),
+                    if r.equiv_tokens > 0.0 {
+                        fmt_usd(usd_for_tokens(r.equiv_tokens, rate))
+                    } else {
+                        "—".to_string()
                     }
                 ));
             }
@@ -414,77 +494,104 @@ pub fn render_human(view: &RoiView) -> String {
 
     // Rollup.
     out.push('\n');
-    out.push_str(&format!(
-        "  AI PRs:            {}  ({:.2} effort units)\n",
-        t.ai_prs, t.units
-    ));
-    out.push_str(&format!(
-        "  tokens:            {} across {} session{}\n",
-        fmt_tokens(t.tokens),
-        t.sessions,
-        if t.sessions == 1 { "" } else { "s" }
-    ));
+    kv(
+        &mut out,
+        "AI PRs:",
+        &format!("{}  ({:.2} effort units)", t.ai_prs, t.units),
+    );
+    kv(
+        &mut out,
+        "tokens (input-equiv):",
+        &format!(
+            "{} across {} session{}",
+            fmt_equiv(t.equiv_tokens),
+            t.sessions,
+            if t.sessions == 1 { "" } else { "s" }
+        ),
+    );
+    // Directly beneath the headline, so the derived figure and the measured
+    // ones it came from are never more than one line apart.
+    kv(&mut out, "raw mix:", &fmt_raw_mix(&t.mix));
     // Two different blanks, and the difference matters: no effort to divide by
     // versus no tokens to divide.
     match t.tokens_per_unit {
-        _ if t.tokens == 0 => {
-            out.push_str("  tokens per unit:   — (no tokens attributed to these PRs)\n")
-        }
-        Some(tpu) => out.push_str(&format!(
-            "  tokens per unit:   {}\n",
-            fmt_tokens(tpu.round() as u64)
-        )),
-        None => out.push_str("  tokens per unit:   — (no AI effort in this window)\n"),
+        _ if t.equiv_tokens <= 0.0 => kv(
+            &mut out,
+            "tokens per unit:",
+            "— (no tokens attributed to these PRs)",
+        ),
+        Some(tpu) => kv(&mut out, "tokens per unit:", &fmt_equiv(tpu)),
+        None => kv(
+            &mut out,
+            "tokens per unit:",
+            "— (no AI effort in this window)",
+        ),
     }
     // Money exists only inside this binding — there is no other path to a `$`.
     if let (Some(rate), Some(usd)) = (usd_rate, t.usd) {
-        if t.tokens == 0 {
+        if t.equiv_tokens <= 0.0 {
             // `$0.00` against no attributed tokens reads as "the AI work was
             // free". It was not measured, which is a different claim.
-            out.push_str("  spend:             — (no tokens attributed to these PRs)\n");
+            kv(&mut out, "spend:", "— (no tokens attributed to these PRs)");
         } else {
-            out.push_str(&format!("  spend:             {}\n", fmt_usd(usd)));
+            kv(&mut out, "spend:", &fmt_usd(usd));
             if let Some(per_unit) = t.tokens_per_unit {
-                out.push_str(&format!(
-                    "  cost per unit:     {}\n",
-                    fmt_usd(usd_for_tokens(per_unit.round() as u64, rate))
-                ));
+                kv(
+                    &mut out,
+                    "cost per unit:",
+                    &fmt_usd(usd_for_tokens(per_unit, rate)),
+                );
             }
         }
     }
     // The join is reference-based, so say how firm it is before anyone quotes
     // the number above.
     if let Some(c) = t.confidence {
-        out.push_str(&format!(
-            "  attribution:       {c:.2} mean confidence (session→PR references)\n"
-        ));
+        kv(
+            &mut out,
+            "attribution:",
+            &format!("{c:.2} mean confidence (session→PR references)"),
+        );
     }
     // Device-wide, NOT this repo: the session scan reads every tool log on the
     // machine. Labelling it as repo-scoped would understate the denominator by
     // however many repos the person also works in.
     if view.spend_available {
-        out.push_str(&format!(
-            "  unattributed:      {} across {} of {} sessions (device-wide)\n",
-            fmt_tokens(view.unattributed_tokens),
-            view.unattributed_sessions,
-            view.sessions_scanned
-        ));
+        kv(
+            &mut out,
+            "unattributed:",
+            &format!(
+                "{} across {} of {} sessions (device-wide), raw {}",
+                fmt_equiv(view.unattributed.equiv_tokens()),
+                view.unattributed_sessions,
+                view.sessions_scanned,
+                fmt_count(view.unattributed.raw_total()),
+            ),
+        );
     } else {
-        out.push_str("  unattributed:      — (no tool session logs found on this device)\n");
+        kv(
+            &mut out,
+            "unattributed:",
+            "— (no tool session logs found on this device)",
+        );
     }
 
     // Tier 2, and only Tier 2.
     match (&view.calibration, t.hours) {
         (Some(cal), Some(hours)) => {
-            out.push_str(&format!(
-                "  hours:             {}  ± {:.0}% (LOOCV, n={})\n",
-                fmt_hours(hours),
-                cal.median_abs_pct_error(),
-                cal.n()
-            ));
+            kv(
+                &mut out,
+                "hours:",
+                &format!(
+                    "{}  ± {:.0}% (LOOCV, n={})",
+                    fmt_hours(hours),
+                    cal.median_abs_pct_error(),
+                    cal.n()
+                ),
+            );
             match t.hours_per_mtok {
-                Some(hpm) => out.push_str(&format!("  hours per 1M tok:  {hpm:.2}\n")),
-                None => out.push_str("  hours per 1M tok:  — (no tokens attributed)\n"),
+                Some(hpm) => kv(&mut out, "hours per 1M eq:", &format!("{hpm:.2}")),
+                None => kv(&mut out, "hours per 1M eq:", "— (no tokens attributed)"),
             }
         }
         _ => {
@@ -494,6 +601,14 @@ pub fn render_human(view: &RoiView) -> String {
             }
         }
     }
+
+    // Why the two token figures differ, stated once, from the constants
+    // themselves so the prose cannot drift from the arithmetic.
+    out.push_str(&format!(
+        "  note: cache reads bill at roughly a tenth of fresh input \
+         (cache-write {W_CACHE_WRITE}×, cache-read {W_CACHE_READ}×, output {W_OUTPUT}×); \
+         weighting them is what makes PRs comparable across session lengths.\n"
+    ));
     out
 }
 
@@ -515,9 +630,12 @@ pub fn render_json(view: &RoiView) -> Value {
                 "units": r.units,
                 "percentile_vs_human_anchors": r.percentile,
                 "judged": r.judged,
-                "input_tokens": r.input_tokens,
-                "output_tokens": r.output_tokens,
-                "total_tokens": r.tokens,
+                // Measured classes and the derived figure, always together: a
+                // consumer can re-weight the mix itself, and can see that the
+                // equivalent is a normalisation rather than a new measurement.
+                "mix": r.mix,
+                "raw_total": r.mix.raw_total(),
+                "equiv_tokens": r.equiv_tokens,
                 "session_count": r.sessions,
                 "attribution_confidence": r.attribution_confidence,
                 "hours": r.hours_p50.map(|p50| json!({
@@ -525,7 +643,7 @@ pub fn render_json(view: &RoiView) -> Value {
                     "p50": p50,
                     "p90": r.hours_p90,
                 })),
-                "usd": view.usd_per_mtok.map(|rate| usd_for_tokens(r.tokens, rate)),
+                "usd": view.usd_per_mtok.map(|rate| usd_for_tokens(r.equiv_tokens, rate)),
             })
         })
         .collect();
@@ -536,6 +654,16 @@ pub fn render_json(view: &RoiView) -> Value {
         "anchor_n": view.anchor_n,
         "spend_available": view.spend_available,
         "usd_per_mtok": view.usd_per_mtok,
+        // Published, not implied: these are Anthropic-family list RATIOS, not
+        // prices, and a consumer on another provider needs to see them to know
+        // whether the equivalent means anything for their fleet.
+        "equiv_weights": {
+            "input": W_INPUT,
+            "cache_creation": W_CACHE_WRITE,
+            "cache_read": W_CACHE_READ,
+            "output": W_OUTPUT,
+            "reasoning": W_OUTPUT,
+        },
         "labels": {
             "count": view.label_count,
             "needed_for_hours": labels_needed(view.label_count),
@@ -547,13 +675,19 @@ pub fn render_json(view: &RoiView) -> Value {
             "ai_prs": t.ai_prs,
             "human_prs": t.human_prs,
             "effort_units": t.units,
-            "total_tokens": t.tokens,
+            "mix": t.mix,
+            "raw_total": t.mix.raw_total(),
+            "equiv_tokens": t.equiv_tokens,
             "session_count": t.sessions,
             "tokens_per_effort_unit": t.tokens_per_unit,
             "attribution_confidence": t.confidence,
             // Device-wide, not repo-scoped: the session scan reads every tool
             // log on this machine, across every repo.
-            "unattributed_tokens_device": view.unattributed_tokens,
+            "unattributed_device": {
+                "mix": view.unattributed,
+                "raw_total": view.unattributed.raw_total(),
+                "equiv_tokens": view.unattributed.equiv_tokens(),
+            },
             "unattributed_sessions_device": view.unattributed_sessions,
             "sessions_scanned_device": view.sessions_scanned,
             "hours": t.hours,
@@ -740,9 +874,8 @@ pub fn cmd_roi(args: &[String]) -> ExitCode {
                 units: report.units.units,
                 percentile: report.units.percentile_vs_human_anchors,
                 judged: report.units.judged,
-                input_tokens: spend.map_or(0, |s| s.input_tokens),
-                output_tokens: spend.map_or(0, |s| s.output_tokens),
-                tokens: spend.map_or(0, |s| s.total_tokens),
+                mix: spend.map_or_else(TokenMix::default, |s| s.mix),
+                equiv_tokens: spend.map_or(0.0, |s| s.equiv_tokens),
                 sessions: spend.map_or(0, |s| s.session_count),
                 attribution_confidence: spend.map_or(0.0, |s| s.attribution_confidence),
                 hours_p50: report.hours.map(|h| h.p50()),
@@ -758,7 +891,7 @@ pub fn cmd_roi(args: &[String]) -> ExitCode {
         anchor_n: mined.anchors.len(),
         rows,
         window_total,
-        unattributed_tokens: spend.unattributed_tokens,
+        unattributed: spend.unattributed,
         unattributed_sessions: spend.unattributed_sessions,
         sessions_scanned: spend.sessions_scanned,
         label_count,
@@ -779,7 +912,34 @@ pub fn cmd_roi(args: &[String]) -> ExitCode {
 mod tests {
     use super::*;
 
+    /// A realistic mix at `raw` total tokens, in the class shares this device
+    /// actually measured over 1,606 turns: 0.8% fresh, 0.4% output, 6.5%
+    /// cache-write, 92.3% cache-read. `raw` is taken in whole millions so the
+    /// shares stay integral and every expectation below can be an exact literal.
+    fn mix_of(raw: u64) -> TokenMix {
+        let m = raw / 1_000_000;
+        TokenMix {
+            input: 8_000 * m,
+            output: 4_000 * m,
+            cache_creation: 65_000 * m,
+            cache_read: 923_000 * m,
+            reasoning: 0,
+        }
+    }
+
+    /// Input-equivalents for one raw million of [`mix_of`]'s shape:
+    /// `8_000·1 + 4_000·5 + 65_000·1.25 + 923_000·0.1`. The ~5× gap between
+    /// this and the raw million IS the defect this command used to report.
+    const EQUIV_PER_RAW_M: f64 = 201_550.0;
+
+    /// `0.1` is not exact in binary, so every equivalent carries a little float
+    /// dust. Compare well inside one token.
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
     fn row(pr: u64, ai: bool, units: f64, tokens: u64) -> Row {
+        let mix = mix_of(tokens);
         Row {
             pr_number: pr,
             ai_assisted: ai,
@@ -787,9 +947,8 @@ mod tests {
             units,
             percentile: 0.5,
             judged: false,
-            input_tokens: tokens / 2,
-            output_tokens: tokens - tokens / 2,
-            tokens,
+            equiv_tokens: mix.equiv_tokens(),
+            mix,
             sessions: 2,
             attribution_confidence: 0.9,
             hours_p50: None,
@@ -805,7 +964,7 @@ mod tests {
             anchor_n: 50,
             window_total: rows.len(),
             rows,
-            unattributed_tokens: 500_000,
+            unattributed: mix_of(2_000_000),
             unattributed_sessions: 4,
             sessions_scanned: 40,
             label_count: 3,
@@ -813,6 +972,15 @@ mod tests {
             usd_per_mtok: None,
             spend_available: true,
         }
+    }
+
+    /// The one line of `text` containing `needle`, or a failure naming what was
+    /// missing — an assertion against a line that does not exist is a silent
+    /// pass, and every rollup check below is exactly that shape.
+    fn line<'a>(text: &'a str, needle: &str) -> &'a str {
+        text.lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line containing `{needle}`:\n{text}"))
     }
 
     /// A calibration can only be earned, never constructed — so the tests earn
@@ -844,22 +1012,27 @@ mod tests {
 
     #[test]
     fn tokens_per_unit_divides_and_refuses_zero_effort() {
-        assert_eq!(tokens_per_unit(3_000_000, 1.5), Some(2_000_000.0));
-        assert_eq!(tokens_per_unit(3_000_000, 0.0), None);
-        assert_eq!(tokens_per_unit(0, 2.0), Some(0.0));
-        assert_eq!(tokens_per_unit(10, f64::NAN), None);
+        assert_eq!(tokens_per_unit(3_000_000.0, 1.5), Some(2_000_000.0));
+        assert_eq!(tokens_per_unit(3_000_000.0, 0.0), None);
+        assert_eq!(tokens_per_unit(0.0, 2.0), Some(0.0));
+        assert_eq!(tokens_per_unit(10.0, f64::NAN), None);
     }
 
     #[test]
     fn per_mtok_scales_by_millions_and_refuses_zero_tokens() {
-        assert_eq!(per_mtok(4.0, 2_000_000), Some(2.0));
-        assert_eq!(per_mtok(4.0, 0), None);
+        assert_eq!(per_mtok(4.0, 2_000_000.0), Some(2.0));
+        assert_eq!(per_mtok(4.0, 0.0), None);
     }
 
     #[test]
-    fn usd_is_tokens_times_rate_per_million() {
-        assert!((usd_for_tokens(2_500_000, 3.0) - 7.5).abs() < 1e-9);
-        assert_eq!(usd_for_tokens(0, 3.0), 0.0);
+    fn usd_prices_the_equivalent_not_the_raw_total() {
+        assert!((usd_for_tokens(2_500_000.0, 3.0) - 7.5).abs() < 1e-9);
+        assert_eq!(usd_for_tokens(0.0, 3.0), 0.0);
+        // 4M raw of the measured shape is 806_200 equivalent, so $3/Mtok buys
+        // $2.42 of spend — not the $12.00 the raw sum used to claim.
+        let raw = mix_of(4_000_000);
+        assert!(close(usd_for_tokens(raw.equiv_tokens(), 3.0), 2.4186));
+        assert!(close(usd_for_tokens(raw.raw_total() as f64, 3.0), 12.0));
     }
 
     #[test]
@@ -873,8 +1046,13 @@ mod tests {
         assert_eq!(t.ai_prs, 2);
         assert_eq!(t.human_prs, 1);
         assert_eq!(t.units, 4.0);
-        assert_eq!(t.tokens, 4_000_000);
-        assert_eq!(t.tokens_per_unit, Some(1_000_000.0));
+        // Every raw class survives the rollup, undiminished...
+        assert_eq!(t.mix.raw_total(), 4_000_000);
+        assert_eq!(t.mix.cache_read, 3_692_000);
+        assert_eq!(t.mix.input, 32_000);
+        // ...beside the equivalent, which is ~5× smaller and is what divides.
+        assert!(close(t.equiv_tokens, 4.0 * EQUIV_PER_RAW_M), "{t:?}");
+        assert!(close(t.tokens_per_unit.unwrap(), EQUIV_PER_RAW_M), "{t:?}");
         // No rate supplied ⇒ no money anywhere in the rollup.
         assert_eq!(t.usd, None);
     }
@@ -886,7 +1064,10 @@ mod tests {
             row(2, false, 1.0, 8_000_000),
         ]);
         v.usd_per_mtok = Some(5.0);
-        assert_eq!(v.totals().usd, Some(10.0));
+        // 2M raw ⇒ 403_100 equivalent ⇒ $2.02. Pre-fix this read $10.00,
+        // pricing 1.8M re-counted cache reads as if they were fresh input.
+        let t = v.totals();
+        assert!(close(t.usd.unwrap(), 2.0155), "{t:?}");
     }
 
     #[test]
@@ -928,6 +1109,54 @@ mod tests {
         assert!(text.contains("no tokens attributed"), "{text}");
         // The per-row cell agrees with the rollup.
         assert!(!text.lines().any(|l| l.contains("#1") && l.contains('$')), "{text}");
+    }
+
+    // ── the equivalent, and the raw mix beside it ───────────────────
+
+    #[test]
+    fn the_rollup_leads_with_the_equivalent_and_shows_the_raw_mix_beneath_it() {
+        let text = render_human(&view(vec![row(1, true, 2.0, 4_000_000)]));
+
+        // The headline is the equivalent — the raw 4.0M is NOT what leads.
+        let head = line(&text, "tokens (input-equiv):");
+        assert!(head.contains("806k eq"), "{text}");
+        assert!(!head.contains("4.0M"), "raw sum in the headline:\n{text}");
+
+        // Directly beneath: every raw class, and a total the four sum to, so a
+        // reader sees both numbers and can reconcile them without the docs.
+        let raw = line(&text, "raw mix:");
+        assert!(raw.contains("32k fresh"), "{raw}");
+        assert!(raw.contains("260k cache-write"), "{raw}");
+        assert!(raw.contains("3.7M cache-read"), "{raw}");
+        assert!(raw.contains("16k out"), "{raw}");
+        assert!(raw.contains("(raw total 4.0M)"), "{raw}");
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("tokens (input-equiv):"))
+            .unwrap();
+        assert!(lines[at + 1].contains("raw mix:"), "not adjacent:\n{text}");
+
+        // The ratio divides the EQUIVALENT: 806_200 / 2.00 = 403_100 eq. Off
+        // the raw total the same row would have read 2.0M.
+        let per_unit = line(&text, "tokens per unit:");
+        assert!(per_unit.contains("403k eq"), "{text}");
+        assert!(!per_unit.contains("2.0M"), "divided the raw total:\n{text}");
+
+        // And one line says why the two figures differ.
+        assert!(text.contains("cache reads bill at roughly a tenth"), "{text}");
+        assert!(text.contains("cache-read 0.1×"), "{text}");
+    }
+
+    #[test]
+    fn the_table_column_is_the_equivalent_and_stays_one_column() {
+        let text = render_human(&view(vec![row(412, true, 2.0, 4_000_000)]));
+        let pr = line(&text, "#412");
+        assert!(pr.contains("806k eq"), "{text}");
+        assert!(!pr.contains("4.0M"), "raw sum in the table:\n{text}");
+        // Narrow: one token column, not four class columns.
+        let head = line(&text, "units");
+        assert!(!head.contains("cache"), "class columns leaked:\n{head}");
     }
 
     // ── the label-count message ─────────────────────────────────────
@@ -985,7 +1214,9 @@ mod tests {
         let mut v = view(vec![row(1, true, 2.0, 4_000_000)]);
         v.usd_per_mtok = Some(2.5);
         let text = render_human(&v);
-        assert!(text.contains("$10.00"), "4M tokens at $2.50/Mtok:\n{text}");
+        // 806_200 eq at $2.50/Mtok. The raw 4.0M would have said $10.00.
+        assert!(text.contains("$2.02"), "806k eq at $2.50/Mtok:\n{text}");
+        assert!(!text.contains("$10.00"), "priced the raw total:\n{text}");
         // Still no hours: a rate buys money, never a calibration.
         assert!(!text.to_lowercase().contains("loocv"), "{text}");
         assert!(text.contains("modelstat label"), "{text}");
@@ -997,7 +1228,8 @@ mod tests {
         let text = render_human(&v);
         assert!(text.contains("hours:"), "{text}");
         assert!(text.contains("LOOCV, n=12"), "{text}");
-        assert!(text.contains("hours per 1M tok"), "{text}");
+        // Per equivalent million, like every other ratio in the rollup.
+        assert!(text.contains("hours per 1M eq"), "{text}");
         // The unlock line is gone once it is unlocked.
         assert!(!text.contains("modelstat label"), "{text}");
     }
@@ -1006,8 +1238,11 @@ mod tests {
     fn empty_window_still_renders_a_rollup_and_refuses_to_divide() {
         let text = render_human(&view(Vec::new()));
         assert!(text.contains("no merged PRs in this window"), "{text}");
-        assert!(text.contains("tokens per unit:   —"), "{text}");
+        assert!(line(&text, "tokens per unit:").contains('—'), "{text}");
         assert!(!text.contains('$'));
+        // The mix line still prints, as zeros: an em-dash inside a sum is not
+        // a number.
+        assert!(line(&text, "raw mix:").contains("(raw total 0)"), "{text}");
         // An empty f64 sum folds from -0.0; `-0.00 effort units` is nonsense.
         assert!(text.contains("(0.00 effort units)"), "{text}");
         assert!(!text.contains("-0.00"), "{text}");
@@ -1033,10 +1268,45 @@ mod tests {
         assert!(doc["totals"].as_object().unwrap().contains_key("hours"));
         assert!(doc["prs"][0].as_object().unwrap().contains_key("usd"));
         assert_eq!(doc["labels"]["needed_for_hours"], 5);
-        assert_eq!(doc["totals"]["tokens_per_effort_unit"], 2_000_000.0);
+        assert!(close(
+            doc["totals"]["tokens_per_effort_unit"].as_f64().unwrap(),
+            403_100.0
+        ));
         // Valid JSON, round-trips.
         let text = serde_json::to_string(&doc).unwrap();
         serde_json::from_str::<Value>(&text).unwrap();
+    }
+
+    #[test]
+    fn json_carries_the_whole_raw_mix_beside_the_equivalent() {
+        let doc = render_json(&view(vec![row(1, true, 2.0, 4_000_000)]));
+        let pr = &doc["prs"][0];
+        // Every class, by name — nothing collapsed, nothing replaced.
+        assert_eq!(pr["mix"]["input"], 32_000);
+        assert_eq!(pr["mix"]["output"], 16_000);
+        assert_eq!(pr["mix"]["cache_creation"], 260_000);
+        assert_eq!(pr["mix"]["cache_read"], 3_692_000);
+        assert_eq!(pr["mix"]["reasoning"], 0);
+        assert_eq!(pr["raw_total"], 4_000_000);
+        assert!(close(pr["equiv_tokens"].as_f64().unwrap(), 806_200.0), "{pr}");
+
+        let t = &doc["totals"];
+        assert_eq!(t["raw_total"], 4_000_000);
+        assert_eq!(t["mix"]["cache_read"], 3_692_000);
+        assert!(close(t["equiv_tokens"].as_f64().unwrap(), 806_200.0), "{t}");
+
+        // The device-wide leftovers carry the same pair, not a bare total.
+        let un = &t["unattributed_device"];
+        assert_eq!(un["raw_total"], 2_000_000);
+        assert_eq!(un["mix"]["cache_read"], 1_846_000);
+        assert!(close(un["equiv_tokens"].as_f64().unwrap(), 403_100.0), "{un}");
+
+        // The weights are published, so the equivalent is re-derivable and a
+        // consumer on another provider can see these are Anthropic-family.
+        assert_eq!(doc["equiv_weights"]["input"], 1.0);
+        assert_eq!(doc["equiv_weights"]["cache_creation"], 1.25);
+        assert_eq!(doc["equiv_weights"]["cache_read"], 0.1);
+        assert_eq!(doc["equiv_weights"]["output"], 5.0);
     }
 
     #[test]
@@ -1045,8 +1315,9 @@ mod tests {
         v.usd_per_mtok = Some(2.5);
         let doc = render_json(&v);
         assert!(doc["prs"][0]["hours"]["p50"].as_f64().unwrap() > 0.0);
-        assert_eq!(doc["prs"][0]["usd"], 10.0);
-        assert_eq!(doc["totals"]["usd"], 10.0);
+        // Priced off the equivalent: 0.8062 Mtok × $2.50, not 4.0 × $2.50.
+        assert!(close(doc["prs"][0]["usd"].as_f64().unwrap(), 2.0155), "{doc}");
+        assert!(close(doc["totals"]["usd"].as_f64().unwrap(), 2.0155), "{doc}");
         assert!(doc["totals"]["hours"].as_f64().unwrap() > 0.0);
         assert_eq!(doc["calibration"]["n"], 12);
     }
@@ -1083,5 +1354,10 @@ mod tests {
         assert_eq!(fmt_tokens(312), "312");
         assert_eq!(fmt_tokens(845_000), "845k");
         assert_eq!(fmt_tokens(1_240_000), "1.2M");
+        // Inside a sum, zero is a number.
+        assert_eq!(fmt_count(0), "0");
+        // Equivalents are tagged so they can never be misread as raw counts.
+        assert_eq!(fmt_equiv(806_200.0), "806k eq");
+        assert_eq!(fmt_equiv(0.0), "—");
     }
 }
