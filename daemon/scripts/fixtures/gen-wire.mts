@@ -134,9 +134,11 @@ const ingestBatch = {
     {
       slug: "acme/api",
       host: "github.com",
-      cutoff: "2026-01-01T00:00:00.000Z",
+      cutoff: null,
       mined_at: "2026-06-01T10:00:00.000Z",
       head_sha: "0f4c9e7d2b8a1c6f3e5d7a9b0c2d4e6f8a1b3c5d",
+      human_anchor_count: 1,
+      ai_pr_count: 9,
       anchors: [
         {
           pr_number: 421,
@@ -147,6 +149,8 @@ const ingestBatch = {
           lines_deleted: 85,
           span_ms: 259200000,
           commit_count: 7,
+          active_minutes: 190,
+          ai_assisted: false,
         },
       ],
     },

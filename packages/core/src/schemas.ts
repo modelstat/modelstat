@@ -349,8 +349,8 @@ export const ToolCallWire = z.object({
 });
 export type ToolCallWire = z.infer<typeof ToolCallWire>;
 
-/** One merged PR mined from a repo's PRE-AI git history — an anchor point the
- * server compares AI-era outcomes against (the ROI denominator). Public repo
+/** One merged PR mined from a repo's git history — an anchor point the server
+ * compares AI-era outcomes against (the ROI denominator). Public repo
  * facts only (numbers, shas, timestamps, line counts) — the same safety class
  * as a slug; no file contents, no commit messages, no author identities. */
 export const AnchorPr = z.object({
@@ -369,20 +369,29 @@ export const AnchorPr = z.object({
   span_ms: z.number().int().nonnegative().optional(),
   /** Commits behind the merge. Absent when the history doesn't say. */
   commit_count: z.number().int().nonnegative().optional(),
+  /** Minutes of ACTIVE work behind the PR, from clustering its own commit
+   * timestamps into sittings. The effort half of the pair `span_ms` opens:
+   * wall time includes the night the PR spent in review, this does not.
+   * Absent when the PR left fewer than two timestamps to cluster. */
+  active_minutes: z.number().int().nonnegative().optional(),
+  /** Whether ANY commit in the PR carried an AI tool's trailer. Always false
+   * inside {@link RepoAnchors}`.anchors` — that list IS the human baseline —
+   * and carried explicitly so a consumer never infers it from context. */
+  ai_assisted: z.boolean().default(false),
 });
 export type AnchorPr = z.infer<typeof AnchorPr>;
 
-/** A repo's pre-AI baseline: merged-PR shape stats mined once from its own
- * history up to `cutoff` (the repo's first AI-era session). `head_sha` +
- * `mined_at` pin WHAT was read and WHEN, so the server can dedupe re-mines
- * instead of averaging them. */
+/** A repo's human-authored baseline: merged-PR shape stats mined once from its
+ * own history. `head_sha` + `mined_at` pin WHAT was read and WHEN, so the
+ * server can dedupe re-mines instead of averaging them. */
 export const RepoAnchors = z.object({
   /** `org/repo`. The join key to `session_metadata` references. */
   slug: z.string().max(200),
   /** The forge host, and only when git itself named it. Null everywhere else. */
   host: z.string().max(80).nullable().default(null),
-  /** End of the pre-AI window the anchors were mined from. */
-  cutoff: z.string().datetime({ offset: true }),
+  /** End of an OPERATOR-set mining window. Null by default: which PRs are a
+   * baseline is decided by AI trailers, not by a date. */
+  cutoff: z.string().datetime({ offset: true }).nullable().default(null),
   /** The instant the mining ran. */
   mined_at: z.string().datetime({ offset: true }),
   /** Hex sha of the repo's HEAD at mining time. */
@@ -391,6 +400,12 @@ export const RepoAnchors = z.object({
     .min(7)
     .max(64)
     .regex(/^[0-9a-fA-F]+$/),
+  /** Human-authored merged PRs found in the window scanned. */
+  human_anchor_count: z.number().int().nonnegative().default(0),
+  /** AI-assisted merged PRs found in that SAME window and excluded from
+   * `anchors`. Read next to `human_anchor_count` it says whether the baseline
+   * is thick enough to calibrate against at all. */
+  ai_pr_count: z.number().int().nonnegative().default(0),
   anchors: z.array(AnchorPr).max(50).default([]),
 });
 export type RepoAnchors = z.infer<typeof RepoAnchors>;
@@ -450,8 +465,8 @@ export const IngestBatch = z.object({
    * batch that waited out a mode switch still names the mode that actually
    * scrubbed it. Additive — old daemons omit it, old servers ignore it. */
   redactor_mode: z.enum(["local", "self-hosted", "cloud"]).optional(),
-  /** Pre-AI repo baseline anchors — one {@link RepoAnchors} per repo, mined
-   * on-device from the repo's own git history before its AI-era cutoff.
+  /** Human-authored repo baseline anchors — one {@link RepoAnchors} per repo,
+   * mined on-device from the repo's own git history.
    * Additive — old daemons omit it, old servers ignore it. */
   repo_anchors: z.array(RepoAnchors).max(10).optional(),
 });
