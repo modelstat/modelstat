@@ -14,8 +14,8 @@
 //!                                             │
 //!                     group by session_id ──▶ dedupe_session_metadata
 //!                                             │
-//!             1 PR ──▶ all tokens          n PRs ──▶ even split, conf × 0.5
-//!             0 PRs ─▶ unattributed_tokens / unattributed_sessions
+//!             1 PR ──▶ whole mix           n PRs ──▶ even split PER CLASS
+//!             0 PRs ─▶ unattributed (mix) / unattributed_sessions
 //! ```
 //!
 //! ## Attribution is a claim, and it says how strong it is
@@ -31,10 +31,20 @@
 //!
 //! Nothing here is a guess dressed as a measurement. A session that resolves to
 //! no PR is NOT quietly dropped into the nearest one: its tokens land in
-//! [`SpendSummary::unattributed_tokens`] and its existence in
+//! [`SpendSummary::unattributed`] and its existence in
 //! `unattributed_sessions`, because on a real machine that number is large
 //! (exploration, reading, ops work, sessions whose PR is never mentioned) and
 //! hiding it would make every per-PR figure look better than it is.
+//!
+//! ## The denominator is input-equivalent tokens, not raw tokens
+//!
+//! Raw token counts are not comparable between PRs. Cache reads are 92.3% of
+//! the raw volume on this machine and are re-counted every single turn, so a
+//! raw sum ranks PRs by how long their conversation was rather than by how much
+//! work they took. [`TokenMix::equiv_tokens`] converts the five classes into
+//! fresh-input equivalents and IS the ROI denominator; [`TokenMix::raw_total`]
+//! and every individual class stay right beside it, because a derived number
+//! must never be the only number a reader can see. See [`W_INPUT`].
 //!
 //! ## Privacy
 //!
@@ -53,15 +63,152 @@ use modelstat_parsers::{
     parse_codex_rollout_streaming, parse_cursor_tracking_db, parse_pi_session_streaming,
     DetectedRefs, ParserContext,
 };
-use modelstat_wire::RawEvent;
+use modelstat_wire::{RawEvent, TokenUsage};
 use serde::Serialize;
+
+/// The five token classes, kept apart all the way to the caller.
+///
+/// The parsers bucket these DISJOINTLY (see `modelstat-parsers`' codex notes),
+/// so [`raw_total`](TokenMix::raw_total) is an honest sum rather than a double
+/// count. Nothing upstream of this struct adds two classes together: an earlier
+/// version of this module collapsed the whole input side into one counter, and
+/// that single addition is precisely what made the ROI denominator wrong.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TokenMix {
+    /// Fresh prompt tokens — read by the model for the first time.
+    pub input: u64,
+    /// Completion tokens, reasoning excluded.
+    pub output: u64,
+    /// Cache writes: a prompt prefix persisted for later turns.
+    pub cache_creation: u64,
+    /// Cache reads: a prefix re-presented on a later turn — and re-counted on
+    /// EVERY turn, which is why it dominates any long agent session.
+    pub cache_read: u64,
+    /// Reasoning tokens. Produced, so weighted as output.
+    pub reasoning: u64,
+}
+
+/// One fresh input token: the unit the other three weights are expressed in.
+///
+/// # Why a raw token sum is the wrong ROI denominator
+///
+/// Measured on this device over 1,606 turns across 40 Claude Code sessions:
+///
+/// ```text
+///   fresh input      1.4M    0.8%
+///   output           0.7M    0.4%
+///   cache write     11.5M    6.5%
+///   cache read     162.7M   92.3%   ← re-counted on every turn
+///   ──────────────────────────────
+///   raw total      176.3M
+/// ```
+///
+/// Cache reads are 92.3% of raw volume and bill at roughly a tenth of fresh
+/// input, so a raw sum overstates billable-equivalent spend by ~5.1×. The worse
+/// problem is comparability: a PR worked on inside a long-context session
+/// outranks an identical PR from a short session purely because more context was
+/// replayed each turn. That is a property of the conversation, not of the work,
+/// and it makes PR-to-PR ROI meaningless.
+///
+/// # What these weights are — and what they are not
+///
+/// They are the Anthropic-family LIST RATIOS (cache write 1.25× input, cache
+/// read 0.1× input, output 5× input) used as a unit conversion, so that classes
+/// with genuinely different costs can be added up at all. OTHER PROVIDERS
+/// DIFFER — OpenAI's cached-input discount is not 0.1×, and no vendor is obliged
+/// to hold these ratios — so an equivalent computed here is comparable across
+/// PRs on this device, not across vendors.
+///
+/// They are explicitly NOT A PRICE. This crate does not price tokens: a price is
+/// a contract with a vendor that this device does not hold. Dollars stay opt-in
+/// through the CLI's `--usd-per-mtok`, which the user supplies and which applies
+/// to the equivalent figure.
+pub const W_INPUT: f64 = 1.0;
+/// A cache write costs 1.25× a fresh input token. See [`W_INPUT`].
+pub const W_CACHE_WRITE: f64 = 1.25;
+/// A cache read costs 0.1× a fresh input token — and is 92.3% of raw volume,
+/// which is the entire reason this weighting exists. See [`W_INPUT`].
+pub const W_CACHE_READ: f64 = 0.1;
+/// A produced token (completion or reasoning) costs 5× a fresh input token.
+/// See [`W_INPUT`].
+pub const W_OUTPUT: f64 = 5.0;
+
+impl TokenMix {
+    /// Every token this device actually saw, unweighted.
+    ///
+    /// The honest raw figure. Kept beside [`equiv_tokens`](Self::equiv_tokens)
+    /// rather than replaced by it: a reader must always be able to see both.
+    #[must_use]
+    pub const fn raw_total(&self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_creation)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.reasoning)
+    }
+
+    /// The mix in fresh-input-token equivalents — the ROI denominator.
+    ///
+    /// A normalization for comparability, not a price. See [`W_INPUT`].
+    #[must_use]
+    pub fn equiv_tokens(&self) -> f64 {
+        self.input as f64 * W_INPUT
+            + self.cache_creation as f64 * W_CACHE_WRITE
+            + self.cache_read as f64 * W_CACHE_READ
+            + (self.output as f64 + self.reasoning as f64) * W_OUTPUT
+    }
+
+    /// Add another mix, class by class. Saturating: a count that would wrap is
+    /// pinned instead, since a wrapped total is a lie and a pinned one is not.
+    fn add(&mut self, o: Self) {
+        self.input = self.input.saturating_add(o.input);
+        self.output = self.output.saturating_add(o.output);
+        self.cache_creation = self.cache_creation.saturating_add(o.cache_creation);
+        self.cache_read = self.cache_read.saturating_add(o.cache_read);
+        self.reasoning = self.reasoning.saturating_add(o.reasoning);
+    }
+
+    /// Share `i` of `n` when one session is split across several PRs.
+    ///
+    /// Every CLASS is divided on its own and carries its own remainder to the
+    /// first shares, so the `n` shares sum back to `self` EXACTLY, class by
+    /// class. Splitting the equivalent instead would let a PR's headline number
+    /// drift from the classes printed beside it; here it cannot, because the
+    /// equivalent is always recomputed from a mix that adds up.
+    ///
+    /// Private, and every caller has already established `n >= 1`.
+    fn share(&self, i: u64, n: u64) -> Self {
+        let part = |total: u64| total / n + u64::from(i < total % n);
+        Self {
+            input: part(self.input),
+            output: part(self.output),
+            cache_creation: part(self.cache_creation),
+            cache_read: part(self.cache_read),
+            reasoning: part(self.reasoning),
+        }
+    }
+}
+
+impl From<&TokenUsage> for TokenMix {
+    /// Field for field. The wire type already separates the five classes; this
+    /// module's job is to keep them that way.
+    fn from(t: &TokenUsage) -> Self {
+        Self {
+            input: t.input,
+            output: t.output,
+            cache_creation: t.cache_creation,
+            cache_read: t.cache_read,
+            reasoning: t.reasoning,
+        }
+    }
+}
 
 /// What one pull request cost in machine tokens.
 ///
-/// `input_tokens` is the whole input side (fresh + cache-write + cache-read) and
-/// `output_tokens` the whole output side (completion + reasoning): the parsers
-/// bucket those five counters DISJOINTLY (see `modelstat-parsers`' codex notes),
-/// so summing them is the honest total rather than a double count.
+/// `mix` is the measurement: five disjoint classes, none of them pre-summed.
+/// `equiv_tokens` is `mix.equiv_tokens()`, carried as a field because it is the
+/// figure PRs are ranked and compared by — never a substitute for the classes,
+/// always derivable from them.
 ///
 /// Deliberately no dollars. Tokens are an exact local fact; a price is a
 /// contract with a vendor that this device does not hold.
@@ -70,9 +217,10 @@ pub struct PrSpend {
     /// `org/repo`, as first seen. Matched case-insensitively.
     pub slug: String,
     pub pr_number: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
+    /// The raw classes, exactly as measured.
+    pub mix: TokenMix,
+    /// `mix.equiv_tokens()` — the ROI denominator. See [`W_INPUT`].
+    pub equiv_tokens: f64,
     /// Sessions that contributed, including ones split across several PRs.
     pub session_count: u32,
     /// Token-weighted mean of the contributing sessions' confidences — how much
@@ -88,9 +236,12 @@ pub struct PrSpend {
 /// attributed figures instead of leaving a reader to assume it is 1.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SpendSummary {
-    /// Highest spend first.
+    /// Highest [`PrSpend::equiv_tokens`] first — NOT highest raw total. The two
+    /// orders differ, and that difference is the point: see [`W_INPUT`].
     pub by_pr: Vec<PrSpend>,
-    pub unattributed_tokens: u64,
+    /// Spend from sessions that resolved to no PR, as a full mix — so device
+    /// coverage can be read in the same units as any PR.
+    pub unattributed: TokenMix,
     pub unattributed_sessions: u32,
     pub sessions_scanned: u32,
 }
@@ -185,8 +336,7 @@ pub fn spend_by_pr_events(events: &[RawEvent]) -> SpendSummary {
 /// One session, reduced to what attribution needs. Never holds an event.
 #[derive(Default)]
 struct SessionAcc {
-    input: u64,
-    output: u64,
+    mix: TokenMix,
     /// The reference blobs this session's turns carried, folded once at the end.
     parts: Vec<DetectedRefs>,
 }
@@ -209,17 +359,9 @@ fn fold_event(sessions: &mut BTreeMap<String, SessionAcc>, e: &RawEvent) {
     let acc = sessions.entry(e.session_id.clone()).or_default();
 
     if let Some(t) = &e.tokens {
-        // The five buckets are disjoint: input + cache write + cache read is the
-        // whole input side, completion + reasoning the whole output side.
-        acc.input = acc
-            .input
-            .saturating_add(t.input)
-            .saturating_add(t.cache_creation)
-            .saturating_add(t.cache_read);
-        acc.output = acc
-            .output
-            .saturating_add(t.output)
-            .saturating_add(t.reasoning);
+        // Class for class. Summing any two of them here is what this module
+        // used to do, and what it must never do again.
+        acc.mix.add(TokenMix::from(t));
     }
 
     match &e.references {
@@ -255,8 +397,7 @@ fn fold_event(sessions: &mut BTreeMap<String, SessionAcc>, e: &RawEvent) {
 #[derive(Default)]
 struct PrAcc {
     slug: String,
-    input: u64,
-    output: u64,
+    mix: TokenMix,
     sessions: u32,
     conf_weighted: f64,
     weight: u64,
@@ -275,10 +416,7 @@ fn finish(sessions: BTreeMap<String, SessionAcc>) -> SpendSummary {
         let prs = session_prs(session.parts);
 
         if prs.is_empty() {
-            out.unattributed_tokens = out
-                .unattributed_tokens
-                .saturating_add(session.input)
-                .saturating_add(session.output);
+            out.unattributed.add(session.mix);
             out.unattributed_sessions = out.unattributed_sessions.saturating_add(1);
             continue;
         }
@@ -292,17 +430,15 @@ fn finish(sessions: BTreeMap<String, SessionAcc>) -> SpendSummary {
         // clothes, and an even split at least states its own error honestly via
         // SPLIT_PENALTY.
         let n = prs.len() as u64;
-        let (in_base, in_rem) = (session.input / n, session.input % n);
-        let (out_base, out_rem) = (session.output / n, session.output % n);
 
         for (i, (slug, number, confidence)) in prs.into_iter().enumerate() {
-            // The remainder goes to the first PRs so the shares sum EXACTLY to
-            // what the session spent: integer division would quietly evaporate
-            // up to n-1 tokens per session, and evaporating spend is the one
-            // rounding this module must not do.
-            let i = i as u64;
-            let input = in_base + u64::from(i < in_rem);
-            let output = out_base + u64::from(i < out_rem);
+            // Each CLASS is split on its own, and each carries its own
+            // remainder to the first PRs, so the shares sum EXACTLY to what the
+            // session spent: integer division would quietly evaporate up to n-1
+            // tokens per class, and evaporating spend is the one rounding this
+            // module must not do. Splitting the equivalent instead would let a
+            // share's headline number disagree with its own classes.
+            let share = session.mix.share(i as u64, n);
             let confidence = if n > 1 {
                 confidence * SPLIT_PENALTY
             } else {
@@ -313,10 +449,13 @@ fn finish(sessions: BTreeMap<String, SessionAcc>) -> SpendSummary {
             if entry.slug.is_empty() {
                 entry.slug = slug;
             }
-            entry.input = entry.input.saturating_add(input);
-            entry.output = entry.output.saturating_add(output);
+            entry.mix.add(share);
             entry.sessions = entry.sessions.saturating_add(1);
-            let weight = input.saturating_add(output);
+            // Weighted by RAW volume, as before: this weight only decides how
+            // loudly a session speaks in the confidence mean, and reweighting it
+            // would silently change an attribution figure this change is not
+            // about.
+            let weight = share.raw_total();
             entry.weight = entry.weight.saturating_add(weight);
             entry.conf_weighted += confidence * weight as f64;
             entry.conf_sum += confidence;
@@ -328,9 +467,8 @@ fn finish(sessions: BTreeMap<String, SessionAcc>) -> SpendSummary {
         .map(|((_, pr_number), a)| PrSpend {
             slug: a.slug,
             pr_number,
-            input_tokens: a.input,
-            output_tokens: a.output,
-            total_tokens: a.input.saturating_add(a.output),
+            mix: a.mix,
+            equiv_tokens: a.mix.equiv_tokens(),
             session_count: a.sessions,
             attribution_confidence: if a.weight > 0 {
                 a.conf_weighted / a.weight as f64
@@ -341,10 +479,13 @@ fn finish(sessions: BTreeMap<String, SessionAcc>) -> SpendSummary {
             },
         })
         .collect();
-    // Spend first; then the key, so a tie is ordered rather than arbitrary.
+    // Equivalent spend first — a cache-read-heavy PR must not outrank a PR that
+    // did more work on a shorter context. `total_cmp` because the values are
+    // finite by construction and a sort must be a total order regardless.
+    // Then the key, so a tie is ordered rather than arbitrary.
     out.by_pr.sort_by(|a, b| {
-        b.total_tokens
-            .cmp(&a.total_tokens)
+        b.equiv_tokens
+            .total_cmp(&a.equiv_tokens)
             .then_with(|| a.slug.cmp(&b.slug))
             .then_with(|| a.pr_number.cmp(&b.pr_number))
     });
@@ -518,12 +659,30 @@ fn in_window(ts: &str, since_ms: i64) -> bool {
 mod tests {
     use super::*;
     use modelstat_parsers::detect_event_references;
-    use modelstat_wire::TokenUsage;
     use serde_json::json;
+
+    /// Equality for a weighted figure. The tolerance guards against
+    /// [`W_CACHE_READ`]'s binary representation (0.1 is not exact in f64), not
+    /// against a wrong answer: it scales with the value and stays many orders of
+    /// magnitude tighter than one token.
+    #[track_caller]
+    fn assert_equiv(got: f64, want: f64) {
+        let tol = 1e-9 * want.abs().max(1.0);
+        assert!((got - want).abs() <= tol, "equiv {got} != {want}");
+    }
 
     /// An event with a mined `references` blob, exactly as a parser stamps one.
     fn ev(session: &str, text: &str, input: u64, output: u64) -> RawEvent {
         let mut e = bare(session, input, output);
+        e.references = detect_event_references(text);
+        e
+    }
+
+    /// The same, carrying the FULL five-class mix a real turn reports — on a
+    /// long agent session fresh input is the rare class, not the common one.
+    fn ev_mix(session: &str, text: &str, tokens: TokenUsage) -> RawEvent {
+        let mut e = bare(session, 0, 0);
+        e.tokens = Some(tokens);
         e.references = detect_event_references(text);
         e
     }
@@ -581,12 +740,19 @@ mod tests {
         let pr = &s.by_pr[0];
         assert_eq!((pr.slug.as_str(), pr.pr_number), ("acme/api", 42));
         assert_eq!(
-            (pr.input_tokens, pr.output_tokens, pr.total_tokens),
-            (150, 15, 165)
+            pr.mix,
+            TokenMix {
+                input: 150,
+                output: 15,
+                ..TokenMix::default()
+            }
         );
+        assert_eq!(pr.mix.raw_total(), 165);
+        // 150 fresh input at 1x + 15 output at 5x.
+        assert_equiv(pr.equiv_tokens, 150.0 + 75.0);
         assert_eq!(pr.session_count, 1);
         assert_eq!(pr.attribution_confidence, CONFIDENCE_CONTENT);
-        assert_eq!(s.unattributed_tokens, 0);
+        assert_eq!(s.unattributed, TokenMix::default());
         assert_eq!(s.unattributed_sessions, 0);
         assert_eq!(s.sessions_scanned, 1);
     }
@@ -602,46 +768,92 @@ mod tests {
         assert_eq!(s.by_pr.len(), 2);
         for pr in &s.by_pr {
             assert_eq!(
-                (pr.input_tokens, pr.output_tokens, pr.total_tokens),
-                (50, 5, 55),
+                pr.mix,
+                TokenMix {
+                    input: 50,
+                    output: 5,
+                    ..TokenMix::default()
+                },
                 "PR {} share",
                 pr.pr_number
             );
+            assert_eq!(pr.mix.raw_total(), 55);
+            assert_equiv(pr.equiv_tokens, 75.0);
             assert_eq!(
                 pr.attribution_confidence,
                 CONFIDENCE_CONTENT * SPLIT_PENALTY
             );
             assert_eq!(pr.session_count, 1);
         }
-        assert_eq!(s.unattributed_tokens, 0);
+        assert_eq!(s.unattributed, TokenMix::default());
         assert_eq!(s.sessions_scanned, 1);
     }
 
     #[test]
-    fn odd_split_loses_no_tokens() {
-        // 101 input / 7 output across 3 PRs: shares must sum to the session's own
-        // spend, not to whatever integer division leaves behind.
-        let s = spend_by_pr_events(&[ev(
+    fn class_wise_split_loses_no_tokens_in_any_class() {
+        // Every class carries an awkward remainder across 3 PRs. The shares must
+        // sum back to the session's own spend CLASS BY CLASS, not merely in
+        // total: a mix that does not add up would let `equiv_tokens` disagree
+        // with the numbers printed beside it.
+        let spent = TokenUsage {
+            input: 101,
+            output: 7,
+            cache_creation: 1_000,
+            cache_read: 65_537,
+            reasoning: 2,
+        };
+        let s = spend_by_pr_events(&[ev_mix(
             "s1",
             "https://github.com/acme/api/pull/1 https://github.com/acme/api/pull/2 https://github.com/acme/api/pull/3",
-            101,
-            7,
+            spent.clone(),
         )]);
         assert_eq!(s.by_pr.len(), 3);
-        assert_eq!(s.by_pr.iter().map(|p| p.input_tokens).sum::<u64>(), 101);
-        assert_eq!(s.by_pr.iter().map(|p| p.output_tokens).sum::<u64>(), 7);
-        assert_eq!(s.by_pr.iter().map(|p| p.total_tokens).sum::<u64>(), 108);
+
+        let mut summed = TokenMix::default();
+        for pr in &s.by_pr {
+            summed.add(pr.mix);
+            // Each share's headline stays derivable from its own classes.
+            assert_equiv(pr.equiv_tokens, pr.mix.equiv_tokens());
+        }
+        assert_eq!(
+            summed,
+            TokenMix::from(&spent),
+            "a class drifted while splitting"
+        );
+        assert_eq!(summed.raw_total(), 66_647);
+
+        let parts: f64 = s.by_pr.iter().map(|p| p.equiv_tokens).sum();
+        assert_equiv(parts, TokenMix::from(&spent).equiv_tokens());
     }
 
     #[test]
-    fn session_with_no_pr_is_reported_as_unattributed() {
+    fn unattributed_carries_a_full_mix() {
+        let unlabelled = TokenUsage {
+            input: 400,
+            output: 40,
+            cache_creation: 4_000,
+            cache_read: 90_000,
+            reasoning: 9,
+        };
         let s = spend_by_pr_events(&[
-            ev("s1", "just reading code, no references here", 400, 40),
+            ev_mix(
+                "s1",
+                "just reading code, no references here",
+                unlabelled.clone(),
+            ),
             ev("s2", "fixing https://github.com/acme/api/pull/9", 100, 10),
         ]);
         assert_eq!(s.by_pr.len(), 1);
         assert_eq!(s.by_pr[0].pr_number, 9);
-        assert_eq!(s.unattributed_tokens, 440);
+        // Not a scalar: the device's uncovered spend is readable in the same
+        // classes, and the same units, as any PR's.
+        assert_eq!(s.unattributed, TokenMix::from(&unlabelled));
+        assert_eq!(s.unattributed.raw_total(), 94_449);
+        // 400 + 4000*1.25 + 90000*0.1 + (40+9)*5
+        assert_equiv(
+            s.unattributed.equiv_tokens(),
+            400.0 + 5_000.0 + 9_000.0 + 245.0,
+        );
         assert_eq!(s.unattributed_sessions, 1);
         assert_eq!(s.sessions_scanned, 2);
     }
@@ -671,7 +883,7 @@ mod tests {
         ]);
         assert_eq!(s.by_pr.len(), 1);
         assert_eq!(s.by_pr[0].attribution_confidence, CONFIDENCE_GIT);
-        assert_eq!(s.by_pr[0].total_tokens, 22);
+        assert_eq!(s.by_pr[0].mix.raw_total(), 22);
     }
 
     #[test]
@@ -692,14 +904,14 @@ mod tests {
         // PR 1 was worked on by two sessions, wholly by both.
         let pr1 = s.by_pr.iter().find(|p| p.pr_number == 1).unwrap();
         assert_eq!(pr1.session_count, 2);
-        assert_eq!(pr1.total_tokens, 11 + 44);
+        assert_eq!(pr1.mix.raw_total(), 11 + 44);
         // Every token is either attributed or reported as unattributed.
-        let attributed: u64 = s.by_pr.iter().map(|p| p.total_tokens).sum();
-        assert_eq!(attributed + s.unattributed_tokens, 11 + 22 + 33 + 44);
+        let attributed: u64 = s.by_pr.iter().map(|p| p.mix.raw_total()).sum();
+        assert_eq!(attributed + s.unattributed.raw_total(), 11 + 22 + 33 + 44);
     }
 
     #[test]
-    fn disjoint_token_buckets_all_count() {
+    fn every_class_survives_to_the_caller() {
         let mut e = ev("s1", "https://github.com/acme/api/pull/42", 0, 0);
         e.tokens = Some(TokenUsage {
             input: 1,
@@ -709,9 +921,174 @@ mod tests {
             reasoning: 16,
         });
         let s = spend_by_pr_events(&[e]);
-        assert_eq!(s.by_pr[0].input_tokens, 1 + 4 + 8);
-        assert_eq!(s.by_pr[0].output_tokens, 2 + 16);
-        assert_eq!(s.by_pr[0].total_tokens, 31);
+        let pr = &s.by_pr[0];
+        // Nothing was pre-summed away: all five are still individually readable.
+        assert_eq!(
+            pr.mix,
+            TokenMix {
+                input: 1,
+                output: 2,
+                cache_creation: 4,
+                cache_read: 8,
+                reasoning: 16,
+            }
+        );
+        assert_eq!(pr.mix.raw_total(), 31);
+        // 1 + 4*1.25 + 8*0.1 + (2+16)*5
+        assert_equiv(pr.equiv_tokens, 1.0 + 5.0 + 0.8 + 90.0);
+    }
+
+    #[test]
+    fn equiv_tokens_is_the_hand_computed_weighted_sum() {
+        let mix = TokenMix {
+            input: 1_000,
+            output: 200,
+            cache_creation: 400,
+            cache_read: 8_000,
+            reasoning: 50,
+        };
+        // By hand: 1000*1.0 + 400*1.25 + 8000*0.1 + (200+50)*5.0
+        //        = 1000    + 500      + 800       + 1250       = 3550
+        assert_equiv(mix.equiv_tokens(), 3_550.0);
+        assert_eq!(mix.raw_total(), 9_650);
+        // The four ratios live in one place, and are the documented ones.
+        assert_eq!(
+            (W_INPUT, W_CACHE_WRITE, W_CACHE_READ, W_OUTPUT),
+            (1.0, 1.25, 0.1, 5.0)
+        );
+    }
+
+    #[test]
+    fn the_measured_device_mix_is_overstated_five_fold_by_raw_tokens() {
+        // The mix this whole change exists for: 1,606 turns across 40 Claude
+        // Code sessions on one real machine.
+        let measured = TokenMix {
+            input: 1_400_000,
+            output: 700_000,
+            cache_creation: 11_500_000,
+            cache_read: 162_700_000,
+            reasoning: 0,
+        };
+        assert_eq!(measured.raw_total(), 176_300_000);
+        let raw = measured.raw_total() as f64;
+        // Cache reads alone are 92.3% of the raw volume …
+        assert!(
+            (measured.cache_read as f64 / raw - 0.923).abs() < 0.001,
+            "cache-read share drifted from the measurement"
+        );
+        // … and re-counting them every turn is what inflates raw by ~5x.
+        assert_equiv(measured.equiv_tokens(), 35_545_000.0);
+        let overstatement = raw / measured.equiv_tokens();
+        assert!(
+            (4.5..=5.5).contains(&overstatement),
+            "raw/equiv was {overstatement}, expected ~5x"
+        );
+    }
+
+    #[test]
+    fn same_raw_total_ranks_by_work_not_by_context_length() {
+        // Two PRs, identical raw totals. One spent it on replayed context, the
+        // other on fresh input. They are not the same amount of work.
+        let s = spend_by_pr_events(&[
+            ev_mix(
+                "s1",
+                "https://github.com/acme/api/pull/1",
+                TokenUsage {
+                    input: 50_000,
+                    cache_read: 950_000,
+                    ..TokenUsage::default()
+                },
+            ),
+            ev_mix(
+                "s2",
+                "https://github.com/acme/api/pull/2",
+                TokenUsage {
+                    input: 1_000_000,
+                    ..TokenUsage::default()
+                },
+            ),
+        ]);
+        let pr1 = s.by_pr.iter().find(|p| p.pr_number == 1).unwrap();
+        let pr2 = s.by_pr.iter().find(|p| p.pr_number == 2).unwrap();
+        assert_eq!(pr1.mix.raw_total(), pr2.mix.raw_total());
+        // 95% replayed context costs roughly a seventh of the same raw volume
+        // spent on fresh input.
+        assert_equiv(pr1.equiv_tokens, 145_000.0);
+        assert_equiv(pr2.equiv_tokens, 1_000_000.0);
+        let order: Vec<u64> = s.by_pr.iter().map(|p| p.pr_number).collect();
+        assert_eq!(order, vec![2, 1], "the cache-read PR must rank far below");
+    }
+
+    #[test]
+    fn sorting_by_equivalent_reverses_a_raw_ordering() {
+        // PR 1 burned twice PR 2's raw tokens, all of it replayed context. Raw
+        // ranks it first; equivalent ranks it last. That disagreement IS the
+        // defect this module was changed to fix.
+        let s = spend_by_pr_events(&[
+            ev_mix(
+                "s1",
+                "https://github.com/acme/api/pull/1",
+                TokenUsage {
+                    cache_read: 2_000_000,
+                    ..TokenUsage::default()
+                },
+            ),
+            ev_mix(
+                "s2",
+                "https://github.com/acme/api/pull/2",
+                TokenUsage {
+                    input: 1_000_000,
+                    ..TokenUsage::default()
+                },
+            ),
+        ]);
+        let mut by_raw = s.by_pr.clone();
+        by_raw.sort_by_key(|p| std::cmp::Reverse(p.mix.raw_total()));
+        assert_eq!(
+            by_raw.iter().map(|p| p.pr_number).collect::<Vec<_>>(),
+            vec![1, 2],
+            "raw would rank the replayed-context PR first"
+        );
+        assert_eq!(
+            s.by_pr.iter().map(|p| p.pr_number).collect::<Vec<_>>(),
+            vec![2, 1],
+            "by_pr must be ordered by equivalent, not raw"
+        );
+    }
+
+    #[test]
+    fn by_pr_is_sorted_by_equiv_tokens_descending() {
+        let s = spend_by_pr_events(&[
+            ev("s1", "https://github.com/acme/api/pull/1", 10, 0),
+            ev("s2", "https://github.com/acme/api/pull/2", 900, 0),
+            ev("s3", "https://github.com/acme/api/pull/3", 100, 0),
+        ]);
+        let order: Vec<u64> = s.by_pr.iter().map(|p| p.pr_number).collect();
+        assert_eq!(order, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn serialized_spend_shows_every_raw_class_beside_the_equivalent() {
+        let s = spend_by_pr_events(&[ev_mix(
+            "s1",
+            "https://github.com/acme/api/pull/42",
+            TokenUsage {
+                input: 1,
+                output: 2,
+                cache_creation: 4,
+                cache_read: 8,
+                reasoning: 16,
+            },
+        )]);
+        let v = serde_json::to_value(&s.by_pr[0]).unwrap();
+        for class in ["input", "output", "cache_creation", "cache_read", "reasoning"] {
+            assert!(
+                v["mix"][class].as_u64().is_some(),
+                "{class} must survive into the JSON"
+            );
+        }
+        assert_eq!(v["mix"]["cache_read"], 8);
+        assert!(v["equiv_tokens"].as_f64().is_some());
     }
 
     #[test]
@@ -734,19 +1111,8 @@ mod tests {
         }));
         let s = spend_by_pr_events(&[e]);
         assert!(s.by_pr.is_empty());
-        assert_eq!(s.unattributed_tokens, 11);
+        assert_eq!(s.unattributed.raw_total(), 11);
         assert_eq!(s.unattributed_sessions, 1);
-    }
-
-    #[test]
-    fn by_pr_is_sorted_by_total_tokens_descending() {
-        let s = spend_by_pr_events(&[
-            ev("s1", "https://github.com/acme/api/pull/1", 10, 0),
-            ev("s2", "https://github.com/acme/api/pull/2", 900, 0),
-            ev("s3", "https://github.com/acme/api/pull/3", 100, 0),
-        ]);
-        let order: Vec<u64> = s.by_pr.iter().map(|p| p.pr_number).collect();
-        assert_eq!(order, vec![2, 3, 1]);
     }
 
     #[test]
@@ -766,7 +1132,7 @@ mod tests {
         let s = spend_by_pr_events(&[lower, upper]);
         assert_eq!(s.by_pr.len(), 1);
         assert_eq!(s.by_pr[0].session_count, 2);
-        assert_eq!(s.by_pr[0].total_tokens, 33);
+        assert_eq!(s.by_pr[0].mix.raw_total(), 33);
     }
 
     #[test]
@@ -775,7 +1141,9 @@ mod tests {
         e.tokens = None;
         let s = spend_by_pr_events(&[e]);
         assert_eq!(s.by_pr.len(), 1);
-        assert_eq!(s.by_pr[0].total_tokens, 0);
+        assert_eq!(s.by_pr[0].mix, TokenMix::default());
+        assert_eq!(s.by_pr[0].mix.raw_total(), 0);
+        assert_equiv(s.by_pr[0].equiv_tokens, 0.0);
         // Weighted mean is undefined at zero weight; the plain mean stands in.
         assert_eq!(s.by_pr[0].attribution_confidence, CONFIDENCE_CONTENT);
     }
@@ -794,13 +1162,17 @@ mod tests {
         assert!(
             s.by_pr
                 .windows(2)
-                .all(|w| w[0].total_tokens >= w[1].total_tokens),
-            "by_pr must be sorted by total_tokens descending"
+                .all(|w| w[0].equiv_tokens >= w[1].equiv_tokens),
+            "by_pr must be sorted by equiv_tokens descending"
         );
         for pr in &s.by_pr {
             assert!(!pr.slug.is_empty(), "an attributed PR always names its repo");
             assert!(pr.pr_number >= 1);
-            assert_eq!(pr.total_tokens, pr.input_tokens + pr.output_tokens);
+            // The ranked figure is always recomputable from the raw classes
+            // published beside it — never a number a reader cannot check.
+            assert_equiv(pr.equiv_tokens, pr.mix.equiv_tokens());
+            assert!(pr.equiv_tokens >= 0.0);
+            assert!(pr.equiv_tokens <= pr.mix.raw_total() as f64 * W_OUTPUT);
             assert!(pr.session_count >= 1);
             assert!(
                 pr.attribution_confidence > 0.0 && pr.attribution_confidence <= CONFIDENCE_GIT,
