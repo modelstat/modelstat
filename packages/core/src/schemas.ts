@@ -349,6 +349,52 @@ export const ToolCallWire = z.object({
 });
 export type ToolCallWire = z.infer<typeof ToolCallWire>;
 
+/** One merged PR mined from a repo's PRE-AI git history — an anchor point the
+ * server compares AI-era outcomes against (the ROI denominator). Public repo
+ * facts only (numbers, shas, timestamps, line counts) — the same safety class
+ * as a slug; no file contents, no commit messages, no author identities. */
+export const AnchorPr = z.object({
+  pr_number: z.number().int().positive(),
+  /** Hex sha of the merge commit. */
+  merge_sha: z
+    .string()
+    .min(7)
+    .max(64)
+    .regex(/^[0-9a-fA-F]+$/),
+  merged_at: z.string().datetime({ offset: true }),
+  files_changed: z.number().int().nonnegative(),
+  lines_added: z.number().int().nonnegative(),
+  lines_deleted: z.number().int().nonnegative(),
+  /** First-commit→merge wall time. Absent when the history doesn't say. */
+  span_ms: z.number().int().nonnegative().optional(),
+  /** Commits behind the merge. Absent when the history doesn't say. */
+  commit_count: z.number().int().nonnegative().optional(),
+});
+export type AnchorPr = z.infer<typeof AnchorPr>;
+
+/** A repo's pre-AI baseline: merged-PR shape stats mined once from its own
+ * history up to `cutoff` (the repo's first AI-era session). `head_sha` +
+ * `mined_at` pin WHAT was read and WHEN, so the server can dedupe re-mines
+ * instead of averaging them. */
+export const RepoAnchors = z.object({
+  /** `org/repo`. The join key to `session_metadata` references. */
+  slug: z.string().max(200),
+  /** The forge host, and only when git itself named it. Null everywhere else. */
+  host: z.string().max(80).nullable().default(null),
+  /** End of the pre-AI window the anchors were mined from. */
+  cutoff: z.string().datetime({ offset: true }),
+  /** The instant the mining ran. */
+  mined_at: z.string().datetime({ offset: true }),
+  /** Hex sha of the repo's HEAD at mining time. */
+  head_sha: z
+    .string()
+    .min(7)
+    .max(64)
+    .regex(/^[0-9a-fA-F]+$/),
+  anchors: z.array(AnchorPr).max(50).default([]),
+});
+export type RepoAnchors = z.infer<typeof RepoAnchors>;
+
 /** Bundle the daemon ships to the server in one request.
  *
  * The daemon runs the full pipeline locally
@@ -404,6 +450,10 @@ export const IngestBatch = z.object({
    * batch that waited out a mode switch still names the mode that actually
    * scrubbed it. Additive — old daemons omit it, old servers ignore it. */
   redactor_mode: z.enum(["local", "self-hosted", "cloud"]).optional(),
+  /** Pre-AI repo baseline anchors — one {@link RepoAnchors} per repo, mined
+   * on-device from the repo's own git history before its AI-era cutoff.
+   * Additive — old daemons omit it, old servers ignore it. */
+  repo_anchors: z.array(RepoAnchors).max(10).optional(),
 });
 export type IngestBatch = z.infer<typeof IngestBatch>;
 

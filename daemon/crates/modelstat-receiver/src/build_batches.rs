@@ -232,6 +232,7 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
         },
         summarizer_mode: None,
         redactor_mode: None,
+        repo_anchors: None,
     })
 }
 

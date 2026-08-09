@@ -64,6 +64,14 @@ pub const SEGMENTS_COUNT_MAX: usize = 2_000;
 pub const TOOL_CALLS_COUNT_MAX: usize = 20_000;
 pub const SESSION_TITLE_MAX: usize = 120;
 
+// --- RepoAnchors / AnchorPr -------------------------------------------------
+pub const ANCHOR_SLUG_MAX: usize = 200;
+pub const ANCHOR_HOST_MAX: usize = 80;
+pub const ANCHOR_SHA_MAX: usize = 64;
+pub const ANCHOR_ISO_MAX: usize = 40;
+pub const ANCHORS_PER_REPO_COUNT_MAX: usize = 50;
+pub const REPO_ANCHORS_COUNT_MAX: usize = 10;
+
 // --- HeartbeatPayload -----------------------------------------------------
 pub const HEARTBEAT_MESSAGE_MAX: usize = 240;
 

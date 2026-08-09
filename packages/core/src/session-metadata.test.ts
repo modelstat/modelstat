@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  type CommitRef,
+  dedupeCommits,
   type DetectedRefs,
   dedupeFiles,
   dedupeSessionMetadata,
@@ -299,10 +301,52 @@ test("dedupeFiles drops malformed refs and caps at 500", () => {
   assert.equal(out[0]?.path, "ok.ts");
 });
 
-test("isEmptySessionMetadata accounts for files", () => {
+test("dedupeCommits merges by sha case-insensitively, keeping the first-seen copy", () => {
+  const commits: CommitRef[] = [
+    { slug: null, sha: "ABC1234", committed_at: "2026-01-01T00:00:00Z", source: "content" },
+    { slug: "acme/api", sha: "abc1234", committed_at: "2026-01-02T00:00:00Z", source: "git" },
+    { slug: "acme/api", sha: "def5678", committed_at: "2026-01-03T00:00:00Z", source: "git" },
+  ];
+  const out = dedupeCommits(commits);
+  assert.equal(out.length, 2);
+  // The first-seen copy keeps its sha casing + timestamp, backfills the
+  // missing slug, and the stronger `git` source wins.
+  assert.equal(out[0]?.sha, "ABC1234");
+  assert.equal(out[0]?.committed_at, "2026-01-01T00:00:00Z");
+  assert.equal(out[0]?.slug, "acme/api");
+  assert.equal(out[0]?.source, "git");
+  assert.equal(out[1]?.sha, "def5678");
+});
+
+test("dedupeCommits drops invalid shas and caps at 100", () => {
+  const mk = (sha: string): CommitRef => ({
+    slug: null,
+    sha,
+    committed_at: "2026-01-01T00:00:00Z",
+    source: "git",
+  });
+  // Non-hex, too-short, and empty-timestamp copies are dropped, not thrown.
+  const bad: CommitRef[] = [
+    mk("not-hex-at-all"),
+    mk("abc12"),
+    { ...mk("abc1234def"), committed_at: "" },
+    mk("beef1234"),
+  ];
+  const kept = dedupeCommits(bad);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0]?.sha, "beef1234");
+  const tooMany = Array.from({ length: 150 }, (_, i) => mk(i.toString(16).padStart(7, "0")));
+  assert.equal(dedupeCommits(tooMany).length, 100);
+});
+
+test("isEmptySessionMetadata accounts for files and commits", () => {
   const withFiles = SessionMetadata.parse({
     files: [{ slug: "acme/api", path: "src/a.ts", lines_added: 1, lines_deleted: 0, source: "git" }],
   });
   assert.equal(isEmptySessionMetadata(withFiles), false);
+  const withCommits = SessionMetadata.parse({
+    commits: [{ sha: "abc1234", committed_at: "2026-01-01T00:00:00Z", source: "git" }],
+  });
+  assert.equal(isEmptySessionMetadata(withCommits), false);
   assert.equal(isEmptySessionMetadata(SessionMetadata.parse({})), true);
 });

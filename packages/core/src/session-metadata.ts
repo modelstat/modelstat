@@ -125,6 +125,25 @@ export const FileRef = z.object({
 });
 export type FileRef = z.infer<typeof FileRef>;
 
+/** A commit the session produced — the session-side half of the spend→outcome
+ * join (the pre-AI baseline rides the batch as `RepoAnchors`). Same public
+ * safety class as a slug (sha, timestamp, provenance — no messages, no file
+ * contents, no author identities). */
+export const CommitRef = z.object({
+  /** `org/repo` this commit landed in. Null when the slug is unknown. */
+  slug: z.string().max(200).nullable().default(null),
+  /** Full or abbreviated hex sha. */
+  sha: z
+    .string()
+    .min(7)
+    .max(64)
+    .regex(/^[0-9a-fA-F]+$/),
+  /** ISO-8601 commit timestamp. */
+  committed_at: z.string().max(40),
+  source: RefSource.default("git"),
+});
+export type CommitRef = z.infer<typeof CommitRef>;
+
 /**
  * The deterministic metadata for one session. Attached to the ingest batch
  * under `session_metadata[session_id]`. Every collection is plural and
@@ -135,6 +154,7 @@ export const SessionMetadata = z.object({
   pull_requests: z.array(PullRequestRef).max(100).default([]),
   issues: z.array(IssueRef).max(100).default([]),
   files: z.array(FileRef).max(500).default([]),
+  commits: z.array(CommitRef).max(100).default([]),
 });
 export type SessionMetadata = z.infer<typeof SessionMetadata>;
 
@@ -475,10 +495,11 @@ export function dedupeSessionMetadata(parts: DetectedRefs[]): SessionMetadata {
     repos: keepValid(RepoRef, repos).slice(0, 50),
     pull_requests: keepValid(PullRequestRef, pull_requests).slice(0, 100),
     issues: keepValid(IssueRef, reconciledIssues).slice(0, 100),
-    // Files are git-collected per repo *after* dedupe (like the PR-outcome
-    // enrichment), so the fold leaves them empty; the daemon fills them via
-    // dedupeFiles.
+    // Files and commits are git-collected per repo *after* dedupe (like the
+    // PR-outcome enrichment), so the fold leaves them empty; the daemon fills
+    // them via dedupeFiles / dedupeCommits.
     files: [],
+    commits: [],
   };
 }
 
@@ -501,6 +522,27 @@ export function dedupeFiles(files: FileRef[]): FileRef[] {
   return merged.filter((f) => FileRef.safeParse(f).success).slice(0, 500);
 }
 
+/** Fold a session's {@link CommitRef}s (collected per repo from git) into one
+ * deduped, capped list: the same sha (case-insensitive) keeps its first-seen
+ * copy, backfilling a missing slug and keeping the strongest source. Like
+ * {@link dedupeFiles}, commits aren't mined from the detected `parts` —
+ * they're collected after dedupe. */
+export function dedupeCommits(commits: CommitRef[]): CommitRef[] {
+  const merged = dedupe(
+    commits,
+    (c) => c.sha.toLowerCase(),
+    (a, b) => ({
+      slug: a.slug ?? b.slug,
+      sha: a.sha,
+      committed_at: a.committed_at,
+      source: stronger(a.source, b.source),
+    }),
+  );
+  return merged
+    .filter((c) => c.committed_at.length > 0 && CommitRef.safeParse(c).success)
+    .slice(0, 100);
+}
+
 /** True when a {@link SessionMetadata} carries no references — callers use
  * this to avoid shipping (and overwriting server state with) an empty map. */
 export function isEmptySessionMetadata(m: SessionMetadata): boolean {
@@ -508,7 +550,8 @@ export function isEmptySessionMetadata(m: SessionMetadata): boolean {
     m.repos.length === 0 &&
     m.pull_requests.length === 0 &&
     m.issues.length === 0 &&
-    m.files.length === 0
+    m.files.length === 0 &&
+    m.commits.length === 0
   );
 }
 

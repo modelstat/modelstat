@@ -252,6 +252,7 @@ mod tests {
                 session_metadata: None,
                 summarizer_mode: None,
                 redactor_mode: None,
+                repo_anchors: None,
             },
             raw: true,
             segment_count: 0,
