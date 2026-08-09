@@ -25,12 +25,18 @@ modelstat-ingest.workspace = true
 modelstat-service.workspace = true
 modelstat-update.workspace = true
 modelstat-sumclient.workspace = true
+# `roi` / `label` (the on-device ROI engine): PR effort units, hours-only-when-
+# calibrated, hand-written labels, and the session→PR token join. Pure Rust,
+# local-only — no llama.cpp, no network (the D4 boundary above still holds).
+modelstat-effort.workspace = true
 # M1 collector commands: the device flow is async (reqwest via modelstat-ingest);
 # serde renders the `--json` shapes (structs, so key order is preserved).
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `label` stamps an ISO-8601 instant; `roi` windows merges by `--days`.
+chrono.workspace = true
 
 [features]
 # Opt into the real on-device REDACTOR (OpenAI Privacy Filter over ONNX Runtime).
