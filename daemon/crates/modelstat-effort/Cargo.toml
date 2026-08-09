@@ -1,0 +1,17 @@
+[package]
+name = "modelstat-effort"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `AnchorPr` — the repo's own human-authored baseline. This crate reads anchors;
+# it never mines or ships them.
+modelstat-wire.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
