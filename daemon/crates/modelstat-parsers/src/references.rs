@@ -11,8 +11,8 @@
 //! ([`crate::git_enrich`] + `modelstat-pipeline`) drives: the typed
 //! [`SessionMetadata`] / [`FileRef`], the branch-ticket miner
 //! ([`detect_branch_tickets`]), and the deduplicators ([`dedupe_session_metadata`],
-//! [`dedupe_files`]). Everything here is deterministic + I/O-free; the git + model
-//! channels are injected by the pass.
+//! [`dedupe_files`], [`dedupe_commits`]). Everything here is deterministic +
+//! I/O-free; the git + model channels are injected by the pass.
 
 use std::sync::OnceLock;
 
@@ -152,6 +152,23 @@ pub struct FileRef {
     pub source: String,
 }
 
+/// A commit the session produced — the session-side half of the spend→outcome
+/// join (the pre-AI baseline rides the batch as `RepoAnchors`). Same public
+/// safety class as a slug (sha, timestamp, provenance — no messages, no file
+/// contents, no author identities).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitRef {
+    /// `org/repo` this commit landed in. Null when the slug is unknown.
+    #[serde(default)]
+    pub slug: Option<String>,
+    /// Full or abbreviated hex sha (7..=64 chars, see `valid_commit`).
+    pub sha: String,
+    /// ISO-8601 commit timestamp.
+    pub committed_at: String,
+    #[serde(default = "default_git_source")]
+    pub source: String,
+}
+
 /// The deterministic metadata for one session — attached to the ingest batch
 /// under `session_metadata[session_id]`. Every collection is plural + capped; an
 /// empty one ([`is_empty_session_metadata`]) is simply not shipped.
@@ -165,6 +182,8 @@ pub struct SessionMetadata {
     pub issues: Vec<IssueRef>,
     #[serde(default)]
     pub files: Vec<FileRef>,
+    #[serde(default)]
+    pub commits: Vec<CommitRef>,
 }
 
 /// The mutable accumulation shape the detectors emit. Deserialize is how a
@@ -669,7 +688,8 @@ pub fn detect_branch_tickets(branch: Option<&str>) -> Vec<IssueRef> {
 /// Fold any number of [`DetectedRefs`] (from every channel + every event/segment
 /// of a session) into one validated, deduped, capped [`SessionMetadata`]. Reuses
 /// the exact per-field [`dedupe`] core (caps 50/100/100, reconcile, keep-valid);
-/// `files` is left empty — the pass fills it after dedupe via [`dedupe_files`].
+/// `files`/`commits` are left empty — the pass fills them after dedupe via
+/// [`dedupe_files`] / [`dedupe_commits`].
 /// Port of `dedupeSessionMetadata`.
 pub fn dedupe_session_metadata(parts: Vec<DetectedRefs>) -> SessionMetadata {
     let mut all = DetectedRefs::default();
@@ -683,7 +703,11 @@ pub fn dedupe_session_metadata(parts: Vec<DetectedRefs>) -> SessionMetadata {
         repos,
         pull_requests,
         issues,
+        // Files and commits are git-collected per repo *after* dedupe (like the
+        // PR-outcome enrichment), so the fold leaves them empty; the pass fills
+        // them via [`dedupe_files`] / [`dedupe_commits`].
         files: Vec::new(),
+        commits: Vec::new(),
     }
 }
 
@@ -726,10 +750,53 @@ pub fn dedupe_files(files: Vec<FileRef>) -> Vec<FileRef> {
         .collect()
 }
 
+fn valid_commit(c: &CommitRef) -> bool {
+    c.sha.chars().all(|ch| ch.is_ascii_hexdigit())
+        && (7..=64).contains(&chars(&c.sha))
+        && opt_chars(&c.slug) <= 200
+        && !c.committed_at.is_empty()
+        && chars(&c.committed_at) <= 40
+}
+
+/// Fold a session's [`CommitRef`]s (collected per repo from git) into one
+/// deduped, capped list: the same sha (case-insensitive) keeps its first-seen
+/// copy, backfilling a missing slug and keeping the strongest source. Preserves
+/// first-seen order (JS `Map`). Mirror of `dedupeCommits`.
+pub fn dedupe_commits(commits: Vec<CommitRef>) -> Vec<CommitRef> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_key: std::collections::HashMap<String, CommitRef> =
+        std::collections::HashMap::new();
+    for c in commits {
+        let key = c.sha.to_lowercase();
+        match by_key.get_mut(&key) {
+            Some(e) => {
+                if e.slug.is_none() {
+                    e.slug = c.slug.clone();
+                }
+                e.source = stronger(&e.source, &c.source);
+            }
+            None => {
+                order.push(key.clone());
+                by_key.insert(key, c);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|k| by_key.remove(&k))
+        .filter(valid_commit)
+        .take(100)
+        .collect()
+}
+
 /// True when a [`SessionMetadata`] carries no references — the pass uses this to
 /// avoid shipping (and overwriting server state with) an empty map.
 pub fn is_empty_session_metadata(m: &SessionMetadata) -> bool {
-    m.repos.is_empty() && m.pull_requests.is_empty() && m.issues.is_empty() && m.files.is_empty()
+    m.repos.is_empty()
+        && m.pull_requests.is_empty()
+        && m.issues.is_empty()
+        && m.files.is_empty()
+        && m.commits.is_empty()
 }
 
 #[cfg(test)]
@@ -852,6 +919,7 @@ mod tests {
         assert_eq!(meta.repos[0].source, "git");
         assert_eq!(meta.repos[0].branches, vec!["main".to_string()]);
         assert!(meta.files.is_empty());
+        assert!(meta.commits.is_empty());
     }
 
     #[test]
@@ -930,6 +998,61 @@ mod tests {
     }
 
     #[test]
+    fn dedupe_commits_merges_by_sha_case_insensitively() {
+        let commits = vec![
+            CommitRef {
+                slug: None,
+                sha: "ABC1234".into(),
+                committed_at: "2026-01-01T00:00:00Z".into(),
+                source: "content".into(),
+            },
+            CommitRef {
+                slug: Some("acme/api".into()),
+                sha: "abc1234".into(),
+                committed_at: "2026-01-02T00:00:00Z".into(),
+                source: "git".into(),
+            },
+            CommitRef {
+                slug: Some("acme/api".into()),
+                sha: "def5678".into(),
+                committed_at: "2026-01-03T00:00:00Z".into(),
+                source: "git".into(),
+            },
+        ];
+        let out = dedupe_commits(commits);
+        assert_eq!(out.len(), 2);
+        // The first-seen copy keeps its sha casing + timestamp, backfills the
+        // missing slug, and the stronger `git` source wins.
+        assert_eq!(out[0].sha, "ABC1234");
+        assert_eq!(out[0].committed_at, "2026-01-01T00:00:00Z");
+        assert_eq!(out[0].slug.as_deref(), Some("acme/api"));
+        assert_eq!(out[0].source, "git");
+        assert_eq!(out[1].sha, "def5678");
+    }
+
+    #[test]
+    fn dedupe_commits_drops_invalid_and_caps_at_100() {
+        let mk = |sha: &str| CommitRef {
+            slug: None,
+            sha: sha.into(),
+            committed_at: "2026-01-01T00:00:00Z".into(),
+            source: "git".into(),
+        };
+        // Non-hex, too-short, and empty-timestamp copies are dropped.
+        let mut commits = vec![mk("not-hex-at-all"), mk("abc12")];
+        commits.push(CommitRef {
+            committed_at: "".into(),
+            ..mk("abc1234def")
+        });
+        for i in 0..150 {
+            commits.push(mk(&format!("{i:07x}")));
+        }
+        let out = dedupe_commits(commits);
+        assert_eq!(out.len(), 100);
+        assert!(out.iter().all(valid_commit));
+    }
+
+    #[test]
     fn empty_metadata_is_flagged() {
         assert!(is_empty_session_metadata(&SessionMetadata::default()));
         let mut m = SessionMetadata::default();
@@ -938,6 +1061,14 @@ mod tests {
             path: "x".into(),
             lines_added: 0,
             lines_deleted: 0,
+            source: "git".into(),
+        });
+        assert!(!is_empty_session_metadata(&m));
+        let mut m = SessionMetadata::default();
+        m.commits.push(CommitRef {
+            slug: None,
+            sha: "abc1234".into(),
+            committed_at: "2026-01-01T00:00:00Z".into(),
             source: "git".into(),
         });
         assert!(!is_empty_session_metadata(&m));

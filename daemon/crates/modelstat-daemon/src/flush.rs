@@ -194,6 +194,7 @@ where
                             .and_then(|m| serde_json::to_value(BTreeMap::from([(&sid, m)])).ok()),
                         summarizer_mode: None,
                         redactor_mode: None,
+                        repo_anchors: None,
                     },
                     raw: true,
                     segment_count: 0,
@@ -297,6 +298,7 @@ where
         session_metadata: session_metadata_value,
         summarizer_mode: None,
         redactor_mode: None,
+        repo_anchors: None,
     };
     FlushOutcome::Ready(vec![PreparedBatch {
         batch,

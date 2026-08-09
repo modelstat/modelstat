@@ -130,6 +130,31 @@ const ingestBatch = {
   tool_calls: [toolCall],
   session_titles: { "11111111-1111-1111-1111-111111111111": "Ingest retry matrix" },
   summarizer_mode: "cloud",
+  repo_anchors: [
+    {
+      slug: "acme/api",
+      host: "github.com",
+      cutoff: null,
+      mined_at: "2026-06-01T10:00:00.000Z",
+      head_sha: "0f4c9e7d2b8a1c6f3e5d7a9b0c2d4e6f8a1b3c5d",
+      human_anchor_count: 1,
+      ai_pr_count: 9,
+      anchors: [
+        {
+          pr_number: 421,
+          merge_sha: "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d",
+          merged_at: "2025-11-20T14:30:00.000Z",
+          files_changed: 12,
+          lines_added: 340,
+          lines_deleted: 85,
+          span_ms: 259200000,
+          commit_count: 7,
+          active_minutes: 190,
+          ai_assisted: false,
+        },
+      ],
+    },
+  ],
 };
 
 const heartbeat = {

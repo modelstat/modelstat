@@ -14,6 +14,7 @@ use modelstat_receiver::PipelineRunner;
 use modelstat_redact::PiiModel;
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
 
+use crate::anchors::AnchorMiner;
 use crate::flush::PreparedBatch;
 use crate::reconcile::{BackfillDaySessions, BackfillDays, BackfillDigest};
 use crate::scan::{BatchSink, Hold};
@@ -71,10 +72,19 @@ impl BatchSink for Spool {
 /// would label a batch with whatever the settings are by then — the exact
 /// drift these fields exist to make answerable ("was THIS batch scrubbed on
 /// the box? WHERE was it summarised?").
+///
+/// The repo anchors ride the same door for a different reason: they are a
+/// property of the REPOS this batch touched, not of the events in it, and this
+/// is the one place every batch passes through whatever built it (cloud ships
+/// one raw batch per session, local one summarised batch per flush).
 pub struct StampedSink<'a> {
     pub spool: &'a Spool,
     pub redactor_mode: String,
     pub summarizer_mode: String,
+    /// The pre-AI baseline miner, or None when the device opted out. Mining is
+    /// gated per repo per run inside it, so most batches cost one HEAD read and
+    /// carry no anchors at all.
+    pub anchors: Option<&'a AnchorMiner>,
 }
 
 impl BatchSink for StampedSink<'_> {
@@ -86,6 +96,9 @@ impl BatchSink for StampedSink<'_> {
         };
         stamped.batch.redactor_mode = Some(self.redactor_mode.clone());
         stamped.batch.summarizer_mode = Some(self.summarizer_mode.clone());
+        stamped.batch.repo_anchors = self
+            .anchors
+            .and_then(|miner| miner.anchors_for(&stamped.batch.events));
         self.spool.accept(&stamped)
     }
 }
@@ -276,6 +289,7 @@ mod tests {
                 session_metadata: None,
                 summarizer_mode: None,
                 redactor_mode: None,
+                repo_anchors: None,
             },
             raw: true,
             segment_count: 0,

@@ -1,0 +1,25 @@
+[package]
+name = "modelstat-effort"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `AnchorPr` — the repo's own human-authored baseline. This crate reads anchors;
+# it never mines or ships them.
+modelstat-wire.workspace = true
+# `attribution` — the session parsers + the one source registry that says where
+# each agent keeps its transcripts. Spend is read from the same files the daemon
+# reads, by the same parsers, so a per-PR token figure cannot drift from the
+# batch the daemon ships.
+modelstat-parsers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# RFC-3339 event timestamps → the "last N days" window. A transcript may stamp a
+# local offset, so the instant is parsed rather than string-compared.
+chrono.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

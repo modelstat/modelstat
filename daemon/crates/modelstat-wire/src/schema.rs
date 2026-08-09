@@ -382,6 +382,85 @@ impl ToolCallWire {
     }
 }
 
+/// One merged PR mined from a repo's git history — an anchor point the server
+/// compares AI-era outcomes against (the ROI denominator). Public repo facts
+/// only (numbers, shas, timestamps, line counts) — the same safety class as a
+/// slug; no file contents, no commit messages, no author identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorPr {
+    pub pr_number: u64,
+    /// Hex sha of the merge commit (7..=64 chars).
+    pub merge_sha: String,
+    /// ISO-8601 merge timestamp.
+    pub merged_at: String,
+    pub files_changed: u32,
+    pub lines_added: u64,
+    pub lines_deleted: u64,
+    /// First-commit→merge wall time. Omitted when the history doesn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_ms: Option<u64>,
+    /// Commits behind the merge. Omitted when the history doesn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_count: Option<u32>,
+    /// Minutes of ACTIVE work behind the PR, from clustering its own commit
+    /// timestamps into sittings. The effort half of the pair `span_ms` opens:
+    /// wall time includes the night the PR spent in review, this does not.
+    /// Omitted when the PR left fewer than two timestamps to cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_minutes: Option<u32>,
+    /// Whether ANY commit in the PR carried an AI tool's trailer. Always false
+    /// inside [`RepoAnchors::anchors`] — that list IS the human baseline — and
+    /// carried explicitly so a consumer never has to infer it from context.
+    #[serde(default)]
+    pub ai_assisted: bool,
+}
+
+/// A repo's human-authored baseline: merged-PR shape stats mined once from its
+/// own history. `head_sha` + `mined_at` pin WHAT was read and WHEN, so the
+/// server can dedupe re-mines instead of averaging them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoAnchors {
+    /// `org/repo`. The join key to `session_metadata` references.
+    pub slug: String,
+    /// The forge host, and only when git itself named it. Null everywhere else.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// ISO-8601 end of an OPERATOR-set mining window. Null by default: which
+    /// PRs are a baseline is decided by AI trailers, not by a date.
+    #[serde(default)]
+    pub cutoff: Option<String>,
+    /// ISO-8601 instant the mining ran.
+    pub mined_at: String,
+    /// Hex sha of the repo's HEAD at mining time (7..=64 chars).
+    pub head_sha: String,
+    /// Human-authored merged PRs found in the window scanned.
+    #[serde(default)]
+    pub human_anchor_count: u32,
+    /// AI-assisted merged PRs found in that SAME window and excluded from
+    /// `anchors`. Read next to `human_anchor_count` it says whether the
+    /// baseline is thick enough to calibrate against at all — a fact the
+    /// anchor list alone cannot carry.
+    #[serde(default)]
+    pub ai_pr_count: u32,
+    #[serde(default)]
+    pub anchors: Vec<AnchorPr>,
+}
+
+impl RepoAnchors {
+    pub fn clamp(&mut self) {
+        clamp_in_place(&mut self.slug, caps::ANCHOR_SLUG_MAX);
+        clamp_opt(&mut self.host, caps::ANCHOR_HOST_MAX);
+        clamp_opt(&mut self.cutoff, caps::ANCHOR_ISO_MAX);
+        clamp_in_place(&mut self.mined_at, caps::ANCHOR_ISO_MAX);
+        clamp_in_place(&mut self.head_sha, caps::ANCHOR_SHA_MAX);
+        for a in &mut self.anchors {
+            clamp_in_place(&mut a.merge_sha, caps::ANCHOR_SHA_MAX);
+            clamp_in_place(&mut a.merged_at, caps::ANCHOR_ISO_MAX);
+        }
+        self.anchors.truncate(caps::ANCHORS_PER_REPO_COUNT_MAX);
+    }
+}
+
 /// The batch the daemon ships to `/v1/ingest` (feature §17.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IngestBatch {
@@ -408,6 +487,11 @@ pub struct IngestBatch {
     /// rather than inferred from a setting that may since have changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redactor_mode: Option<String>,
+    /// Pre-AI repo baseline anchors — one [`RepoAnchors`] per repo, mined
+    /// on-device from the repo's own git history before its AI-era cutoff.
+    /// Additive — old daemons omit it, old servers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_anchors: Option<Vec<RepoAnchors>>,
 }
 
 impl IngestBatch {
@@ -433,6 +517,12 @@ impl IngestBatch {
         self.events.truncate(caps::EVENTS_COUNT_MAX);
         self.segments.truncate(caps::SEGMENTS_COUNT_MAX);
         self.tool_calls.truncate(caps::TOOL_CALLS_COUNT_MAX);
+        if let Some(repo_anchors) = &mut self.repo_anchors {
+            for r in repo_anchors.iter_mut() {
+                r.clamp();
+            }
+            repo_anchors.truncate(caps::REPO_ANCHORS_COUNT_MAX);
+        }
     }
 }
 
@@ -566,5 +656,104 @@ mod tests {
         };
         seg.clamp();
         assert!(seg.r#abstract.len() <= caps::ABSTRACT_MAX);
+    }
+
+    #[test]
+    fn repo_anchors_is_optional_and_roundtrips() {
+        // Additive: a pre-anchor batch (no key) still deserializes, and `None`
+        // is omitted on output (Zod `.optional()` parity).
+        let json = r#"{"batch_id":"b","device_id":"d","daemon_version":"v","events":[]}"#;
+        let mut batch: IngestBatch = serde_json::from_str(json).unwrap();
+        assert!(batch.repo_anchors.is_none());
+        let v: Value = serde_json::to_value(&batch).unwrap();
+        assert!(v.get("repo_anchors").is_none());
+
+        batch.repo_anchors = Some(vec![RepoAnchors {
+            slug: "acme/api".into(),
+            host: Some("github.com".into()),
+            cutoff: None,
+            mined_at: "2026-06-01T10:00:00.000Z".into(),
+            head_sha: "0f4c9e7d2b8a1c6f3e5d7a9b0c2d4e6f8a1b3c5d".into(),
+            human_anchor_count: 1,
+            ai_pr_count: 9,
+            anchors: vec![AnchorPr {
+                pr_number: 421,
+                merge_sha: "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d".into(),
+                merged_at: "2025-11-20T14:30:00.000Z".into(),
+                files_changed: 12,
+                lines_added: 340,
+                lines_deleted: 85,
+                span_ms: None,
+                commit_count: None,
+                active_minutes: None,
+                ai_assisted: false,
+            }],
+        }]);
+        let v: Value = serde_json::to_value(&batch).unwrap();
+        // Unknown-when-absent anchors fields are omitted, not null.
+        let anchor = &v["repo_anchors"][0]["anchors"][0];
+        assert!(anchor.get("span_ms").is_none());
+        assert!(anchor.get("commit_count").is_none());
+        assert!(anchor.get("active_minutes").is_none());
+        // …but the always-known ones materialize (Zod `.default()` parity), so
+        // a consumer never has to guess whether `false`/`0` means "no" or
+        // "this daemon didn't say".
+        assert_eq!(anchor["ai_assisted"], Value::Bool(false));
+        assert_eq!(v["repo_anchors"][0]["cutoff"], Value::Null);
+        assert_eq!(v["repo_anchors"][0]["human_anchor_count"], 1);
+        assert_eq!(v["repo_anchors"][0]["ai_pr_count"], 9);
+        let back: IngestBatch = serde_json::from_value(v).unwrap();
+        assert_eq!(batch, back);
+    }
+
+    #[test]
+    fn clamp_truncates_repo_anchor_collections_and_strings() {
+        let anchor = AnchorPr {
+            pr_number: 1,
+            merge_sha: "a".repeat(100), // > 64
+            merged_at: "t".into(),
+            files_changed: 0,
+            lines_added: 0,
+            lines_deleted: 0,
+            span_ms: None,
+            commit_count: None,
+            active_minutes: None,
+            ai_assisted: false,
+        };
+        let repo = RepoAnchors {
+            slug: "字".repeat(100), // 300 bytes > 200
+            host: None,
+            cutoff: Some("t".repeat(100)), // > 40
+            mined_at: "t".into(),
+            head_sha: "a".repeat(100), // > 64
+            human_anchor_count: 60,
+            ai_pr_count: 3,
+            anchors: vec![anchor; 60], // > 50
+        };
+        let mut batch = IngestBatch {
+            batch_id: "b".into(),
+            device_id: "d".into(),
+            daemon_version: "v".into(),
+            events: vec![],
+            segments: vec![],
+            tool_calls: vec![],
+            session_installs: None,
+            session_titles: None,
+            session_metadata: None,
+            summarizer_mode: None,
+            redactor_mode: None,
+            repo_anchors: Some(vec![repo; 12]), // > 10
+        };
+        batch.clamp();
+        let anchors = batch.repo_anchors.as_ref().unwrap();
+        assert_eq!(anchors.len(), caps::REPO_ANCHORS_COUNT_MAX);
+        assert_eq!(anchors[0].anchors.len(), caps::ANCHORS_PER_REPO_COUNT_MAX);
+        assert!(anchors[0].slug.len() <= caps::ANCHOR_SLUG_MAX);
+        assert!(anchors[0].head_sha.len() <= caps::ANCHOR_SHA_MAX);
+        assert!(anchors[0].anchors[0].merge_sha.len() <= caps::ANCHOR_SHA_MAX);
+        assert!(anchors[0].cutoff.as_ref().unwrap().len() <= caps::ANCHOR_ISO_MAX);
+        // The count survives truncation on purpose: it says how many were
+        // FOUND, which is the fact a thin-baseline check needs.
+        assert_eq!(anchors[0].human_anchor_count, 60);
     }
 }

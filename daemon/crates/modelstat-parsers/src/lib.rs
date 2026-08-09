@@ -20,6 +20,7 @@ pub mod tool_hash;
 pub mod types;
 
 pub mod git;
+pub mod git_anchors;
 pub mod git_enrich;
 pub mod git_files;
 pub mod git_outcome;
@@ -62,11 +63,12 @@ pub use discovery::{
 // The session-metadata surface the M4 pass consumes (feature §7.4): the pure
 // reference core + the git-enrichment seam + the two git-history read shapes.
 pub use git::GitResolver;
+pub use git_anchors::{active_minutes, head_sha, is_ai_authored, mine_repo_anchors, AnchorConfig};
 pub use git_enrich::{GitEnrichment, RealGitEnrichment};
 pub use git_files::FileChange;
 pub use git_outcome::PrOutcome;
 pub use references::{
-    dedupe_files, dedupe_session_metadata, detect_branch_tickets, detect_event_references,
-    detect_references, is_empty_session_metadata, DetectedRefs, FileRef, IssueRef, PullRequestRef,
-    RepoRef, SessionMetadata,
+    dedupe_commits, dedupe_files, dedupe_session_metadata, detect_branch_tickets,
+    detect_event_references, detect_references, is_empty_session_metadata, CommitRef, DetectedRefs,
+    FileRef, IssueRef, PullRequestRef, RepoRef, SessionMetadata,
 };

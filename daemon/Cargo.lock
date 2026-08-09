@@ -1746,7 +1746,9 @@ dependencies = [
 name = "modelstat-cli"
 version = "1.19.1"
 dependencies = [
+ "chrono",
  "modelstat-daemon",
+ "modelstat-effort",
  "modelstat-ingest",
  "modelstat-log",
  "modelstat-mcp",
@@ -1802,6 +1804,17 @@ dependencies = [
  "serde",
  "sha2",
  "tokio",
+]
+
+[[package]]
+name = "modelstat-effort"
+version = "1.19.1"
+dependencies = [
+ "chrono",
+ "modelstat-parsers",
+ "modelstat-wire",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
