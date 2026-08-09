@@ -1,6 +1,6 @@
-//! Pre-AI repo anchors on the outgoing batch: which repos to mine, when a
-//! re-mine is warranted, and the small on-disk record that keeps one mine from
-//! becoming a mine every cycle.
+//! Repo anchors on the outgoing batch: which repos to mine, when a re-mine is
+//! warranted, and the small on-disk record that keeps one mine from becoming a
+//! mine every cycle.
 //!
 //! Mining walks real git history, so it is gated four ways: only when the
 //! device has not opted out (`MODELSTAT_ANCHORS=0`), at most once per repo per
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use modelstat_parsers::git::resolve_repo_root;
-use modelstat_parsers::{head_sha, mine_repo_anchors, AnchorConfig, DEFAULT_CUTOFF};
+use modelstat_parsers::{head_sha, mine_repo_anchors, AnchorConfig};
 use modelstat_wire::{caps, RawEvent, RepoAnchors};
 
 /// Ceiling on the mining one batch may trigger. Each repo carries its own
@@ -33,8 +33,8 @@ const BATCH_BUDGET: Duration = Duration::from_secs(60);
 
 /// What a finished mine left behind for one repo, keyed by repo root.
 ///
-/// `head_sha` is the whole point: history before a fixed cutoff cannot change
-/// unless the repo itself was rewritten, so an unchanged HEAD means an
+/// `head_sha` is the whole point: what the history says cannot change unless
+/// the repo itself was rewritten, so an unchanged HEAD means an
 /// unchanged answer and the walk is skipped entirely. `mined_at` is kept so the
 /// record says WHEN, the same pairing the server uses to dedupe re-mines.
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,28 +58,31 @@ fn anchors_enabled() -> bool {
     )
 }
 
-/// The pre-AI cutoff for this device: `MODELSTAT_ANCHOR_CUTOFF` (ISO-8601) when
-/// it is one, else [`DEFAULT_CUTOFF`].
+/// The optional mining window for this device: `MODELSTAT_ANCHOR_CUTOFF`
+/// (ISO-8601) when it is one, else `None` — mine all the history the walk
+/// reaches.
 ///
-/// A garbage value falls back and says so rather than being passed to git,
-/// which would silently mine a window nobody chose (`--until=junk` is not an
-/// error to git the way it is to a reader).
-fn cutoff_from_env() -> String {
+/// There is no default date on purpose. A fixed "pre-AI" cutoff made every
+/// repo created after it mine zero anchors, which was every repo we tried;
+/// whether a PR is a human baseline is settled by its commits' AI trailers,
+/// not by the calendar. This stays only as an operator escape hatch.
+///
+/// A garbage value falls back to no window and says so rather than being passed
+/// to git, which would silently mine a window nobody chose (`--until=junk` is
+/// not an error to git the way it is to a reader).
+fn cutoff_from_env() -> Option<String> {
     let raw = std::env::var("MODELSTAT_ANCHOR_CUTOFF")
         .ok()
         .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    match raw {
-        None => DEFAULT_CUTOFF.to_string(),
-        Some(v) if chrono::DateTime::parse_from_rfc3339(&v).is_ok() => v,
-        Some(v) => {
-            modelstat_log::log_warn!(
-                "MODELSTAT_ANCHOR_CUTOFF={v} is not an ISO-8601 instant — \
-                 mining pre-AI anchors before {DEFAULT_CUTOFF} instead"
-            );
-            DEFAULT_CUTOFF.to_string()
-        }
+        .filter(|v| !v.is_empty())?;
+    if chrono::DateTime::parse_from_rfc3339(&raw).is_ok() {
+        return Some(raw);
     }
+    modelstat_log::log_warn!(
+        "MODELSTAT_ANCHOR_CUTOFF={raw} is not an ISO-8601 instant — \
+         mining anchors from all history instead"
+    );
+    None
 }
 
 /// The per-device anchor miner: process-lifetime state (what has been mined
@@ -304,15 +307,19 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_cutoff_falls_back_instead_of_mining_a_window_nobody_chose() {
+    fn a_cutoff_is_opt_in_and_a_bad_one_mines_all_history() {
+        // Unset is the default, and the default is "no window" — a date here is
+        // what made every post-2022 repo mine nothing.
+        let unset = with_env(&[("MODELSTAT_ANCHOR_CUTOFF", None)], cutoff_from_env);
+        assert_eq!(unset, None);
         let honored = with_env(
             &[("MODELSTAT_ANCHOR_CUTOFF", Some("2019-01-01T00:00:00Z"))],
             cutoff_from_env,
         );
-        assert_eq!(honored, "2019-01-01T00:00:00Z");
+        assert_eq!(honored.as_deref(), Some("2019-01-01T00:00:00Z"));
         for bad in ["yesterday", "2019-01-01", ""] {
             let got = with_env(&[("MODELSTAT_ANCHOR_CUTOFF", Some(bad))], cutoff_from_env);
-            assert_eq!(got, DEFAULT_CUTOFF, "{bad:?} must not become the cutoff");
+            assert_eq!(got, None, "{bad:?} must not become the cutoff");
         }
     }
 
