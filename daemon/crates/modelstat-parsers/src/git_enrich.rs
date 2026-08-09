@@ -1,22 +1,23 @@
 //! The git-enrichment seam the M4 session-metadata pass drives — the injected
-//! `resolveGit` / `checkPrOutcome` / `collectFilesChanged` of the TS
-//! `buildSessionMetadata` bundled behind one trait (feature §7.4).
+//! `resolveGit` / `checkPrOutcome` / `collectFilesChanged` / `collectCommits` of
+//! the TS `buildSessionMetadata` bundled behind one trait (feature §7.4).
 //!
 //! The pass ([`modelstat-pipeline`]) is generic over this trait so it stays pure
 //! + unit-testable (fakes for the git I/O) and never shells out itself. The real
 //! collector wires [`RealGitEnrichment`], which fronts the (process-lifetime
-//! cached) [`GitResolver`] plus the two stateless git-history reads. All three
+//! cached) [`GitResolver`] plus the three stateless git-history reads. All four
 //! calls are best-effort: `None` means "no signal", never an error the pass must
 //! handle — a git miss just leaves that channel unenriched.
 
 use modelstat_wire::GitContext;
 
 use crate::git::GitResolver;
+use crate::git_commits::{collect_commits_authored, CommitInfo};
 use crate::git_files::{collect_files_changed, FileChange};
 use crate::git_outcome::{check_pull_request_outcome, PrOutcome};
 
-/// The three best-effort git reads the session-metadata pass needs. Bundled
-/// (rather than three separate injected closures like the TS `opts`) because they
+/// The four best-effort git reads the session-metadata pass needs. Bundled
+/// (rather than four separate injected closures like the TS `opts`) because they
 /// share one repo-on-disk context and, in the real impl, one resolver cache —
 /// and "absent" vs "present-but-returns-None" are observationally identical to
 /// the pass, so a single trait covers the whole TS optionality space.
@@ -32,6 +33,14 @@ pub trait GitEnrichment {
         since: &str,
         until: &str,
     ) -> Option<Vec<FileChange>>;
+    /// The commits authored in `cwd` across [`since`, `until`] (ISO-8601), or
+    /// None. Sha + timestamp only — never subject, body, or author.
+    fn collect_commits(
+        &mut self,
+        cwd: &str,
+        since: &str,
+        until: &str,
+    ) -> Option<Vec<CommitInfo>>;
 }
 
 /// The production [`GitEnrichment`] — the real `git` subprocess reads. Fronts a
@@ -62,5 +71,13 @@ impl GitEnrichment for RealGitEnrichment {
         until: &str,
     ) -> Option<Vec<FileChange>> {
         collect_files_changed(cwd, since, until)
+    }
+    fn collect_commits(
+        &mut self,
+        cwd: &str,
+        since: &str,
+        until: &str,
+    ) -> Option<Vec<CommitInfo>> {
+        collect_commits_authored(cwd, since, until)
     }
 }

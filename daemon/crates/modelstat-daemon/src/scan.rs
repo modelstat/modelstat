@@ -685,7 +685,7 @@ mod tests {
     use crate::discover_jobs::ParserKind;
     use crate::testing::AnsweringRedactor;
     use modelstat_ingest::RuntimeState;
-    use modelstat_parsers::{FileChange, ParseStats, PrOutcome};
+    use modelstat_parsers::{CommitInfo, FileChange, ParseStats, PrOutcome};
     use modelstat_pipeline::NoEmbedder;
     use modelstat_sumclient::{CompleteRequest, SumError};
     use modelstat_wire::GitContext;
@@ -734,6 +734,14 @@ mod tests {
             _since: &str,
             _until: &str,
         ) -> Option<Vec<FileChange>> {
+            None
+        }
+        fn collect_commits(
+            &mut self,
+            _cwd: &str,
+            _since: &str,
+            _until: &str,
+        ) -> Option<Vec<CommitInfo>> {
             None
         }
     }
