@@ -26,6 +26,7 @@ use modelstat_receiver::FileQueueStore;
 use modelstat_sumclient::SummarizerClient;
 use modelstat_wire::RawEvent;
 
+use crate::anchors::AnchorMiner;
 use crate::authoritative_git::resolve_authoritative_git;
 use crate::discover_jobs::{
     discover_jobs, order_jobs_newest_first, parse_job_streaming, ParserKind, ScanJob,
@@ -132,6 +133,10 @@ pub struct Daemon {
     /// drains. This is what makes an outage cost a retry instead of a re-run of
     /// the PII model over every turn again.
     pub spool: Arc<crate::spool::Spool>,
+    /// The pre-AI baseline miner, or None when this device opted out
+    /// (`MODELSTAT_ANCHORS=0`). Process-lifetime because "mine each repo once
+    /// per run" is state only the run can hold.
+    pub anchors: Option<AnchorMiner>,
     pub device_id: String,
     pub machine_id: String,
     /// The install-time summariser mode, resolved ONCE (a change bounces the
@@ -175,6 +180,7 @@ impl Daemon {
             status: Arc::new(StdMutex::new(Status::default())),
             queue: Arc::new(FileQueueStore::new(home_path("queue.json"))),
             spool: Arc::new(spool),
+            anchors: AnchorMiner::from_env(home_path("anchors.json")),
             device_id,
             machine_id,
             mode,
@@ -531,6 +537,10 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
         // segments) was decided by the mode this process booted with, and the
         // stamp must name the mode that actually built it.
         summarizer_mode: daemon.mode.clone(),
+        // Mined here rather than in the batch builder: anchors describe the
+        // REPOS a batch touched, and this door is where every batch passes
+        // regardless of which mode built it.
+        anchors: daemon.anchors.as_ref(),
     };
     let sink = &sink;
     let mut observer = StatusObserver {
