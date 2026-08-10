@@ -825,7 +825,7 @@ mod tests {
             &mut actors,
             "s1",
             modelstat_parsers::SessionActor {
-                id: "a628f67608a72832b".into(),
+                id: "a0123456789abcdef".into(),
                 label: Some("Explore".into()),
                 description: Some("Audit the alerting dashboards".into()),
                 spawn_depth: Some(1),
@@ -844,7 +844,7 @@ mod tests {
             },
         );
         let mut event = ev("s1", "2026-07-16T10:00:00.000Z", "hello");
-        event.actor_id = Some("a628f67608a72832b".into());
+        event.actor_id = Some("a0123456789abcdef".into());
         event.reasoning_excerpt = Some("thinking about it".into());
         event.reasoning_bytes = Some(17);
         let out = build_flush_batches(
@@ -869,7 +869,7 @@ mod tests {
         };
         let json = serde_json::to_value(&batches[0].batch).unwrap();
         let roster = &json["session_actors"]["s1"];
-        assert_eq!(roster[0]["id"], "a628f67608a72832b");
+        assert_eq!(roster[0]["id"], "a0123456789abcdef");
         assert_eq!(roster[0]["label"], "Explore");
         assert_eq!(roster[0]["spawn_depth"], 1);
         assert!(
@@ -880,7 +880,7 @@ mod tests {
             json["session_actors"].get("s_elsewhere").is_none(),
             "a batch carries the rosters of the sessions it ships and no others"
         );
-        assert_eq!(json["events"][0]["actor_id"], "a628f67608a72832b");
+        assert_eq!(json["events"][0]["actor_id"], "a0123456789abcdef");
         assert_eq!(json["events"][0]["reasoning_excerpt"], "thinking about it");
         assert_eq!(json["events"][0]["reasoning_bytes"], 17);
         // The whole batch still round-trips through the wire types the zod
@@ -888,7 +888,7 @@ mod tests {
         let back: modelstat_wire::IngestBatch = serde_json::from_value(json).unwrap();
         assert_eq!(
             back.events[0].actor_id.as_deref(),
-            Some("a628f67608a72832b")
+            Some("a0123456789abcdef")
         );
     }
 

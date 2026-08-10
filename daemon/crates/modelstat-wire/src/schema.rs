@@ -101,7 +101,7 @@ pub struct RawEvent {
     pub session_id: String,
     /// WHICH agent-instance inside the session produced this event — the
     /// harness's OWN identifier for it, verbatim (codex states an `agent_path`
-    /// like `/root/history_audit`; Claude Code states an `agentId` on every line
+    /// like `/root/schema_review`; Claude Code states an `agentId` on every line
     /// of a sub-agent transcript). Absent means the session's ROOT actor, which
     /// is every event a single-agent harness ever emits.
     ///
@@ -243,7 +243,7 @@ impl RawEvent {
     ///     is the part that leaks and the part nothing reads.
     ///
     /// [`RawEvent::actor_id`] is deliberately NOT in that list even though it
-    /// can read as a path (`/root/history_audit`): it names a position in the
+    /// can read as a path (`/root/schema_review`): it names a position in the
     /// harness's own agent tree, not a location on this disk, and shortening it
     /// would destroy the only thing it is for.
     ///

@@ -1123,7 +1123,7 @@ mod tests {
     #[test]
     fn a_sub_agent_transcript_folds_into_its_parent_session_and_counts() {
         let (path, _guard) = subagent_transcript(
-            "a628f67608a72832b",
+            "a0123456789abcdef",
             Some(serde_json::json!({
                 "agentType": "Explore",
                 "description": "Audit the alerting dashboards",
@@ -1142,7 +1142,7 @@ mod tests {
             );
             assert_eq!(
                 e.actor_id.as_deref(),
-                Some("a628f67608a72832b"),
+                Some("a0123456789abcdef"),
                 "every turn names the agent that produced it"
             );
         }
@@ -1160,7 +1160,7 @@ mod tests {
 
         // The sidecar's facts, on the id the FILE stated.
         let actor =
-            &res.session_actors["aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"]["a628f67608a72832b"];
+            &res.session_actors["aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"]["a0123456789abcdef"];
         assert_eq!(actor.label.as_deref(), Some("Explore"));
         assert_eq!(
             actor.description.as_deref(),
@@ -1178,12 +1178,12 @@ mod tests {
     /// alone, so "the file is not the shape I expected" has to be survivable.
     #[test]
     fn a_sub_agent_without_a_readable_sidecar_is_still_captured_under_its_own_id() {
-        let (path, _guard) = subagent_transcript("a5612d486c2aeb615", None);
+        let (path, _guard) = subagent_transcript("a1111222233334444", None);
         let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", &path)).unwrap();
         assert_eq!(res.events.len(), 2);
         let actor =
-            &res.session_actors["aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"]["a5612d486c2aeb615"];
-        assert_eq!(actor.id, "a5612d486c2aeb615");
+            &res.session_actors["aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"]["a1111222233334444"];
+        assert_eq!(actor.id, "a1111222233334444");
         assert_eq!(actor.label, None, "nothing stated is nothing claimed");
         assert_eq!(actor.spawn_depth, None);
     }
@@ -1193,7 +1193,7 @@ mod tests {
     /// point and the other is bytes nobody downstream can read.
     #[test]
     fn a_thinking_block_ships_its_reasoning_and_never_its_signature() {
-        let (path, _guard) = subagent_transcript("a8cebbb887b8e08b9", None);
+        let (path, _guard) = subagent_transcript("a9876543210fedcba", None);
         let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", &path)).unwrap();
         let turn = &res.events[1];
         assert_eq!(

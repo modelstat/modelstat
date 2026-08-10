@@ -31,7 +31,7 @@ const fullRawEvent = {
   // The multi-agent primitives: WHICH agent-instance produced this turn, and —
   // on an inter-agent message — who it was addressed to. Both verbatim harness
   // ids; absent means the session's root actor.
-  actor_id: "a628f67608a72832b",
+  actor_id: "a0123456789abcdef",
   recipient_actor_id: "/root",
   turn_index: 3,
   parent_event_id: null,
@@ -146,7 +146,7 @@ const ingestBatch = {
   session_actors: {
     "11111111-1111-1111-1111-111111111111": [
       {
-        id: "a628f67608a72832b",
+        id: "a0123456789abcdef",
         label: "Explore",
         description: "Audit the alerting dashboards",
         spawn_tool_use_id: "toolu_abc",
@@ -155,9 +155,9 @@ const ingestBatch = {
         last_ts: "2026-06-01T10:05:00.000Z",
       },
       {
-        id: "/root/history_audit",
-        path: "/root/history_audit",
-        thread_id: "019f4b1d-2bb0-71c3-9173-345d5dd83f97",
+        id: "/root/schema_review",
+        path: "/root/schema_review",
+        thread_id: "019f0000-0000-7000-8000-000000000001",
         first_ts: "2026-06-01T10:01:00.000Z",
         last_ts: "2026-06-01T10:04:00.000Z",
       },

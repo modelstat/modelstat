@@ -1719,8 +1719,8 @@ mod tests {
                 "2026-08-05T11:59:00.000Z",
                 "sub_agent_activity",
                 json!({ "event_id": "call_0123", "occurred_at_ms": 1_785_931_140_500u64,
-                        "agent_thread_id": "019f4b1d-2bb0-71c3-9173-345d5dd83f97",
-                        "agent_path": "/root/history_audit", "kind": "started" }),
+                        "agent_thread_id": "019f0000-0000-7000-8000-000000000001",
+                        "agent_path": "/root/schema_review", "kind": "started" }),
             ),
             line(
                 "2026-08-05T11:59:01.000Z",
@@ -1735,10 +1735,10 @@ mod tests {
             line("2026-08-05T11:59:02.000Z", "token_count", usage(100)),
             json!({ "timestamp": "2026-08-05T11:59:03.000Z", "type": "response_item",
                     "payload": { "type": "agent_message",
-                                 "author": "/root/history_audit", "recipient": "/root",
+                                 "author": "/root/schema_review", "recipient": "/root",
                                  "content": [
                                     { "type": "input_text",
-                                      "text": "Message Type: MESSAGE\nSender: /root/history_audit\nPayload:\n" },
+                                      "text": "Message Type: MESSAGE\nSender: /root/schema_review\nPayload:\n" },
                                     { "type": "encrypted_content",
                                       "encrypted_content": "EXAMPLEfake0123456789" }
                                  ] } }),
@@ -1746,8 +1746,8 @@ mod tests {
                 "2026-08-05T11:59:04.000Z",
                 "sub_agent_activity",
                 json!({ "event_id": "call_0123", "occurred_at_ms": 1_785_931_144_000u64,
-                        "agent_thread_id": "019f4b1d-2bb0-71c3-9173-345d5dd83f97",
-                        "agent_path": "/root/history_audit", "kind": "interrupted" }),
+                        "agent_thread_id": "019f0000-0000-7000-8000-000000000001",
+                        "agent_path": "/root/schema_review", "kind": "interrupted" }),
             ),
         ]);
         let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
@@ -1757,7 +1757,7 @@ mod tests {
             .events
             .iter()
             .filter(|e| {
-                e.actor_id.as_deref() == Some("/root/history_audit") && e.kind != "agent_message"
+                e.actor_id.as_deref() == Some("/root/schema_review") && e.kind != "agent_message"
             })
             .map(|e| (e.kind.as_str(), e.actor_id.as_deref(), e.ts.as_str()))
             .collect();
@@ -1766,12 +1766,12 @@ mod tests {
             vec![
                 (
                     "started",
-                    Some("/root/history_audit"),
+                    Some("/root/schema_review"),
                     "2026-08-05T11:59:00.500Z"
                 ),
                 (
                     "interrupted",
-                    Some("/root/history_audit"),
+                    Some("/root/schema_review"),
                     "2026-08-05T11:59:04.000Z"
                 ),
             ],
@@ -1784,7 +1784,7 @@ mod tests {
             .iter()
             .find(|e| e.kind == "agent_message")
             .expect("an inter-agent message is an event, not an unknown record");
-        assert_eq!(msg.actor_id.as_deref(), Some("/root/history_audit"));
+        assert_eq!(msg.actor_id.as_deref(), Some("/root/schema_review"));
         assert_eq!(msg.recipient_actor_id.as_deref(), Some("/root"));
         let text = msg.content_excerpt.as_deref().expect("it said something");
         assert!(text.contains("Message Type: MESSAGE"), "{text}");
@@ -1812,11 +1812,11 @@ mod tests {
 
         // ── the registry the actor_ids join against ──
         let actors = &res.session_actors["019fd1ca-816d-7af2-9332-a6db0bfc4d25"];
-        let sub = &actors["/root/history_audit"];
-        assert_eq!(sub.path.as_deref(), Some("/root/history_audit"));
+        let sub = &actors["/root/schema_review"];
+        assert_eq!(sub.path.as_deref(), Some("/root/schema_review"));
         assert_eq!(
             sub.thread_id.as_deref(),
-            Some("019f4b1d-2bb0-71c3-9173-345d5dd83f97")
+            Some("019f0000-0000-7000-8000-000000000001")
         );
         assert_eq!(sub.first_ts.as_deref(), Some("2026-08-05T11:59:00.500Z"));
         assert_eq!(

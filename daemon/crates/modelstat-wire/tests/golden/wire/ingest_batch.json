@@ -11,7 +11,7 @@
       "provider": "anthropic",
       "model": "claude-opus-4-7",
       "session_id": "11111111-1111-1111-1111-111111111111",
-      "actor_id": "a628f67608a72832b",
+      "actor_id": "a0123456789abcdef",
       "recipient_actor_id": "/root",
       "turn_index": 3,
       "parent_event_id": null,
@@ -160,7 +160,7 @@
   "session_actors": {
     "11111111-1111-1111-1111-111111111111": [
       {
-        "id": "a628f67608a72832b",
+        "id": "a0123456789abcdef",
         "label": "Explore",
         "description": "Audit the alerting dashboards",
         "spawn_tool_use_id": "toolu_abc",
@@ -169,9 +169,9 @@
         "last_ts": "2026-06-01T10:05:00.000Z"
       },
       {
-        "id": "/root/history_audit",
-        "path": "/root/history_audit",
-        "thread_id": "019f4b1d-2bb0-71c3-9173-345d5dd83f97",
+        "id": "/root/schema_review",
+        "path": "/root/schema_review",
+        "thread_id": "019f0000-0000-7000-8000-000000000001",
         "first_ts": "2026-06-01T10:01:00.000Z",
         "last_ts": "2026-06-01T10:04:00.000Z"
       }

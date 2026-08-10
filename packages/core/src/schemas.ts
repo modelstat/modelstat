@@ -71,7 +71,7 @@ export const RawEvent = z.object({
   session_id: z.string().max(120), // agent-local session id (UUID in most cases)
   /** WHICH agent-instance inside the session produced this event — the
    * harness's OWN identifier for it, verbatim (codex states an `agent_path`
-   * like `/root/history_audit`; Claude Code states an `agentId` on every line
+   * like `/root/schema_review`; Claude Code states an `agentId` on every line
    * of a sub-agent transcript). Absent means the session's ROOT actor, which is
    * every event a single-agent harness ever emits. A pass-through string, never
    * parsed: a path-shaped id is a tree to the harness that wrote it, and reading
