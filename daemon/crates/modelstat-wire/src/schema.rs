@@ -103,6 +103,9 @@ pub struct RawEvent {
     pub turn_index: Option<u64>,
     #[serde(default)]
     pub parent_event_id: Option<String>,
+    /// The session's working directory, absolute. Local-only — [`Self::clamp`]
+    /// clears it at the wire door, so it reaches the device's own readers (git
+    /// resolution, session metadata, the tray label) and never the network.
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -169,7 +172,9 @@ pub struct RawEvent {
 }
 
 impl RawEvent {
-    /// Clamp every bounded string to its UTF-8-byte cap (feature §17.2/§17.3).
+    /// The wire's last gate, run on every event at the one door that reaches
+    /// the network: bound every string to its cap (feature §17.2/§17.3), and
+    /// shed the local filesystem paths that were never the server's to hold.
     pub fn clamp(&mut self) {
         clamp_opt(&mut self.model, caps::MODEL_MAX);
         clamp_in_place(&mut self.session_id, caps::SESSION_ID_MAX);
@@ -178,7 +183,41 @@ impl RawEvent {
         }
         self.files_touched.truncate(caps::FILES_TOUCHED_COUNT_MAX);
         clamp_opt(&mut self.content_excerpt, caps::CONTENT_EXCERPT_MAX);
+        self.shed_local_paths();
         clamp_opt(&mut self.source_file, caps::SOURCE_FILE_MAX);
+    }
+
+    /// Forget where a file lived on the machine that produced it.
+    ///
+    /// Two fields carried an absolute path the whole way to the server, past a
+    /// floor that redacts exactly that shape out of every piece of TEXT: a
+    /// command mentioning `/Users/<name>/…` shipped scrubbed while the `cwd`
+    /// beside it shipped whole, and a Claude transcript's own directory name
+    /// spells the project path out in full. What the server actually does with
+    /// them decides what may stay, and both answers were read off its source:
+    ///
+    ///   * `cwd` — NOTHING. No column stores it, and the single matcher that
+    ///     names it is set by nothing. Every real reader is on THIS machine
+    ///     (git resolution, session metadata, the tray's label) and has long
+    ///     since run by the time a batch reaches this method.
+    ///   * `source_file` — only its FILE NAME. The one consumer splits on the
+    ///     separators and keeps the last component, to recognise a transcript
+    ///     named after the session it holds. Every directory above that name
+    ///     is the part that leaks and the part nothing reads.
+    ///
+    /// So the wire keeps the name and forgets the path. Enforced HERE rather
+    /// than in each parser because this is the single door every batch passes
+    /// through on its way out ([`crate`] callers reach it via `clamp`): a
+    /// scrub each parser has to remember is a scrub that leaks the day
+    /// somebody adds a parser.
+    fn shed_local_paths(&mut self) {
+        self.cwd = None;
+        if let Some(path) = self.source_file.as_deref() {
+            // `rsplit` over both separators: a transcript written on Windows
+            // names itself with `\`, and the server splits on both too.
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+            self.source_file = Some(name);
+        }
     }
 }
 
@@ -595,6 +634,111 @@ mod tests {
             r#"{"surface":"shell","extractor":"shell.v3","bogus":1}"#,
         );
         assert!(err.is_err());
+    }
+
+    /// A synthetic home path, in the two spellings a transcript can carry.
+    fn local_event(cwd: &str, source_file: &str) -> RawEvent {
+        RawEvent {
+            source_event_id: "evt_x".into(),
+            ts: "2026-01-01T00:00:00Z".into(),
+            kind: "user_message".into(),
+            agent: "claude_code".into(),
+            provider: "anthropic".into(),
+            model: None,
+            session_id: "s".into(),
+            turn_index: None,
+            parent_event_id: None,
+            cwd: Some(cwd.into()),
+            git: None,
+            tokens: None,
+            tokens_unmapped: BTreeMap::new(),
+            duration_ms: None,
+            tool_calls: BTreeMap::new(),
+            files_touched: vec![],
+            content_excerpt: None,
+            content_bytes: None,
+            references: None,
+            source_file: Some(source_file.into()),
+            source_byte_offset: None,
+            redactions: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_wire_keeps_the_file_name_and_forgets_the_path() {
+        // POSIX and Windows spellings both reduce to the bare name, and the
+        // cwd — which nothing server-side reads — does not survive at all.
+        for (cwd, file, want) in [
+            (
+                "/Users/testuser/Projects/secret-client",
+                "/Users/testuser/.claude/projects/-Users-testuser-Projects-secret-client/abc.jsonl",
+                "abc.jsonl",
+            ),
+            (
+                "C:\\Users\\testuser\\Projects\\secret-client",
+                "C:\\Users\\testuser\\.codex\\sessions\\rollout.jsonl",
+                "rollout.jsonl",
+            ),
+        ] {
+            let mut ev = local_event(cwd, file);
+            ev.clamp();
+            assert_eq!(ev.cwd, None, "cwd must not reach the wire");
+            assert_eq!(ev.source_file.as_deref(), Some(want));
+        }
+    }
+
+    /// The server recognises a transcript named after the session it holds by
+    /// splitting the path and reading the last component. Shedding the
+    /// directories has to leave that reading intact — it is the only thing
+    /// anything server-side does with this field.
+    #[test]
+    fn the_session_named_filename_still_reads_after_shedding() {
+        let uuid = "0b3f1e2a-4c5d-6e7f-8a9b-0c1d2e3f4a5b";
+        let mut ev = local_event(
+            "/Users/testuser/x",
+            &format!("/Users/testuser/.claude/projects/-Users-testuser-x/{uuid}.jsonl"),
+        );
+        ev.clamp();
+        let shipped = ev.source_file.unwrap();
+        let stem = shipped
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap()
+            .strip_suffix(".jsonl")
+            .unwrap();
+        assert_eq!(
+            stem, uuid,
+            "the server's filename→session read must survive"
+        );
+    }
+
+    /// The invariant, stated over a whole batch rather than a field: nothing a
+    /// device uploads may carry the absolute path of anything on it.
+    #[test]
+    fn no_absolute_local_path_survives_a_batch_clamp() {
+        let mut batch = IngestBatch {
+            batch_id: "b1".into(),
+            device_id: "dev_1".into(),
+            daemon_version: "daemon-test".into(),
+            events: vec![local_event(
+                "/Users/testuser/Projects/secret-client",
+                "/Users/testuser/.codex/sessions/2026/07/22/rollout.jsonl",
+            )],
+            segments: vec![],
+            tool_calls: vec![],
+            session_installs: None,
+            session_titles: None,
+            session_metadata: None,
+            summarizer_mode: None,
+            redactor_mode: None,
+            repo_anchors: None,
+        };
+        batch.clamp();
+        let json = serde_json::to_string(&batch).unwrap();
+        assert!(
+            !json.contains("/Users/") && !json.contains("testuser"),
+            "a local path reached the wire: {json}"
+        );
     }
 
     #[test]
