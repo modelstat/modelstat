@@ -51,7 +51,7 @@ fn base36(mut n: u64) -> String {
     String::from_utf8(buf[i..].to_vec()).unwrap()
 }
 
-/// The three legal `source` shapes for [`source_event_id`], mirroring the TS
+/// The legal `source` shapes for [`source_event_id`], mirroring the TS
 /// discriminated union. The key string each produces is the frozen contract.
 pub enum EventSource<'a> {
     /// CLI daemon parsing JSONL: `fs::<file>::<byteOffset>`. The legacy 3-arg
@@ -66,6 +66,22 @@ pub enum EventSource<'a> {
     /// Position-independent key for transcript lines whose identity is the uuid
     /// embedded in the line (Claude Code resume-copy dedupe): `uuid::<lineUuid>`.
     LineUuid { line_uuid: &'a str },
+    /// Position-independent key for a codex round trip:
+    /// `codex::<session>::<input>:<cached>:<output>:<reasoning>`, the
+    /// conversation's CUMULATIVE counter at that turn.
+    ///
+    /// Codex has no per-line uuid, so [`LineUuid`](EventSource::LineUuid) — the
+    /// shape that makes Claude Code's resume copies collapse — has nothing to
+    /// key on. A fork rollout file replays its ancestor's whole history
+    /// verbatim, and codex REWRITES the copied timestamps to the fork moment,
+    /// so neither the byte offset nor the timestamp survives a copy. The
+    /// cumulative counter does, byte for byte, and it is what upstream itself
+    /// treats as the conversation's running total.
+    CodexTurn {
+        session_id: &'a str,
+        /// `total_token_usage`, in the order upstream declares it.
+        cumulative: [u64; 4],
+    },
 }
 
 /// Deterministic dedupe key for a single parsed event: `evt_<base36(djb2-64)>`
@@ -79,6 +95,10 @@ pub fn source_event_id(device_id: &str, source: &EventSource) -> String {
             conversation_id,
             message_id,
         } => format!("web::{host}::{conversation_id}::{message_id}"),
+        EventSource::CodexTurn {
+            session_id,
+            cumulative: [i, c, o, r],
+        } => format!("codex::{session_id}::{i}:{c}:{o}:{r}"),
     };
     format!("evt_{}", djb2_base36(&format!("{device_id}::{key}")))
 }

@@ -43,7 +43,7 @@
       "source_byte_offset": 7771
     },
     {
-      "source_event_id": "evt_14p55gfv1e4x",
+      "source_event_id": "evt_igy5dnley1h1",
       "ts": "2026-08-05T11:59:02.811Z",
       "kind": "assistant_message",
       "agent": "codex_cli",
@@ -72,7 +72,7 @@
       "source_byte_offset": 11142
     },
     {
-      "source_event_id": "evt_14p55gfv23kt",
+      "source_event_id": "evt_10tuaeq1kb166",
       "ts": "2026-08-05T11:59:04.046Z",
       "kind": "assistant_message",
       "agent": "codex_cli",

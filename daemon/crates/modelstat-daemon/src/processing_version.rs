@@ -174,11 +174,24 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       alone when they do not, so no home directory ever leaves the machine.
 ///       The unified diffs in that payload stay on disk. Only the codex aspect
 ///       moves — ~65 codex sessions re-read, not the corpus.
+/// codex v26 — a round trip's identity. A `codex resume`/subagent-spawn rollout
+///       opens with its own `session_meta`, then REPLAYS the ancestor's whole
+///       history — and codex rewrites every copied timestamp to the fork moment,
+///       so a copy shares no position and no instant with its original. Keyed on
+///       `(file, byte offset)`, each replay minted a brand-new event under the
+///       ancestor's session id, and one 14-day conversation forked 448 times billed
+///       itself 51x (466.9B of a 489.7B account). Claude Code and cursor were never
+///       exposed: their copies keep the line uuid, so the store collapses them.
+///       Codex gives a line no uuid, but `total_token_usage` — the conversation's
+///       running total — survives a copy byte for byte, so it is the key now. A
+///       re-scan is what re-keys the history; the server tombstones the events the
+///       old key already landed. Rides the SAME codex bump wave as v25 where it
+///       can — but v25 landed first, so this is its own re-read.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
     ("capture", LEGACY_WORLD_VERSION + 1),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION + 1),
-    ("codex", LEGACY_WORLD_VERSION + 2),
+    ("codex", LEGACY_WORLD_VERSION + 3),
     ("cursor", LEGACY_WORLD_VERSION),
     ("pi", LEGACY_WORLD_VERSION),
 ];

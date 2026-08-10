@@ -732,10 +732,7 @@ pub fn dedupe_files(files: Vec<FileRef>) -> Vec<FileRef> {
 /// True when a [`SessionMetadata`] carries no references — the pass uses this to
 /// avoid shipping (and overwriting server state with) an empty map.
 pub fn is_empty_session_metadata(m: &SessionMetadata) -> bool {
-    m.repos.is_empty()
-        && m.pull_requests.is_empty()
-        && m.issues.is_empty()
-        && m.files.is_empty()
+    m.repos.is_empty() && m.pull_requests.is_empty() && m.issues.is_empty() && m.files.is_empty()
 }
 
 #[cfg(test)]

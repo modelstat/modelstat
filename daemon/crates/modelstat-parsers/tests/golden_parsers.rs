@@ -181,6 +181,71 @@ fn parser_golden_parity() {
         assert_eq!(res.tool_calls, tool_calls_of(&g), "codex toolCalls");
     }
 
+    // 4b. Codex fork replay — a subagent/resume rollout opens with its OWN
+    //     `session_meta`, then replays the ancestor's whole history with the
+    //     timestamps rewritten to the fork moment, then does its own new work.
+    //     Every replayed round trip must land on the SAME source_event_id the
+    //     ancestor's own file produced, so the store collapses it instead of
+    //     billing the conversation twice; the fork's new turn must NOT.
+    {
+        let anc = format!(
+            "{BASE}/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl"
+        );
+        let fork = format!(
+            "{BASE}/codex/rollout-2026-08-05T14-41-18-019fd1d5-2a4c-7bd1-9f03-1c7e5a90b442.jsonl"
+        );
+        let anc_res = parse_codex_rollout(&ctx(&anc)).unwrap();
+        let fork_res = parse_codex_rollout(&ctx(&fork)).unwrap();
+
+        let ids = |r: &modelstat_parsers::ParseResult| -> Vec<String> {
+            r.events
+                .iter()
+                .filter(|e| e.kind == "assistant_message")
+                .map(|e| e.source_event_id.clone())
+                .collect()
+        };
+        let anc_ids = ids(&anc_res);
+        let fork_ids = ids(&fork_res);
+        assert_eq!(anc_ids.len(), 2, "the ancestor has two round trips");
+        assert_eq!(
+            fork_ids.len(),
+            3,
+            "the fork replays both, adds one of its own, and its restated \
+             closing counter is not a fourth round trip"
+        );
+        assert_eq!(
+            fork_ids[..2],
+            anc_ids[..],
+            "a replayed round trip keeps the ancestor's event id — the copy is \
+             the SAME work, and a fresh id per fork file is what billed one \
+             conversation 51 times"
+        );
+        assert!(
+            !anc_ids.contains(&fork_ids[2]),
+            "the fork's own new turn is new work and keeps its own id"
+        );
+        // The whole replayed prefix must be free, or the conversation still
+        // double-counts — just more slowly.
+        let replayed: u64 = fork_res
+            .events
+            .iter()
+            .filter(|e| anc_ids.contains(&e.source_event_id))
+            .filter_map(|e| e.tokens.as_ref())
+            .map(|t| t.input + t.output + t.cache_read + t.cache_creation + t.reasoning)
+            .sum();
+        let anc_total: u64 = anc_res
+            .events
+            .iter()
+            .filter_map(|e| e.tokens.as_ref())
+            .map(|t| t.input + t.output + t.cache_read + t.cache_creation + t.reasoning)
+            .sum();
+        assert_eq!(
+            replayed, anc_total,
+            "the replay carries the ancestor's tokens verbatim, so collapsing \
+             on the id is what keeps them counted once"
+        );
+    }
+
     // 5. pi — git slug from cwd on the assistant event, tokens mapping.
     {
         let file = format!(
