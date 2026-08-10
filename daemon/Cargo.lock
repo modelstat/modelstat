@@ -1748,7 +1748,6 @@ version = "1.21.2"
 dependencies = [
  "chrono",
  "modelstat-daemon",
- "modelstat-effort",
  "modelstat-ingest",
  "modelstat-log",
  "modelstat-mcp",
@@ -1758,6 +1757,7 @@ dependencies = [
  "modelstat-sumclient",
  "modelstat-update",
  "modelstat-wire",
+ "modelstat-work",
  "reqwest",
  "serde",
  "serde_json",
@@ -1804,17 +1804,6 @@ dependencies = [
  "serde",
  "sha2",
  "tokio",
-]
-
-[[package]]
-name = "modelstat-effort"
-version = "1.21.2"
-dependencies = [
- "chrono",
- "modelstat-parsers",
- "modelstat-wire",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2007,6 +1996,17 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+]
+
+[[package]]
+name = "modelstat-work"
+version = "1.21.2"
+dependencies = [
+ "chrono",
+ "modelstat-parsers",
+ "modelstat-wire",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

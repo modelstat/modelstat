@@ -412,8 +412,9 @@ export const RepoAnchors = z.object({
   /** Human-authored merged PRs found in the window scanned. */
   human_anchor_count: z.number().int().nonnegative().default(0),
   /** AI-assisted merged PRs found in that SAME window and excluded from
-   * `anchors`. Read next to `human_anchor_count` it says whether the baseline
-   * is thick enough to calibrate against at all. */
+   * `anchors`. Read next to `human_anchor_count` it gives the repo's
+   * AI-vs-human split a denominator. Not a calibration signal — nothing
+   * downstream scores effort. */
   ai_pr_count: z.number().int().nonnegative().default(0),
   anchors: z.array(AnchorPr).max(50).default([]),
 });

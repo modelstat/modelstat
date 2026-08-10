@@ -1,11 +1,17 @@
-//! Repo anchors — the ROI denominator, mined from the repo's OWN git history.
+//! Repo anchors — the human-authored baseline, mined from the repo's OWN git
+//! history.
 //!
-//! What an AI-era PR cost is only meaningful next to what this team's PRs cost
-//! when a human wrote them, so the server's effort judge is calibrated PER REPO
-//! instead of against a vendor's opaque label set. An anchor is a merged PR
-//! that carries NO AI trailer on any of its commits: a human-authored sample
-//! from the same repo, the same team and usually the same month as the
-//! AI-assisted work being measured.
+//! An anchor is a merged PR that carries NO AI trailer on any of its commits: a
+//! human-authored sample from the same repo, the same team and usually the same
+//! month as the AI-assisted work beside it. Anchors exist to answer ONE
+//! question — which shipped work was AI-assisted and which was not — and to give
+//! that split a per-repo denominator.
+//!
+//! They are deliberately NOT an effort baseline. There is no judge, no
+//! calibration and no score anywhere downstream: we report measured primitives
+//! (tokens, time, files, lines, lifecycle) and never blend them into a verdict.
+//! Git timing was measured against change size at Spearman rho 0.11-0.24, so it
+//! cannot support an effort estimate and nothing here pretends otherwise.
 //!
 //! Why not a date? The first cut of this module anchored on every PR merged
 //! before a fixed "pre-AI" instant (2022-06-01). Every repo we ran it against
@@ -176,8 +182,8 @@ pub fn active_minutes(timestamps: &[i64]) -> Option<u32> {
 /// A prose mention is deliberately not one. `git_outcome` reads a bare `#123`
 /// anywhere in a subject as a merge, and is right to: it is checking a PR the
 /// session already named. Mining has no such witness — "fix bug reported in
-/// #123" would invent a calibration point out of a sentence, and every anchor
-/// invented here is a wrong baseline the server then measures real work against.
+/// #123" would invent an anchor out of a sentence, and a PR misfiled as
+/// human-authored corrupts the AI-vs-human split for the whole repo.
 pub fn pr_number_from_subject(subject: &str) -> Option<u64> {
     static RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"^Merge pull request #([0-9]+)|\(#([0-9]+)\)\s*$").unwrap());
