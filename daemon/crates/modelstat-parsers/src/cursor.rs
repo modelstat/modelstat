@@ -174,6 +174,8 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             // Bubbles name no model; the account's plan covers the call.
             model: None,
             session_id: b.composer_id,
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: Some(turn_index),
             parent_event_id: None,
             cwd: None,
@@ -187,6 +189,8 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             files_touched: Vec::new(),
             content_excerpt: Some(cleaned),
             content_bytes: Some(content_bytes),
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             references: None,
             source_file: Some(ctx.source_file.clone()),
             source_byte_offset: None,
@@ -211,6 +215,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             skipped: raw_lines.saturating_sub(emitted),
         },
         skipped_kinds: skips.into_counts(),
+        session_actors: Default::default(),
         source_file: ctx.source_file.clone(),
     })
 }

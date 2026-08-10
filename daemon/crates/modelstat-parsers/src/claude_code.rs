@@ -26,7 +26,10 @@ use crate::references::detect_event_references;
 use crate::skips::{unknown_record_event, SkipLedger, UnknownRecord};
 use crate::tool_action::{extract_local_tool_context, extract_tool_action, ToolActionInput};
 use crate::tool_hash::{hash_args, json_bytes, split_observed_tool_name, tool_identity};
-use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
+use crate::types::{
+    record_actor, LocalToolContext, ParseResult, ParseStats, ParserContext, SessionActor,
+    SessionActors, Sink, ToolCallDraft,
+};
 use crate::util::{slice_utf16, stated_duration_ms};
 use modelstat_wire::tc_fallback_id;
 
@@ -54,6 +57,24 @@ pub fn derive_session_id_from_filename(path: &str) -> Option<String> {
     re.captures(path)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
+}
+
+/// The PARENT session a sub-agent transcript belongs to, read off its path.
+///
+/// Sub-agent conversations live at
+/// `…/projects/<proj>/<session-uuid>/subagents/[workflows/wf_<id>/]agent-<id>.jsonl`,
+/// so the directory holding the `subagents/` tree names the session. The records
+/// inside state the same id — this exists for the callers that must know which
+/// session a FILE belongs to before opening it (the harness-label pass), and the
+/// parser itself always reads the stated `sessionId` instead.
+pub fn derive_session_id_from_subagent_path(path: &str) -> Option<String> {
+    // Plain str ops over both separators: this runs on Windows too, and a
+    // transcript can be read on a machine other than the one that wrote it.
+    let mut parts = path.split(['/', '\\']).collect::<Vec<&str>>();
+    parts.pop()?; // the file itself
+    let at = parts.iter().rposition(|p| *p == "subagents")?;
+    let session = parts.get(at.checked_sub(1)?)?;
+    (!session.is_empty()).then(|| (*session).to_string())
 }
 
 /// Claude encodes `/` as `-`. Not a perfect inverse; good enough for display.
@@ -89,6 +110,33 @@ fn extract_excerpt(content: &Value) -> Option<(String, u64)> {
     }
 }
 
+/// The model's REASONING for this turn — the joined text of its `thinking`
+/// content blocks, redacted like every other captured string.
+///
+/// `signature` rides in the same block and is deliberately left behind: it is an
+/// opaque cryptographic blob the API uses to verify the block came back
+/// unaltered. It is not reasoning, nothing downstream can read it, and shipping
+/// bytes nobody can interpret is the one thing a capture layer should never do.
+fn extract_reasoning(content: &Value) -> Option<(String, u64)> {
+    let Value::Array(blocks) = content else {
+        return None;
+    };
+    let joined = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("thinking"))
+        .filter_map(|b| b.get("thinking").and_then(Value::as_str))
+        .filter(|t| !t.trim().is_empty())
+        .collect::<Vec<&str>>()
+        .join("\n\n");
+    let text = joined.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let pre_chars = text.chars().count() as u64;
+    let cleaned = redact(text, None).text;
+    (!cleaned.is_empty()).then_some((cleaned, pre_chars))
+}
+
 /// Join a message's natural-language TEXT (string content or `text` blocks). For
 /// the excerpt + reference passes. Returns None when there's no text at all.
 fn join_text(content: &Value) -> Option<String> {
@@ -121,6 +169,49 @@ fn join_text(content: &Value) -> Option<String> {
 fn collect_ref_text(content: &Value) -> String {
     let text = join_text(content).unwrap_or_default();
     slice_utf16(&text, 64_000)
+}
+
+/// What the `.meta.json` beside a sub-agent transcript says ABOUT that agent.
+///
+/// Claude Code writes `<transcript>.meta.json` next to each sub-agent
+/// conversation. Across 1,694 of them on one machine the shape is not fixed —
+/// `agentType` on all of them, `spawnDepth` on 1,568, `description`/`toolUseId`
+/// on 353, `parentAgentId` on 10, plus keys this reads nothing from — so every
+/// field is taken only when stated and nothing is defaulted.
+///
+/// The registry entry it returns carries NO id: the id is what the transcript's
+/// own records state, and pairing the two by filename would make this depend on
+/// a naming convention when a stated fact is right there.
+///
+/// A missing, unreadable or non-JSON sidecar degrades to `None` — the agent is
+/// still captured, under the id its own turns state, with less said about it.
+/// A file that failed to open is not a reason to lose a conversation.
+fn read_actor_meta(transcript: &str) -> Option<SessionActor> {
+    let sidecar = format!("{}.meta.json", transcript.strip_suffix(".jsonl")?);
+    let text = std::fs::read_to_string(&sidecar).ok()?;
+    let meta: Value = serde_json::from_str(&text).ok()?;
+    let stated = |key: &str| {
+        meta.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            // Floored like every captured string. On `agentType` and the ids it
+            // is a no-op; on `description` it is not — that is a sentence the
+            // CALLER wrote, so it is prompt text and takes the same floor a tool
+            // command takes at extraction.
+            .map(|s| redact(s, None).text)
+    };
+    Some(SessionActor {
+        id: String::new(),
+        label: stated("agentType"),
+        description: stated("description"),
+        path: None,
+        thread_id: None,
+        parent_actor_id: stated("parentAgentId"),
+        spawn_tool_use_id: stated("toolUseId"),
+        spawn_depth: meta.get("spawnDepth").and_then(Value::as_u64),
+        first_ts: None,
+        last_ts: None,
+    })
 }
 
 struct AncestorCache {
@@ -172,7 +263,7 @@ impl AncestorCache {
 /// Parse a Claude Code transcript, collecting events.
 pub fn parse_claude_code_jsonl(ctx: &ParserContext) -> std::io::Result<ParseResult> {
     let mut sink = Sink::collect();
-    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips, actors) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: sink.take_collected(),
@@ -180,6 +271,7 @@ pub fn parse_claude_code_jsonl(ctx: &ParserContext) -> std::io::Result<ParseResu
         script_contexts,
         stats,
         skipped_kinds: skips.into_counts(),
+        session_actors: actors,
         source_file: ctx.source_file.clone(),
     })
 }
@@ -190,7 +282,7 @@ pub fn parse_claude_code_jsonl_streaming(
     emit: &mut dyn FnMut(Vec<RawEvent>),
 ) -> std::io::Result<ParseResult> {
     let mut sink = Sink::stream(emit);
-    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips, actors) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: Vec::new(),
@@ -198,6 +290,7 @@ pub fn parse_claude_code_jsonl_streaming(
         script_contexts,
         stats,
         skipped_kinds: skips.into_counts(),
+        session_actors: actors,
         source_file: ctx.source_file.clone(),
     })
 }
@@ -210,8 +303,10 @@ fn parse_inner(
     Vec<LocalToolContext>,
     ParseStats,
     SkipLedger,
+    SessionActors,
 )> {
     let mut tool_calls: Vec<ToolCallDraft> = Vec::new();
+    let mut session_actors: SessionActors = SessionActors::new();
     let mut script_contexts: Vec<LocalToolContext> = Vec::new();
     let mut pending_by_call_id: HashMap<String, usize> = HashMap::new();
 
@@ -240,6 +335,11 @@ fn parse_inner(
 
     let filename_session_id = derive_session_id_from_filename(&ctx.source_file);
     let mut ancestors = AncestorCache::new(&ctx.source_file);
+    // What the sidecar says about the agent whose transcript this is, held until
+    // a record STATES the id it belongs to. `None` for a main transcript (there
+    // is no sidecar) and for a sub-agent whose sidecar would not open — in both
+    // cases the turns are captured all the same.
+    let mut pending_actor_meta = read_actor_meta(&ctx.source_file);
 
     // Dedupe id for the line about to be emitted, or None to drop it (a resume
     // copy whose ancestor transcript is still on disk).
@@ -295,6 +395,40 @@ fn parse_inner(
             continue;
         }
 
+        // WHICH agent-instance wrote this line. Claude Code states it as
+        // `agentId` on every record of a sub-agent transcript (105,051 of
+        // 105,051 across 1,694 files) and on nothing else, so reading the stated
+        // field is both the whole rule and the honest one: a main transcript's
+        // turns state no agent and are therefore the session's root actor,
+        // exactly as `RawEvent::actor_id`'s absence means.
+        //
+        // Read off the RECORD rather than derived from the `agent-<id>.jsonl`
+        // filename it always matches — a naming convention is a guess about the
+        // next release, and there is a stated fact sitting right here.
+        let actor_id = obj
+            .get("agentId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(|s| redact(s, None).text);
+        // Registered here, from the record's own id + the session it names, so
+        // the sidecar's facts land on an id the FILE stated rather than one the
+        // filename implied. The sidecar is spent on the first record that names
+        // an agent; every later record only widens the span.
+        if let (Some(actor), Some(sid)) = (
+            actor_id.as_deref(),
+            obj.get("sessionId")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty()),
+        ) {
+            if let Some(ts) = stated_ts(&obj) {
+                let mut facts = pending_actor_meta.take().unwrap_or_default();
+                facts.id = actor.to_string();
+                facts.first_ts = Some(ts.clone());
+                facts.last_ts = Some(ts);
+                record_actor(&mut session_actors, sid, facts);
+            }
+        }
+
         if kind == "user" || kind == "assistant" {
             if let Some(s) = obj.get("sessionId").and_then(Value::as_str) {
                 session_id = Some(s.to_string());
@@ -343,6 +477,13 @@ fn parse_inner(
             let slug = guess_repo_slug_from_path(cwd.as_deref());
             let content = message.get("content").cloned().unwrap_or(Value::Null);
             let (excerpt, content_bytes) = match extract_excerpt(&content) {
+                Some((text, chars)) => (Some(text), Some(chars)),
+                None => (None, None),
+            };
+            // The model's own thinking for this turn. `thinking` blocks were
+            // dropped whole by the text-block filter above, so every session
+            // that reasoned shipped no trace of having done so.
+            let (reasoning_excerpt, reasoning_bytes) = match extract_reasoning(&content) {
                 Some((text, chars)) => (Some(text), Some(chars)),
                 None => (None, None),
             };
@@ -403,6 +544,8 @@ fn parse_inner(
                 provider: "anthropic".to_string(),
                 model,
                 session_id: session_id.clone().unwrap(),
+                actor_id: actor_id.clone(),
+                recipient_actor_id: None,
                 turn_index: Some(current_turn),
                 parent_event_id: obj
                     .get("parentUuid")
@@ -423,6 +566,8 @@ fn parse_inner(
                 files_touched: Vec::new(),
                 content_excerpt: excerpt,
                 content_bytes,
+                reasoning_excerpt,
+                reasoning_bytes,
                 references: refs,
                 source_file: Some(ctx.source_file.clone()),
                 source_byte_offset: Some(offset),
@@ -506,6 +651,8 @@ fn parse_inner(
                 provider: "anthropic".to_string(),
                 model: last_model.clone(),
                 session_id: session_id.clone().unwrap(),
+                actor_id: actor_id.clone(),
+                recipient_actor_id: None,
                 turn_index: Some(current_turn),
                 parent_event_id: obj
                     .get("parentUuid")
@@ -520,6 +667,8 @@ fn parse_inner(
                 files_touched: Vec::new(),
                 content_excerpt: excerpt,
                 content_bytes,
+                reasoning_excerpt: None,
+                reasoning_bytes: None,
                 references: refs,
                 source_file: Some(ctx.source_file.clone()),
                 source_byte_offset: Some(offset),
@@ -603,7 +752,7 @@ fn parse_inner(
             };
             match (sid, ts, event_id) {
                 (Some(sid), Some(ts), Some(event_id)) => {
-                    sink.push(unknown_record_event(UnknownRecord {
+                    let mut unknown = unknown_record_event(UnknownRecord {
                         kind,
                         source_event_id: event_id,
                         agent: &agent_name,
@@ -614,7 +763,12 @@ fn parse_inner(
                         duration_ms: stated_duration_ms(&obj),
                         source_file: &ctx.source_file,
                         source_byte_offset: Some(offset),
-                    }));
+                    });
+                    // An `attachment` written by a sub-agent belongs to that
+                    // sub-agent; the unknown-record path carries no content but
+                    // it does carry WHO.
+                    unknown.actor_id = actor_id.clone();
+                    sink.push(unknown);
                     emitted += 1;
                 }
                 _ => skipped += 1,
@@ -631,6 +785,7 @@ fn parse_inner(
             skipped,
         },
         skips,
+        session_actors,
     ))
 }
 
@@ -897,6 +1052,198 @@ mod tests {
         assert_eq!(
             res.tool_calls[0].ended_at.as_deref(),
             Some("2026-06-01T10:00:03.500Z")
+        );
+    }
+
+    /// A sub-agent transcript, in the shape Claude Code actually writes it
+    /// (fabricated values): its own file, `isSidechain`, its own `agentId`, and
+    /// — the load-bearing part — the PARENT session's `sessionId`. 1,694 of
+    /// these sat on one machine holding 7.2 BILLION tokens no cursor had ever
+    /// pointed at.
+    fn subagent_transcript(agent_id: &str, meta: Option<Value>) -> (String, tempdir::Guard) {
+        let dir = std::env::temp_dir().join(format!(
+            "modelstat-sub-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let subagents = dir.join("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let path = subagents.join(format!("agent-{agent_id}.jsonl"));
+        let line = |extra: Value| {
+            let mut base = serde_json::json!({
+                "isSidechain": true,
+                "agentId": agent_id,
+                "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "cwd": "/Users/dev/Projects/acme",
+            });
+            let (b, e) = (base.as_object_mut().unwrap(), extra.as_object().unwrap());
+            for (k, v) in e {
+                b.insert(k.clone(), v.clone());
+            }
+            base
+        };
+        let lines = [
+            line(serde_json::json!({
+                "type": "user", "uuid": "u-1", "timestamp": "2026-06-01T10:00:00.000Z",
+                "message": { "role": "user", "content": [
+                    { "type": "text", "text": "audit the dashboards" }] },
+            })),
+            line(serde_json::json!({
+                "type": "assistant", "uuid": "a-1", "timestamp": "2026-06-01T10:00:09.000Z",
+                "message": { "model": "claude-opus-4-8", "usage": {
+                        "input_tokens": 11, "output_tokens": 22,
+                        "cache_creation_input_tokens": 33, "cache_read_input_tokens": 44 },
+                    "content": [
+                        { "type": "thinking",
+                          "thinking": "The caller wants the alert rules, not the panels.",
+                          "signature": "EXAMPLEfakesignature0123456789abcdef" },
+                        { "type": "text", "text": "Reading the alert rules." }] },
+            })),
+        ];
+        let text: String = lines
+            .iter()
+            .map(|l| format!("{}\n", serde_json::to_string(l).unwrap()))
+            .collect();
+        std::fs::write(&path, text).unwrap();
+        if let Some(meta) = meta {
+            std::fs::write(
+                subagents.join(format!("agent-{agent_id}.meta.json")),
+                serde_json::to_string(&meta).unwrap(),
+            )
+            .unwrap();
+        }
+        (
+            path.to_string_lossy().into_owned(),
+            tempdir::Guard(dir.to_string_lossy().into_owned()),
+        )
+    }
+
+    /// The headline: a sub-agent's turns fold into the session that asked for
+    /// them, stamped with the agent that ran them, and their tokens are counted.
+    #[test]
+    fn a_sub_agent_transcript_folds_into_its_parent_session_and_counts() {
+        let (path, _guard) = subagent_transcript(
+            "a0123456789abcdef",
+            Some(serde_json::json!({
+                "agentType": "Explore",
+                "description": "Audit the alerting dashboards",
+                "toolUseId": "toolu_0123",
+                "spawnDepth": 1,
+                "parentAgentId": "a0000000000000001"
+            })),
+        );
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", &path)).unwrap();
+
+        assert_eq!(res.events.len(), 2);
+        for e in &res.events {
+            assert_eq!(
+                e.session_id, "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "the records STATE the parent session — the daemon fabricates nothing"
+            );
+            assert_eq!(
+                e.actor_id.as_deref(),
+                Some("a0123456789abcdef"),
+                "every turn names the agent that produced it"
+            );
+        }
+        let tokens = res.events[1].tokens.as_ref().expect("usage was stated");
+        assert_eq!(
+            (
+                tokens.input,
+                tokens.output,
+                tokens.cache_creation,
+                tokens.cache_read
+            ),
+            (11, 22, 33, 44),
+            "spend that reached no cursor and therefore no invoice"
+        );
+
+        // The sidecar's facts, on the id the FILE stated.
+        let actor =
+            &res.session_actors["aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"]["a0123456789abcdef"];
+        assert_eq!(actor.label.as_deref(), Some("Explore"));
+        assert_eq!(
+            actor.description.as_deref(),
+            Some("Audit the alerting dashboards")
+        );
+        assert_eq!(actor.spawn_tool_use_id.as_deref(), Some("toolu_0123"));
+        assert_eq!(actor.spawn_depth, Some(1));
+        assert_eq!(actor.parent_actor_id.as_deref(), Some("a0000000000000001"));
+        assert_eq!(actor.first_ts.as_deref(), Some("2026-06-01T10:00:00.000Z"));
+        assert_eq!(actor.last_ts.as_deref(), Some("2026-06-01T10:00:09.000Z"));
+    }
+
+    /// A missing sidecar loses the description of the agent, never the agent —
+    /// and never the conversation. 126 of 1,694 real sidecars omit `spawnDepth`
+    /// alone, so "the file is not the shape I expected" has to be survivable.
+    #[test]
+    fn a_sub_agent_without_a_readable_sidecar_is_still_captured_under_its_own_id() {
+        let (path, _guard) = subagent_transcript("a1111222233334444", None);
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", &path)).unwrap();
+        assert_eq!(res.events.len(), 2);
+        let actor =
+            &res.session_actors["aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"]["a1111222233334444"];
+        assert_eq!(actor.id, "a1111222233334444");
+        assert_eq!(actor.label, None, "nothing stated is nothing claimed");
+        assert_eq!(actor.spawn_depth, None);
+    }
+
+    /// The thinking ships and the signature does not. A `thinking` block holds
+    /// the model's reasoning and an opaque crypto blob; one of them is the
+    /// point and the other is bytes nobody downstream can read.
+    #[test]
+    fn a_thinking_block_ships_its_reasoning_and_never_its_signature() {
+        let (path, _guard) = subagent_transcript("a9876543210fedcba", None);
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", &path)).unwrap();
+        let turn = &res.events[1];
+        assert_eq!(
+            turn.reasoning_excerpt.as_deref(),
+            Some("The caller wants the alert rules, not the panels.")
+        );
+        assert_eq!(turn.reasoning_bytes, Some(49));
+        assert_eq!(
+            turn.content_excerpt.as_deref(),
+            Some("Reading the alert rules."),
+            "the prose and the reasoning stay separate facts"
+        );
+        let blob = serde_json::to_string(turn).unwrap();
+        assert!(
+            !blob.contains("EXAMPLEfakesignature"),
+            "the signature is not reasoning and must not ship: {blob}"
+        );
+    }
+
+    /// A main transcript states no agent, so its turns carry none — which is
+    /// exactly what an absent `actor_id` means: the session's root actor.
+    #[test]
+    fn a_main_transcript_names_no_actor_and_registers_none() {
+        let (path, _guard) = transcript(&[user_line("u-1", "go")]);
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", path)).unwrap();
+        assert_eq!(res.events[0].actor_id, None);
+        assert!(res.session_actors.is_empty());
+    }
+
+    /// The session a sub-agent belongs to is readable from its PATH as well as
+    /// from its records — the labelling pass has to know before it opens a file.
+    #[test]
+    fn the_parent_session_is_readable_from_a_sub_agent_path() {
+        for path in [
+            "/Users/dev/.claude/projects/-enc/aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb/subagents/agent-a1.jsonl",
+            "/Users/dev/.claude/projects/-enc/aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb/subagents/workflows/wf_5f90830d-2d5/agent-a1.jsonl",
+            r"C:\Users\dev\.claude\projects\-enc\aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb\subagents\agent-a1.jsonl",
+        ] {
+            assert_eq!(
+                derive_session_id_from_subagent_path(path).as_deref(),
+                Some("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            derive_session_id_from_subagent_path(
+                "/Users/dev/.claude/projects/-enc/11111111-1111-1111-1111-111111111111.jsonl"
+            ),
+            None,
+            "a main transcript is not a sub-agent path"
         );
     }
 }

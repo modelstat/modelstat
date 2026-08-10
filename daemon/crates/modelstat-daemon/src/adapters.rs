@@ -195,6 +195,8 @@ mod tests {
     fn ev(session: &str, ts: &str) -> RawEvent {
         RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: format!("{session}:{ts}"),
             ts: ts.into(),
             kind: "message".into(),
@@ -202,6 +204,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: session.into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,
@@ -285,6 +289,7 @@ mod tests {
                 segments: Vec::new(),
                 tool_calls: Vec::new(),
                 session_installs: None,
+                session_actors: None,
                 session_titles: None,
                 session_metadata: None,
                 summarizer_mode: None,

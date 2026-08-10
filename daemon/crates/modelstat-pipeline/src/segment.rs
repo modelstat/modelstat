@@ -429,6 +429,8 @@ mod tests {
         use modelstat_wire::{RawEvent, TokenUsage};
         let mut ev = RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: "e".into(),
             ts: "2026-01-01T00:00:00Z".into(),
             kind: "assistant_message".into(),
@@ -436,6 +438,8 @@ mod tests {
             provider: "anthropic".into(),
             model: Some("claude-opus-4-8".into()),
             session_id: "s".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,

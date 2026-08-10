@@ -201,6 +201,8 @@ mod tests {
         use modelstat_wire::RawEvent;
         let mk = |ts: &str| RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: "e".into(),
             ts: ts.into(),
             kind: "user_message".into(),
@@ -208,6 +210,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: "s".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,

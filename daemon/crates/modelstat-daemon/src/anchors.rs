@@ -241,6 +241,8 @@ mod tests {
     fn ev(cwd: Option<&str>, ts: &str) -> RawEvent {
         RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: format!("e:{ts}"),
             ts: ts.into(),
             kind: "message".into(),
@@ -248,6 +250,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: "s1".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: cwd.map(str::to_string),

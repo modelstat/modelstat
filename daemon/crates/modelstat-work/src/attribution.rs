@@ -1240,7 +1240,9 @@ impl RepoIndex {
         if let Some(hit) = self.by_slug.get(&key) {
             return Some(hit.clone());
         }
-        if self.spent() || self.missing.len() >= MAX_SLUG_PROBES || !self.missing.insert(key.clone())
+        if self.spent()
+            || self.missing.len() >= MAX_SLUG_PROBES
+            || !self.missing.insert(key.clone())
         {
             return None;
         }
@@ -1575,7 +1577,12 @@ fn transcripts(home: &Path, since_ms: i64) -> Vec<(String, Parser)> {
     for (agent, sub, depth, parser) in STORES {
         for data_dir in data_dir_candidates_in(home, agent) {
             let mut found: Vec<PathBuf> = Vec::new();
-            collect_jsonl(&PathBuf::from(&data_dir).join(sub), *depth, since_ms, &mut found);
+            collect_jsonl(
+                &PathBuf::from(&data_dir).join(sub),
+                *depth,
+                since_ms,
+                &mut found,
+            );
             out.extend(
                 found
                     .into_iter()
@@ -1712,6 +1719,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: session.into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,
@@ -1727,6 +1736,8 @@ mod tests {
             files_touched: Vec::new(),
             content_excerpt: None,
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             references: None,
             source_file: None,
             source_byte_offset: None,
@@ -1737,7 +1748,12 @@ mod tests {
     #[test]
     fn single_pr_session_attributes_every_token() {
         let s = spend_by_pr_events(&[
-            ev("s1", "working on https://github.com/acme/api/pull/42", 100, 10),
+            ev(
+                "s1",
+                "working on https://github.com/acme/api/pull/42",
+                100,
+                10,
+            ),
             ev("s1", "still on https://github.com/acme/api/pull/42", 50, 5),
         ]);
         assert_eq!(s.by_pr.len(), 1);
@@ -2124,7 +2140,13 @@ mod tests {
             },
         )]);
         let v = serde_json::to_value(&s.by_pr[0]).unwrap();
-        for class in ["input", "output", "cache_creation", "cache_read", "reasoning"] {
+        for class in [
+            "input",
+            "output",
+            "cache_creation",
+            "cache_read",
+            "reasoning",
+        ] {
             assert!(
                 v["mix"][class].as_u64().is_some(),
                 "{class} must survive into the JSON"
@@ -2213,7 +2235,10 @@ mod tests {
             "by_pr must be sorted by equiv_tokens descending"
         );
         for pr in &s.by_pr {
-            assert!(!pr.slug.is_empty(), "an attributed PR always names its repo");
+            assert!(
+                !pr.slug.is_empty(),
+                "an attributed PR always names its repo"
+            );
             assert!(pr.pr_number >= 1);
             // The ranked figure is always recomputable from the raw classes
             // published beside it — never a number a reader cannot check.
@@ -2229,7 +2254,8 @@ mod tests {
             );
         }
         assert!(
-            u32::try_from(s.by_pr.len()).unwrap_or(u32::MAX) <= s.sessions_scanned.saturating_mul(2)
+            u32::try_from(s.by_pr.len()).unwrap_or(u32::MAX)
+                <= s.sessions_scanned.saturating_mul(2)
                 || s.sessions_scanned > 0,
             "attributed PRs imply scanned sessions"
         );
@@ -2372,7 +2398,11 @@ mod tests {
 
         // 3. the transcript alone: PR 9's files are untouched, and the PR the
         //    session NAMES is not a candidate at all.
-        let m = join(T0, &[one_window("acme/api", &paths, 9, &["z.rs"], T0)], &refs);
+        let m = join(
+            T0,
+            &[one_window("acme/api", &paths, 9, &["z.rs"], T0)],
+            &refs,
+        );
         assert_eq!(m.len(), 1, "an unshared file must not match");
         assert_eq!((m[0].number, m[0].confidence), (7, CONFIDENCE_MENTION_ONLY));
     }

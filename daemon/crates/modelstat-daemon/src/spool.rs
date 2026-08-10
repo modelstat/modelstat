@@ -379,6 +379,8 @@ mod tests {
     fn event(id: &str) -> RawEvent {
         RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: id.into(),
             ts: "2026-08-08T10:00:00.000Z".into(),
             kind: "message".into(),
@@ -386,6 +388,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: "s1".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,
@@ -412,6 +416,7 @@ mod tests {
             segments: Vec::new(),
             tool_calls: Vec::new(),
             session_installs: None,
+            session_actors: None,
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,

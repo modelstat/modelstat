@@ -21,7 +21,9 @@ use std::collections::BTreeMap;
 
 use modelstat_ingest::accounts::Accounts;
 use modelstat_ingest::state::FileCursor;
-use modelstat_parsers::{GitEnrichment, ParseResult, ToolCallDraft};
+use modelstat_parsers::{
+    merge_session_actors, GitEnrichment, ParseResult, SessionActors, ToolCallDraft,
+};
 use modelstat_pipeline::{Embedder, LinkExtractor, ResilientSummarizer, Summarizer};
 use modelstat_redact::PiiModel;
 use modelstat_wire::{RawEvent, Segment};
@@ -225,6 +227,7 @@ async fn prepare_flush<S, E, N, G, CE>(
     pending_cursors: &mut Vec<(String, FileCursor)>,
     run_segments: &mut BTreeMap<String, Vec<Segment>>,
     run_events: &mut BTreeMap<String, Vec<RawEvent>>,
+    run_actors: &SessionActors,
     accounts: &Accounts,
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
@@ -273,6 +276,7 @@ where
         extract_links,
         run_segments,
         run_events,
+        run_actors,
         accounts,
     )
     .await;
@@ -370,6 +374,10 @@ where
     // session metadata is recomputed from the run-long (excerpt-shed) turns, so a
     // later flush's partial view can't overwrite a richer earlier one.
     let mut run_events: BTreeMap<String, Vec<RawEvent>> = BTreeMap::new();
+    // Every agent-instance each session stated, folded across the whole run: one
+    // session's sub-agents are one transcript EACH, so the roster is only
+    // complete once every file that mentions the session has been read.
+    let mut run_actors: SessionActors = SessionActors::new();
 
     // Prepare the buffered events into a flush and park it durably. Evaluates to
     // `Result<(), Hold>`; an `Err` stops the scan with cursors un-advanced.
@@ -392,6 +400,7 @@ where
                 &mut pending_cursors,
                 &mut run_segments,
                 &mut run_events,
+                &run_actors,
                 accounts,
                 resilient,
                 embedder,
@@ -592,6 +601,7 @@ where
                 continue;
             }
         };
+        merge_session_actors(&mut run_actors, std::mem::take(&mut r.session_actors));
         for (kind, n) in std::mem::take(&mut r.skipped_kinds) {
             *tallies.skipped_kinds.entry(kind).or_insert(0) += n;
         }
@@ -792,6 +802,8 @@ mod tests {
     fn ev(session: &str, ts: &str) -> RawEvent {
         RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: format!("{session}:{ts}"),
             ts: ts.into(),
             kind: "message".into(),
@@ -799,6 +811,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: session.into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,
@@ -863,6 +877,7 @@ mod tests {
                 script_contexts: Vec::new(),
                 stats: ParseStats::default(),
                 skipped_kinds: std::collections::BTreeMap::new(),
+                session_actors: Default::default(),
                 source_file: j.path.clone(),
             })
         }
@@ -909,6 +924,7 @@ mod tests {
                 script_contexts: Vec::new(),
                 stats: ParseStats::default(),
                 skipped_kinds: std::collections::BTreeMap::new(),
+                session_actors: Default::default(),
                 source_file: j.path.clone(),
             })
         }

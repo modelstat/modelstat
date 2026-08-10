@@ -99,6 +99,25 @@ pub struct RawEvent {
     #[serde(default)]
     pub model: Option<String>,
     pub session_id: String,
+    /// WHICH agent-instance inside the session produced this event — the
+    /// harness's OWN identifier for it, verbatim (codex states an `agent_path`
+    /// like `/root/schema_review`; Claude Code states an `agentId` on every line
+    /// of a sub-agent transcript). Absent means the session's ROOT actor, which
+    /// is every event a single-agent harness ever emits.
+    ///
+    /// A pass-through string, never parsed: a path-shaped id is a tree to the
+    /// harness that wrote it, and reading that tree is the server's job — the
+    /// daemon would be committing to one harness's spelling of parenthood. The
+    /// registry ([`IngestBatch::session_actors`]) carries what the harness
+    /// stated ABOUT each id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// Who this event was addressed TO, verbatim — set only on an event that IS
+    /// a message from one agent-instance to another (codex's `agent_message`
+    /// names an `author` and a `recipient`). Absent on everything else, which
+    /// includes every message to or from the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_actor_id: Option<String>,
     #[serde(default)]
     pub turn_index: Option<u64>,
     #[serde(default)]
@@ -143,6 +162,23 @@ pub struct RawEvent {
     /// fact. Only set when `content_excerpt` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_bytes: Option<u64>,
+    /// The model's REASONING for this turn, VERBATIM — the thinking it wrote
+    /// before answering (Claude Code's `thinking` content blocks, codex's
+    /// `agent_reasoning` records). Redacted exactly like
+    /// [`Self::content_excerpt`], on the same fail-closed path: it is captured
+    /// text, and there is no weaker treatment for it anywhere.
+    ///
+    /// A field of its own rather than more prose, because the two answer
+    /// different questions — "what did it say" and "what was it working out" —
+    /// and a reader that cannot tell them apart cannot ask either. Absent when
+    /// the turn stated none, which is most turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_excerpt: Option<String>,
+    /// Chars of the reasoning BEFORE the wire clamp — the `content_bytes`
+    /// question for the other text: how big was it really. Only set when
+    /// [`Self::reasoning_excerpt`] is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<Value>,
     #[serde(default)]
@@ -183,6 +219,7 @@ impl RawEvent {
         }
         self.files_touched.truncate(caps::FILES_TOUCHED_COUNT_MAX);
         clamp_opt(&mut self.content_excerpt, caps::CONTENT_EXCERPT_MAX);
+        clamp_opt(&mut self.reasoning_excerpt, caps::REASONING_EXCERPT_MAX);
         self.shed_local_paths();
         clamp_opt(&mut self.source_file, caps::SOURCE_FILE_MAX);
     }
@@ -204,6 +241,11 @@ impl RawEvent {
     ///     separators and keeps the last component, to recognise a transcript
     ///     named after the session it holds. Every directory above that name
     ///     is the part that leaks and the part nothing reads.
+    ///
+    /// [`RawEvent::actor_id`] is deliberately NOT in that list even though it
+    /// can read as a path (`/root/schema_review`): it names a position in the
+    /// harness's own agent tree, not a location on this disk, and shortening it
+    /// would destroy the only thing it is for.
     ///
     /// So the wire keeps the name and forgets the path. Enforced HERE rather
     /// than in each parser because this is the single door every batch passes
@@ -513,6 +555,40 @@ pub struct IngestBatch {
     pub tool_calls: Vec<ToolCallWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_installs: Option<Value>,
+    /// The session's ACTOR REGISTRY — `session_id -> [actor, …]`, one entry per
+    /// agent-instance the harness said it ran, so an `actor_id` on an event has
+    /// something to join against. Held as a pass-through blob for the same
+    /// reason `session_installs` is.
+    ///
+    /// Every actor is an object of VERBATIM STATED FACTS and every key is
+    /// present ONLY when the harness stated it — an absent key means the
+    /// harness said nothing, never a default:
+    ///
+    ///   * `id` — the only required key; matches the events' `actor_id`.
+    ///   * `label` — what the harness CALLS this agent (Claude Code's
+    ///     `agentType`: `Explore`, `general-purpose`, …).
+    ///   * `description` — what the CALLER asked this agent to do, verbatim
+    ///     (Claude Code's `description`). Prompt-derived text, so it arrives
+    ///     floor-redacted like every other captured string.
+    ///   * `path` — the harness's own path for it inside its agent tree
+    ///     (codex's `agent_path`). Logical, never a filesystem path.
+    ///   * `thread_id` — the harness's separate id for the conversation this
+    ///     agent ran in (codex's `agent_thread_id`).
+    ///   * `parent_actor_id` — the actor that spawned it, when the harness NAMES
+    ///     it (Claude Code's `parentAgentId`). Never inferred from a path shape.
+    ///   * `spawn_tool_use_id` — the tool call that spawned it (Claude Code's
+    ///     `toolUseId`), which is what links an actor to the turn that asked
+    ///     for it.
+    ///   * `spawn_depth` — how deep the harness says it sits (Claude Code's
+    ///     `spawnDepth`).
+    ///   * `first_ts` / `last_ts` — the first and last instants this scan saw
+    ///     the actor act. Derived from the actor's own events, so they are
+    ///     observations of this file rather than claims about its lifetime.
+    ///
+    /// Additive: absent from a batch whose harness has no concept of more than
+    /// one agent, which is most of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_actors: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_titles: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -646,6 +722,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: "s".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: Some(cwd.into()),
@@ -657,6 +735,8 @@ mod tests {
             files_touched: vec![],
             content_excerpt: None,
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             references: None,
             source_file: Some(source_file.into()),
             source_byte_offset: None,
@@ -727,6 +807,7 @@ mod tests {
             segments: vec![],
             tool_calls: vec![],
             session_installs: None,
+            session_actors: None,
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,
@@ -751,6 +832,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: "s".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,
@@ -762,6 +845,8 @@ mod tests {
             files_touched: vec![],
             content_excerpt: None,
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             references: None,
             source_file: None,
             source_byte_offset: None,
@@ -882,6 +967,7 @@ mod tests {
             segments: vec![],
             tool_calls: vec![],
             session_installs: None,
+            session_actors: None,
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,

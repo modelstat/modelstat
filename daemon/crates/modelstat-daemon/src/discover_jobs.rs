@@ -194,6 +194,11 @@ fn collect_claude_projects(
                             since_ms: None,
                             agent_label: agent.map(str::to_string),
                         });
+                    } else if f.is_dir() {
+                        // A session DIRECTORY beside the session transcript,
+                        // holding the conversations of the sub-agents that
+                        // session spawned — see `collect_subagents`.
+                        collect_subagents(&f.join("subagents"), SUBAGENT_MAX_DEPTH, agent, jobs);
                     }
                 }
             }
@@ -211,6 +216,53 @@ fn collect_claude_projects(
             continue;
         }
         collect_claude_projects(&child, depth_left - 1, agent, jobs);
+    }
+}
+
+/// How far below a session's `subagents/` directory a sub-agent transcript may
+/// sit. Two shapes exist on a real machine — `subagents/agent-<id>.jsonl` (353
+/// files) and `subagents/workflows/wf_<id>/agent-<id>.jsonl` (1,341) — so the
+/// deepest OBSERVED is 2. The bound is one more than that: enough to absorb the
+/// next grouping directory Claude Code introduces without a release, and small
+/// enough that the walk stays a handful of `read_dir`s per session rather than a
+/// disk crawl. Anything deeper is a shape nobody has seen, and inventing depth
+/// for it would be guessing at a layout instead of reading one.
+const SUBAGENT_MAX_DEPTH: usize = 3;
+
+/// Collect the sub-agent transcripts under one session's `subagents/` tree.
+///
+/// Each Task/sub-agent a session spawns gets its OWN transcript here, carrying
+/// `isSidechain: true` and — the load-bearing part — the PARENT session's
+/// `sessionId`, so the parser folds these turns into the session that asked for
+/// them without the daemon fabricating anything. They hold real `usage` records:
+/// on one developer machine, 1,694 of these files held 7.2 BILLION tokens that
+/// no cursor had ever pointed at.
+///
+/// Only `agent-*.jsonl` is taken. The workflow directories also hold a
+/// `journal.jsonl` — the workflow runner's own bookkeeping, not a conversation
+/// — and a `.meta.json` sidecar per transcript, which is read by the PARSER as
+/// facts about the agent, never walked as a transcript.
+fn collect_subagents(
+    dir: &Path,
+    depth_left: usize,
+    agent: Option<&'static str>,
+    jobs: &mut Vec<ScanJob>,
+) {
+    if !dir.is_dir() {
+        return;
+    }
+    for f in child_paths(dir) {
+        let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if is_jsonl(&f) && name.starts_with("agent-") {
+            jobs.push(ScanJob {
+                path: f.to_string_lossy().into_owned(),
+                kind: ParserKind::ClaudeCode,
+                since_ms: None,
+                agent_label: agent.map(str::to_string),
+            });
+        } else if depth_left > 0 && f.is_dir() && !name.starts_with('.') {
+            collect_subagents(&f, depth_left - 1, agent, jobs);
+        }
     }
 }
 
@@ -333,8 +385,15 @@ pub fn discover_jobs() -> Vec<ScanJob> {
 /// Cursor has none: its store is one global DB, not a per-session file.
 fn job_session_id(job: &ScanJob) -> Option<String> {
     match job.kind {
+        // A sub-agent transcript is named after the AGENT, so the filename rule
+        // finds nothing — the session it belongs to is the directory holding its
+        // `subagents/` tree. Without this a BB-driven session would ship its own
+        // turns labelled `bb` and its sub-agents' turns labelled `claude_code`,
+        // which is one session claiming two tools.
         ParserKind::ClaudeCode => {
-            modelstat_parsers::claude_code::derive_session_id_from_filename(&job.path)
+            modelstat_parsers::claude_code::derive_session_id_from_filename(&job.path).or_else(
+                || modelstat_parsers::claude_code::derive_session_id_from_subagent_path(&job.path),
+            )
         }
         ParserKind::Codex => {
             modelstat_parsers::codex::derive_session_id_from_rollout_path(&job.path)
@@ -636,6 +695,70 @@ mod tests {
             .any(|j| j.kind == ParserKind::Pi && j.path.ends_with("c.jsonl")));
 
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The sub-agent transcripts nobody read. Both observed shapes are walked,
+    /// the sidecar is never mistaken for a conversation, and the workflow
+    /// runner's own `journal.jsonl` — which is not one either — stays out.
+    #[test]
+    fn a_sessions_sub_agent_transcripts_are_discovered_in_both_observed_shapes() {
+        let home = std::env::temp_dir().join(format!("modelstat-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mk = |rel: &str| {
+            let p = home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"{}").unwrap();
+        };
+        let sess = ".claude/projects/-enc/aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb";
+        mk(".claude/projects/-enc/aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb.jsonl");
+        mk(&format!("{sess}/subagents/agent-a1.jsonl"));
+        mk(&format!("{sess}/subagents/agent-a1.meta.json"));
+        mk(&format!("{sess}/subagents/workflows/wf_5f9/agent-a2.jsonl"));
+        mk(&format!("{sess}/subagents/workflows/wf_5f9/journal.jsonl"));
+
+        let jobs = jobs_in(&home);
+        let names: Vec<&str> = jobs
+            .iter()
+            .map(|j| j.path.rsplit(['/', '\\']).next().unwrap())
+            .collect();
+        assert!(names.contains(&"agent-a1.jsonl"), "{names:?}");
+        assert!(
+            names.contains(&"agent-a2.jsonl"),
+            "the workflows/wf_<id>/ shape is 1,341 of 1,694 real files: {names:?}"
+        );
+        assert!(
+            names.contains(&"aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb.jsonl"),
+            "the session's own transcript is still walked: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.ends_with(".meta.json")),
+            "the sidecar is facts ABOUT an agent, not a transcript: {names:?}"
+        );
+        assert!(
+            !names.contains(&"journal.jsonl"),
+            "the workflow runner's bookkeeping is not a conversation: {names:?}"
+        );
+        assert!(jobs.iter().all(|j| j.kind == ParserKind::ClaudeCode));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A sub-agent transcript sits deeper than a session transcript, so the
+    /// watcher's grandparent rule would land on its own directory — but the
+    /// projects root is an ancestor already in the set, and recursive watches
+    /// collapse it. Asserted rather than assumed: real-time capture for these
+    /// files depends on it.
+    #[test]
+    fn one_recursive_watch_still_covers_the_sub_agent_trees() {
+        let home = Path::new("/home/dev");
+        let main = Path::new("/home/dev/.claude/projects/-enc/session.jsonl");
+        let sub = Path::new("/home/dev/.claude/projects/-enc/session/subagents/agent-a1.jsonl");
+        let nested = Path::new(
+            "/home/dev/.claude/projects/-enc/session/subagents/workflows/wf_5f9/agent-a2.jsonl",
+        );
+        assert_eq!(
+            crate::watch::covering_watch_dirs(&[main, sub, nested], home),
+            vec![PathBuf::from("/home/dev/.claude/projects")],
+        );
     }
 
     #[test]

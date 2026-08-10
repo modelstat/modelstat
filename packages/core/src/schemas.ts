@@ -69,6 +69,20 @@ export const RawEvent = z.object({
   provider: z.string().max(120),
   model: z.string().max(120).nullable(),
   session_id: z.string().max(120), // agent-local session id (UUID in most cases)
+  /** WHICH agent-instance inside the session produced this event — the
+   * harness's OWN identifier for it, verbatim (codex states an `agent_path`
+   * like `/root/schema_review`; Claude Code states an `agentId` on every line
+   * of a sub-agent transcript). Absent means the session's ROOT actor, which is
+   * every event a single-agent harness ever emits. A pass-through string, never
+   * parsed: a path-shaped id is a tree to the harness that wrote it, and reading
+   * that tree is the server's job. See IngestBatch.session_actors for what the
+   * harness stated ABOUT each id. */
+  actor_id: z.string().max(200).optional(),
+  /** Who this event was addressed TO, verbatim — set only on an event that IS a
+   * message from one agent-instance to another (codex's `agent_message` names
+   * an `author` and a `recipient`). Absent on everything else, which includes
+   * every message to or from the human. */
+  recipient_actor_id: z.string().max(200).optional(),
   turn_index: z.number().int().nonnegative().nullable(),
   parent_event_id: z.string().nullable(), // for subagent turns
 
@@ -103,16 +117,32 @@ export const RawEvent = z.object({
 
   // Redacted excerpt of the conversation turn (user prompt or
   // assistant response). The PARSER is responsible for:
-  //   1. Pulling a representative snippet from the turn (≤320 chars).
-  //   2. Running it through @modelstat/core/redact PLUS, when
-  //      available, the on-device Privacy Filter adapter.
-  //   3. Stripping code blocks and file-path noise.
-  // Optional — events without it fall back to metadata-only abstracts
-  // (the historical behaviour). The daemon-core pipeline runs
-  // redact() over it again as defence-in-depth before building the
-  // summarize prompt; it never gets stored long-term server-side, only
-  // used to construct the summarize input.
-  content_excerpt: z.string().max(320).optional(),
+  // (SPEC 0005). The parser pulls the turn's text and runs it through
+  // @modelstat/core/redact plus, when available, the on-device Privacy Filter
+  // adapter. Redaction is the ONLY transformation: nothing is stripped,
+  // elided, or cut short, because any semantic judgment about the text belongs
+  // to the LLM layers downstream. The cap is an extreme malicious-size guard
+  // (raised 320 → 262144 when excerpts became real message bodies), not a
+  // length budget — no real message approaches it.
+  // Optional — events without it fall back to metadata-only abstracts.
+  content_excerpt: z.string().max(262_144).optional(),
+
+  /** Chars of the cleaned message text BEFORE the wire clamp — "was this cut /
+   * how big was the real prompt" as a stored fact. Only set when
+   * `content_excerpt` is. */
+  content_bytes: z.number().int().nonnegative().optional(),
+
+  /** The model's REASONING for this turn, VERBATIM — the thinking it wrote
+   * before answering (Claude Code's `thinking` content blocks, codex's
+   * `agent_reasoning` records). Redacted exactly like `content_excerpt`, on the
+   * same fail-closed path: it is captured text, and there is no weaker
+   * treatment for it anywhere. A field of its own rather than more prose,
+   * because "what did it say" and "what was it working out" are different
+   * questions and a reader that cannot tell them apart cannot ask either. */
+  reasoning_excerpt: z.string().max(262_144).optional(),
+  /** Chars of the reasoning BEFORE the wire clamp. Only set when
+   * `reasoning_excerpt` is. */
+  reasoning_bytes: z.number().int().nonnegative().optional(),
 
   // Public code references (PRs, issues, repos) detected on-device
   // from this turn's FULL text — the high-recall feed the server rolls up into
@@ -445,6 +475,49 @@ export const IngestBatch = z.object({
         installation_id: z.string(),
         identity_id: z.string().nullable(),
       }),
+    )
+    .optional(),
+  /** The ACTOR REGISTRY — session_id → the agent-instances the harness said it
+   * ran, so an `actor_id` on an event has something to join against.
+   *
+   * Every actor is an object of VERBATIM STATED FACTS and every key is present
+   * ONLY when the harness stated it — an absent key means the harness said
+   * nothing, never a default:
+   *
+   *   - `id` — the only required key; matches the events' `actor_id`.
+   *   - `label` — what the harness CALLS this agent (Claude Code's `agentType`).
+   *   - `description` — what the CALLER asked it to do. Prompt-derived text, so
+   *     it arrives floor-redacted like every other captured string.
+   *   - `path` — the harness's own path for it inside its agent tree (codex's
+   *     `agent_path`). Logical, never a filesystem path.
+   *   - `thread_id` — the harness's separate id for the conversation it ran in.
+   *   - `parent_actor_id` — the actor that spawned it, when the harness NAMES it
+   *     (Claude Code's `parentAgentId`). Never inferred from a path shape.
+   *   - `spawn_tool_use_id` — the tool call that spawned it, which is what links
+   *     an actor to the turn that asked for it.
+   *   - `spawn_depth` — how deep the harness says it sits.
+   *   - `first_ts` / `last_ts` — the first and last instants the scan saw the
+   *     actor act; observations, not claims about its lifetime.
+   *
+   * Additive — absent from a batch whose harness has no concept of more than one
+   * agent, which is most of them. */
+  session_actors: z
+    .record(
+      z.string(),
+      z.array(
+        z.object({
+          id: z.string().max(200),
+          label: z.string().max(120).optional(),
+          description: z.string().max(2_000).optional(),
+          path: z.string().max(200).optional(),
+          thread_id: z.string().max(200).optional(),
+          parent_actor_id: z.string().max(200).optional(),
+          spawn_tool_use_id: z.string().max(120).optional(),
+          spawn_depth: z.number().int().nonnegative().optional(),
+          first_ts: z.string().optional(),
+          last_ts: z.string().optional(),
+        }),
+      ),
     )
     .optional(),
   /** Optional per-session titles — session_id → short redacted title

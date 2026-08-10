@@ -33,7 +33,10 @@ use crate::tool_hash::{
     hash_args, json_bytes, mcp_server_name, normalize_tool_name, split_observed_tool_name,
     tool_identity,
 };
-use crate::types::{LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft};
+use crate::types::{
+    record_actor, LocalToolContext, ParseResult, ParseStats, ParserContext, SessionActor,
+    SessionActors, Sink, ToolCallDraft,
+};
 use crate::util::{slice_utf16, stated_duration_ms};
 
 /// The elapsed time a rollout record states about itself, in milliseconds.
@@ -164,6 +167,37 @@ fn take_message_text(buf: &mut Vec<String>) -> (Option<String>, Option<u64>) {
     }
     let joined = std::mem::take(buf).join("\n\n");
     message_text(&joined)
+}
+
+/// The natural-language TEXT of a content-block list, joined in order.
+///
+/// The rule is "take what a block STATES as text", not a roster of block types:
+/// codex's inter-agent messages carry `input_text` blocks beside
+/// `encrypted_content` blocks, and the second kind states no `text` at all, so
+/// the opaque half falls out for free. Any block type codex adds tomorrow is
+/// captured the day it carries prose and ignored while it does not — which is
+/// the same rule the claude_code parser reads its own blocks by.
+fn content_block_text(content: &Value) -> String {
+    let Value::Array(blocks) = content else {
+        return String::new();
+    };
+    blocks
+        .iter()
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<&str>>()
+        .join("\n\n")
+}
+
+/// `occurred_at_ms` → the ISO-8601 UTC instant every other event in this file
+/// is stamped with, to the millisecond. `None` when the number is out of range,
+/// so the caller falls back to the line's own timestamp rather than inventing
+/// one.
+fn iso_from_epoch_ms(ms: i64) -> Option<String> {
+    // The exact shape codex stamps its own lines with — millisecond precision,
+    // literal `Z` — so two instants from one file sort and compare as strings.
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
 }
 
 /// What one `token_count` line's `payload` says about token usage.
@@ -378,7 +412,7 @@ fn output_indicates_error(p: &Value) -> bool {
 
 pub fn parse_codex_rollout(ctx: &ParserContext) -> std::io::Result<ParseResult> {
     let mut sink = Sink::collect();
-    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips, session_actors) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: sink.take_collected(),
@@ -386,6 +420,7 @@ pub fn parse_codex_rollout(ctx: &ParserContext) -> std::io::Result<ParseResult> 
         script_contexts,
         stats,
         skipped_kinds: skips.into_counts(),
+        session_actors,
         source_file: ctx.source_file.clone(),
     })
 }
@@ -395,7 +430,7 @@ pub fn parse_codex_rollout_streaming(
     emit: &mut dyn FnMut(Vec<RawEvent>),
 ) -> std::io::Result<ParseResult> {
     let mut sink = Sink::stream(emit);
-    let (tool_calls, script_contexts, stats, skips) = parse_inner(ctx, &mut sink)?;
+    let (tool_calls, script_contexts, stats, skips, session_actors) = parse_inner(ctx, &mut sink)?;
     sink.flush();
     Ok(ParseResult {
         events: Vec::new(),
@@ -403,6 +438,7 @@ pub fn parse_codex_rollout_streaming(
         script_contexts,
         stats,
         skipped_kinds: skips.into_counts(),
+        session_actors,
         source_file: ctx.source_file.clone(),
     })
 }
@@ -415,9 +451,11 @@ fn parse_inner(
     Vec<LocalToolContext>,
     ParseStats,
     SkipLedger,
+    SessionActors,
 )> {
     let mut tool_calls: Vec<ToolCallDraft> = Vec::new();
     let mut script_contexts: Vec<LocalToolContext> = Vec::new();
+    let mut session_actors: SessionActors = SessionActors::new();
 
     let mut raw_lines: u64 = 0;
     let mut emitted: u64 = 0;
@@ -449,6 +487,13 @@ fn parse_inner(
     // a `response_item`; capturing those too would double every message, so
     // the response_item path stays text-free.)
     let mut agent_text: Vec<String> = Vec::new();
+    // The model's REASONING for the round trip being assembled, buffered on
+    // exactly the mechanism above and for exactly the same reason: codex writes
+    // it on its own `event_msg`/`agent_reasoning` lines — several per turn — and
+    // the tokens land later, on `token_count`. Joined and attached to the same
+    // usage-bearing assistant event the prose attaches to, so a turn is one row
+    // holding what it said, what it was working out, and what it cost.
+    let mut agent_reasoning: Vec<String> = Vec::new();
     let mut open_calls: HashMap<String, usize> = HashMap::new();
     let mut pending_aggregate: BTreeMap<String, u64> = BTreeMap::new();
     // `total_token_usage` from the previous `token_count` line, to catch codex
@@ -633,6 +678,88 @@ fn parse_inner(
                 continue;
             }
 
+            // An INTER-AGENT message: one agent-instance writing to another,
+            // which codex names on both ends (`author` → `recipient`). Distinct
+            // from `event_msg`/`agent_message` — that is the root agent's prose
+            // to the HUMAN and is captured on the turn's own event — so nothing
+            // here is captured twice: these lines have no `event_msg` twin.
+            //
+            // Only the sub-agent traffic a multi-agent run generates lands here,
+            // and it is the entire record of it: without this arm a session that
+            // ran 440 sub-agents shipped not one word they said to each other.
+            if pt == "agent_message" {
+                let p = payload.unwrap();
+                let author = p
+                    .get("author")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let recipient = p
+                    .get("recipient")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let ts = line_ts.clone().or_else(|| last_ts.clone());
+                match (session_id.clone(), ts) {
+                    (Some(sid), Some(ts)) => {
+                        // Both ends are actors codex just NAMED, so both earn a
+                        // registry entry — otherwise `recipient_actor_id` would
+                        // point at a row that does not exist for the one actor a
+                        // multi-agent run talks to most: the root.
+                        for id in [author, recipient].into_iter().flatten() {
+                            record_actor(
+                                &mut session_actors,
+                                &sid,
+                                SessionActor {
+                                    id: redact(id, None).text,
+                                    first_ts: Some(ts.clone()),
+                                    last_ts: Some(ts.clone()),
+                                    ..SessionActor::default()
+                                },
+                            );
+                        }
+                        let (content_excerpt, content_bytes) = message_text(&content_block_text(
+                            p.get("content").unwrap_or(&Value::Null),
+                        ));
+                        sink.push(RawEvent {
+                            source_event_id: source_event_id(
+                                &ctx.device_id,
+                                &EventSource::File {
+                                    file: &ctx.source_file,
+                                    byte_offset: offset,
+                                },
+                            ),
+                            ts,
+                            kind: "agent_message".to_string(),
+                            agent: "codex_cli".to_string(),
+                            provider: "openai".to_string(),
+                            model: model.clone(),
+                            session_id: sid,
+                            actor_id: author.map(|a| redact(a, None).text),
+                            recipient_actor_id: recipient.map(|r| redact(r, None).text),
+                            turn_index: Some(turn_index),
+                            parent_event_id: None,
+                            cwd: cwd.clone(),
+                            git: None,
+                            tokens: None,
+                            tokens_unmapped: BTreeMap::new(),
+                            duration_ms: None,
+                            tool_calls: BTreeMap::new(),
+                            files_touched: Vec::new(),
+                            content_excerpt,
+                            content_bytes,
+                            reasoning_excerpt: None,
+                            reasoning_bytes: None,
+                            references: None,
+                            source_file: Some(ctx.source_file.clone()),
+                            source_byte_offset: Some(offset),
+                            redactions: Default::default(),
+                        });
+                        emitted += 1;
+                    }
+                    _ => skipped += 1,
+                }
+                continue;
+            }
+
             // Modelled and declined: codex repeats every message and its
             // reasoning as a `response_item` alongside the `event_msg` this
             // parser reads, so taking these too would double each one. A
@@ -737,6 +864,11 @@ fn parse_inner(
                 let git = path_guessed_git_context(slug.clone(), None);
                 // The prose codex streamed for this round trip, verbatim.
                 let (content_excerpt, content_bytes) = take_message_text(&mut agent_text);
+                // …and the reasoning behind it, drained the same way. Codex
+                // writes several `agent_reasoning` records for one round trip;
+                // they are joined in the order written and belong to THIS event,
+                // which is the one that also states what the round trip cost.
+                let (reasoning_excerpt, reasoning_bytes) = take_message_text(&mut agent_reasoning);
                 let sid = session_id.clone().unwrap();
                 sink.push(RawEvent {
                     // Replay-stable when codex states the cumulative counter;
@@ -765,6 +897,8 @@ fn parse_inner(
                     provider: "openai".to_string(),
                     model: model.clone(),
                     session_id: sid,
+                    actor_id: None,
+                    recipient_actor_id: None,
                     turn_index: Some(turn_index),
                     parent_event_id: None,
                     cwd: cwd.clone(),
@@ -776,6 +910,8 @@ fn parse_inner(
                     files_touched: Vec::new(),
                     content_excerpt,
                     content_bytes,
+                    reasoning_excerpt,
+                    reasoning_bytes,
                     references: None,
                     source_file: Some(ctx.source_file.clone()),
                     source_byte_offset: Some(offset),
@@ -796,6 +932,123 @@ fn parse_inner(
                     agent_text.push(t.to_string());
                 }
                 skipped += 1;
+                continue;
+            }
+            if ptype == "agent_reasoning" {
+                // Buffered exactly like the prose above and for the same reason:
+                // the round trip's own event is the `token_count` line, and one
+                // turn's reasoning arrives as several records.
+                if let Some(t) = payload
+                    .and_then(|p| p.get("text"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    agent_reasoning.push(t.to_string());
+                }
+                skipped += 1;
+                continue;
+            }
+            if ptype == "sub_agent_activity" {
+                // Codex telling us, in its own words, that a sub-agent did
+                // something: which one (`agent_path`), in which thread
+                // (`agent_thread_id`), what happened (`kind`: observed as
+                // `started` / `interacted` / `interrupted`) and when
+                // (`occurred_at_ms`). The lifecycle is not derivable from
+                // anything else in the file, and none of it reached the wire.
+                //
+                // Codex states TWO words about this record and only one of them
+                // is recoverable from anything else: the payload `type` names
+                // the family (and every event here is in it), while `kind` names
+                // what actually happened — 446 starts, 1,649 interactions and 37
+                // INTERRUPTIONS in one real rollout. So `kind` on the wire takes
+                // the specific word, verbatim and unmapped (the field is an open
+                // vocabulary for exactly this), and `actor_id` being set is what
+                // says the word is about a sub-agent. A word codex adds tomorrow
+                // arrives intact rather than as "other".
+                let p = payload.unwrap();
+                let stated_kind = p
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(ptype);
+                let agent_path = p
+                    .get("agent_path")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| redact(s, None).text);
+                // The record's OWN instant, which is the one that says when the
+                // sub-agent acted; the line's timestamp is when codex wrote it
+                // down, and the two differ by seconds in a real rollout.
+                let occurred = p
+                    .get("occurred_at_ms")
+                    .and_then(Value::as_i64)
+                    .and_then(iso_from_epoch_ms)
+                    .unwrap_or_else(|| ts.clone());
+                match (session_id.clone(), agent_path) {
+                    (Some(sid), Some(actor)) => {
+                        record_actor(
+                            &mut session_actors,
+                            &sid,
+                            SessionActor {
+                                id: actor.clone(),
+                                path: Some(actor.clone()),
+                                thread_id: p
+                                    .get("agent_thread_id")
+                                    .and_then(Value::as_str)
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| redact(s, None).text),
+                                first_ts: Some(occurred.clone()),
+                                last_ts: Some(occurred.clone()),
+                                ..SessionActor::default()
+                            },
+                        );
+                        sink.push(RawEvent {
+                            // Keyed positionally: codex gives the record an
+                            // `event_id`, but it is the id of the CALL that
+                            // spawned the agent and repeats across every
+                            // lifecycle line of that agent — collapsing a
+                            // `started` and an `interrupted` into one event.
+                            source_event_id: source_event_id(
+                                &ctx.device_id,
+                                &EventSource::File {
+                                    file: &ctx.source_file,
+                                    byte_offset: offset,
+                                },
+                            ),
+                            ts: occurred,
+                            kind: stated_kind.to_string(),
+                            agent: "codex_cli".to_string(),
+                            provider: "openai".to_string(),
+                            model: model.clone(),
+                            session_id: sid,
+                            actor_id: Some(actor),
+                            recipient_actor_id: None,
+                            turn_index: Some(turn_index),
+                            parent_event_id: None,
+                            cwd: cwd.clone(),
+                            git: None,
+                            tokens: None,
+                            tokens_unmapped: BTreeMap::new(),
+                            duration_ms: None,
+                            tool_calls: BTreeMap::new(),
+                            files_touched: Vec::new(),
+                            // A lifecycle record says nothing; it happens.
+                            content_excerpt: None,
+                            content_bytes: None,
+                            reasoning_excerpt: None,
+                            reasoning_bytes: None,
+                            references: None,
+                            source_file: Some(ctx.source_file.clone()),
+                            source_byte_offset: Some(offset),
+                            redactions: Default::default(),
+                        });
+                        emitted += 1;
+                    }
+                    // No session, or no agent named — the record cannot be
+                    // placed and cannot say who it is about.
+                    _ => skipped += 1,
+                }
                 continue;
             }
             if ptype == "user_message" {
@@ -835,6 +1088,8 @@ fn parse_inner(
                     provider: "openai".to_string(),
                     model: model.clone(),
                     session_id: session_id.clone().unwrap(),
+                    actor_id: None,
+                    recipient_actor_id: None,
                     turn_index: Some(turn_index),
                     parent_event_id: None,
                     cwd: cwd.clone(),
@@ -846,6 +1101,8 @@ fn parse_inner(
                     files_touched: Vec::new(),
                     content_excerpt,
                     content_bytes,
+                    reasoning_excerpt: None,
+                    reasoning_bytes: None,
                     references: None,
                     source_file: Some(ctx.source_file.clone()),
                     source_byte_offset: Some(offset),
@@ -896,6 +1153,8 @@ fn parse_inner(
                             provider: "openai".to_string(),
                             model: model.clone(),
                             session_id: sid,
+                            actor_id: None,
+                            recipient_actor_id: None,
                             turn_index: Some(turn_index),
                             parent_event_id: None,
                             cwd: cwd.clone(),
@@ -907,6 +1166,8 @@ fn parse_inner(
                             files_touched: safe_files_touched(&changed, cwd.as_deref()),
                             content_excerpt: None,
                             content_bytes: None,
+                            reasoning_excerpt: None,
+                            reasoning_bytes: None,
                             references: None,
                             source_file: Some(ctx.source_file.clone()),
                             source_byte_offset: Some(offset),
@@ -985,6 +1246,7 @@ fn parse_inner(
             skipped,
         },
         skips,
+        session_actors,
     ))
 }
 
@@ -1434,5 +1696,179 @@ mod tests {
             !found.contains_key("last_token_usage.input_tokens"),
             "a string leaf must never ride an unvalidated shape onto the wire"
         );
+    }
+
+    /// The multi-agent run, end to end over the real record shapes (fabricated
+    /// values). Three record types that dropped whole become: the sub-agent
+    /// lifecycle codex states about itself, the traffic between the agents, and
+    /// the reasoning behind the turn — and all three leave the skip ledger,
+    /// because an arm that models a record must.
+    #[test]
+    fn a_multi_agent_run_reaches_the_wire_with_its_actors_named() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            json!({ "timestamp": "2026-08-05T11:58:58.000Z", "type": "turn_context",
+                    "payload": { "cwd": "/Users/dev/Projects/acme", "model": "gpt-5-codex" } }),
+            line(
+                "2026-08-05T11:58:59.076Z",
+                "user_message",
+                json!({ "message": "audit the storage layer" }),
+            ),
+            line(
+                "2026-08-05T11:59:00.000Z",
+                "sub_agent_activity",
+                json!({ "event_id": "call_0123", "occurred_at_ms": 1_785_931_140_500u64,
+                        "agent_thread_id": "019f0000-0000-7000-8000-000000000001",
+                        "agent_path": "/root/schema_review", "kind": "started" }),
+            ),
+            line(
+                "2026-08-05T11:59:01.000Z",
+                "agent_reasoning",
+                json!({ "text": "**Planning the audit**" }),
+            ),
+            line(
+                "2026-08-05T11:59:01.500Z",
+                "agent_reasoning",
+                json!({ "text": "**Delegating to the sub-agent**" }),
+            ),
+            line("2026-08-05T11:59:02.000Z", "token_count", usage(100)),
+            json!({ "timestamp": "2026-08-05T11:59:03.000Z", "type": "response_item",
+                    "payload": { "type": "agent_message",
+                                 "author": "/root/schema_review", "recipient": "/root",
+                                 "content": [
+                                    { "type": "input_text",
+                                      "text": "Message Type: MESSAGE\nSender: /root/schema_review\nPayload:\n" },
+                                    { "type": "encrypted_content",
+                                      "encrypted_content": "EXAMPLEfake0123456789" }
+                                 ] } }),
+            line(
+                "2026-08-05T11:59:04.000Z",
+                "sub_agent_activity",
+                json!({ "event_id": "call_0123", "occurred_at_ms": 1_785_931_144_000u64,
+                        "agent_thread_id": "019f0000-0000-7000-8000-000000000001",
+                        "agent_path": "/root/schema_review", "kind": "interrupted" }),
+            ),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+
+        // ── the lifecycle, under codex's OWN word for what happened ──
+        let lifecycle: Vec<(&str, Option<&str>, &str)> = res
+            .events
+            .iter()
+            .filter(|e| {
+                e.actor_id.as_deref() == Some("/root/schema_review") && e.kind != "agent_message"
+            })
+            .map(|e| (e.kind.as_str(), e.actor_id.as_deref(), e.ts.as_str()))
+            .collect();
+        assert_eq!(
+            lifecycle,
+            vec![
+                (
+                    "started",
+                    Some("/root/schema_review"),
+                    "2026-08-05T11:59:00.500Z"
+                ),
+                (
+                    "interrupted",
+                    Some("/root/schema_review"),
+                    "2026-08-05T11:59:04.000Z"
+                ),
+            ],
+            "the record's own instant (occurred_at_ms), not the line's"
+        );
+
+        // ── the inter-agent message: both ends named, only the STATED text ──
+        let msg = res
+            .events
+            .iter()
+            .find(|e| e.kind == "agent_message")
+            .expect("an inter-agent message is an event, not an unknown record");
+        assert_eq!(msg.actor_id.as_deref(), Some("/root/schema_review"));
+        assert_eq!(msg.recipient_actor_id.as_deref(), Some("/root"));
+        let text = msg.content_excerpt.as_deref().expect("it said something");
+        assert!(text.contains("Message Type: MESSAGE"), "{text}");
+        assert!(
+            !text.contains("EXAMPLEfake"),
+            "a block that states no text contributes none: {text}"
+        );
+
+        // ── the reasoning, joined onto the round trip that also states its cost ──
+        let turn = res
+            .events
+            .iter()
+            .find(|e| e.kind == "assistant_message")
+            .expect("the usage-bearing event");
+        assert_eq!(
+            turn.reasoning_excerpt.as_deref(),
+            Some("**Planning the audit**\n\n**Delegating to the sub-agent**"),
+            "several records for one turn, joined in the order written"
+        );
+        assert_eq!(turn.reasoning_bytes, Some(55));
+        assert!(
+            turn.tokens.is_some(),
+            "the same event still states its cost"
+        );
+
+        // ── the registry the actor_ids join against ──
+        let actors = &res.session_actors["019fd1ca-816d-7af2-9332-a6db0bfc4d25"];
+        let sub = &actors["/root/schema_review"];
+        assert_eq!(sub.path.as_deref(), Some("/root/schema_review"));
+        assert_eq!(
+            sub.thread_id.as_deref(),
+            Some("019f0000-0000-7000-8000-000000000001")
+        );
+        assert_eq!(sub.first_ts.as_deref(), Some("2026-08-05T11:59:00.500Z"));
+        assert_eq!(
+            sub.last_ts.as_deref(),
+            Some("2026-08-05T11:59:04.000Z"),
+            "one actor, one row, spanning every sighting"
+        );
+        assert!(
+            actors.contains_key("/root"),
+            "the recipient is an actor codex NAMED — without a row, \
+             recipient_actor_id points at nothing"
+        );
+        assert_eq!(
+            sub.parent_actor_id, None,
+            "codex names no parent; the path is stated and reading a tree out of \
+             it is the server's job"
+        );
+
+        // ── a modelled record leaves the ledger ──
+        for kind in [
+            "event_msg/sub_agent_activity",
+            "event_msg/agent_reasoning",
+            "response_item/agent_message",
+        ] {
+            assert_eq!(
+                res.skipped_kinds.get(kind),
+                None,
+                "{kind} is modelled now and must leave the skip ledger"
+            );
+        }
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// The one record type left UNMODELLED on purpose, and why: codex writes a
+    /// bare `{"trigger_turn": false}` beside every inter-agent message — one
+    /// boolean of undocumented meaning, no content, no ids. Capturing a
+    /// structure nothing explains would be a guess dressed as a fact, so it
+    /// stays in the ledger where it is counted and visible.
+    #[test]
+    fn the_undocumented_inter_agent_metadata_record_stays_in_the_ledger() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            json!({ "timestamp": "2026-08-05T11:59:03.000Z",
+                    "type": "inter_agent_communication_metadata",
+                    "payload": { "trigger_turn": false } }),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        assert_eq!(
+            res.skipped_kinds.get("inter_agent_communication_metadata"),
+            Some(&1)
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 }

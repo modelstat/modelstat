@@ -187,11 +187,34 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       re-scan is what re-keys the history; the server tombstones the events the
 ///       old key already landed. Rides the SAME codex bump wave as v25 where it
 ///       can — but v25 landed first, so this is its own re-read.
+/// claude_code v25 — the model's own THINKING, on transcripts already read.
+///       Claude Code writes reasoning as `thinking` content blocks beside the
+///       `text` ones, and the excerpt pass filtered to `text` — so every session
+///       that reasoned shipped no trace of having reasoned, and the block's
+///       opaque `signature` is the only part of it nothing wants. Turns now
+///       carry `reasoning_excerpt`/`reasoning_bytes` (redacted on the same
+///       fail-closed path as the prose; the signature stays behind). Re-reading
+///       is the only way history gains it: the blocks exist solely in the local
+///       JSONL. The 1,694 sub-agent transcripts this release starts walking need
+///       no bump — they have no cursors to wipe — but the SAME re-read is what
+///       makes existing main transcripts give up their thinking.
+/// codex v27 — the multi-agent run, which was three unmodelled record types.
+///       `event_msg`/`sub_agent_activity` is the sub-agent LIFECYCLE codex
+///       states about itself (2,132 records in one real rollout: 446 starts,
+///       1,649 interactions, 37 interruptions across 440 agents) and it dropped
+///       whole. `response_item`/`agent_message` is the traffic BETWEEN those
+///       agents — author, recipient, and what was said — and 3,109 of them
+///       shipped as content-free unknown records; it has no `event_msg` twin, so
+///       capturing it doubles nothing. `event_msg`/`agent_reasoning` is the
+///       model's thinking, 14,802 records buffered onto the round trip's own
+///       usage-bearing event exactly as its prose already was. All three are
+///       local-only facts, so a re-scan is the only way uploaded sessions get
+///       them; only codex's own files re-read.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
     ("capture", LEGACY_WORLD_VERSION + 1),
     ("redaction", LEGACY_WORLD_VERSION),
-    ("claude_code", LEGACY_WORLD_VERSION + 1),
-    ("codex", LEGACY_WORLD_VERSION + 3),
+    ("claude_code", LEGACY_WORLD_VERSION + 2),
+    ("codex", LEGACY_WORLD_VERSION + 4),
     ("cursor", LEGACY_WORLD_VERSION),
     ("pi", LEGACY_WORLD_VERSION),
 ];
