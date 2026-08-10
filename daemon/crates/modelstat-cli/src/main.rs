@@ -18,7 +18,6 @@ use serde::Serialize;
 
 mod cmd_admin;
 mod cmd_connect;
-mod cmd_label;
 mod cmd_mode;
 mod cmd_redactor;
 mod cmd_roi;
@@ -83,13 +82,10 @@ fn main() -> ExitCode {
         Some("mode") => {
             block_on_config(|config| async move { cmd_mode::cmd_mode(config, &args[1..]).await })
         }
-        // The on-device ROI engine (local-only): what the AI token spend bought,
-        // in this repo's own effort units — and in hours ONLY once `label` has
-        // earned a calibration. No runtime and no Config: pure git + local logs.
+        // The on-device work ledger (local-only): what merged in a repo and what
+        // the AI spend beside it was, in measured primitives only — no score. No
+        // runtime and no Config: pure git + local session logs.
         Some("roi") => cmd_roi::cmd_roi(&args[1..]),
-        // Record how long a PR actually took. The one measured input the whole
-        // estimator rests on; eight of them unlock hours.
-        Some("label") => cmd_label::cmd_label(&args[1..]),
         // Wipe cursors + stamp the processing version so the next scan re-reads all.
         Some("reset") => cmd_admin::cmd_reset(),
         // Tear down the managed service(s) + tray + statusline; identity preserved.
@@ -182,10 +178,10 @@ fn print_usage() {
     eprintln!("  jobs [--json]                  local pipeline view");
     eprintln!("  paths [--json]                 resolved file paths");
     eprintln!("  token [--json]                 print the device bearer\n");
-    eprintln!("Effort + ROI (local only)");
-    eprintln!("  roi [--repo P] [--days N]      what the AI spend bought, in effort units");
-    eprintln!("      [--limit N] [--json] [--usd-per-mtok RATE]");
-    eprintln!("  label <pr> <minutes>           record how long a PR really took (8 unlock hours)\n");
+    eprintln!("Work + spend (local only)");
+    eprintln!("  roi [--repo P] [--days N]      what merged, and the tokens + time");
+    eprintln!("      [--limit N] [--sort KEY]   beside it — measured, never scored");
+    eprintln!("      [--json] [--usd-per-mtok RATE]     (`roi --help` for the columns)\n");
     eprintln!("Control");
     eprintln!("  mode [cloud|local|self-hosted] show/change where sessions summarise");
     eprintln!("  redactor [local|cloud|self-hosted] show/change where turns are scrubbed");
