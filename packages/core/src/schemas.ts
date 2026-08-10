@@ -73,6 +73,10 @@ export const RawEvent = z.object({
   parent_event_id: z.string().nullable(), // for subagent turns
 
   // Location
+  /** Always null from the daemon: the working directory is an absolute local
+   * path that nothing server-side reads, so the wire door clears it. The
+   * device's own readers (git resolution, session metadata) use it before
+   * that. Kept nullable rather than dropped so older daemons still validate. */
   cwd: z.string().nullable(),
   git: GitContext.nullable(),
 
@@ -117,7 +121,12 @@ export const RawEvent = z.object({
   // safely (same class as git.remote_slug). Optional + additive.
   references: EventReferences.optional(),
 
-  // Reference to originating file for reparsing
+  // Reference to originating file for reparsing.
+  /** The transcript's FILE NAME, not its path: the only server-side reader
+   * splits on the separators and keeps the last component (to spot a file
+   * named after the session it holds), and the directories above it are both
+   * unread and identifying — a Claude project dir spells out the full local
+   * path. The daemon sheds them at the wire door. */
   source_file: z.string().max(1024).nullable(),
   source_byte_offset: z.number().int().nonnegative().nullable(),
 });
