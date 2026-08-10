@@ -78,6 +78,21 @@ export const PullRequestRef = z.object({
   merge_sha: z.string().max(64).optional(),
   merge_subject: z.string().max(400).optional(),
   merge_method: z.string().max(40).optional(),
+  // What the PR CHANGED, measured on the device off that same merge commit —
+  // the primitives a forge reports, read from local git with no token. Mirrors
+  // core's `PullRequestRef` field-for-field.
+  //
+  // `.optional()` and never nullable, on purpose: ABSENT is "the local repo
+  // could not say" (no repo on disk, no merge commit found, a git read that
+  // failed) and a present `0` is a measurement. Collapsing the two is exactly
+  // the bug these fields exist to avoid, so a producer must omit the key
+  // rather than send `0` or `null`. `commits_count` is additionally absent for
+  // a squash merge, whose flattened branch is no longer in the history, even
+  // when the file and line counts beside it are known.
+  files_changed: z.number().int().nonnegative().optional(),
+  lines_added: z.number().int().nonnegative().optional(),
+  lines_deleted: z.number().int().nonnegative().optional(),
+  commits_count: z.number().int().nonnegative().optional(),
 });
 export type PullRequestRef = z.infer<typeof PullRequestRef>;
 

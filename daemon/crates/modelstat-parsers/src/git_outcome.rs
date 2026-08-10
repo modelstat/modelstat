@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use regex::Regex;
 
-use crate::git::run_git;
+use crate::git::{parse_numstat_totals, run_git};
 
 /// How `merged` was decided. One value today; a string rather than a bool so a
 /// second method (a forge API, a `gh` tool result) does not need a new field.
@@ -37,6 +37,37 @@ pub struct PrOutcome {
     pub merge_subject: Option<String>,
     /// Which reading produced `merged`; None when nothing matched.
     pub merge_method: Option<&'static str>,
+    /// What the merge commit CHANGED, when one was found and git could be read.
+    /// Absent is "not measured" — see [`PrChange`].
+    pub change: Option<PrChange>,
+}
+
+/// The change primitives of one PR, measured in the local repo — counts only.
+///
+/// These are the same numbers a forge reports for a PR, and the daemon can
+/// read three of them off the merge commit `check_pull_request_outcome`
+/// already found, with no token and no network. They exist ONLY when that
+/// commit is in this repo: no repo on disk, no matching commit, or a failing
+/// git read leaves the whole struct absent rather than zero. Zero is a
+/// measurement ("this PR changed nothing"); absence is "nobody measured".
+///
+/// Privacy: counts. The numstat's path column is never captured
+/// ([`parse_numstat_totals`]), so there is no field a path could be stored in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrChange {
+    pub files_changed: u32,
+    pub lines_added: u64,
+    pub lines_deleted: u64,
+    /// Commits the PR's branch carried — the range between the merge commit's
+    /// two parents.
+    ///
+    /// `None` for a squash or rebase merge: it has ONE parent and the branch it
+    /// flattened is not in this repo's history, so the commit count is not
+    /// knowable here — while the numstat of what landed still is. Counting the
+    /// squash commit itself as `1` would answer a different question ("commits
+    /// on mainline") under the name of this one, and disagree with every forge.
+    /// Same reading as `git_anchors::span_and_count`.
+    pub commits_count: Option<u32>,
 }
 
 /// One parsed commit.
@@ -102,7 +133,9 @@ pub fn is_reverted(commits: &[GitCommit], merge_sha: &str) -> bool {
     })
 }
 
-/// Classify a PR's outcome from already-parsed commits. Pure.
+/// Classify a PR's outcome from already-parsed commits. Pure — so `change` is
+/// always None here; [`check_pull_request_outcome`] is the half that can read
+/// the merge commit's diff.
 pub fn outcome_from_commits(commits: &[GitCommit], pr_number: u64) -> PrOutcome {
     match find_merge_commit_for_pr(commits, pr_number) {
         None => PrOutcome {
@@ -112,6 +145,7 @@ pub fn outcome_from_commits(commits: &[GitCommit], pr_number: u64) -> PrOutcome 
             merge_sha: None,
             merge_subject: None,
             merge_method: None,
+            change: None,
         },
         Some(merge) => PrOutcome {
             merged: true,
@@ -126,12 +160,21 @@ pub fn outcome_from_commits(commits: &[GitCommit], pr_number: u64) -> PrOutcome 
             // convention checkable instead of trusted.
             merge_subject: Some(merge.subject.clone()),
             merge_method: Some(MERGE_METHOD_SUBJECT_REF),
+            change: None,
         },
     }
 }
 
+/// The per-git-call ceiling for every read in this module.
+const GIT_TIMEOUT: Duration = Duration::from_millis(4_000);
+
 /// Run `git log` in `cwd` and determine the PR's outcome. Best-effort: None when
 /// `cwd` isn't a git repo or git fails. Bounded to recent history + a 4s timeout.
+///
+/// When a merge commit was found, its change primitives are measured too
+/// ([`measure_pr_change`]) — the sha is already in hand and the numbers are the
+/// ones a forge would report, so a dashboard fed only by this daemon still has
+/// them. A failure there costs the outcome nothing: `change` stays None.
 pub fn check_pull_request_outcome(cwd: &str, pr_number: u64) -> Option<PrOutcome> {
     let stdout = run_git(
         &[
@@ -141,9 +184,57 @@ pub fn check_pull_request_outcome(cwd: &str, pr_number: u64) -> Option<PrOutcome
             &format!("--format={}", git_log_format()),
         ],
         cwd,
-        Duration::from_millis(4_000),
+        GIT_TIMEOUT,
     )?;
-    Some(outcome_from_commits(&parse_git_log(&stdout), pr_number))
+    let mut outcome = outcome_from_commits(&parse_git_log(&stdout), pr_number);
+    if let Some(sha) = outcome.merge_sha.as_deref() {
+        outcome.change = measure_pr_change(cwd, sha);
+    }
+    Some(outcome)
+}
+
+/// Measure what the commit `merge_sha` changed, in the repo at `cwd`. `None`
+/// when the sha is not in this repo or git could not be read — never zeros.
+///
+/// `-m --first-parent` is load bearing: a merge commit's DEFAULT `git show`
+/// diff is empty, which would report every true-merge PR as changing nothing.
+/// It is a no-op on a squash merge's single parent, whose numstat is the whole
+/// squashed change and is read exactly like any other commit's.
+pub fn measure_pr_change(cwd: &str, merge_sha: &str) -> Option<PrChange> {
+    let numstat = run_git(
+        &[
+            "-c",
+            "core.quotePath=false",
+            "show",
+            "--numstat",
+            "--format=",
+            "-m",
+            "--first-parent",
+            merge_sha,
+        ],
+        cwd,
+        GIT_TIMEOUT,
+    )?;
+    let (files_changed, lines_added, lines_deleted) = parse_numstat_totals(&numstat);
+    Some(PrChange {
+        files_changed,
+        lines_added,
+        lines_deleted,
+        commits_count: branch_commit_count(cwd, merge_sha),
+    })
+}
+
+/// How many commits the merged branch carried: `<sha>^1..<sha>^2`, the range
+/// between the merge's two parents — the same set a forge lists on the PR.
+///
+/// A squash or rebase merge has no `^2`, so git exits non-zero and this is
+/// None: the branch is gone from this history and the count cannot be read
+/// from what remains. Indistinguishable from a git failure, and deliberately
+/// so — both mean "not measured".
+fn branch_commit_count(cwd: &str, merge_sha: &str) -> Option<u32> {
+    let range = format!("{merge_sha}^1..{merge_sha}^2");
+    let out = run_git(&["rev-list", "--count", &range], cwd, GIT_TIMEOUT)?;
+    out.trim().parse().ok().filter(|n| *n > 0)
 }
 
 #[cfg(test)]
@@ -210,7 +301,126 @@ mod tests {
                 merge_sha: None,
                 merge_subject: None,
                 merge_method: None,
+                change: None,
             }
         );
+    }
+
+    /// End-to-end over a real repo: the git invocations are the half a pure
+    /// test cannot check, and they are version-sensitive — a merge commit's
+    /// DEFAULT `git show` diff is empty, so without `-m --first-parent` every
+    /// true merge would ship zeros.
+    #[test]
+    #[cfg(unix)]
+    fn change_primitives_come_off_the_merge_commit_or_not_at_all() {
+        use std::process::{Command, Stdio};
+
+        let dir = std::env::temp_dir().join(format!("modelstat-prchange-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_str().unwrap().to_string();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        };
+        // Skip cleanly if git isn't available on this runner.
+        if git(&["init", "-q"]).map(|s| !s.success()).unwrap_or(true) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let commit = |message: &str| {
+            git(&[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ])
+        };
+        let write = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+
+        write("a.txt", "1\n");
+        let _ = git(&["add", "-A"]);
+        let _ = commit("init");
+        let _ = git(&["branch", "-M", "base"]);
+
+        // A true merge: two branch commits, one of them a binary file.
+        let _ = git(&["checkout", "-q", "-b", "feature"]);
+        write("a.txt", "1\n2\n3\n");
+        let _ = git(&["add", "-A"]);
+        let _ = commit("wip one");
+        std::fs::write(dir.join("logo.png"), [0x89u8, 0x50, 0x4e, 0x47, 0x00, 0x01]).unwrap();
+        let _ = git(&["add", "-A"]);
+        let _ = commit("wip two");
+        let _ = git(&["checkout", "-q", "base"]);
+        let _ = git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge pull request #42 from acme/feature",
+            "feature",
+        ]);
+
+        let merged = check_pull_request_outcome(&path, 42).expect("a repo git can read");
+        assert!(merged.merged);
+        let change = merged.change.expect("the merge commit is right here");
+        // a.txt (+2) and the binary file: the binary row counts as a changed
+        // file and adds no lines, rather than being dropped or read as zero.
+        assert_eq!(change.files_changed, 2, "{change:?}");
+        assert_eq!(change.lines_added, 2, "{change:?}");
+        assert_eq!(change.lines_deleted, 0, "{change:?}");
+        assert_eq!(change.commits_count, Some(2), "{change:?}");
+
+        // A squash merge: the numstat IS readable, the flattened branch is not.
+        write("d.txt", "one\ntwo\n");
+        let _ = git(&["add", "-A"]);
+        let _ = commit("feat: squashed (#43)");
+        let squashed = check_pull_request_outcome(&path, 43)
+            .and_then(|o| o.change)
+            .expect("a squash merge's own diff is measurable");
+        assert_eq!(
+            (squashed.files_changed, squashed.lines_added),
+            (1, 2),
+            "{squashed:?}"
+        );
+        assert_eq!(
+            squashed.commits_count, None,
+            "the squashed branch is not in this history — nothing is claimed"
+        );
+
+        // A PR this repo never saw: the other fields still ship, the change
+        // primitives are absent rather than zero.
+        let absent = check_pull_request_outcome(&path, 9999).expect("still a readable repo");
+        assert!(!absent.merged);
+        assert_eq!(absent.change, None);
+        // …and neither is a sha that is not in the repo at all.
+        assert_eq!(
+            measure_pr_change(&path, "0000000000000000000000000000000000000000"),
+            None
+        );
+        // …nor is a repo that is not on disk at all.
+        assert_eq!(
+            measure_pr_change("/nonexistent-modelstat-prchange", "HEAD"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

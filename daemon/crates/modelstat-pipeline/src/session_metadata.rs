@@ -303,6 +303,15 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
                     pr.merge_sha = o.merge_sha;
                     pr.merge_subject = o.merge_subject;
                     pr.merge_method = o.merge_method.map(str::to_string);
+                    // What it changed, measured off that same commit. Absent
+                    // when the local repo could not say it — never zeroed, and
+                    // `commits_count` is absent on its own for a squash merge.
+                    if let Some(c) = o.change {
+                        pr.files_changed = Some(c.files_changed);
+                        pr.lines_added = Some(c.lines_added);
+                        pr.lines_deleted = Some(c.lines_deleted);
+                        pr.commits_count = c.commits_count;
+                    }
                 }
             }
         }
@@ -357,7 +366,7 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use modelstat_parsers::{FileChange, PrOutcome};
+    use modelstat_parsers::{FileChange, PrChange, PrOutcome};
     use modelstat_wire::GitContext;
     use std::collections::HashMap;
 
@@ -508,6 +517,13 @@ mod tests {
                 merge_sha: Some("c0ffee1".into()),
                 merge_subject: Some("feat: retries (#42)".into()),
                 merge_method: Some("subject_ref_convention"),
+                change: Some(PrChange {
+                    files_changed: 3,
+                    lines_added: 120,
+                    lines_deleted: 4,
+                    // A squash merge: the branch is gone, the diff is not.
+                    commits_count: None,
+                }),
             },
         );
         let out = build_session_metadata(&[s], &[e], Some(&mut fake), None).await;
@@ -529,6 +545,14 @@ mod tests {
         assert_eq!(pr.merge_sha.as_deref(), Some("c0ffee1"));
         assert_eq!(pr.merge_subject.as_deref(), Some("feat: retries (#42)"));
         assert_eq!(pr.merge_method.as_deref(), Some("subject_ref_convention"));
+        // …and so do the change primitives it measured off that commit.
+        assert_eq!(pr.files_changed, Some(3));
+        assert_eq!(pr.lines_added, Some(120));
+        assert_eq!(pr.lines_deleted, Some(4));
+        assert_eq!(
+            pr.commits_count, None,
+            "a squash merge's branch count is unknown, and stays unknown"
+        );
     }
 
     #[tokio::test]

@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use modelstat_wire::{AnchorPr, RepoAnchors};
 use regex::Regex;
 
-use crate::git::{run_git, GitResolver};
+use crate::git::{parse_numstat_totals, run_git, GitResolver};
 use crate::git_outcome::{parse_git_log, GitCommit};
 
 /// Anchors kept per repo — the wire cap (`caps::ANCHORS_PER_REPO_COUNT_MAX`),
@@ -189,27 +189,6 @@ pub fn pr_number_from_subject(subject: &str) -> Option<u64> {
         LazyLock::new(|| Regex::new(r"^Merge pull request #([0-9]+)|\(#([0-9]+)\)\s*$").unwrap());
     let caps = RE.captures(subject)?;
     caps.get(1).or_else(|| caps.get(2))?.as_str().parse().ok()
-}
-
-/// `(files_changed, lines_added, lines_deleted)` from `git show --numstat`.
-/// Pure.
-///
-/// A numstat row is `<added>\t<deleted>\t<path>`. A binary file's `-\t-` row
-/// carries no line signal, so it is skipped whole — the regex simply requires
-/// digits. The path column is matched but never captured: an anchor ships
-/// counts, and this parse gives it no way to ship anything else.
-pub fn parse_numstat_totals(stdout: &str) -> (u32, u64, u64) {
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([0-9]+)\t([0-9]+)\t").unwrap());
-    let (mut files, mut added, mut deleted) = (0u32, 0u64, 0u64);
-    for line in stdout.lines() {
-        let Some(caps) = RE.captures(line) else {
-            continue;
-        };
-        files = files.saturating_add(1);
-        added += caps[1].parse::<u64>().unwrap_or(0);
-        deleted += caps[2].parse::<u64>().unwrap_or(0);
-    }
-    (files, added, deleted)
 }
 
 /// `sha → parent shas`, from `git log --format=%H %P`. Pure.
@@ -558,13 +537,10 @@ mod tests {
     }
 
     #[test]
-    fn numstat_totals_sum_files_and_skip_binaries() {
-        let out = "3\t1\tsrc/a.ts\n\
-                   -\t-\tassets/logo.png\n\
-                   2\t0\tsrc/b.ts\n";
-        // The binary row carries no line signal and no countable change.
-        assert_eq!(parse_numstat_totals(out), (2, 5, 1));
-        assert_eq!(parse_numstat_totals(""), (0, 0, 0));
+    fn numstat_totals_come_from_the_one_shared_parse() {
+        // The reading itself is tested in `crate::git`; this pins that the mine
+        // uses it rather than a second copy.
+        assert_eq!(parse_numstat_totals("3\t1\tsrc/a.ts\n"), (1, 3, 1));
     }
 
     #[test]

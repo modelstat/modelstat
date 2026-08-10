@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 use modelstat_wire::{GitContext, SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_PATH_SHAPE};
@@ -143,6 +143,32 @@ pub fn path_guessed_git_context(
 /// never allowed to block or fail a scan.
 pub(crate) fn run_git(args: &[&str], cwd: &str, timeout: Duration) -> Option<String> {
     crate::util::run_command("git", args, Some(cwd), timeout)
+}
+
+/// `(files_changed, lines_added, lines_deleted)` from a `git … --numstat`.
+/// Pure. Shared by every local change measurement in this crate
+/// ([`crate::git_anchors`] for an anchor PR, [`crate::git_outcome`] for a
+/// session's own PR) so there is ONE reading of a numstat here.
+///
+/// A row is `<added>\t<deleted>\t<path>`. A binary file's `-\t-` row carries no
+/// line signal but IS a changed file: it counts toward the file total and adds
+/// nothing to either line count, which is also what a forge reports for it.
+/// The path column is matched and never captured — every caller ships counts,
+/// and this parse gives it no way to ship anything else.
+pub(crate) fn parse_numstat_totals(stdout: &str) -> (u32, u64, u64) {
+    static RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^([0-9]+|-)\t([0-9]+|-)\t").unwrap());
+    let (mut files, mut added, mut deleted) = (0u32, 0u64, 0u64);
+    for line in stdout.lines() {
+        let Some(caps) = RE.captures(line) else {
+            continue;
+        };
+        files = files.saturating_add(1);
+        // `-` does not parse, which is exactly the "no line signal" reading.
+        added = added.saturating_add(caps[1].parse::<u64>().unwrap_or(0));
+        deleted = deleted.saturating_add(caps[2].parse::<u64>().unwrap_or(0));
+    }
+    (files, added, deleted)
 }
 
 /// Resolves authoritative git context per cwd, caching for the process lifetime
@@ -312,5 +338,20 @@ mod tests {
             Some("acme/myrepo")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn numstat_totals_sum_lines_and_count_a_binary_file_without_lines() {
+        let out = "3\t1\tsrc/a.ts\n\
+                   -\t-\tassets/logo.png\n\
+                   2\t0\tsrc/b.ts\n";
+        // Three files changed; the binary row contributes no lines to either
+        // side rather than being dropped from the file count or read as zero.
+        assert_eq!(parse_numstat_totals(out), (3, 5, 1));
+        // Nothing measured is (0,0,0) — the CALLER decides whether it had a
+        // numstat to read at all; this parse never invents one.
+        assert_eq!(parse_numstat_totals(""), (0, 0, 0));
+        // A commit sha line, a blank line and prose are not rows.
+        assert_eq!(parse_numstat_totals("abc123\n\nnot a row\n"), (0, 0, 0));
     }
 }

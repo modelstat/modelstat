@@ -110,6 +110,24 @@ pub struct PullRequestRef {
     pub merge_subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_method: Option<String>,
+    /// What the PR CHANGED, measured on this machine off the merge commit
+    /// above (`modelstat_parsers::git_outcome::measure_pr_change`) — the same
+    /// primitives a forge reports, without a forge.
+    ///
+    /// Every one is omitted when the local repo could not say it: no repo on
+    /// disk, no merge commit found, or a git read that failed. A `0` here is a
+    /// measurement (a PR that changed nothing); ABSENT is "not measured", and
+    /// the two must never be collapsed. `commits_count` is additionally absent
+    /// for a squash merge, whose branch this history no longer contains, even
+    /// though its file/line counts are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_added: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_deleted: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits_count: Option<u32>,
 }
 
 /// An issue / ticket the session referenced.
@@ -291,6 +309,10 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merge_sha: None,
             merge_subject: None,
             merge_method: None,
+            files_changed: None,
+            lines_added: None,
+            lines_deleted: None,
+            commits_count: None,
         });
         out.repos
             .push(repo_from(Some("github.com".into()), &slug, source));
@@ -309,6 +331,10 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merge_sha: None,
             merge_subject: None,
             merge_method: None,
+            files_changed: None,
+            lines_added: None,
+            lines_deleted: None,
+            commits_count: None,
         });
         out.repos
             .push(repo_from(Some("gitlab.com".into()), &c[1], source));
@@ -328,6 +354,10 @@ pub fn detect_references(text: &str, source: &str) -> DetectedRefs {
             merge_sha: None,
             merge_subject: None,
             merge_method: None,
+            files_changed: None,
+            lines_added: None,
+            lines_deleted: None,
+            commits_count: None,
         });
         out.repos
             .push(repo_from(Some("bitbucket.org".into()), &slug, source));
@@ -495,14 +525,19 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
                     url: win.url.or(lose.url),
                     source: win.source,
                     confidence: win.confidence.max(lose.confidence),
-                    // Outcome signals are filled AFTER dedupe (like the TS merge,
-                    // which returns only the six core fields), so reset to unknown.
+                    // Outcome signals and the change primitives are filled
+                    // AFTER dedupe (like the TS merge, which returns only the
+                    // six core fields), so reset to unknown.
                     merged: None,
                     merged_at: None,
                     reverted: None,
                     merge_sha: None,
                     merge_subject: None,
                     merge_method: None,
+                    files_changed: None,
+                    lines_added: None,
+                    lines_deleted: None,
+                    commits_count: None,
                 };
             }
             None => {
@@ -884,6 +919,10 @@ mod tests {
             merge_sha: None,
             merge_subject: None,
             merge_method: None,
+            files_changed: None,
+            lines_added: None,
+            lines_deleted: None,
+            commits_count: None,
         };
         // Unenriched: the three keys are omitted entirely.
         let bare = serde_json::to_value(&pr).unwrap();
@@ -897,6 +936,68 @@ mod tests {
         assert_eq!(enriched["merged"], serde_json::json!(false));
         assert_eq!(enriched["merged_at"], serde_json::Value::Null);
         assert!(enriched.get("merged_at").is_some());
+    }
+
+    #[test]
+    fn change_primitives_are_absent_until_measured_and_never_null_or_zero() {
+        let mut pr = PullRequestRef {
+            host: Some("github.com".into()),
+            slug: Some("acme/api".into()),
+            number: 42,
+            url: None,
+            source: "git".into(),
+            confidence: default_pr_confidence(),
+            merged: Some(true),
+            merged_at: Some(Some("2026-07-16T11:00:00Z".into())),
+            reverted: Some(false),
+            merge_sha: Some("c0ffee1".into()),
+            merge_subject: Some("feat: retries (#42)".into()),
+            merge_method: Some(crate::git_outcome::MERGE_METHOD_SUBJECT_REF.into()),
+            files_changed: None,
+            lines_added: None,
+            lines_deleted: None,
+            commits_count: None,
+        };
+        // A repo that could not be measured says nothing — not `null`, not `0`.
+        let unmeasured = serde_json::to_value(&pr).unwrap();
+        for key in [
+            "files_changed",
+            "lines_added",
+            "lines_deleted",
+            "commits_count",
+        ] {
+            assert!(unmeasured.get(key).is_none(), "{key} must be absent");
+        }
+        // A squash merge: the numstat is known, the flattened branch is not.
+        pr.files_changed = Some(3);
+        pr.lines_added = Some(120);
+        pr.lines_deleted = Some(4);
+        let squashed = serde_json::to_value(&pr).unwrap();
+        assert_eq!(squashed["files_changed"], serde_json::json!(3));
+        assert!(squashed.get("commits_count").is_none());
+        // A measured zero is a measurement and IS shipped.
+        pr.lines_deleted = Some(0);
+        pr.commits_count = Some(2);
+        let measured = serde_json::to_value(&pr).unwrap();
+        assert_eq!(measured["lines_deleted"], serde_json::json!(0));
+        assert_eq!(measured["commits_count"], serde_json::json!(2));
+        // Round-trips back, and this is the exact JSON the TS mirror parses in
+        // packages/core/src/session-metadata.test.ts — change one, change both.
+        let json = serde_json::to_string(&pr).unwrap();
+        assert_eq!(
+            json,
+            r#"{"host":"github.com","slug":"acme/api","number":42,"url":null,"source":"git","confidence":0.9,"merged":true,"merged_at":"2026-07-16T11:00:00Z","reverted":false,"merge_sha":"c0ffee1","merge_subject":"feat: retries (#42)","merge_method":"subject_ref_convention","files_changed":3,"lines_added":120,"lines_deleted":0,"commits_count":2}"#
+        );
+        let back: PullRequestRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.files_changed, Some(3));
+        assert_eq!(back.lines_added, Some(120));
+        assert_eq!(back.lines_deleted, Some(0));
+        assert_eq!(back.commits_count, Some(2));
+        // An older daemon's ref has none of the four keys and still parses.
+        let old: PullRequestRef =
+            serde_json::from_str(r#"{"number":7,"source":"content","confidence":0.9}"#).unwrap();
+        assert_eq!(old.files_changed, None);
+        assert_eq!(old.commits_count, None);
     }
 
     #[test]

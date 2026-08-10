@@ -113,28 +113,34 @@ Five families. Every one is a count of something that happened, and none of them
 | **Time** | `active_ms` — the union of 5-minute windows around a session's event timestamps, so idle gaps do not count (`attribution::active_ms`, `ACTIVITY_WINDOW_MS`). The server additionally derives `agent_working_ms` (developer waiting on the agent) and `waiting_on_user_ms` (agent blocked on a human) from turn-level message timing the daemon does not model. | On-device from event timestamps; server-side from the time plane. | Shipped (device: `active_ms` only). |
 | **Authorship** | AI-assisted vs human-authored, per merged PR. | `is_ai_authored` reads the tools' own commit trailers (§4). A read of a string that is either present or absent. | Shipped. |
 | **Lifecycle** | Merged, reverted, and sessions that reference no outcome that ever merged (§6). | `check_pull_request_outcome` / `is_reverted`, `daemon/crates/modelstat-parsers/src/git_outcome.rs`. | Shipped. |
-| **Change primitives** | `files_changed`, `lines_added`, `lines_deleted`, and churn split by path class (test / config / doc / generated). The server additionally carries `commits` per work item, which the daemon deliberately does not report — see below. | `diff_features` over a bounded `git show --numstat`, `daemon/crates/modelstat-work/src/diff.rs`. Paths are read to classify and then dropped — `DiffFeatures` is deliberately not `Serialize`. A hunk count was also read here and is gone: it needed a second, far larger `git show` — 52% of the git time on a 120-merge walk — and nothing consumed it. | Shipped (device: no `commits`). |
+| **Change primitives** | `files_changed`, `lines_added`, `lines_deleted`, `commits_count`, and — on the device only — churn split by path class (test / config / doc / generated). | Two readings of the same bounded `git show -m --first-parent --numstat`. What ships: `git_outcome::measure_pr_change` folds it through `git::parse_numstat_totals` — the crate's one totals parse, which matches the path column and never captures it — into the four counts that ride `PullRequestRef` to the server. What stays: `modelstat-work/src/diff.rs` keeps the row-level parse `modelstat roi` needs, because classifying a path means reading it (`DiffFeatures` is deliberately not `Serialize`, so no path can reach a wire through that crate). A hunk count was also read here and is gone: it needed a second, far larger `git show` — 52% of the git time on a 120-merge walk — and nothing consumed it. | Shipped. |
 
-**Two quantities exist server-side and not on the device.** The daemon does not compute
+**One pair of quantities exists server-side and not on the device.** The daemon does not compute
 `agent_working_ms` / `waiting_on_user_ms`, because turn-level wait needs message timing it does
-not model. It does not report `commits`, because a first-parent walk sees exactly one commit per
-merge: on a squash-merging repo — the dominant convention, and the one §1 finding 2 measured at
-0–17% branch-range coverage — a device-side commit count would be a constant `1` wearing the
-costume of a measurement. The server can count commits honestly because the forge knows the
-branch that was flattened.
+not model.
 
-So `modelstat roi` and the dashboard will agree on files and lines and differ on commits. **That
-is correct in both places, not drift.**
+**`commits_count` is measured only where a branch survives to count.** A merge commit has two
+parents, so `sha^1..sha^2` is the PR's own commits — the same set the forge lists, counted from
+the history already on disk. A squash or rebase merge has one parent and the branch it flattened
+is gone: there the daemon reports NOTHING rather than the constant `1` a first-parent walk would
+see, which would be a fabrication wearing the costume of a measurement (§1 finding 2 measured
+squash-merging repos at 0–17% branch-range coverage, so that constant would be most of the
+column). The numstat beside it is still real and still ships — a squash merge's diff is exactly
+what landed. The server, when a forge integration is connected, can count commits for the
+squashed case too, because the forge remembers the branch.
 
-**Neither absence names a reason, and neither may be read as one.** The device omits `commits`
-from `--json` entirely — it does not measure the quantity at all, so there is no outcome to
-report. The server stores NULL, which means *not measured* and nothing further: one bucket over
-several causes — no forge integration connected, a PR seen only through a list endpoint that
-omits the field, a detail fetch that failed or timed out, a per-run fetch budget exhausted before
-reaching that PR — with no column recording which. Inferring the cause is a bug with a friendly
-face: "NULL ⇒ tell them to connect an integration" is wrong for the user who has one connected
-and hit a timeout, and wrong in the direction that looks actionable. Telling those states apart
-needs a provenance column somebody would have to add, and is never an inference from the NULL.
+So the device and the dashboard agree on files and lines everywhere, and agree on commits
+wherever the merge kept its branch. **Where they differ, the device is the one saying less.**
+
+**No absence names a reason, and none may be read as one.** An omitted `commits_count` means the
+local history could not count it; a NULL server-side means *not measured* and nothing further:
+one bucket over several causes — no forge integration connected, a PR seen only through a list
+endpoint that omits the field, a detail fetch that failed or timed out, a per-run fetch budget
+exhausted before reaching that PR — with no column recording which. Inferring the cause is a bug
+with a friendly face: "NULL ⇒ tell them to connect an integration" is wrong for the user who has
+one connected and hit a timeout, and wrong in the direction that looks actionable. Telling those
+states apart needs a provenance column somebody would have to add, and is never an inference from
+the NULL.
 
 What the two absences do share is the only thing they should: both refuse to fabricate a number.
 That is also why these columns are nullable rather than `NOT NULL DEFAULT 0` — a default would
@@ -384,7 +390,8 @@ defensible one.
 |---|---|
 | `daemon/crates/modelstat-work/` | Two modules, no socket. `diff.rs` reads a merge's change primitives locally, classifying paths and then dropping them (`DiffFeatures` is not `Serialize`, so no path or source text can reach a wire through this crate). `attribution.rs` is the §5 join, plus `active_ms` / `ACTIVITY_WINDOW_MS` as the citable definition of active time. |
 | `modelstat roi` | The device-side view: per merged PR — authorship, files changed, lines +/−, sessions, input-equivalent tokens (with the raw mix in the rollup) and active time. `--sort` over any of those columns, `--json` for the full document, `--usd-per-mtok` for the only dollars that exist. `--help` states in as many words that this reports measured quantities and does not score anyone. |
-| `IngestBatch.repo_anchors` | §4a. The only wire addition this work required. |
+| `IngestBatch.repo_anchors` | §4a. |
+| `SessionMetadata.pull_requests[].{files_changed,lines_added,lines_deleted,commits_count}` | The four counts `measure_pr_change` reads off the merge commit the outcome check already found, so the server's change columns are populated by local git alone — a forge integration becomes a second source, not the only one. Omitted, never zeroed, when the local repo cannot say. |
 
 What was deleted with the score, so it does not come back by accident: `units.rs` (the composite),
 `calibrate.rs` (label-fitted hours + LOOCV), `judge.rs` (the `Scorer` seam and its prompts),

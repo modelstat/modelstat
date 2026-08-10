@@ -9,6 +9,7 @@ import {
   detectReferences,
   type FileRef,
   isEmptySessionMetadata,
+  PullRequestRef,
   repoRefFromGit,
   SessionMetadata,
 } from "./session-metadata.js";
@@ -305,4 +306,51 @@ test("isEmptySessionMetadata accounts for files", () => {
   });
   assert.equal(isEmptySessionMetadata(withFiles), false);
   assert.equal(isEmptySessionMetadata(SessionMetadata.parse({})), true);
+});
+
+/**
+ * The daemon measures a PR's change primitives from local git and ships them
+ * on `PullRequestRef`. This is the exact JSON the Rust struct serializes —
+ * pinned byte-for-byte by
+ * `references::tests::change_primitives_are_absent_until_measured_and_never_null_or_zero`
+ * in daemon/crates/modelstat-parsers/src/references.rs. Change one, change both.
+ */
+const RUST_EMITTED_PR_REF =
+  '{"host":"github.com","slug":"acme/api","number":42,"url":null,"source":"git","confidence":0.9,"merged":true,"merged_at":"2026-07-16T11:00:00Z","reverted":false,"merge_sha":"c0ffee1","merge_subject":"feat: retries (#42)","merge_method":"subject_ref_convention","files_changed":3,"lines_added":120,"lines_deleted":0,"commits_count":2}';
+
+test("TS accepts the Rust-emitted PR ref, change primitives included", () => {
+  const pr = PullRequestRef.parse(JSON.parse(RUST_EMITTED_PR_REF));
+  assert.equal(pr.files_changed, 3);
+  assert.equal(pr.lines_added, 120);
+  // A measured zero survives as zero — it is a measurement, not a gap.
+  assert.equal(pr.lines_deleted, 0);
+  assert.equal(pr.commits_count, 2);
+});
+
+test("unmeasured change primitives stay absent — not null, not zero", () => {
+  // A PR whose repo was not on disk: the daemon omits all four keys.
+  const pr = PullRequestRef.parse({
+    host: "github.com",
+    slug: "acme/api",
+    number: 7,
+    url: null,
+    source: "content",
+    confidence: 0.9,
+  });
+  for (const key of ["files_changed", "lines_added", "lines_deleted", "commits_count"] as const) {
+    assert.equal(pr[key], undefined, `${key} must be absent`);
+    assert.ok(!(key in pr), `${key} must not be materialised as a null`);
+  }
+  // A squash merge: the diff is known, the flattened branch is not.
+  const squashed = PullRequestRef.parse({
+    number: 8,
+    files_changed: 2,
+    lines_added: 30,
+    lines_deleted: 1,
+  });
+  assert.equal(squashed.files_changed, 2);
+  assert.equal(squashed.commits_count, undefined);
+  // `null` is not a stand-in for "unknown" here: absence is.
+  assert.throws(() => PullRequestRef.parse({ number: 9, files_changed: null }));
+  assert.throws(() => PullRequestRef.parse({ number: 9, lines_added: -1 }));
 });
