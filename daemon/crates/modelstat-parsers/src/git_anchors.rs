@@ -343,13 +343,8 @@ pub fn mine_repo_anchors(cwd: &str, cfg: &AnchorConfig) -> Option<RepoAnchors> {
     // Parents in one bulk read over the same bounded walk, rather than a
     // `rev-list` per candidate: it is what tells a true merge from a squash, and
     // hundreds of extra subprocesses to learn it would cost more than the walk.
-    let mut parents_walk: Vec<&str> = vec![
-        "log",
-        "--first-parent",
-        "-n",
-        MAX_HISTORY,
-        "--format=%H %P",
-    ];
+    let mut parents_walk: Vec<&str> =
+        vec!["log", "--first-parent", "-n", MAX_HISTORY, "--format=%H %P"];
     if let Some(until) = &until {
         parents_walk.push(until);
     }
@@ -370,9 +365,7 @@ pub fn mine_repo_anchors(cwd: &str, cfg: &AnchorConfig) -> Option<RepoAnchors> {
         let branch = parents
             .get(commit.sha.as_str())
             .and_then(|shas| merge_range(shas))
-            .and_then(|range| {
-                run_git(&["log", &format, "-n", MAX_RANGE, &range], cwd, GIT_TIMEOUT)
-            })
+            .and_then(|range| run_git(&["log", &format, "-n", MAX_RANGE, &range], cwd, GIT_TIMEOUT))
             .map(|out| parse_git_log(&out))
             .unwrap_or_default();
 
@@ -599,7 +592,11 @@ mod tests {
             commit("c4", "2026-01-01T00:00:00Z", "feat: modern (#900)"),
             commit("c3", "2022-05-01T00:00:00Z", "feat: three (#3)"),
             commit("c1", "2021-01-01T00:00:00Z", "feat: one (#1)"),
-            commit("c2", "2021-06-01T00:00:00Z", "Merge pull request #2 from a/b"),
+            commit(
+                "c2",
+                "2021-06-01T00:00:00Z",
+                "Merge pull request #2 from a/b",
+            ),
             commit("prose", "2021-07-01T00:00:00Z", "chore: see #77 for why"),
         ];
         // No cutoff by default: a 2026 merge is a candidate like any other —
@@ -681,7 +678,10 @@ mod tests {
                 .status()
         };
         // Skip cleanly if git isn't available on this runner.
-        if git(&["init", "-q"], "").map(|s| !s.success()).unwrap_or(true) {
+        if git(&["init", "-q"], "")
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
@@ -705,7 +705,11 @@ mod tests {
         let write = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
 
         let _ = git(
-            &["config", "remote.origin.url", "git@github.com:acme/myrepo.git"],
+            &[
+                "config",
+                "remote.origin.url",
+                "git@github.com:acme/myrepo.git",
+            ],
             "",
         );
         write("a.txt", "1\n");
@@ -785,7 +789,11 @@ mod tests {
         assert_eq!(mined.cutoff, None, "no date filter by default");
         assert_eq!(mined.head_sha.len(), 40);
         assert_eq!(
-            mined.anchors.iter().map(|a| a.pr_number).collect::<Vec<_>>(),
+            mined
+                .anchors
+                .iter()
+                .map(|a| a.pr_number)
+                .collect::<Vec<_>>(),
             vec![45, 42],
             "newest first, and only the PRs no AI touched"
         );

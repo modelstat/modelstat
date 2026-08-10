@@ -232,6 +232,29 @@ fn codex_last_token_usage(p: &Value) -> CodexUsage {
     })
 }
 
+/// `payload.info.total_token_usage` — the conversation's running total at this
+/// turn, in upstream's own declaration order.
+///
+/// This is NOT accounting input; the tokens an event carries still come from
+/// `last_token_usage`. It is the turn's IDENTITY. Codex gives a rollout line no
+/// uuid, and a fork file replays its ancestor's history with the timestamps
+/// rewritten to the fork moment, so a copied turn shares nothing positional or
+/// temporal with its original. The cumulative counter it does share, exactly —
+/// see [`EventSource::CodexTurn`].
+///
+/// `None` when any counter is missing or non-numeric; the caller then falls back
+/// to the positional key rather than minting a key from partial numbers.
+fn codex_total_token_usage(p: &Value) -> Option<[u64; 4]> {
+    let total = p.get("info")?.get("total_token_usage")?;
+    let field = |name: &str| total.get(name).and_then(Value::as_u64);
+    Some([
+        field("input_tokens")?,
+        field("cached_input_tokens")?,
+        field("output_tokens")?,
+        field("reasoning_output_tokens")?,
+    ])
+}
+
 /// `rollout-<TS>-<UUID>.jsonl` → the session uuid.
 pub fn derive_session_id_from_rollout_path(path: &str) -> Option<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -428,6 +451,9 @@ fn parse_inner(
     let mut agent_text: Vec<String> = Vec::new();
     let mut open_calls: HashMap<String, usize> = HashMap::new();
     let mut pending_aggregate: BTreeMap<String, u64> = BTreeMap::new();
+    // `total_token_usage` from the previous `token_count` line, to catch codex
+    // restating one round trip's counters twice in a row.
+    let mut prev_cumulative: Option<[u64; 4]> = None;
 
     while let Some((line, offset)) = lines.next_line()? {
         raw_lines += 1;
@@ -461,6 +487,9 @@ fn parse_inner(
                     session_id = Some(id.to_string());
                     pending_aggregate.clear();
                     open_calls.clear();
+                    // Each conversation runs its own cumulative counter, so the
+                    // previous region's last value says nothing about this one.
+                    prev_cumulative = None;
                 }
             }
             continue;
@@ -692,24 +721,50 @@ fn parse_inner(
                         (None, found)
                     }
                 };
+                // The conversation's running total at this turn. It identifies
+                // the turn across replays; it is never summed.
+                let cumulative = codex_total_token_usage(p);
+                // A counter that did not move means no api call happened between
+                // the two lines, so the second states the SAME round trip a
+                // second time (codex re-emits its final counters this way).
+                // Summing both would bill that round trip twice.
+                if cumulative.is_some() && cumulative == prev_cumulative {
+                    skipped += 1;
+                    continue;
+                }
+                prev_cumulative = cumulative;
                 let slug = guess_repo_slug_from_path(cwd.as_deref());
                 let git = path_guessed_git_context(slug.clone(), None);
                 // The prose codex streamed for this round trip, verbatim.
                 let (content_excerpt, content_bytes) = take_message_text(&mut agent_text);
+                let sid = session_id.clone().unwrap();
                 sink.push(RawEvent {
-                    source_event_id: source_event_id(
-                        &ctx.device_id,
-                        &EventSource::File {
-                            file: &ctx.source_file,
-                            byte_offset: offset,
-                        },
-                    ),
+                    // Replay-stable when codex states the cumulative counter;
+                    // positional only when it does not, which no observed line
+                    // does — a fabricated key would be worse than a positional
+                    // one, because it would collapse UNRELATED turns.
+                    source_event_id: match cumulative {
+                        Some(cumulative) => source_event_id(
+                            &ctx.device_id,
+                            &EventSource::CodexTurn {
+                                session_id: &sid,
+                                cumulative,
+                            },
+                        ),
+                        None => source_event_id(
+                            &ctx.device_id,
+                            &EventSource::File {
+                                file: &ctx.source_file,
+                                byte_offset: offset,
+                            },
+                        ),
+                    },
                     ts,
                     kind: "assistant_message".to_string(),
                     agent: "codex_cli".to_string(),
                     provider: "openai".to_string(),
                     model: model.clone(),
-                    session_id: session_id.clone().unwrap(),
+                    session_id: sid,
                     turn_index: Some(turn_index),
                     parent_event_id: None,
                     cwd: cwd.clone(),
@@ -814,14 +869,25 @@ fn parse_inner(
                     .and_then(Value::as_object)
                     .map(|m| m.keys().map(String::as_str).collect())
                     .unwrap_or_default();
+                // A fork rollout replays these records too, so the same edit
+                // must not land twice. `call_id` is codex's own globally unique
+                // name for the call and survives the copy verbatim — the same
+                // shape of identity Claude Code's line uuid provides.
+                let call_id = payload
+                    .and_then(|p| p.get("call_id"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
                 match session_id.clone() {
                     Some(sid) => {
                         sink.push(RawEvent {
                             source_event_id: source_event_id(
                                 &ctx.device_id,
-                                &EventSource::File {
-                                    file: &ctx.source_file,
-                                    byte_offset: offset,
+                                &match call_id {
+                                    Some(line_uuid) => EventSource::LineUuid { line_uuid },
+                                    None => EventSource::File {
+                                        file: &ctx.source_file,
+                                        byte_offset: offset,
+                                    },
                                 },
                             ),
                             ts,
@@ -1216,6 +1282,66 @@ mod tests {
             "an arm that models the record must leave the skip ledger"
         );
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// The same edit, replayed into a fork's rollout, is ONE edit. `call_id` is
+    /// what says so — keyed by byte offset, the fork would report the file as
+    /// changed a second time and the components dimension would count it twice.
+    #[test]
+    fn a_replayed_patch_record_keeps_the_original_s_event_id() {
+        let patch = |ts: &str| {
+            line(
+                ts,
+                "patch_apply_end",
+                json!({
+                    "call_id": "exec-e1472a0d", "turn_id": "turn_1",
+                    "stdout": "Success. Updated the following files:\nM src/lib.rs\n",
+                    "stderr": "", "success": true, "status": "completed",
+                    "changes": { "/Users/dev/Projects/acme/src/lib.rs": {
+                        "type": "update", "unified_diff": "@@\n", "move_path": null } }
+                }),
+            )
+        };
+        let meta = json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } });
+        let ctx_line = json!({ "timestamp": "2026-08-05T11:58:58.000Z", "type": "turn_context",
+                "payload": { "cwd": "/Users/dev/Projects/acme", "model": "gpt-5-codex" } });
+        // The session's own rollout.
+        let own = rollout(&[
+            meta.clone(),
+            ctx_line.clone(),
+            patch("2026-08-05T11:59:01.000Z"),
+        ]);
+        // A fork replaying it: extra lines ahead of the record move its byte
+        // offset, and codex stamps the copy at the fork moment.
+        let fork = rollout(&[
+            meta.clone(),
+            ctx_line.clone(),
+            line(
+                "2026-08-05T12:41:18.000Z",
+                "user_message",
+                json!({ "message": "carry on" }),
+            ),
+            patch("2026-08-05T12:41:18.204Z"),
+        ]);
+        let id_of = |p: &str| {
+            parse_codex_rollout(&ParserContext::new("dev_1", p))
+                .unwrap()
+                .events
+                .iter()
+                .find(|e| e.kind == "patch_apply_end")
+                .expect("the patch record ships")
+                .source_event_id
+                .clone()
+        };
+        assert_eq!(
+            id_of(&own),
+            id_of(&fork),
+            "one edit, one event — whichever rollout it was read from"
+        );
+        for p in [&own, &fork] {
+            let _ = std::fs::remove_dir_all(std::path::Path::new(p).parent().unwrap());
+        }
     }
 
     #[test]
