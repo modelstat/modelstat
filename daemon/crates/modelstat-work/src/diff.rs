@@ -2,10 +2,10 @@
 //!
 //! Everything here is on-device. Paths are read — they are the only reliable
 //! way to tell a lockfile from a hand-written parser — and then dropped: a
-//! [`DiffFeatures`] holds counts, file extensions and a structure-only excerpt,
-//! and deliberately does NOT implement `Serialize`, so no code path can put one
-//! on a wire by accident. The serializable types this crate exposes are the
-//! numeric report shapes in [`crate::units`] and [`crate::calibrate`].
+//! [`DiffFeatures`] holds counts and nothing else, and deliberately does NOT
+//! implement `Serialize`, so no code path can put one on a wire by accident.
+//! What leaves this crate serialized are the spend counts in
+//! [`crate::attribution`].
 //!
 //! Best-effort like every other git read in this workspace: bounded
 //! (`--format=` so git never even prints the message, a byte ceiling on stdout,
@@ -26,19 +26,13 @@ const DIFF_MAX_BYTES: usize = 200 * 1024;
 /// Stdout ceiling for the numstat. One row per file, so this is ~4k files.
 const NUMSTAT_MAX_BYTES: usize = 256 * 1024;
 
-/// Numstat rows aggregated. A PR that touched more files than this is already
-/// off the scale the anchors calibrate, so the tail buys nothing.
+/// Numstat rows aggregated. A PR that touched more files than this is churn on
+/// a scale no per-file classification can say anything useful about.
 const MAX_FILES: usize = 2_000;
 
-/// Extensions kept in [`DiffFeatures::languages`], most files first.
-const MAX_LANGS: usize = 12;
-
-/// Byte ceiling on the structure-only excerpt handed to the judge.
-pub const EXCERPT_MAX_BYTES: usize = 8 * 1024;
-
-/// What a path is, by convention. Effort does not scale with churn alone: 600
+/// What a path is, by convention. Churn alone does not say what changed: 600
 /// lines of regenerated lockfile and 600 lines of new consensus code are the
-/// same `lines_added` and nowhere near the same work.
+/// same `lines_added` and plainly not the same event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathClass {
     /// Tests, specs, fixtures, testdata.
@@ -65,7 +59,8 @@ pub struct NumstatRow<'a> {
 
 /// The local, never-transmitted shape of one PR's diff.
 ///
-/// Intentionally NOT `Serialize`. See the module docs.
+/// Counts only, and every one of them is recountable by hand from
+/// `git show --numstat`. Intentionally NOT `Serialize`: see the module docs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DiffFeatures {
     pub files_changed: u32,
@@ -74,27 +69,17 @@ pub struct DiffFeatures {
     /// `@@` hunks across the (bounded) diff — a proxy for how scattered the
     /// change is, which two PRs of identical churn can differ wildly on.
     pub hunks: u32,
-    /// `(extension, file count)`, most files first. Extension only — never a
-    /// path, never a filename.
-    pub languages: Vec<(String, u32)>,
-    /// Churn (`added + deleted`) attributed to each [`PathClass`].
+    /// Churn (`added + deleted`) attributed to each [`PathClass`]. Reported
+    /// apart rather than discounted against each other: which classes a change
+    /// landed in is measured here, what each one is worth is the reader's call.
     pub test_lines: u64,
     pub config_lines: u64,
     pub doc_lines: u64,
     pub generated_lines: u64,
-    /// Structure-only rendering of the diff for the judge: hunk headers with
-    /// their line counts and per-line SHAPES (sign, indent, length, kind).
-    /// Contains no identifiers, no paths and no source text — see
-    /// [`structure_excerpt`]. Local-only regardless.
-    pub excerpt: String,
 }
 
 impl DiffFeatures {
-    /// Total churn — the unit the anchor population speaks.
-    ///
-    /// Raw, undiscounted. The per-class weighting that turns this into an
-    /// effort signal lives in [`crate::units`], because it needs weights an
-    /// `AnchorPr` cannot carry.
+    /// Total churn — added plus deleted, raw and undiscounted.
     pub fn churn(&self) -> u64 {
         self.lines_added.saturating_add(self.lines_deleted)
     }
@@ -280,108 +265,15 @@ pub fn parse_numstat(stdout: &str) -> Vec<NumstatRow<'_>> {
     out
 }
 
-/// The post-image path of a `diff --git a/X b/Y` header, or `None`. Pure.
-fn diff_header_path(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("diff --git ")?;
-    // Quoted paths (git's C-style quoting for non-ASCII) are left alone: we
-    // only need the extension and the class, and a mis-parse is a `Source`
-    // guess, not a leak.
-    let (_, b) = rest.rsplit_once(" b/")?;
-    Some(b)
-}
-
-/// One changed line, as a SHAPE: sign, indent width, visible length, kind.
-///
-/// This is the whole privacy argument for the excerpt. `+8/42x` says "an added
-/// line, indented eight columns, forty-two characters wide, code" and cannot be
-/// turned back into the line. Tabs count as four columns.
-fn line_shape(sign: char, body: &str) -> String {
-    let indent: usize = body
-        .chars()
-        .take_while(|c| *c == ' ' || *c == '\t')
-        .map(|c| if c == '\t' { 4 } else { 1 })
-        .sum();
-    let trimmed = body.trim();
-    let len = trimmed.chars().count().min(999);
-    let kind = if trimmed.is_empty() {
-        'b'
-    } else if trimmed.starts_with("//")
-        || trimmed.starts_with('#')
-        || trimmed.starts_with("/*")
-        || trimmed.starts_with('*')
-        || trimmed.starts_with("--")
-        || trimmed.starts_with("<!--")
-        || trimmed.starts_with(';')
-    {
-        'c'
-    } else {
-        'x'
-    };
-    format!("{sign}{indent}/{len}{kind}\n")
-}
-
-/// Render a unified diff as structure only, capped at `cap` bytes. Pure.
-///
-/// Keeps: a per-file line naming the file's [`PathClass`] and extension, hunk
-/// headers truncated at the second `@@` (the tail git appends there is the
-/// enclosing function's source text), and one shape per changed line. Drops
-/// everything else — paths, identifiers, literals, context lines.
-pub fn structure_excerpt(diff: &str, cap: usize) -> String {
-    let mut out = String::with_capacity(cap.min(4096));
-    let mut file_no = 0u32;
-    for line in diff.lines() {
-        let piece = if let Some(path) = diff_header_path(line) {
-            file_no += 1;
-            let file = path.rsplit('/').next().unwrap_or(path);
-            let ext = extension(&file.to_ascii_lowercase()).unwrap_or_else(|| "none".into());
-            let class = match classify_path(path) {
-                PathClass::Test => "test",
-                PathClass::Generated => "generated",
-                PathClass::Doc => "doc",
-                PathClass::Config => "config",
-                PathClass::Source => "source",
-            };
-            format!("file {file_no} {class} .{ext}\n")
-        } else if line.starts_with("@@ ") {
-            // `@@ -a,b +c,d @@ fn whatever(` → `@@ -a,b +c,d @@`.
-            let head = match line[3..].find("@@") {
-                Some(i) => &line[..3 + i + 2],
-                None => line,
-            };
-            format!("{head}\n")
-        } else if let Some(body) = line.strip_prefix('+') {
-            if line.starts_with("+++") {
-                continue;
-            }
-            line_shape('+', body)
-        } else if let Some(body) = line.strip_prefix('-') {
-            if line.starts_with("---") {
-                continue;
-            }
-            line_shape('-', body)
-        } else {
-            continue;
-        };
-        if out.len() + piece.len() > cap {
-            out.push_str("…truncated\n");
-            break;
-        }
-        out.push_str(&piece);
-    }
-    out
-}
-
 /// Fold a numstat and a unified diff into [`DiffFeatures`]. Pure — this is the
 /// half that is unit-tested; [`diff_features`] is the git call around it.
 pub fn features_from(numstat: &str, diff: &str) -> DiffFeatures {
-    let rows = parse_numstat(numstat);
     let mut f = DiffFeatures {
-        files_changed: rows.len() as u32,
-        excerpt: structure_excerpt(diff, EXCERPT_MAX_BYTES),
         hunks: diff.lines().filter(|l| l.starts_with("@@ ")).count() as u32,
         ..Default::default()
     };
-    let mut langs: Vec<(String, u32)> = Vec::new();
+    let rows = parse_numstat(numstat);
+    f.files_changed = rows.len() as u32;
     for row in &rows {
         // Saturating, like the totals below: a numstat is untrusted input, and
         // this crate's contract is "degrade, never panic".
@@ -395,19 +287,7 @@ pub fn features_from(numstat: &str, diff: &str) -> DiffFeatures {
             PathClass::Generated => f.generated_lines = f.generated_lines.saturating_add(churn),
             PathClass::Source => {}
         }
-        let file = row.path.rsplit('/').next().unwrap_or(row.path);
-        if let Some(ext) = extension(&file.to_ascii_lowercase()) {
-            match langs.iter_mut().find(|(e, _)| *e == ext) {
-                Some((_, n)) => *n += 1,
-                None => langs.push((ext, 1)),
-            }
-        }
     }
-    // Most files first, extension name as the tiebreak so the prompt built from
-    // this is byte-identical for the same diff on every machine.
-    langs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    langs.truncate(MAX_LANGS);
-    f.languages = langs;
     f
 }
 
@@ -432,8 +312,8 @@ pub fn diff_features(cwd: &str, merge_sha: &str) -> Option<DiffFeatures> {
         cwd,
         NUMSTAT_MAX_BYTES,
     )?;
-    // The diff is a nice-to-have: features stand without it (only `hunks` and
-    // the excerpt come from here), so a timeout on the big read degrades rather
+    // The diff is a nice-to-have: every other count stands without it (only
+    // `hunks` comes from here), so a timeout on the big read degrades rather
     // than fails.
     let diff = run_git_bounded(
         &[
@@ -506,12 +386,12 @@ mod tests {
     #[test]
     fn classifies_test_paths() {
         for p in [
-            "tests/effort.rs",
+            "tests/work.rs",
             "src/foo/__tests__/bar.ts",
             "cmd/erpc/main_test.go",
             "packages/core/src/roi.test.ts",
             "spec/models/user_spec.rb",
-            "test_calibrate.py",
+            "test_attribution.py",
             "internal/testdata/big.json",
             "e2e/checkout.ts",
         ] {
@@ -557,7 +437,7 @@ mod tests {
     fn classifies_everything_else_as_source() {
         for p in [
             "common/config.go",
-            "daemon/crates/modelstat-effort/src/calibrate.rs",
+            "daemon/crates/modelstat-work/src/attribution.rs",
             "app/models/user.rb",
         ] {
             assert_eq!(classify_path(p), PathClass::Source, "{p}");
@@ -595,7 +475,6 @@ mod tests {
         assert_eq!(f.generated_lines, 1000);
         assert_eq!(f.doc_lines, 3);
         assert_eq!(f.churn(), 1163);
-        assert_eq!(f.languages[0], ("rs".to_string(), 2));
     }
 
     const SAMPLE_DIFF: &str = "\
@@ -612,47 +491,19 @@ index a2796573..a476f67e 100644
 ";
 
     #[test]
-    fn excerpt_keeps_shape_and_drops_every_identifier() {
-        let ex = structure_excerpt(SAMPLE_DIFF, EXCERPT_MAX_BYTES);
-        for leak in [
-            "sk-live-DEADBEEF",
-            "token_store",
-            "secret",
-            "TokenStore",
-            "api_key",
-            "explain the swap",
-            "existing",
-        ] {
-            assert!(!ex.contains(leak), "excerpt leaked {leak:?}:\n{ex}");
-        }
-        assert!(ex.contains("file 1 source .rs"));
-        assert!(ex.contains("@@ -9,6 +9,7 @@"), "hunk tail must be cut:\n{ex}");
-        assert!(!ex.contains("impl"), "hunk tail must be cut:\n{ex}");
-        // tab indent = 4 columns, 33 visible chars, code.
-        assert!(ex.contains("+4/33x"), "{ex}");
-        assert!(ex.contains("-8/15x"), "{ex}");
-        assert!(ex.contains("+0/0b"), "blank added line:\n{ex}");
-        assert!(ex.contains("+0/19c"), "comment added line:\n{ex}");
-    }
-
-    #[test]
-    fn excerpt_respects_its_cap() {
-        let big = SAMPLE_DIFF.repeat(500);
-        let ex = structure_excerpt(&big, 512);
-        assert!(ex.len() <= 512 + "…truncated\n".len());
-        assert!(ex.ends_with("…truncated\n"));
-    }
-
-    #[test]
-    fn hunks_counted_from_diff() {
+    fn hunk_headers_are_counted_and_nothing_else_is_read_from_the_diff() {
         let f = features_from("1\t1\tsrc/a.rs", SAMPLE_DIFF);
         assert_eq!(f.hunks, 1);
+        // Two hunks in one file is two, and a diff with none is zero.
+        let two = features_from("1\t1\tsrc/a.rs", &SAMPLE_DIFF.repeat(2));
+        assert_eq!(two.hunks, 2);
+        assert_eq!(features_from("1\t1\tsrc/a.rs", "").hunks, 0);
     }
 
     #[test]
     fn missing_sha_yields_none_not_panic() {
         // A directory that is a repo (this workspace) but a sha that is not.
         assert!(diff_features(".", "0000000000000000000000000000000000000000").is_none());
-        assert!(diff_features("/nonexistent-path-modelstat-effort", "HEAD").is_none());
+        assert!(diff_features("/nonexistent-path-modelstat-work", "HEAD").is_none());
     }
 }

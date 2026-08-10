@@ -1,9 +1,12 @@
-//! What the AI actually spent, per pull request — the denominator of ROI.
+//! What the machine spent on work that shipped: tokens and time, per pull
+//! request.
 //!
-//! [`estimate_pr_effort`](crate::estimate_pr_effort) answers "what would a human
-//! have paid for this PR". This module answers the other half: "what did the
-//! machine pay". Both halves are read off THIS device, from files that are
-//! already on it — the session transcripts the agents write as they work.
+//! Two measured quantities, both read off THIS device from files that are
+//! already on it — the session transcripts the agents write as they work — and
+//! both attributed to merged PRs by the same evidence with the same weights:
+//! [`TokenMix`], the five disjoint token classes, and [`active_ms`], the union
+//! of a session's activity windows. They are reported side by side and never
+//! combined, with each other or with anything the PR shipped.
 //!
 //! ```text
 //!   discovery::data_dir_candidates_in ──▶ transcripts (mtime >= window)
@@ -12,14 +15,15 @@
 //!                                             │
 //!                    RawEvent (tokens + references + cwd + ts)
 //!                                             │
-//!            group by session_id ──▶ token mix, [start, end], cwds
+//!     group by session_id ──▶ token mix, active_ms, [start, end], cwds
 //!                                             │
 //!        git: files the window changed  ×  files each merged PR changed
 //!                                             │
-//!            overlap × time proximity ──▶ score ──▶ split PER CLASS,
-//!                                                   PROPORTIONAL to score
+//!            overlap × time proximity ──▶ score ──▶ split PER CLASS
+//!                                                   AND time, PROPORTIONAL
+//!                                                   to the same score
 //!                                             │
-//!             no match ─▶ unattributed (mix) / unattributed_sessions
+//!             no match ─▶ unattributed (mix + active_ms) / sessions
 //! ```
 //!
 //! ## A session is joined to the PR it AUTHORED, not the one it mentioned
@@ -57,30 +61,41 @@
 //! case that produced the inversion.
 //!
 //! Nothing here is a guess dressed as a measurement. A session that resolves to
-//! no PR is NOT quietly dropped into the nearest one: its tokens land in
-//! [`SpendSummary::unattributed`] and its existence in
-//! `unattributed_sessions`, because on a real machine that number is large
-//! (exploration, reading, ops work, sessions whose repo is not on this disk)
-//! and hiding it would make every per-PR figure look better than it is.
+//! no PR is NOT quietly dropped into the nearest one: its tokens and its time
+//! land in [`SpendSummary::unattributed`] and
+//! [`unattributed_active_ms`](SpendSummary::unattributed_active_ms), and its
+//! existence in `unattributed_sessions`, because on a real machine that number
+//! is large (exploration, reading, ops work, sessions whose repo is not on this
+//! disk) and hiding it would make every per-PR figure look better than it is.
 //!
-//! ## The denominator is input-equivalent tokens, not raw tokens
+//! ## The comparable token figure is input-equivalent, not raw
 //!
 //! Raw token counts are not comparable between PRs. Cache reads are 92.3% of
 //! the raw volume on this machine and are re-counted every single turn, so a
 //! raw sum ranks PRs by how long their conversation was rather than by how much
 //! work they took. [`TokenMix::equiv_tokens`] converts the five classes into
-//! fresh-input equivalents and IS the ROI denominator; [`TokenMix::raw_total`]
-//! and every individual class stay right beside it, because a derived number
-//! must never be the only number a reader can see. See [`W_INPUT`].
+//! fresh-input equivalents; [`TokenMix::raw_total`] and every individual class
+//! stay right beside it, because a derived number must never be the only number
+//! a reader can see. See [`W_INPUT`].
+//!
+//! ## Time is measured, not inferred
+//!
+//! [`active_ms`] counts activity windows, so idle gaps are excluded and a
+//! session left open overnight does not bill the night. It is a count of when
+//! this device was working, nothing more: it is never multiplied by a rate,
+//! never compared against what a human "would have" taken, and never turned
+//! into a saving. The turn-level half of the time plane —
+//! `agent_working_ms`, the developer's wait ON the agent — needs message timing
+//! this crate does not model, and is therefore absent rather than approximated.
 //!
 //! ## Privacy
 //!
 //! [`PrSpend`] and [`SpendSummary`] carry a repo slug, a PR number and counts.
 //! No path, no prompt, no diff, no commit message, no author. Transcript paths,
-//! turn text, working directories and the two changed-file sets the join is
-//! computed from all exist inside this module for the length of one call and
-//! are dropped. No type that leaves this module has a field a path could be
-//! stored in.
+//! turn text, working directories, event timestamps and the two changed-file
+//! sets the join is computed from all exist inside this module for the length
+//! of one call and are dropped. No type that leaves this module has a field a
+//! path could be stored in.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
@@ -204,7 +219,8 @@ impl TokenMix {
         self.reasoning = self.reasoning.saturating_add(o.reasoning);
     }
 
-    /// Split into one share per weight, PROPORTIONAL to the weights.
+    /// Split into one share per weight, PROPORTIONAL to the weights already
+    /// sanitized by [`split_weights`].
     ///
     /// Every CLASS is apportioned on its own by largest remainder — floor each
     /// exact share, then hand the leftover units to the largest fractional
@@ -218,30 +234,22 @@ impl TokenMix {
     /// The weights are the join's match scores ([`PrMatch`]), so a session that
     /// touched nine of PR A's files and one of PR B's is charged that way. An
     /// earlier version split EVENLY and said so; the even split was a
-    /// placeholder for exactly this. Weights that are all zero, negative or
-    /// non-finite fall back to even — the caller asked for `n` shares and gets
-    /// `n` shares.
+    /// placeholder for exactly this.
     ///
-    /// Private, and every caller has already established `n >= 1`.
-    fn split(&self, weights: &[f64]) -> Vec<Self> {
-        let n = weights.len();
+    /// `(w, sum)` arrive pre-sanitized rather than being derived here because
+    /// `finish` apportions the same session's `active_ms` with the very same
+    /// pair. Two call sites re-deriving "the same" weights is how time and
+    /// tokens would eventually stop dividing a session the same way.
+    fn split_with(&self, w: &[f64], sum: f64) -> Vec<Self> {
+        let n = w.len();
         if n == 0 {
             return Vec::new();
         }
-        let mut w: Vec<f64> = weights
-            .iter()
-            .map(|x| if x.is_finite() && *x > 0.0 { *x } else { 0.0 })
-            .collect();
-        let mut sum: f64 = w.iter().sum();
-        if !(sum > 0.0) {
-            w = vec![1.0; n];
-            sum = n as f64;
-        }
-        let input = apportion(self.input, &w, sum);
-        let output = apportion(self.output, &w, sum);
-        let cache_creation = apportion(self.cache_creation, &w, sum);
-        let cache_read = apportion(self.cache_read, &w, sum);
-        let reasoning = apportion(self.reasoning, &w, sum);
+        let input = apportion(self.input, w, sum);
+        let output = apportion(self.output, w, sum);
+        let cache_creation = apportion(self.cache_creation, w, sum);
+        let cache_read = apportion(self.cache_read, w, sum);
+        let reasoning = apportion(self.reasoning, w, sum);
         (0..n)
             .map(|i| Self {
                 input: input[i],
@@ -268,15 +276,59 @@ impl From<&TokenUsage> for TokenMix {
     }
 }
 
-/// What one pull request cost in machine tokens.
+/// The window one event opens. Every event says "somebody was working here",
+/// and this is how long that claim covers.
+///
+/// Five minutes, matching the server's `ACTIVITY_WINDOW_MS` — the two must
+/// agree or the same session reads as two different durations depending on who
+/// was asked.
+pub const ACTIVITY_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// How long a session was actually being worked on: the length of the UNION of
+/// the [`ACTIVITY_WINDOW_MS`] windows its events open.
+///
+/// Sorted, that union has a closed form and needs no interval merging:
+///
+/// ```text
+///   active_ms = WINDOW + Σ min(tᵢ₊₁ − tᵢ, WINDOW)
+/// ```
+///
+/// The consequences are the point, and are the server's too:
+///
+/// * a burst of 40 events inside one minute counts ONCE, not 40 windows;
+/// * two events three hours apart are two windows, not three hours — the gap
+///   is idle, and idle is not work;
+/// * a session with no placeable event is 0, not one free window.
+///
+/// `event_ms` is sorted in place; the caller's order is scratch. Pure
+/// otherwise — no clock, no I/O.
+#[must_use]
+pub fn active_ms(event_ms: &mut [i64]) -> u64 {
+    if event_ms.is_empty() {
+        return 0;
+    }
+    event_ms.sort_unstable();
+    let mut total = ACTIVITY_WINDOW_MS;
+    for pair in event_ms.windows(2) {
+        // Saturating: a transcript is untrusted input, and a wrapped duration
+        // is a lie where a pinned one is merely a ceiling.
+        total = total.saturating_add(pair[1].saturating_sub(pair[0]).min(ACTIVITY_WINDOW_MS));
+    }
+    total as u64
+}
+
+/// What one pull request cost the machine: tokens, and the time this device
+/// spent working on it.
 ///
 /// `mix` is the measurement: five disjoint classes, none of them pre-summed.
 /// `equiv_tokens` is `mix.equiv_tokens()`, carried as a field because it is the
-/// figure PRs are ranked and compared by — never a substitute for the classes,
-/// always derivable from them.
+/// figure PRs are compared by — never a substitute for the classes, always
+/// derivable from them.
 ///
-/// Deliberately no dollars. Tokens are an exact local fact; a price is a
-/// contract with a vendor that this device does not hold.
+/// Deliberately no dollars, and deliberately no blend of the two quantities.
+/// Tokens and milliseconds are exact local facts; a price is a contract with a
+/// vendor that this device does not hold, and a score that mixed them would be
+/// this crate deciding what a team should value.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PrSpend {
     /// `org/repo`, as first seen. Matched case-insensitively.
@@ -284,8 +336,11 @@ pub struct PrSpend {
     pub pr_number: u64,
     /// The raw classes, exactly as measured.
     pub mix: TokenMix,
-    /// `mix.equiv_tokens()` — the ROI denominator. See [`W_INPUT`].
+    /// `mix.equiv_tokens()` — the comparable token figure. See [`W_INPUT`].
     pub equiv_tokens: f64,
+    /// This PR's share of the contributing sessions' [`active_ms`], split by
+    /// the identical weights that split `mix`. Idle gaps are already excluded.
+    pub active_ms: u64,
     /// Sessions that contributed, including ones split across several PRs.
     pub session_count: u32,
     /// Token-weighted mean of the contributing matches' confidences — how much
@@ -311,9 +366,13 @@ pub struct SpendSummary {
     /// Highest [`PrSpend::equiv_tokens`] first — NOT highest raw total. The two
     /// orders differ, and that difference is the point: see [`W_INPUT`].
     pub by_pr: Vec<PrSpend>,
-    /// Spend from sessions that resolved to no PR, as a full mix — so device
+    /// Tokens from sessions that resolved to no PR, as a full mix — so device
     /// coverage can be read in the same units as any PR.
     pub unattributed: TokenMix,
+    /// The same sessions' [`active_ms`]. Reported for the same reason the
+    /// tokens are: time nobody can attribute is the honest size of what these
+    /// per-PR figures do not cover.
+    pub unattributed_active_ms: u64,
     pub unattributed_sessions: u32,
     pub sessions_scanned: u32,
 }
@@ -429,6 +488,15 @@ struct SessionAcc {
     /// measured from.
     start_ms: Option<i64>,
     end_ms: Option<i64>,
+    /// Epoch-ms of every placeable turn, unsorted — the windows [`active_ms`]
+    /// unions. Timestamps only: eight bytes a turn, and no event survives here.
+    ///
+    /// ponytail: unsorted and uncollapsed, so a session costs 8 bytes per turn
+    /// until `finish` drops it. Upgrade path if a pathological transcript ever
+    /// justifies it: sort and drop any point whose neighbours span
+    /// `<= ACTIVITY_WINDOW_MS`, which is exact — a cluster inside one window
+    /// contributes only its endpoints.
+    stamps: Vec<i64>,
     /// The working directories the session's turns reported, deduped. LOCAL
     /// ONLY — used to find the repo on disk and never returned in any shape.
     cwds: Vec<String>,
@@ -464,10 +532,12 @@ fn fold_event(sessions: &mut BTreeMap<String, SessionAcc>, e: &RawEvent) {
 
     // Parsed, not string-compared: a transcript may stamp a local offset, and
     // ISO-8601 only sorts lexically within one offset. A turn we cannot place in
-    // time simply does not move the window.
+    // time moves neither the window nor the clock — it opens no activity window
+    // rather than opening one at an invented instant.
     if let Some(ms) = parse_iso_ms(&e.ts) {
         acc.start_ms = Some(acc.start_ms.map_or(ms, |s| s.min(ms)));
         acc.end_ms = Some(acc.end_ms.map_or(ms, |s| s.max(ms)));
+        acc.stamps.push(ms);
     }
 
     if let Some(cwd) = e.cwd.as_deref().filter(|c| !c.is_empty()) {
@@ -510,6 +580,7 @@ fn fold_event(sessions: &mut BTreeMap<String, SessionAcc>, e: &RawEvent) {
 struct PrAcc {
     slug: String,
     mix: TokenMix,
+    active_ms: u64,
     sessions: u32,
     conf_weighted: f64,
     weight: u64,
@@ -532,27 +603,37 @@ fn finish(sessions: BTreeMap<String, SessionAcc>, repos: &mut RepoIndex) -> Spen
         repos.learn(&session.cwds);
     }
 
-    for (_session_id, session) in sessions {
+    for (_session_id, mut session) in sessions {
         out.sessions_scanned = out.sessions_scanned.saturating_add(1);
+        // A property of the session itself, measured before anything is known
+        // about what it shipped.
+        let session_active = active_ms(&mut session.stamps);
         let refs = session_prs(session.parts);
         let windows = repos.windows(&session.cwds, &refs, session.start_ms, session.end_ms);
         let matches = join(session.end_ms.unwrap_or(0), &windows, &refs);
 
         if matches.is_empty() {
             out.unattributed.add(session.mix);
+            out.unattributed_active_ms = out.unattributed_active_ms.saturating_add(session_active);
             out.unattributed_sessions = out.unattributed_sessions.saturating_add(1);
             continue;
         }
 
-        let weights: Vec<f64> = matches.iter().map(|m| m.score).collect();
-        let shares = session.mix.split(&weights);
+        let scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
+        // Sanitized ONCE and used for both quantities. Time and tokens
+        // disagreeing about which PR a session belongs to would make every
+        // "tokens and time" reading of a row unanswerable.
+        let (w, sum) = split_weights(&scores);
+        let shares = session.mix.split_with(&w, sum);
+        let time_shares = apportion(session_active, &w, sum);
 
-        for (m, share) in matches.into_iter().zip(shares) {
+        for ((m, share), active) in matches.into_iter().zip(shares).zip(time_shares) {
             let entry = acc.entry((m.slug.to_lowercase(), m.number)).or_default();
             if entry.slug.is_empty() {
                 entry.slug = m.slug;
             }
             entry.mix.add(share);
+            entry.active_ms = entry.active_ms.saturating_add(active);
             entry.sessions = entry.sessions.saturating_add(1);
             // Weighted by the RAW volume of THIS PR's share, which is what
             // makes a further "divided session" discount wrong: a session that
@@ -577,6 +658,7 @@ fn finish(sessions: BTreeMap<String, SessionAcc>, repos: &mut RepoIndex) -> Spen
             pr_number,
             mix: a.mix,
             equiv_tokens: a.mix.equiv_tokens(),
+            active_ms: a.active_ms,
             session_count: a.sessions,
             attribution_confidence: if a.weight > 0 {
                 a.conf_weighted / a.weight as f64
@@ -809,13 +891,36 @@ fn join(end_ms: i64, windows: &[RepoWindow], refs: &[(String, u64, f64)]) -> Vec
     out.into_values().collect()
 }
 
+/// The match scores as split weights, plus their sum. Pure.
+///
+/// Negative, non-finite and zero scores read as no weight; an all-zero set
+/// falls back to an even split, because the caller asked for `n` shares and a
+/// session's spend has to land somewhere.
+///
+/// One function, called once per session, because every quantity a session is
+/// divided into MUST be divided by the same numbers. Tokens and `active_ms`
+/// re-deriving "the same" weights independently is how they would eventually
+/// stop being the same.
+fn split_weights(weights: &[f64]) -> (Vec<f64>, f64) {
+    let mut w: Vec<f64> = weights
+        .iter()
+        .map(|x| if x.is_finite() && *x > 0.0 { *x } else { 0.0 })
+        .collect();
+    let mut sum: f64 = w.iter().sum();
+    if !(sum > 0.0) {
+        w = vec![1.0; weights.len()];
+        sum = weights.len() as f64;
+    }
+    (w, sum)
+}
+
 /// Split `total` into `weights.len()` whole units proportional to `weights`,
 /// summing back to `total` EXACTLY. Pure.
 ///
 /// Largest remainder: floor every exact share, then hand the leftover units to
 /// the largest fractional parts, ties to the lower index so the answer is
-/// deterministic. `sum` is `weights.iter().sum()`, passed in because
-/// [`TokenMix::split`] computes it once and apportions five classes with it.
+/// deterministic. `sum` is `weights.iter().sum()`, passed in because one
+/// session apportions five token classes AND its `active_ms` with it.
 fn apportion(total: u64, weights: &[f64], sum: f64) -> Vec<u64> {
     let n = weights.len();
     if n <= 1 {
@@ -2027,6 +2132,10 @@ mod tests {
         }
         assert_eq!(v["mix"]["cache_read"], 8);
         assert!(v["equiv_tokens"].as_f64().is_some());
+        assert!(
+            v["active_ms"].as_u64().is_some(),
+            "time travels beside the tokens, never folded into them"
+        );
     }
 
     #[test]
@@ -2327,7 +2436,8 @@ mod tests {
             vec![f64::NAN, 1.0],
             vec![-1.0, 2.0],
         ] {
-            let shares = mix.split(&weights);
+            let (w, sum) = split_weights(&weights);
+            let shares = mix.split_with(&w, sum);
             assert_eq!(shares.len(), weights.len(), "weights {weights:?}");
             let mut summed = TokenMix::default();
             for s in &shares {
@@ -2343,18 +2453,162 @@ mod tests {
             input: 1_000,
             ..TokenMix::default()
         };
-        let shares = mix.split(&[0.9, 0.1]);
+        let (w, sum) = split_weights(&[0.9, 0.1]);
+        let shares = mix.split_with(&w, sum);
         assert_eq!((shares[0].input, shares[1].input), (900, 100));
         // An even split is still exact, and its remainder is deterministic.
+        let (w, sum) = split_weights(&[1.0, 1.0, 1.0]);
         let shares = TokenMix {
             input: 10,
             ..TokenMix::default()
         }
-        .split(&[1.0, 1.0, 1.0]);
+        .split_with(&w, sum);
         assert_eq!(
             shares.iter().map(|s| s.input).collect::<Vec<_>>(),
             vec![4, 3, 3]
         );
+    }
+
+    // ── time: the union of activity windows ─────────────────────────────────
+
+    /// The window one event opens, as the tests read it.
+    const W: i64 = ACTIVITY_WINDOW_MS;
+
+    /// The same event, stamped at a given instant.
+    fn at(mut e: RawEvent, ts: &str) -> RawEvent {
+        e.ts = ts.into();
+        e
+    }
+
+    #[test]
+    fn a_session_with_no_events_is_zero_not_one_free_window() {
+        let mut empty: Vec<i64> = Vec::new();
+        assert_eq!(active_ms(&mut empty), 0);
+    }
+
+    #[test]
+    fn a_single_event_is_one_window() {
+        assert_eq!(active_ms(&mut [1_000_000]), W as u64);
+    }
+
+    #[test]
+    fn events_inside_one_window_count_once() {
+        // A minute apart: one window plus that minute, NOT two windows.
+        assert_eq!(active_ms(&mut [0, 60_000]), (W + 60_000) as u64);
+        // Forty events inside one minute are that same one-minute span.
+        let mut burst: Vec<i64> = (0..40).map(|i| i * 1_500).collect();
+        assert_eq!(active_ms(&mut burst), (W + 58_500) as u64);
+        // Repeated identical stamps add nothing at all.
+        assert_eq!(active_ms(&mut [7, 7, 7]), W as u64);
+    }
+
+    #[test]
+    fn a_three_hour_gap_is_two_windows_not_three_hours() {
+        // The whole reason this is not `ended_at - started_at`: nobody worked
+        // through the gap, so the gap is not work.
+        assert_eq!(active_ms(&mut [0, 3 * 60 * 60 * 1000]), (2 * W) as u64);
+    }
+
+    #[test]
+    fn out_of_order_stamps_measure_the_same_span() {
+        // Transcripts interleave; the union is a set operation and cannot care.
+        let ordered = active_ms(&mut [0, 60_000, 3 * W]);
+        assert_eq!(ordered, (W + 60_000 + W) as u64);
+        assert_eq!(active_ms(&mut [3 * W, 60_000, 0]), ordered);
+    }
+
+    #[test]
+    fn one_weight_vector_divides_tokens_and_time_alike() {
+        // The contract in one assertion: both quantities go through the same
+        // sanitized weights, so a PR's time and its tokens describe the same
+        // fraction of the same session.
+        let (w, sum) = split_weights(&[0.9, 0.1]);
+        let shares = TokenMix {
+            input: 1_000,
+            ..TokenMix::default()
+        }
+        .split_with(&w, sum);
+        assert_eq!((shares[0].input, shares[1].input), (900, 100));
+        assert_eq!(apportion(1_000_000, &w, sum), vec![900_000, 100_000]);
+    }
+
+    #[test]
+    fn a_sessions_time_lands_on_the_pr_it_worked_on() {
+        let s = spend_by_pr_events(&[
+            at(
+                ev("s1", "https://github.com/acme/api/pull/42", 100, 10),
+                "2026-08-01T10:00:00.000Z",
+            ),
+            at(ev("s1", "still on it", 50, 5), "2026-08-01T10:01:00.000Z"),
+        ]);
+        assert_eq!(s.by_pr.len(), 1);
+        assert_eq!(s.by_pr[0].active_ms, (W + 60_000) as u64);
+        assert_eq!(s.unattributed_active_ms, 0);
+    }
+
+    #[test]
+    fn a_split_session_splits_its_time_the_way_it_splits_its_tokens() {
+        let s = spend_by_pr_events(&[
+            at(
+                ev(
+                    "s1",
+                    "landing https://github.com/acme/api/pull/1 then https://github.com/acme/api/pull/2",
+                    100,
+                    0,
+                ),
+                "2026-08-01T10:00:00.000Z",
+            ),
+            at(ev("s1", "wrap up", 100, 0), "2026-08-01T13:00:00.000Z"),
+        ]);
+        assert_eq!(s.by_pr.len(), 2);
+        // Two windows three hours apart, divided by the same even weights the
+        // 200 input tokens are.
+        for p in &s.by_pr {
+            assert_eq!(p.mix.input, 100, "{p:?}");
+            assert_eq!(p.active_ms, W as u64, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn time_nobody_can_attribute_is_reported_rather_than_dropped() {
+        let s = spend_by_pr_events(&[
+            at(bare("s1", 10, 1), "2026-08-01T10:00:00.000Z"),
+            at(bare("s1", 20, 2), "2026-08-01T14:00:00.000Z"),
+        ]);
+        assert!(s.by_pr.is_empty());
+        assert_eq!(s.unattributed_active_ms, (2 * W) as u64);
+        assert_eq!(s.unattributed_sessions, 1);
+    }
+
+    #[test]
+    fn every_millisecond_is_attributed_or_reported_unattributed() {
+        let s = spend_by_pr_events(&[
+            at(
+                ev("s1", "https://github.com/acme/api/pull/1", 10, 1),
+                "2026-08-01T10:00:00.000Z",
+            ),
+            at(
+                ev("s2", "https://github.com/acme/api/pull/2", 10, 1),
+                "2026-08-01T11:00:00.000Z",
+            ),
+            at(bare("s3", 10, 1), "2026-08-01T12:00:00.000Z"),
+        ]);
+        let attributed: u64 = s.by_pr.iter().map(|p| p.active_ms).sum();
+        assert_eq!(attributed + s.unattributed_active_ms, (3 * W) as u64);
+    }
+
+    #[test]
+    fn an_unplaceable_turn_opens_no_window() {
+        // A turn we cannot place in time is unknown, and unknown must not read
+        // as five free minutes of work.
+        let s = spend_by_pr_events(&[
+            at(
+                ev("s1", "https://github.com/acme/api/pull/42", 10, 1),
+                "not a timestamp",
+            ),
+            at(ev("s1", "more", 10, 1), "2026-08-01T10:00:00.000Z"),
+        ]);
+        assert_eq!(s.by_pr[0].active_ms, W as u64);
     }
 
     // ── the regression this whole module was rebuilt for ────────────────────
