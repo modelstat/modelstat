@@ -159,11 +159,26 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       so the number was dropped. A stated duration is structural, like the
 ///       instant and the ids, so unmodelled records carry it now. Both are
 ///       local-only facts: a re-scan is the only way uploaded sessions get them.
+/// codex v25 — which files the work actually touched. `files_touched` had no
+///       producer in ANY parser — every construction site was `Vec::new()`, and
+///       the only non-empty occurrences in the tree were test fixtures — so the
+///       taxonomy `components` dimension the server derives from it
+///       (`components_from_slice`, one `hint("components", …, 0.6)` per value)
+///       has been computed over an empty list on every session, from every
+///       agent, for as long as the field has existed. Codex is the agent that
+///       STATES the answer: `event_msg`/`patch_apply_end` keys `payload.changes`
+///       by the path of each file it just edited (1,019 such records in one real
+///       session), and the parser dropped the whole record as unmodelled. It now
+///       ships as an event carrying those paths, made safe where they are read:
+///       relative to the session's `cwd` when they sit under it, the file's name
+///       alone when they do not, so no home directory ever leaves the machine.
+///       The unified diffs in that payload stay on disk. Only the codex aspect
+///       moves — ~65 codex sessions re-read, not the corpus.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
     ("capture", LEGACY_WORLD_VERSION + 1),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION + 1),
-    ("codex", LEGACY_WORLD_VERSION + 1),
+    ("codex", LEGACY_WORLD_VERSION + 2),
     ("cursor", LEGACY_WORLD_VERSION),
     ("pi", LEGACY_WORLD_VERSION),
 ];

@@ -53,6 +53,67 @@ fn record_duration_ms(obj: &Value) -> Option<u64> {
 /// tomorrow falls through as UNKNOWN instead of joining a silent decline.
 const DECLINED_RESPONSE_ITEMS: &[&str] = &["message", "reasoning", "web_search_call"];
 
+/// Both separators, on every platform. This parser runs on Windows, and a
+/// rollout can be read on a machine other than the one that wrote it — so the
+/// host's own separator is not the one to trust.
+const SEPARATORS: [char; 2] = ['/', '\\'];
+
+/// The files one `patch_apply_end` record names, made safe to leave the machine.
+///
+/// Codex keys `payload.changes` by ABSOLUTE path, and an absolute path is a home
+/// directory: the username, and every directory above the checkout. Nothing
+/// downstream floors this — `modelstat-redact` scrubs prose, and `files_touched`
+/// is a `Vec<String>` no redactor walks — so the parser is the only place that
+/// can make these safe. It is also the only place that knows the frame that
+/// makes them meaningful: the session's own `cwd`.
+///
+///   * under `cwd` → the repo-relative path. That is the shape the rest of the
+///     product already speaks — `git_files` emits it, and `components_from_slice`
+///     (modelstat-pipeline) splits it on `/`.
+///   * anywhere else (a dotfile, a second checkout), or no `cwd` known → the
+///     final component alone. The directories above it are precisely the part
+///     that leaks, and the file's own name is what "files touched" means.
+///
+/// Deduped, first-seen order kept — two files outside the repo can share a name.
+/// No cap here: the wire's `FILES_TOUCHED_COUNT_MAX` is the one clamp.
+fn safe_files_touched(paths: &[&str], cwd: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in paths {
+        let path = raw.trim();
+        let safe = repo_relative(path, cwd).unwrap_or_else(|| file_name(path));
+        if safe.is_empty() || out.contains(&safe) {
+            continue;
+        }
+        out.push(safe);
+    }
+    out
+}
+
+/// `path` stated relative to `root`, or `None` when it does not sit under it.
+///
+/// The root must end at a directory boundary, or `…/acme` would swallow
+/// `…/acme-website/src/main.rs` and emit `ite/src/main.rs`. Every way this can
+/// fail — a different drive, a symlinked or case-different root, no `cwd` at all
+/// — degrades to the file's name alone: less context, never a leak.
+fn repo_relative(path: &str, root: Option<&str>) -> Option<String> {
+    let root = root?.trim_end_matches(SEPARATORS);
+    if root.is_empty() {
+        return None;
+    }
+    let rest = path.strip_prefix(root)?;
+    if !rest.starts_with(SEPARATORS) {
+        return None;
+    }
+    // One separator downstream, because a repo-relative path means the same
+    // file whichever platform wrote it.
+    Some(rest.trim_start_matches(SEPARATORS).replace('\\', "/"))
+}
+
+/// The final component of a path — the only part of it that is not a directory.
+fn file_name(path: &str) -> String {
+    path.rsplit(SEPARATORS).next().unwrap_or(path).to_string()
+}
+
 fn is_tool_call_payload(pt: &str) -> bool {
     matches!(
         pt,
@@ -738,6 +799,59 @@ fn parse_inner(
                 emitted += 1;
                 continue;
             }
+            if ptype == "patch_apply_end" {
+                // Codex STATES which files it changed: `payload.changes` is
+                // keyed by path, one key per file. `files_touched` had no
+                // producer in any parser until this arm, so the taxonomy
+                // `components` dimension the server derives from it was computed
+                // over an empty list on every session ever uploaded.
+                //
+                // The values are unified diffs — source code — and this arm
+                // ships none of them: the record's own word plus the file names
+                // is everything it says.
+                let changed: Vec<&str> = payload
+                    .and_then(|p| p.get("changes"))
+                    .and_then(Value::as_object)
+                    .map(|m| m.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                match session_id.clone() {
+                    Some(sid) => {
+                        sink.push(RawEvent {
+                            source_event_id: source_event_id(
+                                &ctx.device_id,
+                                &EventSource::File {
+                                    file: &ctx.source_file,
+                                    byte_offset: offset,
+                                },
+                            ),
+                            ts,
+                            kind: "patch_apply_end".to_string(),
+                            agent: "codex_cli".to_string(),
+                            provider: "openai".to_string(),
+                            model: model.clone(),
+                            session_id: sid,
+                            turn_index: Some(turn_index),
+                            parent_event_id: None,
+                            cwd: cwd.clone(),
+                            git: None,
+                            tokens: None,
+                            tokens_unmapped: BTreeMap::new(),
+                            duration_ms: record_duration_ms(&obj),
+                            tool_calls: BTreeMap::new(),
+                            files_touched: safe_files_touched(&changed, cwd.as_deref()),
+                            content_excerpt: None,
+                            content_bytes: None,
+                            references: None,
+                            source_file: Some(ctx.source_file.clone()),
+                            source_byte_offset: Some(offset),
+                            redactions: Default::default(),
+                        });
+                        emitted += 1;
+                    }
+                    None => skipped += 1,
+                }
+                continue;
+            }
             // An `event_msg` payload type nothing here models. `ts` is already
             // resolved above, so the only question left is the session.
             skips.drop_record(&ctx.source_file, &format!("event_msg/{ptype}"));
@@ -941,6 +1055,165 @@ mod tests {
             res.skipped_kinds.get("event_msg/task_complete"),
             Some(&1),
             "reading a structural field is not the same as modelling the record"
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// The invariant, stated as a test: whatever comes out of the path rule, a
+    /// home directory does not. Codex hands us absolute paths and nothing
+    /// downstream floors `files_touched`, so "no `/Users/`, never rooted" has to
+    /// hold HERE or it holds nowhere.
+    #[test]
+    fn a_changed_file_never_carries_the_directories_above_it() {
+        let cases: &[(&str, Option<&str>, &str, &str)] = &[
+            (
+                "/Users/dev/Projects/acme/src/lib.rs",
+                Some("/Users/dev/Projects/acme"),
+                "src/lib.rs",
+                "under cwd → repo-relative",
+            ),
+            (
+                "/Users/dev/Projects/acme/src/lib.rs",
+                Some("/Users/dev/Projects/acme/"),
+                "src/lib.rs",
+                "a trailing separator on cwd changes nothing",
+            ),
+            (
+                "/Users/dev/.zshrc",
+                Some("/Users/dev/Projects/acme"),
+                ".zshrc",
+                "outside cwd → the file's own name, nothing above it",
+            ),
+            (
+                "/Users/dev/Projects/globex/README.md",
+                None,
+                "README.md",
+                "no cwd known → the same, the name alone",
+            ),
+            (
+                "/Users/dev/Projects/acme-website/src/main.rs",
+                Some("/Users/dev/Projects/acme"),
+                "main.rs",
+                "a sibling whose name STARTS with cwd is not under it",
+            ),
+            (
+                "C:\\Users\\dev\\Projects\\acme\\src\\main.rs",
+                Some("C:\\Users\\dev\\Projects\\acme"),
+                "src/main.rs",
+                "windows behaves identically, and states one separator",
+            ),
+            (
+                "D:\\scratch\\notes.md",
+                Some("C:\\Users\\dev\\Projects\\acme"),
+                "notes.md",
+                "another drive is outside cwd",
+            ),
+        ];
+        for (path, cwd, want, why) in cases {
+            let got = safe_files_touched(&[path], *cwd);
+            assert_eq!(got, vec![want.to_string()], "{why}");
+            let only = &got[0];
+            assert!(
+                !only.contains("/Users/") && !only.contains("\\Users\\"),
+                "a home directory reached the wire via {path:?}: {only:?}"
+            );
+            assert!(
+                !only.starts_with('/') && !only.starts_with('\\'),
+                "an absolute path reached the wire via {path:?}: {only:?}"
+            );
+        }
+    }
+
+    /// Codex re-applies patches to the same file many times in a turn, and two
+    /// files outside the repo can share a name. First-seen order is the record's
+    /// own order, so the list reads as the sequence of edits it was.
+    #[test]
+    fn repeated_files_collapse_and_the_first_sighting_sets_the_order() {
+        let cwd = Some("/Users/dev/Projects/acme");
+        let got = safe_files_touched(
+            &[
+                "/Users/dev/Projects/acme/src/main.rs",
+                "/Users/dev/Projects/acme/Cargo.toml",
+                "/Users/dev/Projects/acme/src/main.rs",
+                "/Users/dev/Projects/globex/notes.md",
+                "/Users/dev/Projects/acme-website/notes.md",
+                "",
+            ],
+            cwd,
+        );
+        assert_eq!(
+            got,
+            vec![
+                "src/main.rs".to_string(),
+                "Cargo.toml".to_string(),
+                "notes.md".to_string(),
+            ],
+            "two out-of-repo files named notes.md are one name once, and an \
+             empty key states nothing"
+        );
+    }
+
+    /// End to end over the record's real shape (fabricated values). The kind
+    /// codex writes is what ships, the paths are repo-relative, the unified
+    /// diffs stay on the machine — and because the arm MODELS the record, the
+    /// kind leaves the skip ledger.
+    #[test]
+    fn codex_s_own_account_of_which_files_it_changed_reaches_the_wire() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            json!({ "timestamp": "2026-08-05T11:58:58.000Z", "type": "turn_context",
+                    "payload": { "cwd": "/Users/dev/Projects/acme", "model": "gpt-5-codex" } }),
+            line(
+                "2026-08-05T11:58:59.076Z",
+                "user_message",
+                json!({ "message": "rename the helper" }),
+            ),
+            line(
+                "2026-08-05T11:59:01.000Z",
+                "patch_apply_end",
+                json!({
+                    "call_id": "call_0123", "turn_id": "turn_0123",
+                    "stdout": "Success. Updated the following files:\nM src/lib.rs\n",
+                    "stderr": "", "success": true, "status": "completed",
+                    "changes": {
+                        "/Users/dev/Projects/acme/src/lib.rs": {
+                            "type": "update",
+                            "unified_diff": "@@ -1,1 +1,1 @@\n-fn helper() {}\n+fn assist() {}\n",
+                            "move_path": null
+                        },
+                        "/Users/dev/.config/acme/config.toml": {
+                            "type": "add",
+                            "unified_diff": "@@ -0,0 +1 @@\n+renamed = true\n",
+                            "move_path": null
+                        }
+                    }
+                }),
+            ),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        let patch = res
+            .events
+            .iter()
+            .find(|e| e.kind == "patch_apply_end")
+            .expect("the record codex writes ships under its own word");
+        assert_eq!(
+            patch.files_touched,
+            vec!["src/lib.rs".to_string(), "config.toml".to_string()],
+            "the repo file keeps its path; the dotfile keeps only its name"
+        );
+        assert!(
+            patch.content_excerpt.is_none() && patch.content_bytes.is_none(),
+            "a unified diff is source code and this arm ships none of it"
+        );
+        assert_eq!(patch.turn_index, Some(0), "it is the typed prompt's turn");
+        assert_eq!(patch.agent, "codex_cli");
+        assert_eq!(patch.provider, "openai");
+        assert_eq!(patch.cwd.as_deref(), Some("/Users/dev/Projects/acme"));
+        assert_eq!(
+            res.skipped_kinds.get("event_msg/patch_apply_end"),
+            None,
+            "an arm that models the record must leave the skip ledger"
         );
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
