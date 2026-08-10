@@ -42,7 +42,7 @@
       "content_excerpt": "did some work on the ingest path",
       "content_bytes": 32,
       "reasoning_excerpt": "checking the retry matrix before answering",
-      "reasoning_bytes": 41,
+      "reasoning_bytes": 42,
       "references": {
         "repos": [],
         "pull_requests": [],

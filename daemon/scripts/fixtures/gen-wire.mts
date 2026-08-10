@@ -52,7 +52,7 @@ const fullRawEvent = {
   // What the model was working out, as distinct from what it said. Same
   // redaction path as the prose.
   reasoning_excerpt: "checking the retry matrix before answering",
-  reasoning_bytes: 41,
+  reasoning_bytes: 42,
   references: { repos: [], pull_requests: [], issues: [] },
   source_file: "/data/session.jsonl",
   source_byte_offset: 4096,
