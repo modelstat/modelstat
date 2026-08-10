@@ -38,15 +38,36 @@ const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
 
 /// Soft byte budget per request body. Chunks aim under this; one oversize text
 /// still ships alone (the hard cap [`MAX_REQUEST_BYTES`] is sized to fit it).
-const CHUNK_BYTE_BUDGET: usize = 4 * 1024 * 1024;
+///
+/// Sized in MODEL TIME, not in bytes we could technically send. The classifier
+/// runs ~20k chars/sec on an idle laptop and several times slower on a shared
+/// server, so this is the knob that decides whether one request is seconds of
+/// work or minutes of it. It used to be 4 MiB — over an hour of inference in a
+/// single request on a loaded box — which meant a request could not finish
+/// before ANY caller's patience ran out: the daemon gave up, retried, and the
+/// server burned its whole capacity on passes nobody would ever read. 64 KiB is
+/// ~3s of model time on a laptop and well under a minute on a slow server, so a
+/// request lands inside every timeout on the path with room to spare.
+const CHUNK_BYTE_BUDGET: usize = 64 * 1024;
 
 /// One request's timeout — transfer plus a bounded inference wave server-side.
+///
+/// The OUTERMOST deadline on a chain that already reports its own failures:
+/// the sidecar gives up on one pass at 180s and says `redactor_deadline`, and
+/// the ingest edge gives up on the sidecar at 200s and says
+/// `redactor_unavailable`. Both of those are worth strictly more than our
+/// silence, so we outwait them — at 60s we cut the server off mid-answer and
+/// learned nothing, over and over. A genuinely dead endpoint still fails fast
+/// on `connect_timeout`; this only bounds a server that accepted and then went
+/// quiet, which is the one case where waiting is the informative move.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+
 fn request_timeout() -> Duration {
     std::env::var("MODELSTAT_REDACTOR_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(60))
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT)
 }
 
 pub struct RemoteRedactor {
@@ -441,6 +462,41 @@ mod tests {
             "a budget-sized text ships alone, and never drags a neighbour over"
         );
         assert_eq!(chunks[1][0], "small");
+    }
+
+    /// The deadlines on this path must NEST, innermost first: the sidecar gives
+    /// up on one pass at 180s (`redactor_deadline`), the ingest edge gives up on
+    /// the sidecar at 200s (`redactor_unavailable`), and only then may we give
+    /// up. Both of those answers name a reason; ours names nothing. Cutting them
+    /// off first is what made cloud redaction fail silently for days, so this
+    /// pins our end of an ordering whose other end lives in another repo.
+    #[test]
+    fn we_outwait_the_deadlines_that_can_still_explain_themselves() {
+        const SIDECAR_CLASSIFY_BUDGET: Duration = Duration::from_secs(180);
+        const INGEST_EDGE_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(200);
+        assert!(
+            SIDECAR_CLASSIFY_BUDGET < INGEST_EDGE_UPSTREAM_TIMEOUT,
+            "the sidecar must answer before the edge stops listening"
+        );
+        assert!(
+            DEFAULT_REQUEST_TIMEOUT > INGEST_EDGE_UPSTREAM_TIMEOUT,
+            "we must outwait the edge, or we trade its stated reason for our silence"
+        );
+    }
+
+    /// One request is a slice of MODEL time, and the model runs ~20k chars/sec
+    /// on good hardware and slower on a shared box. A budget that cannot finish
+    /// inside the sidecar's own 180s pass budget guarantees every request is
+    /// abandoned work — the shape of the original wedge.
+    #[test]
+    fn a_full_chunk_is_minutes_of_work_at_worst_not_hours() {
+        const PESSIMISTIC_CHARS_PER_SEC: usize = 2_000;
+        let worst_case_secs = CHUNK_BYTE_BUDGET / PESSIMISTIC_CHARS_PER_SEC;
+        assert!(
+            worst_case_secs < 180,
+            "a full chunk needs ~{worst_case_secs}s on a slow box, which the \
+             sidecar's 180s pass budget cannot absorb"
+        );
     }
 
     #[test]
