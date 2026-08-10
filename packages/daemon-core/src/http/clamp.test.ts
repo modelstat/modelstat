@@ -50,7 +50,8 @@ test("clampToSchemaBytes: every bounded string in a batch fits its BYTE cap", ()
         user_intent: "🎉".repeat(300), // 400 code units after the client slice → 1200 bytes
       },
     ],
-    events: [{ content_excerpt: "é".repeat(400) }], // .max(320), 800 bytes
+    // .max(262144) — SPEC 0005's extreme guard; 131_073 two-byte chars overflow it.
+    events: [{ content_excerpt: "é".repeat(131_073) }],
     session_titles: { s1: "本".repeat(100) }, // record value .max(120), 300 bytes
   } as never;
 
@@ -62,7 +63,10 @@ test("clampToSchemaBytes: every bounded string in a batch fits its BYTE cap", ()
 
   assert.ok(bytes(out.segments[0]!.abstract) <= 512, "abstract ≤ 512 bytes");
   assert.ok(bytes(out.segments[0]!.user_intent) <= 512, "user_intent ≤ 512 bytes");
-  assert.ok(bytes(out.events[0]!.content_excerpt) <= 320, "content_excerpt ≤ 320 bytes");
+  assert.ok(
+    bytes(out.events[0]!.content_excerpt) <= 262144,
+    "content_excerpt ≤ 262144 bytes (the SPEC 0005 extreme guard — 320 was the pre-verbatim cap)",
+  );
   assert.ok(bytes(out.session_titles.s1!) <= 120, "session title ≤ 120 bytes");
 });
 
