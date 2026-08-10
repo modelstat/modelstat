@@ -174,9 +174,24 @@ pub enum Strategy {
     ProcessProbe,
 }
 
-/// Directory names never worth descending: vendor caches, blob stores and VM
-/// images that hold no transcripts and plenty of gigabytes.
+/// Directory names no transcript hunt may descend into. ONE list, consulted by
+/// every walk, so a new call site cannot honour half of it.
+///
+/// Two reasons, and the second is the load-bearing one:
+///
+///   * COST — vendor caches, blob stores and VM images hold no transcripts and
+///     plenty of gigabytes.
+///   * CONSENT — macOS guards a handful of directories behind TCC, so merely
+///     OPENING one makes the system interrupt the user with "modelstat would
+///     like to access your Contacts". None of them can hold an agent's
+///     transcripts, so the honest thing is never to open them.
+///
+/// The user's own `Desktop`, `Documents`, `Downloads`, `Pictures` and `Music`
+/// are guarded the same way and are deliberately NOT named here: they live
+/// directly under a home, and a home's children are excluded by a positive rule
+/// instead — see [`Children::Hidden`].
 pub const SKIP_DIRS: &[&str] = &[
+    // Cost.
     "node_modules",
     "blob_storage",
     "Cache",
@@ -190,7 +205,49 @@ pub const SKIP_DIRS: &[&str] = &[
     "Service Worker",
     "IndexedDB",
     "Local Storage",
+    // A deleted `~/.sometool` keeps its transcripts, and reporting it as a live
+    // install is a claim the user has already withdrawn. Both spellings, for the
+    // same reason `application_data_roots` returns every platform's paths: a
+    // `cfg!` here would be a claim about the machine. macOS trashes to
+    // `~/.Trash`, Linux to `~/.local/share/Trash`.
+    ".Trash",
+    "Trash",
+    // Consent — Apple's private stores, which sit inside an application-data
+    // root among ordinary app directories.
+    "AddressBook",
+    "CallHistoryDB",
+    "CallHistoryTransactions",
+    "com.apple.TCC",
+    "Knowledge",
+    "MobileSync",
+    "icdd",
 ];
+
+/// Which children of a scan root the signature probe may open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Children {
+    /// Hidden directories only — the rule for a HOME.
+    ///
+    /// An agent's own store is a dotdir without exception (`~/.claude`,
+    /// `~/.codex`, `~/.gemini`, `~/.aider`), while a home's VISIBLE children are
+    /// the human's own folders. On macOS `Desktop`, `Documents`, `Downloads`,
+    /// `Pictures` and `Music` are guarded by TCC, so a probe that merely opens
+    /// one makes the system interrupt the user with a consent dialog — for a
+    /// walk that was looking for `.jsonl` files, on every discovery pass,
+    /// forever.
+    ///
+    /// A POSITIVE rule rather than a longer skip list on purpose. A list of
+    /// guarded names is a claim about which directories macOS protects this
+    /// year, and it is outgrown by the next release, by a synced `~/Dropbox`,
+    /// by whatever the user called their photo folder. "Hidden only" is a claim
+    /// about where agents keep transcripts, which is ours to know and does not
+    /// rot.
+    Hidden,
+    /// Every directory — the rule for an application-data root, whose children
+    /// ARE application data directories and carry ordinary visible names
+    /// (`Cursor`, `Claude`, whatever a fork calls itself).
+    Any,
+}
 
 /// Where applications keep their data, per platform — NOT a list of app names.
 ///
@@ -383,6 +440,20 @@ pub fn discover(options: &DiscoveryOptions) -> DiscoveryOutput {
     }
 }
 
+/// The identity probes alone — which accounts are logged in on this device.
+///
+/// Split out of [`discover`] because the two halves answer questions on
+/// completely different clocks. WHO is logged in changes whenever somebody runs
+/// `claude login`, and the window each account's `observed_since` measures is
+/// only correct if every reading updates it — so the daemon reads this on every
+/// heartbeat. WHICH TOOLS are installed does not meaningfully change between two
+/// heartbeats, and asking costs a full process listing, a `--version`
+/// subprocess per binary found, and a filesystem sweep.
+#[must_use]
+pub fn discover_identities() -> Vec<DetectedIdentity> {
+    dedupe_identities(probe_identities(current_os()))
+}
+
 /// How far below a candidate directory to look for a transcript before giving
 /// up. Four levels covers every layout observed — codex nests deepest at
 /// `sessions/<y>/<m>/<d>/rollout-*.jsonl`.
@@ -395,12 +466,17 @@ const FILE_SIGNATURE_MAX_DEPTH: usize = 4;
 /// invisible until somebody adds it here and cuts a release, and that release
 /// cadence is the thing this strategy exists to remove.
 ///
-/// The signature is STRUCTURAL and deliberately thin — a directory under a
-/// user's home or an application-data root that holds `.jsonl` files a few
-/// levels down. That is the shape every JSONL agent's store has, and it is all
-/// we can honestly claim to recognise. Nothing is parsed and nothing is read;
-/// this reports "there is a transcript-shaped store here, called this", which is
-/// exactly the fact a human needs to decide whether a parser is worth writing.
+/// The signature is STRUCTURAL and deliberately thin — a HIDDEN directory under
+/// the user's home, or any directory under an application-data root, that holds
+/// `.jsonl` files a few levels down. That is the shape every JSONL agent's
+/// store has, and it is all we can honestly claim to recognise. Nothing is
+/// parsed and nothing is read; this reports "there is a transcript-shaped store
+/// here, called this", which is exactly the fact a human needs to decide whether
+/// a parser is worth writing.
+///
+/// The home's VISIBLE children are never opened — see [`Children::Hidden`] for
+/// why that rule is the fix for a probe that used to make macOS ask the user for
+/// their photos every ten seconds.
 ///
 /// The agent name is the DIRECTORY's own name, because that is the only name
 /// anything states. A single leading `.` is dropped — the dotfile convention is
@@ -412,32 +488,56 @@ const FILE_SIGNATURE_MAX_DEPTH: usize = 4;
 /// the strategies that understand them, and a second entry under a different
 /// name would split one install in two.
 fn probe_file_signatures() -> Vec<DetectedInstallation> {
-    let Some(home) = home_dir() else {
-        return Vec::new();
-    };
-    let home = PathBuf::from(home);
+    home_dir().map_or_else(Vec::new, |h| probe_file_signatures_in(Path::new(&h)))
+}
+
+/// [`probe_file_signatures`] over an explicit home.
+///
+/// The home is injected so a test can assert the ROOT WIRING — which rule each
+/// root is walked under, which is the whole of the consent fix — over a tree it
+/// built, instead of over whatever the developer happens to keep in their own
+/// home.
+fn probe_file_signatures_in(home: &Path) -> Vec<DetectedInstallation> {
+    let app_roots = application_data_roots(home);
+    // Directories another strategy already owns. The application-data roots are
+    // in here alongside the known source paths, because `~/.config` is BOTH a
+    // root of its own and a dotdir under the home: without this it is walked as
+    // a root and then reported a second time as an agent literally called
+    // "config".
     let claimed: BTreeSet<String> = sources()
         .iter()
         .flat_map(|s| s.macos.iter().chain(s.linux).chain(s.windows))
-        .map(|raw| expand_path_with_home(&home, raw))
+        .map(|raw| expand_path_with_home(home, raw))
+        .chain(app_roots.iter().map(|r| r.to_string_lossy().into_owned()))
         .collect();
 
-    let mut roots = application_data_roots(&home);
-    roots.push(home.clone());
+    let mut roots: Vec<(PathBuf, Children)> =
+        app_roots.into_iter().map(|r| (r, Children::Any)).collect();
+    roots.push((home.to_path_buf(), Children::Hidden));
     roots
         .iter()
-        .flat_map(|root| file_signature_installs(root, &claimed))
+        .flat_map(|(root, children)| file_signature_installs(root, *children, &claimed))
         .collect()
 }
 
 /// The transcript-shaped children of one directory, as installations.
-fn file_signature_installs(root: &Path, claimed: &BTreeSet<String>) -> Vec<DetectedInstallation> {
+fn file_signature_installs(
+    root: &Path,
+    children: Children,
+    claimed: &BTreeSet<String>,
+) -> Vec<DetectedInstallation> {
     let mut out = Vec::new();
     for candidate in child_dirs(root) {
         let name = candidate
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
+        // Decided from the NAME, before anything opens the directory — the
+        // whole point is that a guarded folder is never read, and a consent
+        // dialog fires on the open, not on what the open finds.
+        if children == Children::Hidden && !name.starts_with('.') {
+            continue;
+        }
         let agent = name.strip_prefix('.').unwrap_or(name);
         if agent.is_empty() || SKIP_DIRS.contains(&name) {
             continue;
@@ -1459,7 +1559,7 @@ mod tests {
         // A cache the skip list prunes, transcripts or not.
         mk(".cachey/node_modules/pkg/x.jsonl");
 
-        let found = file_signature_installs(&root, &BTreeSet::new());
+        let found = file_signature_installs(&root, Children::Hidden, &BTreeSet::new());
         let agents: Vec<&str> = found.iter().map(|i| i.agent.as_str()).collect();
         assert_eq!(
             agents,
@@ -1472,7 +1572,139 @@ mod tests {
         // A directory a known source already claims belongs to that source, not
         // to a second entry under a different name.
         let claimed = BTreeSet::from([root.join(".newagent").to_string_lossy().into_owned()]);
-        assert!(file_signature_installs(&root, &claimed).is_empty());
+        assert!(file_signature_installs(&root, Children::Hidden, &claimed).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The probe never OPENS a visible directory under a home.
+    ///
+    /// This is the whole of the macOS consent bug: the walk used to read every
+    /// child of `$HOME`, so `~/Desktop`, `~/Documents`, `~/Downloads`,
+    /// `~/Pictures` and `~/Music` were opened on every discovery pass and macOS
+    /// interrupted the user with a TCC dialog for each — Photo Library, Apple
+    /// Music, one per folder — every ten seconds, forever.
+    ///
+    /// Asserted through the RESULT rather than by counting syscalls, because the
+    /// two are the same statement here: a directory only becomes an
+    /// installation by being read, so a `Documents` that holds a transcript and
+    /// is still not reported is a `Documents` that was never opened.
+    #[test]
+    fn a_homes_visible_folders_are_never_opened() {
+        let root = std::env::temp_dir().join(format!("modelstat-tcc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"{}").unwrap();
+        };
+        // Every macOS-guarded folder, each holding a transcript-shaped file so
+        // that reading it WOULD report an install. Nothing may.
+        for guarded in ["Desktop", "Documents", "Downloads", "Pictures", "Music"] {
+            mk(&format!("{guarded}/notes/session.jsonl"));
+        }
+        // The user's own folders are visible too, and just as much not ours.
+        mk("Dropbox/work/a.jsonl");
+        mk("projects/repo/b.jsonl");
+        // An agent's real store, which must survive the rule.
+        mk(".newagent/sessions/a.jsonl");
+
+        let found = file_signature_installs(&root, Children::Hidden, &BTreeSet::new());
+        let agents: Vec<&str> = found.iter().map(|i| i.agent.as_str()).collect();
+        assert_eq!(
+            agents,
+            ["newagent"],
+            "only hidden children of a home may be opened"
+        );
+
+        // The same tree under an APPLICATION-DATA root is a different question:
+        // there the children are app data directories and visible names are
+        // exactly what they carry.
+        let any = file_signature_installs(&root, Children::Any, &BTreeSet::new());
+        assert!(
+            any.iter().any(|i| i.agent == "Documents"),
+            "an application-data root keeps its visible children"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Apple's private stores live inside an application-data root, among
+    /// ordinary app directories, and opening one raises a Contacts consent
+    /// dialog. The `Children::Any` rule cannot exclude them — only the name can.
+    #[test]
+    fn the_guarded_stores_inside_an_app_data_root_are_never_opened() {
+        let root = std::env::temp_dir().join(format!("modelstat-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"{}").unwrap();
+        };
+        mk("AddressBook/Sources/x.jsonl");
+        mk("MobileSync/Backup/y.jsonl");
+        mk("Knowledge/z.jsonl");
+        mk("SomeEditor/sessions/a.jsonl");
+
+        let found = file_signature_installs(&root, Children::Any, &BTreeSet::new());
+        let agents: Vec<&str> = found.iter().map(|i| i.agent.as_str()).collect();
+        assert_eq!(agents, ["SomeEditor"]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The wiring, over a whole home: each root walked under its own rule.
+    ///
+    /// The per-root rules are asserted above; this is the statement that the
+    /// PROBE applies them to the right roots, which is what actually regressed.
+    /// A home's guarded folders each hold a transcript, so any of them being
+    /// reported means it was opened — and an open is what raises the dialog.
+    #[test]
+    fn the_probe_walks_a_home_by_the_hidden_rule_and_app_data_by_its_own() {
+        let home = std::env::temp_dir().join(format!("modelstat-wiring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mk = |rel: &str| {
+            let p = home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"{}").unwrap();
+        };
+        for guarded in ["Desktop", "Documents", "Downloads", "Pictures", "Music"] {
+            mk(&format!("{guarded}/notes/session.jsonl"));
+        }
+        mk("Library/Application Support/AddressBook/Sources/x.jsonl");
+        // A hidden agent store, and an app-data one under a name nothing knows.
+        mk(".newagent/sessions/a.jsonl");
+        mk("Library/Application Support/Some Editor/sessions/b.jsonl");
+        // `~/.config` is both an application-data root AND a dotdir under the
+        // home. Walked as a root, it must not ALSO be reported as an agent
+        // called "config".
+        mk(".config/othertool/sessions/c.jsonl");
+
+        let mut agents: Vec<String> = probe_file_signatures_in(&home)
+            .into_iter()
+            .map(|i| i.agent)
+            .collect();
+        agents.sort();
+        assert_eq!(agents, ["Some Editor", "newagent", "othertool"]);
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A deleted tool is not an installed one — on either platform's trash.
+    #[test]
+    fn a_trashed_store_is_not_reported_as_an_install() {
+        let root = std::env::temp_dir().join(format!("modelstat-trash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for rel in [
+            ".Trash/.oldtool/sessions/a.jsonl",
+            ".local/share/Trash/files/.oldtool/b.jsonl",
+        ] {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"{}").unwrap();
+        }
+
+        assert!(file_signature_installs(&root, Children::Hidden, &BTreeSet::new()).is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }
