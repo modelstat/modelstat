@@ -109,6 +109,7 @@ fn sample_batch() -> IngestBatch {
         segments: vec![],
         tool_calls: vec![],
         session_installs: None,
+        session_actors: None,
         session_titles: None,
         session_metadata: None,
         summarizer_mode: None,

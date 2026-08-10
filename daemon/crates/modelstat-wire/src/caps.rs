@@ -15,6 +15,11 @@ pub const FILES_TOUCHED_COUNT_MAX: usize = 256;
 // text, never processed short. This bound exists only as an extreme
 // malicious-size guard (was 320 pre-capture); no real message approaches it.
 pub const CONTENT_EXCERPT_MAX: usize = 262_144;
+// The model's own reasoning for a turn is a message body like any other, and it
+// is bounded for the same single reason: an extreme malicious-size guard. Same
+// number as the prose deliberately — two different ceilings would say the two
+// texts are different kinds of thing, and they are not.
+pub const REASONING_EXCERPT_MAX: usize = 262_144;
 pub const SOURCE_FILE_MAX: usize = 1024;
 
 // --- Segment --------------------------------------------------------------

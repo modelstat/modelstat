@@ -136,6 +136,8 @@ mod tests {
     fn ev(cwd: Option<&str>, branch: Option<&str>) -> RawEvent {
         RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: "e".into(),
             ts: "2026-07-16T10:00:00.000Z".into(),
             kind: "message".into(),
@@ -143,6 +145,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: "s1".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: cwd.map(Into::into),

@@ -217,6 +217,16 @@ fn redaction_counts(
     out
 }
 
+/// Which of a turn's two captured texts a queued redaction pass belongs to.
+///
+/// The pass is one flat batch of strings — one round trip for a remote redactor
+/// — so each queued string has to remember where to be spliced back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnText {
+    Content,
+    Reasoning,
+}
+
 /// Prepare a Cloud-mode raw batch: run the FULL redaction (regex floor + the
 /// PII-model pass) over every event excerpt AND tool-call command before
 /// they leave the machine. FAIL-CLOSED — returns `None` when PII is unavailable,
@@ -241,15 +251,27 @@ pub fn prepare_cloud_raw_events<N: PiiModel>(
     // floored texts (`pii_redact_checked_many`). Element-for-element the answers
     // are identical to the per-turn calls — batching only changes how many
     // round-trips a remote redactor pays.
+    //
+    // Both captured texts a turn can carry go through this ONE pass: what the
+    // model SAID and what it was WORKING OUT. They are the same kind of thing —
+    // verbatim text the model produced — so a second, weaker path for the second
+    // one would be a hole in exactly the shape of the first one's guarantee. One
+    // unanswerable reasoning text holds the flush precisely as an unanswerable
+    // prose text does.
     let mut floored_texts: Vec<String> = Vec::new();
-    let mut pending: Vec<(usize, modelstat_redact::RedactionCounts)> = Vec::new();
+    let mut pending: Vec<(usize, TurnText, modelstat_redact::RedactionCounts)> = Vec::new();
     for (i, e) in events.iter().enumerate() {
-        let Some(excerpt) = e.content_excerpt.as_deref().filter(|x| !x.is_empty()) else {
-            continue;
-        };
-        let floor = redact(excerpt, None);
-        floored_texts.push(floor.text);
-        pending.push((i, floor.counts));
+        for (slot, text) in [
+            (TurnText::Content, e.content_excerpt.as_deref()),
+            (TurnText::Reasoning, e.reasoning_excerpt.as_deref()),
+        ] {
+            let Some(text) = text.filter(|x| !x.is_empty()) else {
+                continue;
+            };
+            let floor = redact(text, None);
+            floored_texts.push(floor.text);
+            pending.push((i, slot, floor.counts));
+        }
     }
     let passes = if floored_texts.is_empty() {
         Vec::new()
@@ -266,17 +288,28 @@ pub fn prepare_cloud_raw_events<N: PiiModel>(
         p
     };
     let mut redacted: Vec<RawEvent> = events.to_vec();
-    for ((i, floor_counts), pass) in pending.into_iter().zip(passes) {
+    for ((i, slot, floor_counts), pass) in pending.into_iter().zip(passes) {
         // Counted HERE, at the only place that knows what was removed. Cloud mode
         // ships raw events and no segments, so the segment-borne `RedactionReport`
         // never applied to it — every count computed on this path used to be thrown
         // away, which is why "was a secret redacted in this session?" had no answer
         // for essentially all production traffic.
         let counts = redaction_counts(&floor_counts, &pass.counts);
-        let unchanged = events[i].content_excerpt.as_deref() == Some(pass.text.as_str());
-        if !unchanged {
-            redacted[i].content_excerpt = Some(pass.text);
-            redacted[i].redactions = counts;
+        let before = match slot {
+            TurnText::Content => events[i].content_excerpt.as_deref(),
+            TurnText::Reasoning => events[i].reasoning_excerpt.as_deref(),
+        };
+        if before == Some(pass.text.as_str()) {
+            continue;
+        }
+        match slot {
+            TurnText::Content => redacted[i].content_excerpt = Some(pass.text),
+            TurnText::Reasoning => redacted[i].reasoning_excerpt = Some(pass.text),
+        }
+        // One tally per EVENT, not per text: an event's counts say what was
+        // removed from that turn, and the two texts are two halves of one turn.
+        for (key, n) in counts {
+            *redacted[i].redactions.entry(key).or_insert(0) += n;
         }
     }
     if !drafts.is_empty() && !enrich_tool_call_redaction(drafts, redactor) {
@@ -369,6 +402,8 @@ mod tests {
     fn ev(source_event_id: &str, excerpt: Option<&str>) -> RawEvent {
         RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: source_event_id.into(),
             ts: "2026-07-16T10:00:00.000Z".into(),
             kind: "message".into(),
@@ -376,6 +411,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: "s1".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,
@@ -391,6 +428,70 @@ mod tests {
             source_byte_offset: None,
             redactions: Default::default(),
         }
+    }
+
+    /// A turn whose model wrote down its reasoning.
+    fn ev_reasoning(source_event_id: &str, excerpt: Option<&str>, reasoning: &str) -> RawEvent {
+        RawEvent {
+            reasoning_excerpt: Some(reasoning.into()),
+            reasoning_bytes: Some(reasoning.chars().count() as u64),
+            ..ev(source_event_id, excerpt)
+        }
+    }
+
+    /// Reasoning is captured text and takes the SAME pass the prose takes — the
+    /// whole point of routing both through one call. A second, weaker path for
+    /// the model's thinking would be a hole shaped exactly like the guarantee
+    /// the first one makes, and the thinking is where a model repeats back what
+    /// it just read.
+    #[test]
+    fn reasoning_is_scrubbed_by_the_same_pass_as_the_prose() {
+        let events = vec![
+            ev_reasoning(
+                "e1",
+                Some("Escalate to Katherine Johnson now"),
+                "The user means Katherine Johnson, the on-call.",
+            ),
+            // Reasoning present, content ABSENT — the case a
+            // content-keyed loop skips entirely.
+            ev_reasoning("e2", None, "Katherine Johnson owns this service."),
+        ];
+        let mut drafts: Vec<ToolCallDraft> = Vec::new();
+        let out = prepare_cloud_raw_events(&events, &mut drafts, &FakeRedactor).expect("shipped");
+        assert_eq!(
+            out[0].content_excerpt.as_deref(),
+            Some("Escalate to [REDACTED:PER] now")
+        );
+        for (i, e) in out.iter().enumerate() {
+            let reasoning = e.reasoning_excerpt.as_deref().unwrap();
+            assert!(
+                !reasoning.contains("Katherine Johnson"),
+                "event {i} shipped an unscrubbed name in its reasoning: {reasoning}"
+            );
+            assert!(reasoning.contains("[REDACTED:PER]"), "{reasoning}");
+            assert!(
+                e.redactions.values().sum::<u32>() > 0,
+                "event {i} redacted something and must say so"
+            );
+        }
+        // The excerpt-less event still has no excerpt invented for it.
+        assert_eq!(out[1].content_excerpt, None);
+    }
+
+    /// The fail-closed rule covers the reasoning too: a turn whose reasoning the
+    /// model could not classify has NOT been scrubbed, and shipping it is
+    /// exactly the egress the rule exists to prevent — even when its prose
+    /// scrubbed cleanly.
+    #[test]
+    fn reasoning_the_model_cannot_classify_holds_the_whole_flush() {
+        let long = "x".repeat(5_000);
+        let events = vec![ev_reasoning("e1", Some("short and answerable"), &long)];
+        let mut drafts: Vec<ToolCallDraft> = Vec::new();
+        assert!(modelstat_redact::redactor_active(&FailsOnLongText));
+        assert!(
+            prepare_cloud_raw_events(&events, &mut drafts, &FailsOnLongText).is_none(),
+            "unscrubbable reasoning must never leave the box"
+        );
     }
 
     #[test]

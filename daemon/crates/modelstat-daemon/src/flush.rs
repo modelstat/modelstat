@@ -18,7 +18,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use modelstat_ingest::accounts::{session_installs_for, Accounts};
-use modelstat_parsers::{detect_references, DetectedRefs, GitEnrichment, ToolCallDraft};
+use modelstat_parsers::{
+    detect_references, DetectedRefs, GitEnrichment, SessionActors, ToolCallDraft,
+};
 use modelstat_pipeline::{
     attach_segment_ids_by_map, batch_id, build_for_one_session, build_session_metadata,
     build_session_titles, deep_redact_tool_commands, enrich_tool_call_redaction,
@@ -40,6 +42,31 @@ pub struct PreparedBatch {
 pub enum FlushOutcome {
     Ready(Vec<PreparedBatch>),
     Held,
+}
+
+/// The `session_id -> [actor, …]` blob for the sessions a batch ships.
+///
+/// Registry rows are held keyed by id while they are being folded together;
+/// the wire wants a list, and the conversion happens once, here, at the door.
+/// A session nothing was recorded for stays ABSENT rather than riding as an
+/// empty list — an empty list is a claim that the session ran no sub-agents,
+/// and the honest answer is that this scan saw none.
+fn actors_wire_for<'a>(
+    run_actors: &SessionActors,
+    sessions: impl IntoIterator<Item = &'a str>,
+) -> Option<serde_json::Value> {
+    let mut out: BTreeMap<&str, Vec<&modelstat_parsers::SessionActor>> = BTreeMap::new();
+    for sid in sessions {
+        if let Some(actors) = run_actors.get(sid) {
+            if !actors.is_empty() {
+                out.insert(sid, actors.values().collect());
+            }
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    serde_json::to_value(&out).ok()
 }
 
 /// Zero out null token usage — the ingest server rejects null `tokens`, and this
@@ -77,6 +104,13 @@ pub async fn build_flush_batches<S, E, N>(
     // turns instead (excerpt-shed — see the accumulation below). Untouched in
     // local / self-hosted mode, which reads the segment map.
     run_events_by_session: &mut BTreeMap<String, Vec<RawEvent>>,
+    // Every agent-instance the scan has seen each session state, accumulated
+    // across files and flushes for the same reason the two maps above are: a
+    // session's sub-agents are discovered over many files (each one is its own
+    // transcript) and the server takes the last write, so a flush that carried
+    // only the actors IT happened to read would narrow what an earlier flush
+    // already landed.
+    run_actors_by_session: &SessionActors,
     // Which provider account is logged in, and since when. Passed in rather than
     // read here so the caller owns the I/O and this stays a pure builder.
     accounts: &Accounts,
@@ -172,6 +206,7 @@ where
             .map(|(sid, (evs, calls))| {
                 // Computed before the struct literal below moves `evs`.
                 let installs_for_session = session_installs_for(&evs, accounts);
+                let actors_for_session = actors_wire_for(run_actors_by_session, [sid.as_str()]);
                 PreparedBatch {
                     batch: IngestBatch {
                         batch_id: batch_id(),
@@ -184,6 +219,7 @@ where
                         // honestly (see `accounts::session_installs_for`). One session
                         // per raw batch, so only its own entry rides.
                         session_installs: installs_for_session,
+                        session_actors: None,
                         session_titles: None,
                         // One session per batch ⇒ ship that session's entry alone. A
                         // session the pass found nothing for stays absent rather than
@@ -280,6 +316,10 @@ where
     };
     // Computed before the struct literal below moves `events`.
     let session_installs = session_installs_for(&events, accounts);
+    let session_actors = actors_wire_for(
+        run_actors_by_session,
+        events.iter().map(|e| e.session_id.as_str()),
+    );
     let batch = IngestBatch {
         batch_id: batch_id(),
         device_id: device_id.into(),
@@ -290,6 +330,7 @@ where
         // The account behind each session in this batch, for the sessions we can
         // name one for; absent entirely when we can name none.
         session_installs,
+        session_actors,
         session_titles: if session_titles.is_empty() {
             None
         } else {
@@ -359,6 +400,8 @@ mod tests {
     fn ev(session: &str, ts: &str, excerpt: &str) -> RawEvent {
         RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: format!("{session}:{ts}"),
             ts: ts.into(),
             kind: "message".into(),
@@ -366,6 +409,8 @@ mod tests {
             provider: "anthropic".into(),
             model: None,
             session_id: session.into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,
@@ -422,6 +467,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &accounts,
         )
         .await;
@@ -476,6 +522,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &accounts,
         )
         .await;
@@ -516,6 +563,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &Accounts::new(),
         )
         .await;
@@ -557,6 +605,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &Accounts::new(),
         )
         .await;
@@ -589,6 +638,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &Accounts::new(),
         )
         .await;
@@ -635,6 +685,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &Accounts::new(),
         )
         .await;
@@ -681,6 +732,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &Accounts::new(),
         )
         .await;
@@ -703,6 +755,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &Accounts::new(),
         )
         .await;
@@ -742,6 +795,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &Accounts::new(),
         )
         .await;
@@ -749,6 +803,130 @@ mod tests {
             panic!("ready")
         };
         assert!(batches[0].batch.session_metadata.is_none());
+    }
+
+    /// The registry reaches the wire, in the shape the zod mirror validates —
+    /// and a batch built through the real path serializes to it. The two halves
+    /// (an event's `actor_id`, the roster it joins against) are produced by
+    /// different code, so nothing but a test keeps them meeting.
+    #[tokio::test]
+    async fn a_flush_ships_the_actor_roster_its_events_point_at() {
+        let resilient = ResilientSummarizer::with_cooldown(
+            Fake {
+                reply: "Did the thing".into(),
+                failing: false,
+            },
+            Duration::ZERO,
+        );
+        let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
+        let mut actors = SessionActors::new();
+        modelstat_parsers::record_actor(
+            &mut actors,
+            "s1",
+            modelstat_parsers::SessionActor {
+                id: "a628f67608a72832b".into(),
+                label: Some("Explore".into()),
+                description: Some("Audit the alerting dashboards".into()),
+                spawn_depth: Some(1),
+                first_ts: Some("2026-07-16T10:00:00.000Z".into()),
+                last_ts: Some("2026-07-16T10:00:00.000Z".into()),
+                ..Default::default()
+            },
+        );
+        // A session this flush does not ship must not leak into the batch.
+        modelstat_parsers::record_actor(
+            &mut actors,
+            "s_elsewhere",
+            modelstat_parsers::SessionActor {
+                id: "affffffffffffffff".into(),
+                ..Default::default()
+            },
+        );
+        let mut event = ev("s1", "2026-07-16T10:00:00.000Z", "hello");
+        event.actor_id = Some("a628f67608a72832b".into());
+        event.reasoning_excerpt = Some("thinking about it".into());
+        event.reasoning_bytes = Some(17);
+        let out = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "local",
+            vec![event],
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &AnsweringRedactor,
+            None,
+            None,
+            &mut acc,
+            &mut ev_acc,
+            &actors,
+            &Accounts::new(),
+        )
+        .await;
+        let FlushOutcome::Ready(batches) = out else {
+            panic!("healthy engine must not hold");
+        };
+        let json = serde_json::to_value(&batches[0].batch).unwrap();
+        let roster = &json["session_actors"]["s1"];
+        assert_eq!(roster[0]["id"], "a628f67608a72832b");
+        assert_eq!(roster[0]["label"], "Explore");
+        assert_eq!(roster[0]["spawn_depth"], 1);
+        assert!(
+            roster[0].get("path").is_none(),
+            "a key the harness never stated must be ABSENT, not null: {roster}"
+        );
+        assert!(
+            json["session_actors"].get("s_elsewhere").is_none(),
+            "a batch carries the rosters of the sessions it ships and no others"
+        );
+        assert_eq!(json["events"][0]["actor_id"], "a628f67608a72832b");
+        assert_eq!(json["events"][0]["reasoning_excerpt"], "thinking about it");
+        assert_eq!(json["events"][0]["reasoning_bytes"], 17);
+        // The whole batch still round-trips through the wire types the zod
+        // schemas mirror.
+        let back: modelstat_wire::IngestBatch = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.events[0].actor_id.as_deref(),
+            Some("a628f67608a72832b")
+        );
+    }
+
+    /// A session nobody stated an actor for ships NO roster. An empty map would
+    /// be a claim that the session ran no sub-agents; the honest answer is that
+    /// this scan saw none.
+    #[tokio::test]
+    async fn a_single_agent_session_ships_no_roster_at_all() {
+        let resilient = ResilientSummarizer::with_cooldown(
+            Fake {
+                reply: "x".into(),
+                failing: false,
+            },
+            Duration::ZERO,
+        );
+        let mut acc = BTreeMap::new();
+        let mut ev_acc = BTreeMap::new();
+        let out = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "local",
+            vec![ev("s1", "2026-07-16T10:00:00.000Z", "hello")],
+            Vec::new(),
+            &resilient,
+            &NoEmbedder,
+            &AnsweringRedactor,
+            None,
+            None,
+            &mut acc,
+            &mut ev_acc,
+            &SessionActors::new(),
+            &Accounts::new(),
+        )
+        .await;
+        let FlushOutcome::Ready(batches) = out else {
+            panic!("ready")
+        };
+        assert!(batches[0].batch.session_actors.is_none());
     }
 
     #[tokio::test]
@@ -775,6 +953,7 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
             &Accounts::new(),
         )
         .await;

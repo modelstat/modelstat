@@ -44,8 +44,8 @@ pub use tool_hash::{
     ArgsHashes, SIGNATURE_NONE,
 };
 pub use types::{
-    LocalToolContext, ParseResult, ParseStats, ParserContext, Sink, ToolCallDraft,
-    PARSER_EVENT_CHUNK,
+    merge_session_actors, record_actor, LocalToolContext, ParseResult, ParseStats, ParserContext,
+    SessionActor, SessionActors, Sink, ToolCallDraft, PARSER_EVENT_CHUNK,
 };
 
 pub use claude_code::{

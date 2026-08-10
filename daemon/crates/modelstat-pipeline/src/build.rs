@@ -712,6 +712,8 @@ mod tests {
     fn ev(id: &str, ts: &str, kind: &str, content: Option<&str>) -> RawEvent {
         RawEvent {
             content_bytes: None,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             source_event_id: id.into(),
             ts: ts.into(),
             kind: kind.into(),
@@ -719,6 +721,8 @@ mod tests {
             provider: "anthropic".into(),
             model: Some("claude-opus-4-8".into()),
             session_id: "s1".into(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: None,
             parent_event_id: None,
             cwd: None,

@@ -153,6 +153,7 @@ pub fn parse_pi_session(ctx: &ParserContext) -> std::io::Result<ParseResult> {
         script_contexts,
         stats,
         skipped_kinds: skips.into_counts(),
+        session_actors: Default::default(),
         source_file: ctx.source_file.clone(),
     })
 }
@@ -170,6 +171,7 @@ pub fn parse_pi_session_streaming(
         script_contexts,
         stats,
         skipped_kinds: skips.into_counts(),
+        session_actors: Default::default(),
         source_file: ctx.source_file.clone(),
     })
 }
@@ -407,6 +409,8 @@ fn parse_inner(
                 provider: provider.to_string(),
                 model,
                 session_id: session_id.clone().unwrap(),
+                actor_id: None,
+                recipient_actor_id: None,
                 turn_index: Some(current_turn),
                 parent_event_id: None,
                 cwd: cwd.clone(),
@@ -418,6 +422,8 @@ fn parse_inner(
                 files_touched: Vec::new(),
                 content_excerpt: excerpt,
                 content_bytes,
+                reasoning_excerpt: None,
+                reasoning_bytes: None,
                 references: refs,
                 source_file: Some(ctx.source_file.clone()),
                 source_byte_offset: Some(offset),
@@ -497,6 +503,8 @@ fn parse_inner(
             provider: provider_of(last_provider.as_deref()),
             model: last_model.clone(),
             session_id: session_id.clone().unwrap(),
+            actor_id: None,
+            recipient_actor_id: None,
             turn_index: Some(current_turn),
             parent_event_id: None,
             cwd: cwd.clone(),
@@ -508,6 +516,8 @@ fn parse_inner(
             files_touched: Vec::new(),
             content_excerpt: excerpt,
             content_bytes,
+            reasoning_excerpt: None,
+            reasoning_bytes: None,
             references: refs,
             source_file: Some(ctx.source_file.clone()),
             source_byte_offset: Some(offset),
