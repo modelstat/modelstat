@@ -113,7 +113,33 @@ Five families. Every one is a count of something that happened, and none of them
 | **Time** | `active_ms` — the union of 5-minute windows around a session's event timestamps, so idle gaps do not count (`attribution::active_ms`, `ACTIVITY_WINDOW_MS`). The server additionally derives `agent_working_ms` (developer waiting on the agent) and `waiting_on_user_ms` (agent blocked on a human) from turn-level message timing the daemon does not model. | On-device from event timestamps; server-side from the time plane. | Shipped (device: `active_ms` only). |
 | **Authorship** | AI-assisted vs human-authored, per merged PR. | `is_ai_authored` reads the tools' own commit trailers (§4). A read of a string that is either present or absent. | Shipped. |
 | **Lifecycle** | Merged, reverted, and sessions that reference no outcome that ever merged (§6). | `check_pull_request_outcome` / `is_reverted`, `daemon/crates/modelstat-parsers/src/git_outcome.rs`. | Shipped. |
-| **Change primitives** | `files_changed`, `lines_added`, `lines_deleted`, and churn split by path class (test / config / doc / generated). | `diff_features` over a bounded `git show --numstat`, `daemon/crates/modelstat-work/src/diff.rs`. Paths are read to classify and then dropped — `DiffFeatures` is deliberately not `Serialize`. A hunk count was also read here and is gone: it needed a second, far larger `git show` — 52% of the git time on a 120-merge walk — and nothing consumed it. | Shipped. |
+| **Change primitives** | `files_changed`, `lines_added`, `lines_deleted`, and churn split by path class (test / config / doc / generated). The server additionally carries `commits` per work item, which the daemon deliberately does not report — see below. | `diff_features` over a bounded `git show --numstat`, `daemon/crates/modelstat-work/src/diff.rs`. Paths are read to classify and then dropped — `DiffFeatures` is deliberately not `Serialize`. A hunk count was also read here and is gone: it needed a second, far larger `git show` — 52% of the git time on a 120-merge walk — and nothing consumed it. | Shipped (device: no `commits`). |
+
+**Two quantities exist server-side and not on the device.** The daemon does not compute
+`agent_working_ms` / `waiting_on_user_ms`, because turn-level wait needs message timing it does
+not model. It does not report `commits`, because a first-parent walk sees exactly one commit per
+merge: on a squash-merging repo — the dominant convention, and the one §1 finding 2 measured at
+0–17% branch-range coverage — a device-side commit count would be a constant `1` wearing the
+costume of a measurement. The server can count commits honestly because the forge knows the
+branch that was flattened.
+
+So `modelstat roi` and the dashboard will agree on files and lines and differ on commits. **That
+is correct in both places, not drift.**
+
+**Neither absence names a reason, and neither may be read as one.** The device omits `commits`
+from `--json` entirely — it does not measure the quantity at all, so there is no outcome to
+report. The server stores NULL, which means *not measured* and nothing further: one bucket over
+several causes — no forge integration connected, a PR seen only through a list endpoint that
+omits the field, a detail fetch that failed or timed out, a per-run fetch budget exhausted before
+reaching that PR — with no column recording which. Inferring the cause is a bug with a friendly
+face: "NULL ⇒ tell them to connect an integration" is wrong for the user who has one connected
+and hit a timeout, and wrong in the direction that looks actionable. Telling those states apart
+needs a provenance column somebody would have to add, and is never an inference from the NULL.
+
+What the two absences do share is the only thing they should: both refuse to fabricate a number.
+That is also why these columns are nullable rather than `NOT NULL DEFAULT 0` — a default would
+bake in the exact failure mode this document exists to refuse, an unobserved quantity rendering
+as a figure somebody can act on.
 
 **`equiv_tokens` is a normalisation, not a new measurement, and never appears alone.** Raw token
 counts are not comparable between PRs: cache reads are 92.3% of raw volume on a measured device
