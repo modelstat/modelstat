@@ -147,7 +147,7 @@
         "action": null,
         "object": null,
         "qualifiers": [],
-        "param_shape": "\u00a7 \u00a7 \u00a7 -n \u00a7",
+        "param_shape": "§ § § -n §",
         "keywords": [],
         "abstract": null,
         "command_redacted": "kubectl rollout restart deploy/payments-api -n prod",
