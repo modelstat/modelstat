@@ -98,7 +98,6 @@ fn reads_a_real_commit_into_change_primitives() {
     assert_eq!(f.generated_lines, 3, "Cargo.lock is generated: {f:?}");
     assert_eq!(f.doc_lines, 0, "README untouched in commit two: {f:?}");
     assert_eq!(f.config_lines, 0, "{f:?}");
-    assert_eq!(f.hunks, 3, "{f:?}");
 
     // Every count is recountable by hand off git's own numstat. That is the
     // whole claim these primitives make, so the test makes it against git

@@ -7,9 +7,10 @@
 //! What leaves this crate serialized are the spend counts in
 //! [`crate::attribution`].
 //!
-//! Best-effort like every other git read in this workspace: bounded
-//! (`--format=` so git never even prints the message, a byte ceiling on stdout,
-//! a file-count ceiling) and a 4s timeout, `None` on any failure.
+//! Best-effort like every other git read in this workspace: ONE bounded call
+//! (`--numstat --format=`, so git neither prints the message nor generates a
+//! patch), a byte ceiling on stdout, a file-count ceiling and a 4s timeout,
+//! `None` on any failure.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -18,10 +19,6 @@ use std::time::{Duration, Instant};
 /// Per-git-call ceiling — the same 4s class as
 /// `modelstat_parsers::git_outcome::check_pull_request_outcome`.
 const GIT_TIMEOUT: Duration = Duration::from_millis(4_000);
-
-/// Stdout ceiling for the unified diff. A monorepo merge can be hundreds of
-/// megabytes; past this we stop reading and let git die on the closed pipe.
-const DIFF_MAX_BYTES: usize = 200 * 1024;
 
 /// Stdout ceiling for the numstat. One row per file, so this is ~4k files.
 const NUMSTAT_MAX_BYTES: usize = 256 * 1024;
@@ -66,9 +63,6 @@ pub struct DiffFeatures {
     pub files_changed: u32,
     pub lines_added: u64,
     pub lines_deleted: u64,
-    /// `@@` hunks across the (bounded) diff — a proxy for how scattered the
-    /// change is, which two PRs of identical churn can differ wildly on.
-    pub hunks: u32,
     /// Churn (`added + deleted`) attributed to each [`PathClass`]. Reported
     /// apart rather than discounted against each other: which classes a change
     /// landed in is measured here, what each one is worth is the reader's call.
@@ -265,15 +259,14 @@ pub fn parse_numstat(stdout: &str) -> Vec<NumstatRow<'_>> {
     out
 }
 
-/// Fold a numstat and a unified diff into [`DiffFeatures`]. Pure — this is the
-/// half that is unit-tested; [`diff_features`] is the git call around it.
-pub fn features_from(numstat: &str, diff: &str) -> DiffFeatures {
+/// Fold a numstat into [`DiffFeatures`]. Pure — this is the half that is
+/// unit-tested; [`diff_features`] is the git call around it.
+pub fn features_from(numstat: &str) -> DiffFeatures {
+    let rows = parse_numstat(numstat);
     let mut f = DiffFeatures {
-        hunks: diff.lines().filter(|l| l.starts_with("@@ ")).count() as u32,
+        files_changed: rows.len() as u32,
         ..Default::default()
     };
-    let rows = parse_numstat(numstat);
-    f.files_changed = rows.len() as u32;
     for row in &rows {
         // Saturating, like the totals below: a numstat is untrusted input, and
         // this crate's contract is "degrade, never panic".
@@ -312,25 +305,7 @@ pub fn diff_features(cwd: &str, merge_sha: &str) -> Option<DiffFeatures> {
         cwd,
         NUMSTAT_MAX_BYTES,
     )?;
-    // The diff is a nice-to-have: every other count stands without it (only
-    // `hunks` comes from here), so a timeout on the big read degrades rather
-    // than fails.
-    let diff = run_git_bounded(
-        &[
-            "show",
-            "-m",
-            "--first-parent",
-            "--no-renames",
-            "--unified=3",
-            "--no-color",
-            "--format=",
-            merge_sha,
-        ],
-        cwd,
-        DIFF_MAX_BYTES,
-    )
-    .unwrap_or_default();
-    Some(features_from(&numstat, &diff))
+    Some(features_from(&numstat))
 }
 
 /// Run `git` in `cwd`, reading at most `max_bytes` of stdout, killing the child
@@ -466,7 +441,7 @@ mod tests {
 2\t1\tdocs/design.md
 -\t-\tassets/icon.png
 ";
-        let f = features_from(numstat, "");
+        let f = features_from(numstat);
         assert_eq!(f.files_changed, 6);
         assert_eq!(f.lines_added, 737);
         assert_eq!(f.lines_deleted, 426);
@@ -477,27 +452,14 @@ mod tests {
         assert_eq!(f.churn(), 1163);
     }
 
-    const SAMPLE_DIFF: &str = "\
-diff --git a/src/secret/token_store.rs b/src/secret/token_store.rs
-index a2796573..a476f67e 100644
---- a/src/secret/token_store.rs
-+++ b/src/secret/token_store.rs
-@@ -9,6 +9,7 @@ impl TokenStore {
- 	let existing = self.load();
-+	let api_key = \"sk-live-DEADBEEF\";
--        drop(existing);
-+
-+// explain the swap
-";
-
     #[test]
-    fn hunk_headers_are_counted_and_nothing_else_is_read_from_the_diff() {
-        let f = features_from("1\t1\tsrc/a.rs", SAMPLE_DIFF);
-        assert_eq!(f.hunks, 1);
-        // Two hunks in one file is two, and a diff with none is zero.
-        let two = features_from("1\t1\tsrc/a.rs", &SAMPLE_DIFF.repeat(2));
-        assert_eq!(two.hunks, 2);
-        assert_eq!(features_from("1\t1\tsrc/a.rs", "").hunks, 0);
+    fn a_single_row_without_a_trailing_newline_still_parses() {
+        // What git emits for a one-file merge, and the only case where the last
+        // row is not newline-terminated.
+        let f = features_from("1\t1\tsrc/a.rs");
+        assert_eq!((f.files_changed, f.lines_added, f.lines_deleted), (1, 1, 1));
+        assert_eq!(f.churn(), 2);
+        assert_eq!(f.test_lines, 0, "src/ is source, not test");
     }
 
     #[test]

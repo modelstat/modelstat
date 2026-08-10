@@ -10,7 +10,7 @@
 //!              PrSpend per PR                          unattributed
 //!        (mix, equiv_tokens, active_ms)          (mix, active_ms, count)
 //!
-//!   git show --numstat ──▶ DiffFeatures (files, +/−, hunks, path classes)
+//!   git show --numstat ──▶ DiffFeatures (files, +/−, churn by path class)
 //! ```
 //!
 //! ## Primitives, not a verdict
@@ -22,8 +22,9 @@
 //!   windows over a session's own events. Both are attributed to pull requests
 //!   through the SAME split weights, so time and tokens can never disagree
 //!   about which PR a session belongs to.
-//! * [`diff`] — what a merged PR changed, read from the local repo: files,
-//!   lines added, lines deleted, hunks, and churn by path class.
+//! * [`diff`] — what a merged PR changed, read from the local repo in one
+//!   bounded `git show --numstat`: files, lines added, lines deleted, and
+//!   churn by path class.
 //!
 //! Everything here is a quantity somebody could recount by hand from the same
 //! files. Nothing is blended: there is no composite of these numbers, no
