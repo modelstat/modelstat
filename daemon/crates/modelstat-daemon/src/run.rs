@@ -22,7 +22,9 @@ use serde_json::{json, Value};
 use modelstat_ingest::accounts;
 use modelstat_ingest::state::save_state;
 use modelstat_ingest::{home_path, Config};
-use modelstat_parsers::discovery::{discover, DiscoveryOptions, DiscoveryOutput};
+use modelstat_parsers::discovery::{
+    discover, discover_identities, DetectedInstallation, DiscoveryOptions, DiscoveryOutput,
+};
 use modelstat_receiver::{
     drain_local_queue, start_local_ingest_receiver, ControlScanHandler, ControlTarget, QueueStore,
     DEFAULT_LOCAL_INGEST_PORT,
@@ -427,30 +429,67 @@ async fn preflight(daemon: &Daemon) {
 
 /// The 10s heartbeat loop (+ an immediate prime), owning the discovery-fold state:
 /// attach the installs/identities snapshot on the FIRST beat, whenever it changes,
-/// or on the 5-min backstop — else a bare liveness body. A `discover()` failure is
+/// or on the 5-min backstop — else a bare liveness body. A discovery failure is
 /// swallowed (liveness still ships). Port of `sendHeartbeat` +
 /// `discoverySnapshotForHeartbeat`.
+///
+/// The two halves of discovery run on their own clocks, because they answer
+/// questions that change at wildly different rates:
+///
+///   * IDENTITIES, every beat. An account changes the moment somebody runs
+///     `claude login`, and the window each account's `observed_since` measures
+///     is only correct if every reading updates it.
+///   * INSTALLS, on the backstop. Which tools exist on a machine does not
+///     change between two heartbeats, and asking costs a full process listing,
+///     a `--version` subprocess per binary found, and a filesystem sweep. Thirty
+///     times a minute, for an answer that was already right.
 async fn heartbeat_loop(daemon: Arc<Daemon>) {
     let mut last_snapshot: Option<String> = None;
-    // Force the first beat to attach: pretend the backstop is already due.
-    let mut last_attached = Instant::now()
-        .checked_sub(DISCOVERY_BACKSTOP)
-        .unwrap_or_else(Instant::now);
+    // Both clocks start already due, so the first beat takes an install reading
+    // and attaches it.
+    let overdue = || {
+        Instant::now()
+            .checked_sub(DISCOVERY_BACKSTOP)
+            .unwrap_or_else(Instant::now)
+    };
+    let mut last_attached = overdue();
+    // Deliberately NOT `last_attached`. Attaching is driven by change, and an
+    // identity can change at any beat; hanging the install probe off that timer
+    // would let a flapping identity postpone it forever — the one failure mode
+    // where "runs every 5 minutes" silently becomes "never runs again".
+    let mut last_installs = overdue();
+    // The most recent install reading, re-attached by the beats that take none
+    // of their own.
+    let mut installations: Vec<DetectedInstallation> = Vec::new();
     loop {
-        // Discovery is best-effort + potentially slow (binary/file probes) → off
-        // the async runtime; a failure just ships a bare heartbeat.
-        let disc = tokio::task::spawn_blocking(|| discover(&DiscoveryOptions::default()))
-            .await
-            .ok();
-        // Remember which account is logged in, for the scan to name on each
-        // session it ships. Folded on EVERY beat, not just the ones that attach a
-        // snapshot to the heartbeat: the two cadences are unrelated, and the
-        // window `observed_since` measures is only correct if every reading
-        // updates it. Best-effort — a failed write just means nothing is stamped
-        // and the server infers, exactly as before.
-        if let Some(d) = disc.as_ref() {
-            let detected: Vec<(String, String)> = d
-                .identities
+        let backstop_due = last_attached.elapsed() >= DISCOVERY_BACKSTOP;
+        let installs_due = last_installs.elapsed() >= DISCOVERY_BACKSTOP;
+        // Best-effort + potentially slow (binary/file probes) → off the async
+        // runtime. A failure ships a bare heartbeat and leaves both timers
+        // untouched, so the next beat retries rather than waiting out another
+        // backstop.
+        let probe = tokio::task::spawn_blocking(move || {
+            if installs_due {
+                let d = discover(&DiscoveryOptions::default());
+                (d.identities, Some(d.installations))
+            } else {
+                (discover_identities(), None)
+            }
+        })
+        .await
+        .ok();
+
+        let attach = probe.and_then(|(identities, probed_installs)| {
+            if let Some(probed) = probed_installs {
+                installations = probed;
+                last_installs = Instant::now();
+            }
+            // Remember which account is logged in, for the scan to name on each
+            // session it ships. Folded on EVERY beat, not just the ones that
+            // attach a snapshot to the heartbeat: the two cadences are
+            // unrelated. Best-effort — a failed write just means nothing is
+            // stamped and the server infers, exactly as before.
+            let detected: Vec<(String, String)> = identities
                 .iter()
                 .map(|i| (i.provider.clone(), i.provider_account_id.clone()))
                 .collect();
@@ -463,20 +502,20 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
                     );
                 }
             }
-        }
 
-        let attach = disc.as_ref().and_then(|d| {
             daemon.with_status(|s| {
-                s.set_stat("installations_detected", json!(d.installations.len()));
-                s.set_stat("identities_detected", json!(d.identities.len()));
+                s.set_stat("installations_detected", json!(installations.len()));
+                s.set_stat("identities_detected", json!(identities.len()));
             });
-            let key = serde_json::to_string(&(&d.installations, &d.identities)).unwrap_or_default();
+            let key = serde_json::to_string(&(&installations, &identities)).unwrap_or_default();
             let changed = last_snapshot.as_deref() != Some(key.as_str());
-            let backstop_due = last_attached.elapsed() >= DISCOVERY_BACKSTOP;
             if changed || backstop_due {
                 last_snapshot = Some(key);
                 last_attached = Instant::now();
-                Some(d.clone())
+                Some(DiscoveryOutput {
+                    installations: installations.clone(),
+                    identities,
+                })
             } else {
                 None
             }
