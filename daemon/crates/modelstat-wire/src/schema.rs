@@ -476,9 +476,9 @@ pub struct RepoAnchors {
     #[serde(default)]
     pub human_anchor_count: u32,
     /// AI-assisted merged PRs found in that SAME window and excluded from
-    /// `anchors`. Read next to `human_anchor_count` it says whether the
-    /// baseline is thick enough to calibrate against at all — a fact the
-    /// anchor list alone cannot carry.
+    /// `anchors`. Read next to `human_anchor_count` it gives the repo's
+    /// AI-vs-human split a denominator — a fact the anchor list alone cannot
+    /// carry. It is not a calibration signal; nothing downstream scores effort.
     #[serde(default)]
     pub ai_pr_count: u32,
     #[serde(default)]
