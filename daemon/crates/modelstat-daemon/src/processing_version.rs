@@ -210,8 +210,20 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       usage-bearing event exactly as its prose already was. All three are
 ///       local-only facts, so a re-scan is the only way uploaded sessions get
 ///       them; only codex's own files re-read.
+/// capture v25 — segments state which SCAN produced them (core#701). The scan
+///       flushes every `BATCH_MAX_EVENTS`, so a session's segmentation leaves in
+///       several batches, and the server inferred what a batch superseded from
+///       TIME OVERLAP. A cursor-resumed scan overlaps older segments without
+///       re-stating them, so the server retired spans no batch ever restated:
+///       116 sessions and 50,651,192,068 tokens — 29.5% of all measured work —
+///       ended up with no live segment at all, invisible to every taxonomy,
+///       insight and node-spend read while the rollups kept counting the events.
+///       Batches now carry `segment_generations`, and this bump is the repair:
+///       only a re-read regenerates the segments that were retired without a
+///       replacement. Cross-parser, because the loss is in supersession rather
+///       than in any one parser — claude_code and pi were worst hit.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
-    ("capture", LEGACY_WORLD_VERSION + 1),
+    ("capture", LEGACY_WORLD_VERSION + 2),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION + 2),
     ("codex", LEGACY_WORLD_VERSION + 4),

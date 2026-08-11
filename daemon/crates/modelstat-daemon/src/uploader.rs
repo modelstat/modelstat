@@ -389,6 +389,7 @@ mod tests {
             summarizer_mode: None,
             redactor_mode: None,
             repo_anchors: None,
+            segment_generations: None,
         }
     }
 

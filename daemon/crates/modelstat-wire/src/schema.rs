@@ -607,6 +607,36 @@ pub struct IngestBatch {
     /// Additive — old daemons omit it, old servers ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_anchors: Option<Vec<RepoAnchors>>,
+    /// What this batch's segments REPLACE, per session (core#701).
+    ///
+    /// The scan flushes every `BATCH_MAX_EVENTS`, so one session's segmentation
+    /// leaves here split across batches. The server used to infer what a batch
+    /// superseded by TIME OVERLAP, and a cursor-resumed scan overlaps older
+    /// segments without re-stating them — so it retired spans no batch ever
+    /// restated. 116 sessions and 50.65B tokens (29.5% of all measured work)
+    /// ended up with no live segment at all.
+    ///
+    /// Only this side knows whether the file was re-read from the top or
+    /// resumed at a cursor, so only this side can say what a batch restates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_generations: Option<BTreeMap<String, SegmentGeneration>>,
+}
+
+/// One session's claim about the segments in this batch (core#701).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentGeneration {
+    /// Identifies the SCAN that produced these segments — identical across every
+    /// batch of one scan, so the server can retire the generation this one
+    /// replaces without ever retiring its own siblings.
+    pub id: String,
+    /// The span this generation supersedes, stated ONLY when the scan re-read
+    /// the session's transcript whole. A scan resumed at a cursor APPENDS: it
+    /// claims no span and the server retires nothing, because the segments it
+    /// did not re-read are still the truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces_to: Option<String>,
 }
 
 impl IngestBatch {
@@ -813,6 +843,7 @@ mod tests {
             summarizer_mode: None,
             redactor_mode: None,
             repo_anchors: None,
+            segment_generations: None,
         };
         batch.clamp();
         let json = serde_json::to_string(&batch).unwrap();
@@ -973,6 +1004,7 @@ mod tests {
             summarizer_mode: None,
             redactor_mode: None,
             repo_anchors: Some(vec![repo; 12]), // > 10
+            segment_generations: None,
         };
         batch.clamp();
         let anchors = batch.repo_anchors.as_ref().unwrap();

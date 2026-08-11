@@ -294,6 +294,7 @@ mod tests {
                 session_metadata: None,
                 summarizer_mode: None,
                 redactor_mode: None,
+                segment_generations: None,
                 repo_anchors: None,
             },
             raw: true,
