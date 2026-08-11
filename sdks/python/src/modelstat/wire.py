@@ -202,6 +202,18 @@ class RawEvent:
     provider: str
     session_id: str
     tokens: TokenUsage = field(default_factory=TokenUsage)
+    # When the call BEGAN. The SDK sits in the call path, so this is an
+    # observation rather than an inference -- and it is stated separately from
+    # ``ts`` because the two answer different questions: ``ts`` places the event
+    # on the timeline, this one opens the span the call occupied.
+    started_at: Optional[datetime] = None
+    # When the FIRST piece of the model's output arrived -- time-to-first-token
+    # as an instant, so it reads against the other two without anyone having to
+    # know which clock produced it. Omitted unless a first chunk was actually
+    # seen: a call that returns in one piece never had one, and filling this
+    # with the completion instant would put a latency downstream that nothing
+    # ever measured.
+    first_token_at: Optional[datetime] = None
     model: Optional[str] = None
     cwd: Optional[str] = None
     git: Optional[GitContext] = None
@@ -226,6 +238,10 @@ class RawEvent:
             "tokens": self.tokens.to_dict(),
         }
         # Optional keys -- omit when absent (never emit null).
+        if self.started_at is not None:
+            out["started_at"] = format_rfc3339(self.started_at)
+        if self.first_token_at is not None:
+            out["first_token_at"] = format_rfc3339(self.first_token_at)
         if self.model is not None:
             out["model"] = self.model
         if self.cwd is not None:

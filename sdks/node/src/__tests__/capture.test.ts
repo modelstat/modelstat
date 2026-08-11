@@ -186,3 +186,22 @@ test("ts and started_at are RFC3339 UTC with millisecond precision", () => {
   assert.equal(batch.events[0]!.ts, "2026-06-19T00:00:00.000Z");
   assert.equal(batch.tool_calls![0]!.started_at, "2026-06-19T00:00:00.000Z");
 });
+
+test("the call states the instants it saw and omits the one it did not", () => {
+  const seq: SeqRef = { value: 0 };
+  const quiet = new LlmCall("openai", "sess_1");
+  quiet.startedAt = new Date("2026-06-19T00:00:00.000Z");
+  const streamed = new LlmCall("openai", "sess_2");
+  streamed.startedAt = new Date("2026-06-19T00:00:00.000Z");
+  streamed.firstTokenAt = new Date("2026-06-19T00:00:00.140Z");
+
+  const batch = buildBatch(cfg(), [quiet, streamed], seq);
+  const [a, b] = [batch.events[0]!, batch.events[1]!];
+
+  // `started_at` sits BESIDE `ts`, which is unchanged.
+  assert.equal(a.ts, "2026-06-19T00:00:00.000Z");
+  assert.equal(a.started_at, "2026-06-19T00:00:00.000Z");
+  // No stream, no first chunk to time — the key is omitted, never null.
+  assert.ok(!("first_token_at" in a));
+  assert.equal(b.first_token_at, "2026-06-19T00:00:00.140Z");
+});

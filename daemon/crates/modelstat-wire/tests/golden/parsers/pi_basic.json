@@ -4,6 +4,7 @@
   "events": [
     {
       "source_event_id": "evt_zqd4n169mhou",
+      "seq": 3,
       "ts": "2026-06-26T23:53:39.971Z",
       "kind": "user_message",
       "agent": "pi",
@@ -25,6 +26,7 @@
     },
     {
       "source_event_id": "evt_zqd4n169mcng",
+      "seq": 4,
       "ts": "2026-06-26T23:53:44.372Z",
       "kind": "assistant_message",
       "agent": "pi",

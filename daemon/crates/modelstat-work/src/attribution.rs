@@ -1712,6 +1712,9 @@ mod tests {
 
     fn bare(session: &str, input: u64, output: u64) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             source_event_id: format!("{session}_{input}_{output}"),
             ts: "2026-08-01T10:00:00.000Z".into(),
             kind: "message".into(),

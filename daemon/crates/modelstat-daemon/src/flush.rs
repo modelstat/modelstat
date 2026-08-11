@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use modelstat_ingest::accounts::{session_installs_for, Accounts};
+use modelstat_ingest::device_utc_offset_minutes;
 use modelstat_parsers::{
     detect_references, DetectedRefs, GitEnrichment, SessionActors, ToolCallDraft,
 };
@@ -301,6 +302,9 @@ where
                             .get(&sid)
                             .and_then(|m| serde_json::to_value(BTreeMap::from([(&sid, m)])).ok()),
                         summarizer_mode: None,
+                        // As on the local path below: the zone in force when the
+                        // batch was built, not when it is finally uploaded.
+                        utc_offset_minutes: Some(device_utc_offset_minutes()),
                         redactor_mode: None,
                         repo_anchors: None,
                         // Cloud ships no local segments, so there is no generation to
@@ -420,6 +424,11 @@ where
         },
         session_metadata: session_metadata_value,
         summarizer_mode: None,
+        // The zone this machine is in, as it is at the moment the batch is
+        // built. Stamped at build rather than at upload: a batch can wait in the
+        // spool for hours, and the offset that belongs to it is the one that was
+        // in force when its events were gathered.
+        utc_offset_minutes: Some(device_utc_offset_minutes()),
         redactor_mode: None,
         repo_anchors: None,
         segment_generations,
@@ -551,6 +560,9 @@ mod tests {
 
     fn ev(session: &str, ts: &str, excerpt: &str) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             content_bytes: None,
             reasoning_excerpt: None,
             reasoning_bytes: None,

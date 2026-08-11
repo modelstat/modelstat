@@ -711,6 +711,9 @@ mod tests {
 
     fn ev(id: &str, ts: &str, kind: &str, content: Option<&str>) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             content_bytes: None,
             reasoning_excerpt: None,
             reasoning_bytes: None,

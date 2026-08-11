@@ -168,6 +168,11 @@ function interceptCreate(
 ): AnyFn {
   return function wrapped(this: unknown, ...args: unknown[]): unknown {
     const request = args[0];
+    // Read BEFORE the provider call. The recording runs after the response, so
+    // a call built there would date itself to the moment it came back — the one
+    // instant a wrapped call is not. This is the only place the start can be
+    // observed, and it is what `ts` / `started_at` carry.
+    const startedAt = new Date();
     const result = create.apply(thisArg, args);
     // The provider SDKs return a Promise for the non-streaming create; handle
     // both promise and (defensively) sync returns. Recording rides on a
@@ -175,7 +180,7 @@ function interceptCreate(
     if (isPromiseLike(result)) {
       return result.then(
         (response: unknown) => {
-          safeRecord(provider, options, request, response);
+          safeRecord(provider, options, request, response, startedAt);
           return response;
         },
         // Propagate the original rejection untouched (don't record failures).
@@ -184,7 +189,7 @@ function interceptCreate(
         },
       );
     }
-    safeRecord(provider, options, request, result);
+    safeRecord(provider, options, request, result, startedAt);
     return result;
   };
 }
@@ -198,9 +203,10 @@ function safeRecord(
   options: WrapOptions,
   request: unknown,
   response: unknown,
+  startedAt: Date,
 ): void {
   try {
-    const call = buildCall(provider, options, request, response);
+    const call = buildCall(provider, options, request, response, startedAt);
     options.client.record(call);
   } catch {
     // Swallow — recording is best-effort and must never surface to the caller.
@@ -213,6 +219,7 @@ function buildCall(
   options: WrapOptions,
   request: unknown,
   response: unknown,
+  startedAt: Date,
 ): LlmCall {
   const req = isObject(request) ? (request as Record<string, unknown>) : {};
   const resp = isObject(response) ? (response as Record<string, unknown>) : {};
@@ -222,6 +229,13 @@ function buildCall(
 
   const sessionId = resolveSessionId(options.sessionId);
   const call = new LlmCall(provider, sessionId);
+  // The instant the request went out, measured by the interceptor. `LlmCall`'s
+  // own default is construction time, which here is after the response — so
+  // this overwrite is what makes the call's timing true.
+  call.startedAt = startedAt;
+  // `firstTokenAt` stays unset: this interceptor sees one whole response, never
+  // a first chunk, so it has no such instant to state. A caller who streams and
+  // times it themselves builds their own LlmCall and sets it there.
   if (model !== undefined) {
     call.model(model);
   }

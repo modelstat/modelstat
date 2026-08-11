@@ -35,6 +35,7 @@ fn emit<T: DeserializeOwned + Serialize>(name: &str) {
 fn main() {
     emit::<RawEvent>("raw_event_full.json");
     emit::<RawEvent>("raw_event_minimal.json");
+    emit::<RawEvent>("raw_event_sdk_instants.json");
     emit::<ToolCallWire>("tool_call.json");
     emit::<Segment>("segment.json");
     emit::<Segment>("segment_with_embedding.json");

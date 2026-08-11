@@ -333,6 +333,7 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
     post_heartbeat_now(&daemon, None).await;
     let snap = daemon.with_status(|s| {
         s.refresh_auto_update();
+        s.refresh_timezone();
         s.snapshot_body(
             Some(&daemon.device_id),
             daemon.config.version(),
@@ -530,6 +531,7 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
 async fn post_heartbeat_now(daemon: &Daemon, discovery: Option<DiscoveryOutput>) {
     let snap = daemon.with_status(|s| {
         s.refresh_auto_update();
+        s.refresh_timezone();
         s.snapshot_body(
             Some(&daemon.device_id),
             daemon.config.version(),
@@ -865,6 +867,7 @@ async fn last_status_loop(daemon: Arc<Daemon>) {
     loop {
         let snap = daemon.with_status(|s| {
             s.refresh_auto_update();
+            s.refresh_timezone();
             s.snapshot_body(
                 Some(&daemon.device_id),
                 daemon.config.version(),

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
+from datetime import timedelta
 
 from modelstat.capture import EXCERPT_MAX_CHARS, LlmCall, ToolCallInput, build_batch
 from modelstat.config import Config
@@ -161,6 +162,31 @@ class TestBuildBatch(unittest.TestCase):
             batch.events[0].source_event_id,
             batch.events[1].source_event_id,
         )
+
+    def test_states_the_instants_it_saw_and_omits_the_one_it_did_not(self) -> None:
+        """The SDK is in the call path, so it can state the span's ends.
+
+        ``started_at`` always ships (it is ``ts``'s own provenance made
+        explicit); the first-token instant ships only when the caller watched a
+        stream and said so, because a call that returns in one piece never had a
+        first chunk to time.
+        """
+        quiet = LlmCall("openai", "sess_1")
+        streamed = LlmCall("openai", "sess_2")
+        streamed.started_at = quiet.started_at
+        streamed.first_token_at = quiet.started_at + timedelta(milliseconds=140)
+
+        batch, _ = build_batch(cfg(), [quiet, streamed], 0)
+        a, b = batch.events[0], batch.events[1]
+
+        self.assertEqual(a.started_at, quiet.started_at)
+        self.assertEqual(a.ts, quiet.started_at, "ts is unchanged")
+        self.assertIsNone(a.first_token_at, "no stream, no first chunk to time")
+        self.assertEqual(b.first_token_at, streamed.first_token_at)
+
+        # Additive on the wire: absent means absent, never null.
+        self.assertNotIn("first_token_at", a.to_dict())
+        self.assertIn("started_at", a.to_dict())
 
 
 if __name__ == "__main__":

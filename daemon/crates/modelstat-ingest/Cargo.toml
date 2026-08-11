@@ -29,6 +29,10 @@ tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "time"]
 reqwest.workspace = true
 chrono.workspace = true
 hostname.workspace = true
+# The device's IANA zone name. Already in the tree (chrono's `clock` feature
+# uses it for the local offset); named directly here because the NAME is a fact
+# we ship and chrono only exposes the offset.
+iana-time-zone = "0.1"
 
 [dev-dependencies]
 # The fake device-API server harness (plan §6) — an in-process axum server used

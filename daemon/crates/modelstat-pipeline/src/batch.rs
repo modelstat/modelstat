@@ -401,6 +401,9 @@ mod tests {
 
     fn ev(source_event_id: &str, excerpt: Option<&str>) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             content_bytes: None,
             reasoning_excerpt: None,
             reasoning_bytes: None,
@@ -433,6 +436,9 @@ mod tests {
     /// A turn whose model wrote down its reasoning.
     fn ev_reasoning(source_event_id: &str, excerpt: Option<&str>, reasoning: &str) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             reasoning_excerpt: Some(reasoning.into()),
             reasoning_bytes: Some(reasoning.chars().count() as u64),
             ..ev(source_event_id, excerpt)

@@ -1,5 +1,6 @@
 {
   "source_event_id": "evt_16zw770jnvito",
+  "seq": 128,
   "ts": "2026-06-01T10:00:00.000Z",
   "kind": "assistant_message",
   "agent": "claude_code",

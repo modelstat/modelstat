@@ -39,6 +39,7 @@ const WIRE_DIR = join(
 const SCHEMA_BY_FILE: Record<string, ZodTypeAny> = {
   "raw_event_full.json": RawEvent,
   "raw_event_minimal.json": RawEvent,
+  "raw_event_sdk_instants.json": RawEvent,
   "tool_call.json": ToolCallWire,
   "segment.json": Segment,
   "segment_with_embedding.json": Segment,
@@ -68,7 +69,19 @@ test("TS schemas accept the Rust-emitted wire fixtures (TS accepts Rust wire)", 
   const batch = IngestBatch.parse(
     JSON.parse(readFileSync(join(rustDir, "ingest_batch.json"), "utf8")),
   );
-  assert.equal(batch.events.length, 2);
+  assert.equal(batch.events.length, 3);
   assert.equal(batch.tool_calls.length, 1);
   assert.equal(batch.summarizer_mode, "cloud");
+  // The additive facts of this wave survive Rust's serialization: the source-log
+  // ordinal, the SDK's own call instants, and the device's zone offset.
+  assert.equal(batch.utc_offset_minutes, -420);
+  assert.equal(batch.events[0]!.seq, 128);
+  const sdk = batch.events[2]!;
+  assert.equal(sdk.started_at, "2026-06-01T10:00:00.000Z");
+  assert.equal(sdk.first_token_at, "2026-06-01T10:00:00.140Z");
+  const hb = HeartbeatPayload.parse(
+    JSON.parse(readFileSync(join(rustDir, "heartbeat.json"), "utf8")),
+  );
+  assert.equal(hb.timezone, "America/Los_Angeles");
+  assert.equal(hb.utc_offset_minutes, -420);
 });

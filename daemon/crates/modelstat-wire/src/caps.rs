@@ -21,6 +21,15 @@ pub const CONTENT_EXCERPT_MAX: usize = 262_144;
 // texts are different kinds of thing, and they are not.
 pub const REASONING_EXCERPT_MAX: usize = 262_144;
 pub const SOURCE_FILE_MAX: usize = 1024;
+/// An RFC3339 instant stated ALONGSIDE `ts` (`started_at`, `first_token_at`).
+/// The same number as [`ANCHOR_ISO_MAX`] on purpose — one shape, one ceiling.
+///
+/// A SIZE guard, not a format check, which is the same treatment `ts` gets: an
+/// instant these fields cannot parse is one the server rejects for the whole
+/// batch, and that is the wire contract doing its job. Validating the format
+/// here — while the required instant beside them has no validator — would only
+/// move where the same batch fails.
+pub const EVENT_INSTANT_MAX: usize = 40;
 
 // --- Segment --------------------------------------------------------------
 pub const SEGMENT_ID_MAX: usize = 64;
@@ -79,6 +88,10 @@ pub const REPO_ANCHORS_COUNT_MAX: usize = 10;
 
 // --- HeartbeatPayload -----------------------------------------------------
 pub const HEARTBEAT_MESSAGE_MAX: usize = 240;
+/// An IANA time-zone name (`Europe/Berlin`, `America/Argentina/Buenos_Aires`).
+/// The longest name in the database is well under this; the cap is the usual
+/// malicious-size guard, not a claim about the zone database's contents.
+pub const TIMEZONE_MAX: usize = 64;
 
 // --- DetectedInstallation / DetectedIdentity ------------------------------
 pub const INSTALL_VERSION_MAX: usize = 40;

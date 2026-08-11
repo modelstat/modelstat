@@ -67,6 +67,10 @@ pub struct LlmCall {
     pub kind: EventKind,
     pub tokens: TokenUsage,
     pub started_at: DateTime<Utc>,
+    /// When the first piece of the model's output arrived, when the caller
+    /// watched for it (a streamed response). Left `None` on a call that returns
+    /// in one piece — there is no first chunk to have seen.
+    pub first_token_at: Option<DateTime<Utc>>,
     pub duration: Option<Duration>,
     pub prompt: Option<String>,
     pub completion: Option<String>,
@@ -89,6 +93,7 @@ impl LlmCall {
             kind: EventKind::AssistantMessage,
             tokens: TokenUsage::default(),
             started_at: Utc::now(),
+            first_token_at: None,
             duration: None,
             prompt: None,
             completion: None,
@@ -113,6 +118,14 @@ impl LlmCall {
     #[must_use]
     pub fn tokens(mut self, tokens: TokenUsage) -> Self {
         self.tokens = tokens;
+        self
+    }
+
+    /// State when the first piece of the model's output arrived. Call this from
+    /// a streaming loop, on the first chunk; leave it unset otherwise.
+    #[must_use]
+    pub fn first_token_at(mut self, at: DateTime<Utc>) -> Self {
+        self.first_token_at = Some(at);
         self
     }
 
@@ -198,6 +211,11 @@ fn event_from_call(cfg: &Config, call: &LlmCall, seq: u64) -> (RawEvent, Vec<Too
     let event = RawEvent {
         source_event_id: source_event_id.clone(),
         ts: call.started_at,
+        // The SDK held the clock for this call, so it states the span's ends
+        // rather than leaving a reader to reconstruct them from `ts` and a
+        // duration that may not be set.
+        started_at: Some(call.started_at),
+        first_token_at: call.first_token_at,
         kind: call.kind,
         agent: cfg.agent.clone(),
         provider: call.provider.clone(),
@@ -361,6 +379,36 @@ mod tests {
         assert!(excerpt.chars().count() <= EXCERPT_MAX_CHARS + 1);
         assert!(ev.source_event_id.starts_with("evt_"));
         assert!(batch.batch_id.starts_with("batch_"));
+    }
+
+    /// The SDK is in the call path, so it can state the span's ends. `started_at`
+    /// always ships (it is `ts`'s own provenance made explicit); the first-token
+    /// instant ships only when the caller watched a stream and said so, because a
+    /// call that returns in one piece never had a first chunk to time.
+    #[test]
+    fn the_call_states_the_instants_it_saw_and_omits_the_one_it_did_not() {
+        let mut seq = 0;
+        let quiet = LlmCall::new("openai", "sess_1");
+        let started = quiet.started_at;
+        let streamed = LlmCall::new("openai", "sess_2")
+            .first_token_at(started + Duration::from_millis(140));
+
+        let batch = build_batch(&cfg(), [quiet, streamed], &mut seq);
+        let (a, b) = (&batch.events[0], &batch.events[1]);
+
+        assert_eq!(a.started_at, Some(started));
+        assert_eq!(a.ts, started, "ts is unchanged — the new field sits beside it");
+        assert_eq!(a.first_token_at, None, "no stream, no first chunk to time");
+        assert_eq!(
+            b.first_token_at,
+            Some(started + Duration::from_millis(140)),
+            "the instant the caller stated survives verbatim"
+        );
+
+        // Additive on the wire: absent means absent, never null.
+        let json = serde_json::to_value(a).unwrap();
+        assert!(json.get("first_token_at").is_none());
+        assert!(json.get("started_at").is_some());
     }
 
     #[test]

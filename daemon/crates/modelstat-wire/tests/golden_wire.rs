@@ -37,6 +37,26 @@ fn raw_event_full_accepts_and_roundtrips() {
         ev.content_excerpt.as_deref(),
         Some("did some work on the ingest path")
     );
+    assert_eq!(
+        ev.seq,
+        Some(128),
+        "the source-log ordinal survives the wire"
+    );
+}
+
+/// The instants only a producer INSIDE the call path can state. `ts` is
+/// untouched by them; each of the two rides on its own, and a fixture that
+/// carried them as `null` would be a different claim from omitting them.
+#[test]
+fn sdk_instants_accept_and_roundtrip_beside_ts() {
+    let ev: RawEvent = roundtrip("raw_event_sdk_instants.json");
+    assert_eq!(ev.ts, "2026-06-01T10:00:00.000Z");
+    assert_eq!(ev.started_at.as_deref(), Some("2026-06-01T10:00:00.000Z"));
+    assert_eq!(
+        ev.first_token_at.as_deref(),
+        Some("2026-06-01T10:00:00.140Z")
+    );
+    assert_eq!(ev.seq, None, "an SDK has no source log to be positioned in");
 }
 
 #[test]
@@ -49,12 +69,18 @@ fn raw_event_minimal_materializes_defaults() {
     assert!(ev.tool_calls.is_empty());
     assert!(ev.files_touched.is_empty());
     assert!(ev.content_excerpt.is_none());
+    assert!(ev.seq.is_none());
+    assert!(ev.started_at.is_none());
+    assert!(ev.first_token_at.is_none());
     // Re-serialize: default containers present, optionals omitted.
     let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
     assert!(v.get("tool_calls").unwrap().is_object());
     assert!(v.get("files_touched").unwrap().is_array());
     assert!(v.get("model").unwrap().is_null());
     assert!(v.get("content_excerpt").is_none());
+    assert!(v.get("seq").is_none());
+    assert!(v.get("started_at").is_none());
+    assert!(v.get("first_token_at").is_none());
 }
 
 #[test]
@@ -87,7 +113,10 @@ fn segment_with_embedding_has_384_dims() {
 #[test]
 fn ingest_batch_accepts_and_roundtrips() {
     let batch: IngestBatch = roundtrip("ingest_batch.json");
-    assert_eq!(batch.events.len(), 2);
+    assert_eq!(batch.events.len(), 3);
+    // The zone the building machine was in — the one working-day fact that is
+    // lost the moment a batch ships nothing but UTC.
+    assert_eq!(batch.utc_offset_minutes, Some(-420));
     assert_eq!(batch.segments.len(), 1);
     assert_eq!(batch.tool_calls.len(), 1);
     assert_eq!(batch.summarizer_mode.as_deref(), Some("cloud"));
@@ -111,6 +140,9 @@ fn heartbeat_accepts_and_roundtrips() {
     assert_eq!(hb.status, "scanning");
     assert_eq!(hb.progress_total, 12);
     assert_eq!(hb.daemon_version, "daemon-0.0.0");
+    // Both readings of the zone: the durable NAME and the offset in force.
+    assert_eq!(hb.timezone.as_deref(), Some("America/Los_Angeles"));
+    assert_eq!(hb.utc_offset_minutes, Some(-420));
 }
 
 #[test]

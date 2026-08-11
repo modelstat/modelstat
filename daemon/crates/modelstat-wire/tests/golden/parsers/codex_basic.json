@@ -4,6 +4,7 @@
   "events": [
     {
       "source_event_id": "evt_2owq0qzhz2o1c",
+      "seq": 2,
       "ts": "2026-08-05T11:58:57.508Z",
       "kind": "task_started",
       "agent": "codex_cli",
@@ -23,6 +24,7 @@
     },
     {
       "source_event_id": "evt_36pa237q80av4",
+      "seq": 8,
       "ts": "2026-08-05T11:58:59.076Z",
       "kind": "user_message",
       "agent": "codex_cli",
@@ -44,6 +46,7 @@
     },
     {
       "source_event_id": "evt_igy5dnley1h1",
+      "seq": 14,
       "ts": "2026-08-05T11:59:02.811Z",
       "kind": "assistant_message",
       "agent": "codex_cli",
@@ -73,6 +76,7 @@
     },
     {
       "source_event_id": "evt_10tuaeq1kb166",
+      "seq": 17,
       "ts": "2026-08-05T11:59:04.046Z",
       "kind": "assistant_message",
       "agent": "codex_cli",
@@ -100,6 +104,7 @@
     },
     {
       "source_event_id": "evt_14p55gfuzrir",
+      "seq": 18,
       "ts": "2026-08-05T11:59:04.063Z",
       "kind": "task_complete",
       "agent": "codex_cli",

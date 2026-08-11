@@ -76,6 +76,12 @@ export class LlmCall {
   /** Token usage. Set via `.tokens(...)` or assigned directly. */
   tokenUsage: TokenUsage = zeroTokens();
   startedAt: Date = new Date();
+  /**
+   * When the first piece of the model's output arrived, if it was watched for
+   * (a streamed response). Left unset on a call that returns in one piece —
+   * there is no first chunk to have seen.
+   */
+  firstTokenAt?: Date;
   durationMs?: number;
   prompt?: string;
   completion?: string;
@@ -283,6 +289,15 @@ function eventFromCall(
     session_id: call.sessionId,
     tokens: call.tokenUsage,
   };
+  // The SDK held the clock for this call, so it states the span's ends rather
+  // than leaving a reader to reconstruct them from `ts` and a duration that may
+  // not be set. `first_token_at` rides only when the caller saw a first chunk.
+  event.started_at = rfc3339(call.startedAt);
+  setIfPresent(
+    event,
+    "first_token_at",
+    call.firstTokenAt ? rfc3339(call.firstTokenAt) : undefined,
+  );
   setIfPresent(event, "model", call.modelName);
   setIfPresent(event, "cwd", call.cwd);
   setIfPresent(event, "git", call.git);

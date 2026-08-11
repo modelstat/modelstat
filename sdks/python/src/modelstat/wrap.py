@@ -33,12 +33,17 @@ Example
 from __future__ import annotations
 
 import inspect
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Union
 
 from .capture import LlmCall
 from .client import Client
 
 __all__ = ["wrap"]
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def wrap(
@@ -168,30 +173,36 @@ def _intercept_create(
     (coroutine-returning) ``create`` methods, and never lets a recording error
     escape or alter the return value."""
 
+    # Read BEFORE the provider call in both arms. The recording runs after the
+    # response, so a call built there would date itself to the moment it came
+    # back -- the one instant a wrapped call is not. This is the only place the
+    # start can be observed, and it is what ``ts`` / ``started_at`` carry.
     if inspect.iscoroutinefunction(create):
 
         async def awrapped(*args: Any, **kwargs: Any) -> Any:
+            started_at = _now_utc()
             response = await create(*args, **kwargs)
-            _safe_record(opts, args, kwargs, response)
+            _safe_record(opts, args, kwargs, response, started_at)
             return response
 
         return awrapped
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
+        started_at = _now_utc()
         response = create(*args, **kwargs)
-        _safe_record(opts, args, kwargs, response)
+        _safe_record(opts, args, kwargs, response, started_at)
         return response
 
     return wrapped
 
 
 def _safe_record(
-    opts: _Options, args: tuple, kwargs: dict, response: Any
+    opts: _Options, args: tuple, kwargs: dict, response: Any, started_at: datetime
 ) -> None:
     """Best-effort extract + record, wrapped so a malformed response or a
     recording fault can never break the user's call."""
     try:
-        call = _build_call(opts, args, kwargs, response)
+        call = _build_call(opts, args, kwargs, response, started_at)
         opts.recorder.record(call)
     except Exception:
         # Swallow -- recording is best-effort and must never surface.
@@ -199,13 +210,19 @@ def _safe_record(
 
 
 def _build_call(
-    opts: _Options, args: tuple, kwargs: dict, response: Any
+    opts: _Options, args: tuple, kwargs: dict, response: Any, started_at: datetime
 ) -> LlmCall:
     """Build the :class:`LlmCall` from the request kwargs and the response."""
     provider = opts.provider
     model = _resp_get(response, "model") or kwargs.get("model")
 
     call = LlmCall(provider, _resolve_session_id(opts.session_id))
+    # ``LlmCall``'s own default is construction time, which here is after the
+    # response -- this overwrite is what makes the call's timing true.
+    call.started_at = started_at
+    # ``first_token_at`` stays unset: this interceptor sees one whole response,
+    # never a first chunk, so it has no such instant to state. A caller who
+    # streams and times it themselves builds their own LlmCall and sets it.
     if isinstance(model, str):
         call.model = model
 

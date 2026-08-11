@@ -378,6 +378,9 @@ mod tests {
 
     fn event(id: &str) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             content_bytes: None,
             reasoning_excerpt: None,
             reasoning_bytes: None,
@@ -420,6 +423,7 @@ mod tests {
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,
+            utc_offset_minutes: None,
             redactor_mode: None,
             repo_anchors: None,
             segment_generations: None,
