@@ -1813,6 +1813,7 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "hostname",
+ "iana-time-zone",
  "modelstat-log",
  "modelstat-redact",
  "modelstat-wire",

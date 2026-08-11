@@ -85,8 +85,27 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
     let mut current_composer = String::new();
     let mut turn_index: u64 = 0;
     let mut saw_user_prompt = false;
+    // This bubble's position in ITS conversation's record list — the `seq` a
+    // transcript parser reads off a line number. The store is key/value, so the
+    // order is the one established by the sort above rather than one written
+    // down; it is a total order and the same one on every read, which is what
+    // the field claims and all it claims.
+    let mut seq: u64 = 0;
 
     for b in bubbles {
+        // Counted BEFORE every filter below, and reset on the conversation
+        // boundary the sort guarantees is contiguous: an ordinal names where a
+        // record sat among its neighbours, so one this parser has no arm for
+        // must still cost its neighbours their positions. Resetting here rather
+        // than after the filters also stops a leftover `turn_index` from the
+        // PREVIOUS conversation reaching the unmodelled-record arm below.
+        if b.composer_id != current_composer {
+            current_composer.clone_from(&b.composer_id);
+            turn_index = 0;
+            saw_user_prompt = false;
+            seq = 0;
+        }
+        seq += 1;
         let kind = match b.kind {
             BUBBLE_TYPE_USER => "user_message",
             BUBBLE_TYPE_ASSISTANT => "assistant_message",
@@ -117,6 +136,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
                         duration_ms: None,
                         source_file: &ctx.source_file,
                         source_byte_offset: None,
+                        seq: Some(seq),
                     }));
                 }
                 continue;
@@ -125,12 +145,6 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
         let text = b.text.trim();
         if text.is_empty() || b.composer_id.is_empty() || b.created_at.is_empty() {
             continue;
-        }
-        // A new conversation restarts the turn ordinal.
-        if b.composer_id != current_composer {
-            current_composer.clone_from(&b.composer_id);
-            turn_index = 0;
-            saw_user_prompt = false;
         }
         // A turn starts at each user message (SPEC 0005, as in the other
         // parsers); the assistant's replies inherit the ordinal.
@@ -158,6 +172,9 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             continue;
         }
         events.push(RawEvent {
+            seq: Some(seq),
+            started_at: None,
+            first_token_at: None,
             // Keyed by the bubble's own uuid: position-independent, so a
             // re-scan of a DB whose rows moved re-derives the same id and the
             // server upserts instead of duplicating.
@@ -517,6 +534,76 @@ mod since_floor_tests {
         let path = db_with(B);
         let r = parse_cursor_tracking_db(&ParserContext::new("dev_1", path.clone())).unwrap();
         assert_eq!(r.events.len(), 4);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// A key/value store has no line numbers, so the order is the one the sort
+    /// above establishes — and `seq` counts positions in THAT, per conversation,
+    /// before any floor applies. So the ordinal a message carries on a resumed
+    /// scan is the one it carried on the first, exactly as `turn_index` is.
+    #[test]
+    fn seq_counts_positions_in_the_conversation_and_a_floor_does_not_renumber() {
+        let path = db_with(B);
+        let full = parse_cursor_tracking_db(&ParserContext::new("dev_1", path.clone())).unwrap();
+        assert_eq!(
+            full.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3), Some(4)]
+        );
+
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-06-20T10:30:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        let resumed = parse_cursor_tracking_db(
+            &ParserContext::new("dev_1", path.clone()).with_since_ms(Some(floor)),
+        )
+        .unwrap();
+        assert_eq!(
+            resumed.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![Some(3), Some(4)],
+            "not renumbered to 1 by the floor"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// Each conversation is numbered from its own start: the ordinal answers
+    /// "where in THIS conversation", and a store-wide counter would make it
+    /// depend on how many other chats happen to sort first.
+    #[test]
+    fn each_conversation_numbers_from_its_own_start() {
+        let path = db_with(B);
+        let conn = Connection::open(&path).unwrap();
+        for (bid, kind, text, ts) in [
+            ("z1", 1, "other chat", "2026-06-20T12:00:00.000Z"),
+            ("z2", 2, "other reply", "2026-06-20T12:00:03.000Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO cursorDiskKV VALUES (?,?)",
+                rusqlite::params![
+                    format!("bubbleId:comp-2:{bid}"),
+                    format!(r#"{{"type":{kind},"text":"{text}","createdAt":"{ts}"}}"#)
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let r = parse_cursor_tracking_db(&ParserContext::new("dev_1", path.clone())).unwrap();
+        let by_session: Vec<(&str, Option<u64>)> = r
+            .events
+            .iter()
+            .map(|e| (e.session_id.as_str(), e.seq))
+            .collect();
+        assert_eq!(
+            by_session,
+            vec![
+                ("comp-1", Some(1)),
+                ("comp-1", Some(2)),
+                ("comp-1", Some(3)),
+                ("comp-1", Some(4)),
+                ("comp-2", Some(1)),
+                ("comp-2", Some(2)),
+            ]
+        );
         std::fs::remove_file(path).ok();
     }
 

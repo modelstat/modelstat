@@ -113,6 +113,7 @@ fn sample_batch() -> IngestBatch {
         session_titles: None,
         session_metadata: None,
         summarizer_mode: None,
+        utc_offset_minutes: None,
         redactor_mode: None,
         repo_anchors: None,
         segment_generations: None,

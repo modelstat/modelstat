@@ -537,6 +537,9 @@ fn parse_inner(
             let git = path_guessed_git_context(slug.clone(), git_branch.clone());
 
             sink.push(RawEvent {
+                seq: Some(raw_lines),
+                started_at: None,
+                first_token_at: None,
                 source_event_id: event_id,
                 ts,
                 kind: "assistant_message".to_string(),
@@ -644,6 +647,9 @@ fn parse_inner(
             let duration_ms = obj.get("toolUseResult").and_then(stated_duration_ms);
             let refs = detect_event_references(&collect_ref_text(&content));
             sink.push(RawEvent {
+                seq: Some(raw_lines),
+                started_at: None,
+                first_token_at: None,
                 source_event_id: event_id,
                 ts,
                 kind: "user_message".to_string(),
@@ -753,6 +759,7 @@ fn parse_inner(
             match (sid, ts, event_id) {
                 (Some(sid), Some(ts), Some(event_id)) => {
                     let mut unknown = unknown_record_event(UnknownRecord {
+                        seq: Some(raw_lines),
                         kind,
                         source_event_id: event_id,
                         agent: &agent_name,
@@ -938,6 +945,36 @@ mod tests {
             "cwd": "/Users/dev/Projects/acme",
             "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
         })
+    }
+
+    /// `seq` is the LINE the record sat on, not the count of events emitted —
+    /// which is the whole point. A line this build drops (an unparseable one,
+    /// a blank) still costs its position, so the turns around it keep the
+    /// ordinals they had before that line existed and will keep them after a
+    /// future build starts reading it.
+    ///
+    /// And it is stable across scans: the cursor gates the SEND, never the READ,
+    /// so every scan re-reads from the top and re-derives the same numbers.
+    #[test]
+    fn seq_is_the_source_line_not_the_emitted_count() {
+        let (path, _guard) = transcript(&[
+            user_line("u-1", "first"),
+            serde_json::json!({ "type": "queue-operation", "uuid": "q-1" }),
+            user_line("u-2", "second"),
+        ]);
+        let ctx = ParserContext::new("dev_1", path);
+        let res = parse_claude_code_jsonl(&ctx).unwrap();
+        let seqs: Vec<Option<u64>> = res.events.iter().map(|e| e.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![Some(1), Some(3)],
+            "the dropped line keeps its place in the numbering"
+        );
+        // Strictly increasing, so a shared millisecond still has an order.
+        assert!(seqs.windows(2).all(|w| w[0] < w[1]));
+        // A second read of the same file derives the same ordinals.
+        let again = parse_claude_code_jsonl(&ctx).unwrap();
+        assert_eq!(again.events.iter().map(|e| e.seq).collect::<Vec<_>>(), seqs);
     }
 
     /// Claude Code states its own elapsed time under the name the TOOL chose,

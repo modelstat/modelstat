@@ -347,6 +347,9 @@ mod tests {
     /// A minimal event: only session / provider / ts matter here.
     fn ev(session: &str, provider: &str, ts: &str) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             content_bytes: None,
             reasoning_excerpt: None,
             reasoning_bytes: None,

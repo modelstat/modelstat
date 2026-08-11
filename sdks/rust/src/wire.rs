@@ -81,6 +81,21 @@ pub struct GitContext {
 pub struct RawEvent {
     pub source_event_id: String,
     pub ts: DateTime<Utc>,
+    /// When the call BEGAN. The SDK sits in the call path, so this is an
+    /// observation rather than an inference — and it is stated separately from
+    /// `ts` because the two answer different questions: `ts` places the event on
+    /// the timeline, this one opens the span the call occupied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the FIRST piece of the model's output arrived — time-to-first-token
+    /// as an instant, so it reads against the other two without anyone having to
+    /// know which clock produced it.
+    ///
+    /// Omitted unless the caller actually saw a first chunk. A non-streaming
+    /// call has no such moment, and inventing one (the completion instant, say)
+    /// would put a latency number downstream that nothing ever measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_at: Option<DateTime<Utc>>,
     pub kind: EventKind,
     /// The **agent** — which AI tool/integration produced the call (e.g.
     /// `raw_sdk_openai`), not the provider. (The wire key is `agent`.)
@@ -279,6 +294,8 @@ mod tests {
         let ev = RawEvent {
             source_event_id: "evt_x".into(),
             ts: "2026-06-19T00:00:00Z".parse().unwrap(),
+            started_at: None,
+            first_token_at: None,
             kind: EventKind::AssistantMessage,
             agent: "raw_sdk_openai".into(),
             provider: "openai".into(),
@@ -303,6 +320,8 @@ mod tests {
         assert!(j.get("cwd").is_none());
         assert!(j.get("git").is_none());
         assert!(j.get("metadata").is_none());
+        assert!(j.get("started_at").is_none());
+        assert!(j.get("first_token_at").is_none());
     }
 
     #[test]
@@ -311,6 +330,8 @@ mod tests {
         let mut ev = RawEvent {
             source_event_id: "evt_x".into(),
             ts: "2026-06-19T00:00:00Z".parse().unwrap(),
+            started_at: None,
+            first_token_at: None,
             kind: EventKind::AssistantMessage,
             agent: "raw_sdk_openai".into(),
             provider: "openai".into(),

@@ -252,6 +252,7 @@ fn parse_inner(
             ) {
                 (Some(sid), Some(ts)) => {
                     sink.push(unknown_record_event(UnknownRecord {
+                        seq: Some(raw_lines),
                         kind,
                         source_event_id: source_event_id(
                             &ctx.device_id,
@@ -402,6 +403,9 @@ fn parse_inner(
             }
             let git = path_guessed_git_context(slug.clone(), None);
             sink.push(RawEvent {
+                seq: Some(raw_lines),
+                started_at: None,
+                first_token_at: None,
                 source_event_id: event_id,
                 ts: ml_timestamp.to_string(),
                 kind: "assistant_message".to_string(),
@@ -455,6 +459,7 @@ fn parse_inner(
         if role != "user" {
             skips.drop_record(&ctx.source_file, &format!("message/{role}"));
             sink.push(unknown_record_event(UnknownRecord {
+                seq: Some(raw_lines),
                 kind: role,
                 source_event_id: source_event_id(
                     &ctx.device_id,
@@ -490,6 +495,9 @@ fn parse_inner(
         }
         let refs = detect_event_references(&collect_ref_text(&content));
         sink.push(RawEvent {
+            seq: Some(raw_lines),
+            started_at: None,
+            first_token_at: None,
             source_event_id: source_event_id(
                 &ctx.device_id,
                 &EventSource::File {

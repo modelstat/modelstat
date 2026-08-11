@@ -78,6 +78,10 @@ class LlmCall:
     kind: EventKind = EventKind.ASSISTANT_MESSAGE
     tokens: TokenUsage = field(default_factory=TokenUsage)
     started_at: datetime = field(default_factory=_now_utc)
+    # When the first piece of the model's output arrived, if it was watched for
+    # (a streamed response). Left ``None`` on a call that returns in one piece
+    # -- there is no first chunk to have seen.
+    first_token_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
     prompt: Optional[str] = None
     completion: Optional[str] = None
@@ -215,6 +219,11 @@ def _event_from_call(
     event = RawEvent(
         source_event_id=src_event_id,
         ts=call.started_at,
+        # The SDK held the clock for this call, so it states the span's ends
+        # rather than leaving a reader to reconstruct them from ``ts`` and a
+        # duration that may not be set.
+        started_at=call.started_at,
+        first_token_at=call.first_token_at,
         kind=call.kind,
         agent=cfg.agent,
         provider=call.provider,

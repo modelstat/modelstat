@@ -4,6 +4,7 @@
   "events": [
     {
       "source_event_id": "evt_3fl5gtwmt0y0i",
+      "seq": 1,
       "ts": "2026-06-01T10:00:00.000Z",
       "kind": "user_message",
       "agent": "claude_code",
@@ -25,6 +26,7 @@
     },
     {
       "source_event_id": "evt_174aoeacah3q0",
+      "seq": 2,
       "ts": "2026-06-01T10:00:05.000Z",
       "kind": "assistant_message",
       "agent": "claude_code",
@@ -54,6 +56,7 @@
     },
     {
       "source_event_id": "evt_174aoeacah71z",
+      "seq": 3,
       "ts": "2026-06-01T10:00:00.000Z",
       "kind": "user_message",
       "agent": "claude_code",

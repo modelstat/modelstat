@@ -49,7 +49,34 @@ export type GitContext = z.infer<typeof GitContext>;
 /** One raw event from the agent. `source_event_id` is the dedupe key. */
 export const RawEvent = z.object({
   source_event_id: z.string(),
+  /** This record's position in the source log it was read from, 1-based: the
+   * line ordinal in a transcript file, the record ordinal in a conversation for
+   * a key/value store. A stated observation of WHERE the record sat, not a
+   * claim about the session as a whole.
+   *
+   * It exists because `ts` cannot order a log: every parser sees runs of records
+   * sharing one millisecond, and some sources round to the second, so sorting by
+   * instant alone shuffles a conversation into an order nobody wrote. The source
+   * already answers this exactly — it is a list — and this is that answer.
+   *
+   * Deterministic across re-reads: every positional parser reads its file from
+   * the top on every scan (the upload cursor gates the SEND, never the READ), so
+   * the same record is the same ordinal forever. Absent from producers with no
+   * source log to be positioned in — an SDK reports calls as they happen. */
+  seq: z.number().int().nonnegative().optional(),
   ts: z.string().datetime({ offset: true }),
+  /** When the work behind this event BEGAN, stated only by a producer that
+   * watched it begin — the SDKs, which sit in the call path. `ts` stays the
+   * event's own instant; this is a second fact about the same occurrence, never
+   * a re-reading of the first. A transcript parser reads a line written after
+   * the fact, so it omits this, which is what its absence means. */
+  started_at: z.string().datetime({ offset: true }).optional(),
+  /** When the FIRST piece of the model's output arrived — time-to-first-token
+   * as an instant, so it reads against the other two without knowing which clock
+   * produced it. Stated only when a first chunk was actually observed: a
+   * non-streaming call has no such moment, and filling this with the completion
+   * instant would put a latency downstream that nothing ever measured. */
+  first_token_at: z.string().datetime({ offset: true }).optional(),
   /** The turn's category. `EVENT_KINDS` is the vocabulary the daemon MEANS to
    * emit, not the set of values that can arrive: a parser that meets a record
    * type it has no arm for reports the type VERBATIM here rather than dropping
@@ -540,6 +567,18 @@ export const IngestBatch = z.object({
    * mode — only the summarisation LOCATION differs. Additive — old daemons omit
    * it, old servers ignore it; the server records it as the scope's last-seen
    * mode for ops-alert enrichment. */
+  /** Minutes east of UTC on the machine that BUILT this batch, at the moment it
+   * was built (`-420` for UTC-7), DST included.
+   *
+   * Every instant on the wire is UTC, so once a batch leaves the box nothing can
+   * recover what time of day the work happened for the person doing it — and a
+   * device moves: a laptop crosses zones, a zone changes its rules. Stamped per
+   * batch rather than looked up per device, so each batch answers for itself.
+   *
+   * The offset alone here on purpose: it is the reading that survives being
+   * stored beside the events. The zone's NAME rides the heartbeat, which is
+   * where a fact about the device belongs. */
+  utc_offset_minutes: z.number().int().min(-840).max(840).optional(),
   summarizer_mode: z.enum(["local", "self-hosted", "cloud"]).optional(),
   /** Where this batch's layer-2 PII detection ran when it was BUILT: "local"
    * (on-device model), "cloud" (modelstat's /v1/redact classifier), or
@@ -569,6 +608,20 @@ export const HeartbeatPayload = z.object({
   stats: z.record(z.string(), z.unknown()).default({}),
   last_event_at: z.string().datetime({ offset: true }).nullable(),
   daemon_version: z.string().max(40),
+  /** The device's IANA time-zone name (`Europe/Berlin`), verbatim from the OS.
+   *
+   * The zone is the durable fact and the offset is only its reading at one
+   * instant — two devices at `+120` can be in different zones, and the same
+   * device reads `+60` six months later. Validated as a bounded string, never
+   * against a roster of zones this build has heard of: the zone database gains
+   * and moves entries, and a name we cannot place is still the truthful answer
+   * to what the machine is set to. Absent when the OS will not say — no zone is
+   * not UTC. */
+  timezone: z.string().max(64).optional(),
+  /** Minutes east of UTC on this device right now (`-420` for UTC-7), DST
+   * included. Sent beside `timezone` rather than derived from it, so a reader
+   * never has to carry a zone database to know what time it is there. */
+  utc_offset_minutes: z.number().int().min(-840).max(840).optional(),
 });
 export type HeartbeatPayload = z.infer<typeof HeartbeatPayload>;
 

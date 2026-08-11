@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use modelstat_ingest::accounts::{session_installs_for, Accounts};
+use modelstat_ingest::device_utc_offset_minutes;
 use modelstat_parsers::{GitEnrichment, ToolCallDraft};
 use modelstat_pipeline::{attach_segment_ids, batch_id, build_session_metadata};
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
@@ -232,6 +233,11 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
             serde_json::to_value(&session_metadata).ok()
         },
         summarizer_mode: None,
+        // The zone this machine is in, as it is at the moment the batch is
+        // built. Stamped at build rather than at upload: a batch can wait in the
+        // spool for hours, and the offset that belongs to it is the one that was
+        // in force when its events were gathered.
+        utc_offset_minutes: Some(device_utc_offset_minutes()),
         redactor_mode: None,
         // The receiver takes turns over HTTP rather than re-reading a
         // transcript, so it has no generation to supersede: every batch is an
@@ -257,6 +263,9 @@ mod tests {
 
     fn raw_event(id: &str, session: &str) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             content_bytes: None,
             reasoning_excerpt: None,
             reasoning_bytes: None,
@@ -338,6 +347,34 @@ mod tests {
             .clone()
             .expect("the SDK batch must carry session_metadata");
         assert_eq!(meta["s1"]["pull_requests"][0]["number"], 7);
+    }
+
+    /// Every instant in a batch is UTC, so the batch itself has to say what zone
+    /// the machine was in — otherwise nothing downstream can tell a 09:00 start
+    /// in one zone from a 09:00 start seven hours away. Stamped at BUILD, so a
+    /// batch that waits in the spool keeps the offset its events were gathered
+    /// under rather than the one in force when it finally uploads.
+    #[tokio::test]
+    async fn a_built_batch_states_the_zone_its_machine_was_in() {
+        let path = tmp_path("sdk_tz");
+        let q = seed(&path, vec![item("e1", "s1", 0)]).await;
+        let out = build_batches(
+            &q,
+            &FakePipeline { held: false },
+            &BuildBatchesOpts::new("dev1", "9.9.9", 10_000),
+            None,
+        )
+        .await;
+        let DrainBatches::Ready(b) = out else {
+            panic!("ready")
+        };
+        let offset = b[0]
+            .utc_offset_minutes
+            .expect("a batch this device built must say what zone it was in");
+        assert!(
+            (-840..=840).contains(&offset),
+            "{offset} is outside the wire's range"
+        );
     }
 
     #[tokio::test]

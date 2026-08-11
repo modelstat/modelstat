@@ -5,6 +5,7 @@
   "events": [
     {
       "source_event_id": "evt_16zw770jnvito",
+      "seq": 128,
       "ts": "2026-06-01T10:00:00.000Z",
       "kind": "assistant_message",
       "agent": "claude_code",
@@ -65,6 +66,33 @@
       "git": null,
       "tokens": null,
       "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": null,
+      "source_byte_offset": null
+    },
+    {
+      "source_event_id": "evt_sdk_instants",
+      "ts": "2026-06-01T10:00:00.000Z",
+      "started_at": "2026-06-01T10:00:00.000Z",
+      "first_token_at": "2026-06-01T10:00:00.140Z",
+      "kind": "assistant_message",
+      "agent": "raw_sdk_openai",
+      "provider": "openai",
+      "model": "gpt-x",
+      "session_id": "sess-sdk-1",
+      "turn_index": null,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": {
+        "input": 800,
+        "output": 120,
+        "cache_creation": 0,
+        "cache_read": 0,
+        "reasoning": 0
+      },
+      "duration_ms": 980,
       "tool_calls": {},
       "files_touched": [],
       "source_file": null,
@@ -180,6 +208,7 @@
   "session_titles": {
     "11111111-1111-1111-1111-111111111111": "Ingest retry matrix"
   },
+  "utc_offset_minutes": -420,
   "summarizer_mode": "cloud",
   "repo_anchors": [
     {

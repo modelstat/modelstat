@@ -4,6 +4,7 @@
   "events": [
     {
       "source_event_id": "evt_1nm177bewi0d4",
+      "seq": 1,
       "ts": "2026-06-02T10:13:11.277Z",
       "kind": "user_message",
       "agent": "cursor",
@@ -25,6 +26,7 @@
     },
     {
       "source_event_id": "evt_qi3ljc5ze5eh",
+      "seq": 3,
       "ts": "2026-06-02T10:13:13.381Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -46,6 +48,7 @@
     },
     {
       "source_event_id": "evt_2c7ca0145jk9j",
+      "seq": 9,
       "ts": "2026-06-02T10:13:53.627Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -67,6 +70,7 @@
     },
     {
       "source_event_id": "evt_1ro3p4m1dl2u4",
+      "seq": 1,
       "ts": "2026-06-16T10:35:11.113Z",
       "kind": "user_message",
       "agent": "cursor",
@@ -88,6 +92,7 @@
     },
     {
       "source_event_id": "evt_dhlsic9hrtwm",
+      "seq": 3,
       "ts": "2026-06-16T10:35:18.995Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -109,6 +114,7 @@
     },
     {
       "source_event_id": "evt_1iuonawnei870",
+      "seq": 7,
       "ts": "2026-06-16T10:35:26.596Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -130,6 +136,7 @@
     },
     {
       "source_event_id": "evt_ulnd28zyajml",
+      "seq": 11,
       "ts": "2026-06-16T10:35:41.374Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -151,6 +158,7 @@
     },
     {
       "source_event_id": "evt_142ufbg4ufpn3",
+      "seq": 15,
       "ts": "2026-06-16T10:35:56.785Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -172,6 +180,7 @@
     },
     {
       "source_event_id": "evt_3inhvtwdhd4sh",
+      "seq": 19,
       "ts": "2026-06-16T10:36:11.687Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -193,6 +202,7 @@
     },
     {
       "source_event_id": "evt_1puipt2mxqz8k",
+      "seq": 23,
       "ts": "2026-06-16T10:36:23.163Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -214,6 +224,7 @@
     },
     {
       "source_event_id": "evt_31pfvlvaocp8w",
+      "seq": 26,
       "ts": "2026-06-16T10:37:56.000Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -235,6 +246,7 @@
     },
     {
       "source_event_id": "evt_16vahw9ywxpuc",
+      "seq": 29,
       "ts": "2026-06-16T10:38:13.103Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -256,6 +268,7 @@
     },
     {
       "source_event_id": "evt_cr065dhy29h2",
+      "seq": 35,
       "ts": "2026-06-16T10:38:22.503Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -277,6 +290,7 @@
     },
     {
       "source_event_id": "evt_1zjeotz8p7v95",
+      "seq": 39,
       "ts": "2026-06-16T10:38:34.887Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -298,6 +312,7 @@
     },
     {
       "source_event_id": "evt_1wtk291h3yr0z",
+      "seq": 46,
       "ts": "2026-06-16T10:38:57.694Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -319,6 +334,7 @@
     },
     {
       "source_event_id": "evt_37iah6js56j9j",
+      "seq": 49,
       "ts": "2026-06-16T10:39:05.355Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -340,6 +356,7 @@
     },
     {
       "source_event_id": "evt_1j0ohhb3a8pzf",
+      "seq": 52,
       "ts": "2026-06-16T10:39:14.652Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -361,6 +378,7 @@
     },
     {
       "source_event_id": "evt_1t40ppxjl0npp",
+      "seq": 57,
       "ts": "2026-06-16T10:39:39.800Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -382,6 +400,7 @@
     },
     {
       "source_event_id": "evt_12zvhat0mxtt3",
+      "seq": 60,
       "ts": "2026-06-16T10:39:57.281Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -403,6 +422,7 @@
     },
     {
       "source_event_id": "evt_3kwodggeh5kda",
+      "seq": 64,
       "ts": "2026-06-16T10:40:19.456Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -424,6 +444,7 @@
     },
     {
       "source_event_id": "evt_1igflkrd9bek0",
+      "seq": 67,
       "ts": "2026-06-16T10:40:52.660Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -445,6 +466,7 @@
     },
     {
       "source_event_id": "evt_2wfy5ttjwr8n5",
+      "seq": 70,
       "ts": "2026-06-16T10:45:53.313Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -466,6 +488,7 @@
     },
     {
       "source_event_id": "evt_20kfom6ig2d1w",
+      "seq": 73,
       "ts": "2026-06-16T10:46:08.167Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -487,6 +510,7 @@
     },
     {
       "source_event_id": "evt_1hbg27zgdtxio",
+      "seq": 74,
       "ts": "2026-06-16T10:46:14.919Z",
       "kind": "user_message",
       "agent": "cursor",
@@ -508,6 +532,7 @@
     },
     {
       "source_event_id": "evt_p2ats8bk58ur",
+      "seq": 76,
       "ts": "2026-06-16T10:46:27.099Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -529,6 +554,7 @@
     },
     {
       "source_event_id": "evt_35a5gsgj1ujoo",
+      "seq": 80,
       "ts": "2026-06-16T10:46:53.502Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -550,6 +576,7 @@
     },
     {
       "source_event_id": "evt_12h6bkhjc4wb1",
+      "seq": 84,
       "ts": "2026-06-16T10:47:09.169Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -571,6 +598,7 @@
     },
     {
       "source_event_id": "evt_1a3q33j5vrhb0",
+      "seq": 85,
       "ts": "2026-06-16T10:47:15.616Z",
       "kind": "user_message",
       "agent": "cursor",
@@ -592,6 +620,7 @@
     },
     {
       "source_event_id": "evt_37pebs5lufk2q",
+      "seq": 86,
       "ts": "2026-06-16T10:47:18.662Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -613,6 +642,7 @@
     },
     {
       "source_event_id": "evt_3mwgxamcdpjam",
+      "seq": 89,
       "ts": "2026-06-16T10:47:28.988Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -634,6 +664,7 @@
     },
     {
       "source_event_id": "evt_2xffohykir6xj",
+      "seq": 93,
       "ts": "2026-06-16T10:48:02.830Z",
       "kind": "assistant_message",
       "agent": "cursor",
@@ -655,6 +686,7 @@
     },
     {
       "source_event_id": "evt_1j281iowojx7b",
+      "seq": 95,
       "ts": "2026-06-16T10:48:20.122Z",
       "kind": "assistant_message",
       "agent": "cursor",

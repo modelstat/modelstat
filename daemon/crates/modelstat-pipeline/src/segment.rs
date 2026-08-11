@@ -428,6 +428,9 @@ mod tests {
     fn turn_surface_is_metadata_only() {
         use modelstat_wire::{RawEvent, TokenUsage};
         let mut ev = RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             content_bytes: None,
             reasoning_excerpt: None,
             reasoning_bytes: None,

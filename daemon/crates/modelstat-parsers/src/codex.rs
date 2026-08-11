@@ -720,6 +720,9 @@ fn parse_inner(
                             p.get("content").unwrap_or(&Value::Null),
                         ));
                         sink.push(RawEvent {
+                            seq: Some(raw_lines),
+                            started_at: None,
+                            first_token_at: None,
                             source_event_id: source_event_id(
                                 &ctx.device_id,
                                 &EventSource::File {
@@ -777,6 +780,7 @@ fn parse_inner(
             ) {
                 (Some(sid), Some(ts)) => {
                     sink.push(unknown_record_event(UnknownRecord {
+                        seq: Some(raw_lines),
                         kind: pt,
                         source_event_id: source_event_id(
                             &ctx.device_id,
@@ -871,6 +875,9 @@ fn parse_inner(
                 let (reasoning_excerpt, reasoning_bytes) = take_message_text(&mut agent_reasoning);
                 let sid = session_id.clone().unwrap();
                 sink.push(RawEvent {
+                    seq: Some(raw_lines),
+                    started_at: None,
+                    first_token_at: None,
                     // Replay-stable when codex states the cumulative counter;
                     // positional only when it does not, which no observed line
                     // does — a fabricated key would be worse than a positional
@@ -1004,6 +1011,9 @@ fn parse_inner(
                             },
                         );
                         sink.push(RawEvent {
+                            seq: Some(raw_lines),
+                            started_at: None,
+                            first_token_at: None,
                             // Keyed positionally: codex gives the record an
                             // `event_id`, but it is the id of the CALL that
                             // spawned the agent and repeats across every
@@ -1075,6 +1085,9 @@ fn parse_inner(
                     saw_user_prompt = true;
                 }
                 sink.push(RawEvent {
+                    seq: Some(raw_lines),
+                    started_at: None,
+                    first_token_at: None,
                     source_event_id: source_event_id(
                         &ctx.device_id,
                         &EventSource::File {
@@ -1137,6 +1150,9 @@ fn parse_inner(
                 match session_id.clone() {
                     Some(sid) => {
                         sink.push(RawEvent {
+                            seq: Some(raw_lines),
+                            started_at: None,
+                            first_token_at: None,
                             source_event_id: source_event_id(
                                 &ctx.device_id,
                                 &match call_id {
@@ -1185,6 +1201,7 @@ fn parse_inner(
             match session_id.clone() {
                 Some(sid) => {
                     sink.push(unknown_record_event(UnknownRecord {
+                        seq: Some(raw_lines),
                         kind: ptype,
                         source_event_id: source_event_id(
                             &ctx.device_id,
@@ -1214,6 +1231,7 @@ fn parse_inner(
         match (session_id.clone(), last_ts.clone()) {
             (Some(sid), Some(ts)) => {
                 sink.push(unknown_record_event(UnknownRecord {
+                    seq: Some(raw_lines),
                     kind,
                     source_event_id: source_event_id(
                         &ctx.device_id,

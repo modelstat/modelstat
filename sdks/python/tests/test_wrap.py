@@ -4,7 +4,9 @@ the underlying response untouched, and a record failure doesn't break the call."
 
 from __future__ import annotations
 
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 
 import modelstat
 from modelstat import Client, Config, FakeTransport
@@ -93,6 +95,48 @@ class TestWrap(unittest.TestCase):
         self.assertEqual(ev["tokens"]["output"], 120)
         self.assertIn("the prompt", ev["content_excerpt"])
         self.assertIn("the completion", ev["content_excerpt"])
+        ms.shutdown()
+
+    def test_a_wrapped_call_is_dated_when_the_request_went_out(self) -> None:
+        """Recording happens after the response resolves, so a call built there
+        would carry the LATER instant. The interceptor reads the clock before it
+        forwards, and that is what ``ts`` / ``started_at`` carry."""
+
+        class _SlowCompletions:
+            def create(self, **kwargs: object) -> object:
+                time.sleep(0.025)
+                return {"model": "gpt-x", "usage": {"prompt_tokens": 1}}
+
+        class _SlowChat:
+            def __init__(self) -> None:
+                self.completions = _SlowCompletions()
+
+        class _SlowOpenAI:
+            def __init__(self) -> None:
+                self.chat = _SlowChat()
+
+        fake = FakeTransport()
+        ms = Client.with_transport(cfg(), fake)
+        client = modelstat.wrap(_SlowOpenAI(), recorder=ms)
+
+        before = datetime.now(timezone.utc)
+        client.chat.completions.create(model="gpt-x", messages=[])
+        after = datetime.now(timezone.utc)
+        ms.flush()
+
+        ev = [e for b in fake.batches() for e in b["events"]][0]
+        started = datetime.fromisoformat(ev["started_at"].replace("Z", "+00:00"))
+        self.assertEqual(ev["ts"], ev["started_at"], "ts carries the same instant")
+        # The wire carries milliseconds, so the reading is the reference instant
+        # rounded DOWN -- compare against the same resolution, not below it.
+        self.assertGreaterEqual(started, before - timedelta(milliseconds=1))
+        self.assertLess(
+            started,
+            after - timedelta(milliseconds=20),
+            "the response instant leaked in place of the request instant",
+        )
+        # One whole response, never a first chunk -- so no instant is invented.
+        self.assertNotIn("first_token_at", ev)
         ms.shutdown()
 
     def test_anthropic_autorecords_with_anthropic_token_shape(self) -> None:

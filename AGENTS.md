@@ -85,6 +85,30 @@ Things to know:
   for local error/notice messages is passed through as-is (the server
   decides what to hide; the daemon never drops data). The one exception:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
+- **Every event carries `seq`** — its 1-based position in the source log it was
+  read from (the line ordinal in a transcript, the record ordinal within a
+  conversation for Cursor's key/value store). `ts` cannot order a log: parsers
+  routinely see runs of records sharing one millisecond. Two properties make it
+  worth carrying, and both are load-bearing when you touch a parser:
+  - it counts SOURCE RECORDS, not emitted events, so a line this build drops
+    still costs its position and a line a future build starts reading does not
+    renumber its neighbours;
+  - it is stable across scans, because a positional parser always reads its file
+    from the top (the upload cursor gates the SEND, never the READ) and Cursor
+    counts in its own total order BEFORE the since-floor applies.
+- **The device's time zone** is stated by `modelstat-ingest::timezone`: the IANA
+  NAME plus the current UTC offset ride the heartbeat, and the offset alone is
+  stamped on every `IngestBatch` **at build time** (not at upload — a spooled
+  batch belongs to the offset its events were gathered under). Everything else on
+  the wire is UTC, so this is the only way anything downstream can tell 09:00 in
+  one zone from 09:00 seven hours away.
+- **The SDKs state their own call instants.** `RawEvent.started_at` /
+  `first_token_at` are optional and sit BESIDE `ts`, which is unchanged. Only a
+  producer inside the call path can state them, so the parsers always omit them;
+  `wrap()` reads the clock before it forwards the request (recording happens
+  after the response, so a call built there would date itself to the wrong end),
+  and it leaves `first_token_at` unset because it sees one whole response rather
+  than a first chunk. A caller who streams sets it on their own `LlmCall`.
 - **Summariser mode** is chosen at install (`modelstat connect`, Cloud
   pre-selected) and persisted to `state.json` (`summarizerMode`; env override
   `MODELSTAT_SUMMARIZER_MODE`). The install chooser (`MODE_INFO` in `cli.ts`)

@@ -279,6 +279,9 @@ mod tests {
 
     fn raw_event(id: &str, session: &str) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             content_bytes: None,
             reasoning_excerpt: None,
             reasoning_bytes: None,

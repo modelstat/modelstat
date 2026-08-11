@@ -22,6 +22,10 @@ const TS_END = "2026-06-01T10:05:00.000Z";
 
 const fullRawEvent = {
   source_event_id: "evt_16zw770jnvito",
+  // Where this record sat in its source log — the line ordinal a transcript
+  // parser reads off the file, which is what orders turns a shared millisecond
+  // cannot.
+  seq: 128,
   ts: TS,
   kind: "assistant_message",
   agent: "claude_code",
@@ -74,6 +78,29 @@ const minimalRawEvent = {
   git: null,
   tokens: null,
   duration_ms: null,
+  source_file: null,
+  source_byte_offset: null,
+};
+
+// An SDK-produced event: the one producer that sits in the call path, so it
+// states the span's ends. `started_at` opens it; `first_token_at` marks the
+// arrival of the first streamed chunk, which is the only way it is ever known.
+const sdkRawEvent = {
+  source_event_id: "evt_sdk_instants",
+  ts: TS,
+  started_at: TS,
+  first_token_at: "2026-06-01T10:00:00.140Z",
+  kind: "assistant_message",
+  agent: "raw_sdk_openai",
+  provider: "openai",
+  model: "gpt-x",
+  session_id: "sess-sdk-1",
+  turn_index: null,
+  parent_event_id: null,
+  cwd: null,
+  git: null,
+  tokens: { input: 800, output: 120, cache_creation: 0, cache_read: 0, reasoning: 0 },
+  duration_ms: 980,
   source_file: null,
   source_byte_offset: null,
 };
@@ -135,7 +162,11 @@ const ingestBatch = {
   batch_id: "01HZ0000000000000000000000",
   device_id: "device-uuid-abc",
   daemon_version: "daemon-0.0.0",
-  events: [fullRawEvent, minimalRawEvent],
+  events: [fullRawEvent, minimalRawEvent, sdkRawEvent],
+  // The zone the machine that built this batch was in, at the moment it built
+  // it. Everything else on the wire is UTC, so nothing downstream can recover
+  // what time of day the work happened without it.
+  utc_offset_minutes: -420,
   segments: [segment],
   tool_calls: [toolCall],
   // The actor REGISTRY the events' `actor_id`s join against — one entry per
@@ -202,6 +233,9 @@ const heartbeat = {
   stats: { files_seen: 42 },
   last_event_at: TS,
   daemon_version: "daemon-0.0.0",
+  // The device's zone, both readings: the durable NAME and the offset in force.
+  timezone: "America/Los_Angeles",
+  utc_offset_minutes: -420,
 };
 
 export const generator: Generator = {
@@ -209,6 +243,7 @@ export const generator: Generator = {
   run: () => {
     writeGolden("wire/raw_event_full.json", RawEvent.parse(fullRawEvent));
     writeGolden("wire/raw_event_minimal.json", RawEvent.parse(minimalRawEvent));
+    writeGolden("wire/raw_event_sdk_instants.json", RawEvent.parse(sdkRawEvent));
     writeGolden("wire/tool_call.json", ToolCallWire.parse(toolCall));
     writeGolden("wire/segment.json", Segment.parse(segment));
     writeGolden("wire/segment_with_embedding.json", Segment.parse(segmentWithEmbedding));

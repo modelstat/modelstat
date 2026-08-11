@@ -92,7 +92,46 @@ pub struct RedactionReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawEvent {
     pub source_event_id: String,
+    /// This record's position in the source log it was read from, 1-based: the
+    /// line ordinal in a transcript file, the record ordinal in a conversation
+    /// for a key/value store. A stated observation of WHERE the record sat, not
+    /// a claim about the session as a whole.
+    ///
+    /// It exists because `ts` cannot order a log: every parser sees runs of
+    /// records sharing one millisecond, and some sources round to the second, so
+    /// sorting by instant alone shuffles a conversation into an order nobody
+    /// wrote. The source already answers this exactly — it is a list — and this
+    /// is that answer, carried instead of thrown away and re-guessed downstream.
+    ///
+    /// Deterministic and stable across re-reads: every positional parser reads
+    /// its file from the top on every scan (the upload cursor gates the SEND,
+    /// never the READ), so the same record is the same ordinal forever, and the
+    /// key/value parser counts in its own total order before any floor applies.
+    /// Absent from producers with no source log to be positioned in — an SDK
+    /// reports calls as they happen and has no list to count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     pub ts: String,
+    /// When the work behind this event BEGAN, stated only by a producer that
+    /// watched it begin. `ts` stays the event's own instant; this is a second
+    /// fact about the same occurrence, never a re-reading of the first.
+    ///
+    /// The SDKs are the producers that can state it: they sit in the call path,
+    /// so they hold the instant the request left and the instant it came back.
+    /// A transcript parser is not — it reads a line that was written after the
+    /// fact — so it omits this, which is what its absence means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// When the FIRST piece of the model's output arrived — time-to-first-token,
+    /// as an instant rather than a duration so it can be read against the other
+    /// two without knowing which clock produced it.
+    ///
+    /// Stated only when the producer actually observed a first chunk. A
+    /// non-streaming call has no such moment to observe, and this is omitted
+    /// there rather than filled with the completion instant: a latency read off
+    /// a fabricated instant is worse than no latency at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_at: Option<String>,
     pub kind: String,
     pub agent: String,
     pub provider: String,
@@ -220,6 +259,8 @@ impl RawEvent {
         self.files_touched.truncate(caps::FILES_TOUCHED_COUNT_MAX);
         clamp_opt(&mut self.content_excerpt, caps::CONTENT_EXCERPT_MAX);
         clamp_opt(&mut self.reasoning_excerpt, caps::REASONING_EXCERPT_MAX);
+        clamp_opt(&mut self.started_at, caps::EVENT_INSTANT_MAX);
+        clamp_opt(&mut self.first_token_at, caps::EVENT_INSTANT_MAX);
         self.shed_local_paths();
         clamp_opt(&mut self.source_file, caps::SOURCE_FILE_MAX);
     }
@@ -595,6 +636,21 @@ pub struct IngestBatch {
     pub session_metadata: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summarizer_mode: Option<String>,
+    /// Minutes east of UTC on the machine that BUILT this batch, at the moment
+    /// it was built (`-420` for UTC-7), DST included.
+    ///
+    /// Every instant on the wire is UTC, so once a batch leaves the box nothing
+    /// can recover what time of day the work happened for the person doing it —
+    /// and a device moves: a laptop crosses zones, a zone changes its rules.
+    /// Stamped per batch rather than looked up per device, so each batch answers
+    /// for itself instead of inheriting whatever the device last said.
+    ///
+    /// The offset alone, here, on purpose: it is the reading that survives being
+    /// stored beside the events. The zone's NAME — the durable fact behind the
+    /// reading — rides [`HeartbeatPayload::timezone`], which is where a fact
+    /// about the device belongs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utc_offset_minutes: Option<i32>,
     /// Where this batch was REDACTED — `local` (on the device, the default and the
     /// only mode where nothing unscrubbed can leave), `cloud`, or `self-hosted`.
     /// Separate from `summarizer_mode` because the two are separate questions, and
@@ -689,12 +745,31 @@ pub struct HeartbeatPayload {
     #[serde(default)]
     pub last_event_at: Option<String>,
     pub daemon_version: String,
+    /// The device's IANA time-zone name (`Europe/Berlin`), verbatim from the OS.
+    ///
+    /// The zone is the durable fact and the offset is only its reading at one
+    /// instant — two devices at `+120` can be in different zones, and the same
+    /// device reads `+60` six months later. Sent as the string the OS states,
+    /// never mapped onto a roster of zones this build has heard of: the zone
+    /// database gains and moves entries, and a name we cannot place is still the
+    /// truthful answer to what the machine is set to.
+    ///
+    /// Absent when the OS will not say, which is honest: no zone is not UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// Minutes east of UTC on this device right now (`-420` for UTC-7), DST
+    /// included — the zone as it is in force, not as its rules read on paper.
+    /// Sent beside [`Self::timezone`] rather than derived from it, so a reader
+    /// never has to carry a zone database to know what time it is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utc_offset_minutes: Option<i32>,
 }
 
 impl HeartbeatPayload {
     pub fn clamp(&mut self) {
         clamp_opt(&mut self.message, caps::HEARTBEAT_MESSAGE_MAX);
         clamp_in_place(&mut self.daemon_version, caps::DAEMON_VERSION_MAX);
+        clamp_opt(&mut self.timezone, caps::TIMEZONE_MAX);
     }
 }
 
@@ -745,6 +820,9 @@ mod tests {
     /// A synthetic home path, in the two spellings a transcript can carry.
     fn local_event(cwd: &str, source_file: &str) -> RawEvent {
         RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             source_event_id: "evt_x".into(),
             ts: "2026-01-01T00:00:00Z".into(),
             kind: "user_message".into(),
@@ -841,6 +919,7 @@ mod tests {
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,
+            utc_offset_minutes: None,
             redactor_mode: None,
             repo_anchors: None,
             segment_generations: None,
@@ -856,6 +935,9 @@ mod tests {
     #[test]
     fn nullable_serializes_null_optional_omits() {
         let ev = RawEvent {
+            seq: None,
+            started_at: None,
+            first_token_at: None,
             source_event_id: "evt_x".into(),
             ts: "2026-01-01T00:00:00Z".into(),
             kind: "user_message".into(),
@@ -1002,6 +1084,7 @@ mod tests {
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,
+            utc_offset_minutes: None,
             redactor_mode: None,
             repo_anchors: Some(vec![repo; 12]), // > 10
             segment_generations: None,

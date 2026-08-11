@@ -88,6 +88,23 @@ export interface RawEvent {
   source_event_id: string;
   /** RFC3339 UTC, e.g. `"2026-06-19T00:00:00.000Z"`. */
   ts: string;
+  /**
+   * When the call BEGAN, RFC3339 UTC. The SDK sits in the call path, so this is
+   * an observation rather than an inference — and it is stated separately from
+   * `ts` because the two answer different questions: `ts` places the event on
+   * the timeline, this one opens the span the call occupied.
+   */
+  started_at?: string;
+  /**
+   * When the FIRST piece of the model's output arrived, RFC3339 UTC —
+   * time-to-first-token as an instant, so it reads against the other two
+   * without anyone having to know which clock produced it.
+   *
+   * Omitted unless a first chunk was actually seen. A non-streaming call has no
+   * such moment, and filling it with the completion instant would put a latency
+   * number downstream that nothing ever measured.
+   */
+  first_token_at?: string;
   kind: EventKind;
   /**
    * The **agent** — which AI tool/integration produced the call (e.g.

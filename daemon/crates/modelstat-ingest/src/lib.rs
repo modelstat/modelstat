@@ -16,6 +16,8 @@
 //!   retry matrix.
 //! - [`remote_config`] — the server-delivered config channel (`GET
 //!   /v1/config/{kind}`), version-gated and disk-cached.
+//! - [`timezone`] — the device's IANA zone + current UTC offset, read off the
+//!   OS. The one working-day fact that is lost the moment a batch ships UTC.
 //!
 //! Everything is a byte-for-byte port of the TS `apps/daemon/src/*` sources so
 //! existing devices never re-enroll (feature §4, §21.9). See daemon/PARITY.md.
@@ -32,6 +34,7 @@ pub mod redactor_client;
 pub mod remote_config;
 pub mod state;
 pub mod timefmt;
+pub mod timezone;
 pub mod upload_gate;
 
 // Flat re-exports for the common (CLI + daemon) surface.
@@ -48,6 +51,7 @@ pub use ingest::{
 pub use machine_key::{build_fingerprint, intended_device_uuid, machine_key_source};
 pub use paths::{home_path, logs_dir, modelstat_home};
 pub use state::{state_path, RuntimeState};
+pub use timezone::{device_timezone, device_utc_offset_minutes};
 
 /// Serialize the env-mutating tests across this crate. `cargo test` runs a
 /// crate's tests on multiple threads in one process, so tests that flip

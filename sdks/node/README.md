@@ -163,7 +163,7 @@ Source-event and batch ids are derived with **blake3** (via `@noble/hashes`), ex
 ## API surface
 
 - `new Config(ingestKey, agent)` — `.withRemote(baseUrl, raw)`, `.withDeviceId(id)`; public fields `mode`, `redaction`, `bufferCapacity`, `flushIntervalMs`, `flushMaxBatch`, `deviceId`, `version`, `autoTaxonomy` (default `false`), `metadata` (default `{}`).
-- `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`, `.metadata({…})`; public fields `kind`, `startedAt`, `durationMs`, `cwd`, `git`, `toolCalls`, `metadataTags`.
+- `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`, `.metadata({…})`; public fields `kind`, `startedAt`, `firstTokenAt`, `durationMs`, `cwd`, `git`, `toolCalls`, `metadataTags`. `startedAt` ships as the wire `started_at`; set `firstTokenAt` from a streaming loop's first chunk and it ships as `first_token_at` (omitted otherwise — a call that returns in one piece has no first chunk to time).
 - `new Client(cfg)` / `Client.withTransport(cfg, transport)` — `record(call)`, `await flush()`, `await shutdown()`, `dropped()`.
 - `wrap(providerClient, { client, metadata?, sessionId? })` — auto-record an `openai` / `@anthropic-ai/sdk` client (returns a transparent proxy).
 - `withMetadata(tags, fn)` — run `fn` with ambient attribution tags in scope.

@@ -9,5 +9,7 @@
     "files_seen": 42
   },
   "last_event_at": "2026-06-01T10:00:00.000Z",
-  "daemon_version": "daemon-0.0.0"
+  "daemon_version": "daemon-0.0.0",
+  "timezone": "America/Los_Angeles",
+  "utc_offset_minutes": -420
 }

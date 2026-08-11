@@ -111,6 +111,15 @@ pub struct Status {
     pub last_event_at: Option<String>,
     pub update: Option<UpdateInfo>,
     pub auto_update: bool,
+    /// The device's IANA time-zone name, or `None` when the OS states none.
+    /// Refreshed by [`Status::refresh_timezone`] before each snapshot, because a
+    /// laptop crosses zones and a zone changes its own rules.
+    pub timezone: Option<String>,
+    /// Minutes east of UTC on this device, as of the last
+    /// [`Status::refresh_timezone`]. `None` until the first refresh — the
+    /// distinction the wire needs is "this daemon has not said" versus "UTC",
+    /// and a bare `0` cannot make it.
+    pub utc_offset_minutes: Option<i32>,
     /// When the unit of work now in progress started, epoch ms — `None` when
     /// nothing is being processed.
     ///
@@ -176,6 +185,8 @@ impl Default for Status {
             last_event_at: None,
             update: None,
             auto_update: false,
+            timezone: None,
+            utc_offset_minutes: None,
             busy_since_ms: None,
             uploading: None,
             run: None,
@@ -380,6 +391,20 @@ impl Status {
         self.auto_update = modelstat_update::auto_update_enabled();
     }
 
+    /// Re-read the device's zone from the OS. Called beside
+    /// [`Status::refresh_auto_update`] on every heartbeat, and kept out of
+    /// `snapshot_body` for the same reason: that stays a pure serializer, and
+    /// this touches the machine.
+    ///
+    /// Re-read each time rather than probed once at boot — a daemon runs for
+    /// weeks, and in that time a laptop crosses a zone and a zone crosses a DST
+    /// boundary. A cached answer would be silently wrong for exactly the
+    /// sessions worked in the new one.
+    pub fn refresh_timezone(&mut self) {
+        self.timezone = modelstat_ingest::device_timezone();
+        self.utc_offset_minutes = Some(modelstat_ingest::device_utc_offset_minutes());
+    }
+
     /// The full snapshot body — the `last-status.json` mirror payload AND (minus
     /// `device_id`) the heartbeat wire body. `device_id` serializes to `null`
     /// when absent. Port of `snapshotBody`.
@@ -423,6 +448,11 @@ impl Status {
             "machine_id": machine_id,
             "update": self.update.as_ref().map(|u| json!({ "verdict": u.verdict, "latest": u.latest })),
             "auto_update": self.auto_update,
+            // The device's zone, both readings. Only this machine can answer:
+            // every instant on the wire is UTC, so a reader downstream cannot
+            // tell 09:00 in Berlin from 09:00 seven hours away.
+            "timezone": self.timezone,
+            "utc_offset_minutes": self.utc_offset_minutes,
         })
     }
 }
@@ -525,6 +555,37 @@ mod tests {
         let wire = heartbeat_wire_body(&snap);
         assert!(wire.get("device_id").is_none()); // heartbeat strips it
         assert_eq!(wire["status"], json!("starting"));
+    }
+
+    /// The device's zone is the one working-day fact the wire cannot recover for
+    /// itself: everything on it is UTC, so 09:00 in one zone and 09:00 seven
+    /// hours away arrive identical. Both readings ride the heartbeat — the
+    /// durable NAME and the offset in force — and neither is invented before the
+    /// OS has been asked.
+    #[test]
+    fn the_heartbeat_carries_the_devices_zone_once_it_has_been_read() {
+        let mut s = Status::default();
+        let before = heartbeat_wire_body(&s.snapshot_body(Some("dev-1"), "9.9.9", "m"));
+        assert_eq!(
+            before["utc_offset_minutes"],
+            Value::Null,
+            "un-probed is null, never a fabricated UTC"
+        );
+
+        s.refresh_timezone();
+        let wire = heartbeat_wire_body(&s.snapshot_body(Some("dev-1"), "9.9.9", "m"));
+        let offset = wire["utc_offset_minutes"].as_i64().expect("stated");
+        assert!(
+            (-840..=840).contains(&offset),
+            "{offset} is outside the wire's range"
+        );
+        // A name only when the OS states one — a container with no zone
+        // configured is a real machine, and silence is the honest answer there.
+        match &wire["timezone"] {
+            Value::String(tz) => assert!(!tz.is_empty()),
+            Value::Null => {}
+            other => panic!("timezone must be a string or null, got {other}"),
+        }
     }
 
     /// The whole point of the field: a record kind nobody modelled has to reach

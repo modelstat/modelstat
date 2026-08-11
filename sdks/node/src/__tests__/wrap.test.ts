@@ -190,3 +190,40 @@ test("a rejected provider call rejects untouched and records nothing", async () 
   assert.equal(fake.batches().length, 0); // failures are not recorded
   await ms.shutdown();
 });
+
+test("a wrapped call is dated when the request went out, not when it came back", async () => {
+  const calls: FakeCall[] = [];
+  // A provider that takes measurable time to answer. Recording happens after
+  // the response resolves, so a call built there would carry the LATER instant.
+  const slowOpenAI = {
+    chat: {
+      completions: {
+        async create(args: unknown): Promise<unknown> {
+          calls.push({ args });
+          await new Promise((r) => setTimeout(r, 25));
+          return { model: "gpt-x", usage: { prompt_tokens: 1, completion_tokens: 1 } };
+        },
+      },
+    },
+  };
+  const fake = new FakeTransport();
+  const ms = Client.withTransport(cfg(), fake);
+  const openai = wrap(slowOpenAI, { client: ms });
+
+  const before = Date.now();
+  await openai.chat.completions.create({ model: "gpt-x", messages: [] });
+  const after = Date.now();
+  await ms.flush();
+
+  const event = fake.batches()[0]!.events[0]!;
+  const started = Date.parse(event.started_at!);
+  assert.equal(event.ts, event.started_at, "ts carries the same instant");
+  assert.ok(started >= before, `${event.started_at} predates the call`);
+  assert.ok(
+    started < after - 20,
+    `${event.started_at} is the response instant, not the request instant`,
+  );
+  // The interceptor sees one whole response, never a first chunk — so it states
+  // no first-token instant rather than inventing one.
+  assert.ok(!("first_token_at" in event));
+});

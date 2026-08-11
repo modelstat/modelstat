@@ -165,6 +165,11 @@ pub struct UnknownRecord<'a> {
     pub duration_ms: Option<u64>,
     pub source_file: &'a str,
     pub source_byte_offset: Option<u64>,
+    /// The record's 1-based position in its source log — see
+    /// [`modelstat_wire::RawEvent::seq`]. Structural like the offset beside it,
+    /// and the reason an unmodelled record can still be ordered against the
+    /// turns around it without anyone having to understand what it says.
+    pub seq: Option<u64>,
 }
 
 /// Build the minimal event for an unmodelled record — see [`UnknownRecord`].
@@ -172,7 +177,10 @@ pub struct UnknownRecord<'a> {
 pub fn unknown_record_event(r: UnknownRecord) -> RawEvent {
     RawEvent {
         source_event_id: r.source_event_id,
+        seq: r.seq,
         ts: r.ts,
+        started_at: None,
+        first_token_at: None,
         kind: r.kind.to_string(),
         agent: r.agent.to_string(),
         provider: r.provider.to_string(),
@@ -237,8 +245,14 @@ mod tests {
             duration_ms: Some(6556),
             source_file: "/t.jsonl",
             source_byte_offset: Some(42),
+            seq: Some(7),
         });
         assert_eq!(ev.kind, "some_new_thing");
+        assert_eq!(
+            ev.seq,
+            Some(7),
+            "an unmodelled record still knows where it sat"
+        );
         assert_eq!(ev.content_excerpt, None);
         assert_eq!(ev.content_bytes, None);
         assert_eq!(ev.tokens, None);
