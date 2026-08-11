@@ -28,7 +28,7 @@ use modelstat_pipeline::{
     Summarizer,
 };
 use modelstat_redact::PiiModel;
-use modelstat_wire::{IngestBatch, RawEvent, Segment, TokenUsage};
+use modelstat_wire::{IngestBatch, RawEvent, Segment, SegmentGeneration, TokenUsage};
 
 /// One assembled batch plus how the scan loop should ship it: `raw` picks the
 /// `/v1/ingest/raw` endpoint (cloud), `segment_count` is what the tray surfaces.
@@ -84,6 +84,70 @@ pub fn with_non_null_tokens(mut e: RawEvent) -> RawEvent {
 /// read so a session split across flush boundaries keeps its full-view title and
 /// its straddling calls stay attributed.
 #[allow(clippy::too_many_arguments)]
+/// One scan's identity, and which sessions it may claim to have restated
+/// (core#701).
+///
+/// Supersession on the server used to be inferred from TIME OVERLAP, which
+/// cannot work: the scan flushes every `BATCH_MAX_EVENTS`, so one session's
+/// segmentation leaves in several batches, and a cursor-resumed scan overlaps
+/// older segments without re-stating them. The server retired those anyway and
+/// 116 sessions — 29.5% of all measured work — lost their segments entirely.
+///
+/// Only the scan knows which it did, so the scan says.
+#[derive(Debug, Clone, Default)]
+pub struct ScanGeneration {
+    /// Stable for the whole scan and increasing between scans. Every batch of
+    /// one scan carries it, which is what lets the server retire the generation
+    /// it replaces without ever retiring the scan's own other batches.
+    pub id: String,
+    /// Sessions this scan read from byte 0. Everything else appends.
+    pub read_whole: BTreeSet<String>,
+}
+
+impl ScanGeneration {
+    /// The per-session claim for a batch carrying `batch_segments`.
+    ///
+    /// The replaced span is taken from the RUN's segments for that session, not
+    /// the batch's, so a batch that carries the middle of a generation still
+    /// names the generation's span rather than its own slice. Sessions this
+    /// scan only appended to get an id and NO span: the server then retires
+    /// nothing for them, because what it did not re-read is still the truth.
+    #[must_use]
+    pub fn claims(
+        &self,
+        batch_segments: &[Segment],
+        run_segments: &BTreeMap<String, Vec<Segment>>,
+    ) -> Option<BTreeMap<String, SegmentGeneration>> {
+        if self.id.is_empty() {
+            return None;
+        }
+        let mut out: BTreeMap<String, SegmentGeneration> = BTreeMap::new();
+        for sid in batch_segments.iter().map(|s| s.session_id.as_str()) {
+            if out.contains_key(sid) {
+                continue;
+            }
+            let span = if self.read_whole.contains(sid) {
+                run_segments.get(sid).and_then(|segs| {
+                    let from = segs.iter().map(|s| s.started_at.as_str()).min()?;
+                    let to = segs.iter().map(|s| s.ended_at.as_str()).max()?;
+                    Some((from.to_string(), to.to_string()))
+                })
+            } else {
+                None
+            };
+            out.insert(
+                sid.to_string(),
+                SegmentGeneration {
+                    id: self.id.clone(),
+                    replaces_from: span.as_ref().map(|(f, _)| f.clone()),
+                    replaces_to: span.as_ref().map(|(_, t)| t.clone()),
+                },
+            );
+        }
+        (!out.is_empty()).then_some(out)
+    }
+}
+
 pub async fn build_flush_batches<S, E, N>(
     device_id: &str,
     daemon_version: &str,
@@ -111,6 +175,14 @@ pub async fn build_flush_batches<S, E, N>(
     // only the actors IT happened to read would narrow what an earlier flush
     // already landed.
     run_actors_by_session: &SessionActors,
+    // This scan's identity, and which sessions it re-read WHOLE (core#701).
+    //
+    // A session in the set was parsed from byte 0, so the segments accumulated
+    // for it in `run_segments_by_session` restate its whole span and the server
+    // may retire what they replace. A session absent from it was resumed at a
+    // cursor: this batch appends, claims no span, and the server retires
+    // nothing — which is the bug that lost 29.5% of all measured work.
+    generation: &ScanGeneration,
     // Which provider account is logged in, and since when. Passed in rather than
     // read here so the caller owns the I/O and this stays a pure builder.
     accounts: &Accounts,
@@ -231,6 +303,9 @@ where
                         summarizer_mode: None,
                         redactor_mode: None,
                         repo_anchors: None,
+                        // Cloud ships no local segments, so there is no generation to
+                        // supersede (core#701).
+                        segment_generations: None,
                     },
                     raw: true,
                     segment_count: 0,
@@ -320,6 +395,13 @@ where
         run_actors_by_session,
         events.iter().map(|e| e.session_id.as_str()),
     );
+    // The claim, per session this batch carries segments for. The span comes
+    // from the RUN's accumulated segments, not this batch's: a scan's segments
+    // leave across several batches, so an early batch would otherwise claim a
+    // span narrower than the generation it is part of. Narrower is the safe
+    // direction — it retires less, and later batches of the same scan widen it —
+    // whereas over-claiming is what over-retired in core#698.
+    let segment_generations = generation.claims(&segments, run_segments_by_session);
     let batch = IngestBatch {
         batch_id: batch_id(),
         device_id: device_id.into(),
@@ -340,6 +422,7 @@ where
         summarizer_mode: None,
         redactor_mode: None,
         repo_anchors: None,
+        segment_generations,
     };
     FlushOutcome::Ready(vec![PreparedBatch {
         batch,
@@ -350,6 +433,75 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// core#701. A scan that re-read a session WHOLE may say what span it
+    /// restates; one that resumed at a cursor may not, and the server then
+    /// retires nothing for it. Getting that backwards is what left 116 sessions
+    /// — 29.5% of all measured work — with no live segment at all.
+    #[test]
+    fn only_a_whole_read_claims_a_span() {
+        let seg = |sid: &str, from: &str, to: &str| Segment {
+            segment_id: format!("seg_{sid}_{from}"),
+            session_id: sid.into(),
+            agent: "claude_code".into(),
+            started_at: from.into(),
+            ended_at: to.into(),
+            r#abstract: String::new(),
+            tokens: TokenUsage::default(),
+            tags: Vec::new(),
+            redaction: Default::default(),
+            source_event_ids: Vec::new(),
+            abstract_embedding: None,
+            behavior: None,
+            user_intent: None,
+            local_time: None,
+        };
+        // The run saw more of the session than this batch carries: the claim
+        // must name the RUN's span, or an early batch under-claims and a later
+        // one would have to re-retire.
+        let run: BTreeMap<String, Vec<Segment>> = [(
+            "s1".to_string(),
+            vec![
+                seg("s1", "2026-06-10T10:00:00Z", "2026-06-10T10:10:00Z"),
+                seg("s1", "2026-06-10T10:20:00Z", "2026-06-10T10:30:00Z"),
+            ],
+        )]
+        .into_iter()
+        .collect();
+        let batch = vec![seg("s1", "2026-06-10T10:00:00Z", "2026-06-10T10:10:00Z")];
+
+        let whole = ScanGeneration {
+            id: "scan_1".into(),
+            read_whole: ["s1".to_string()].into_iter().collect(),
+        };
+        let claims = whole.claims(&batch, &run).expect("a claim");
+        let c = &claims["s1"];
+        assert_eq!(c.id, "scan_1");
+        assert_eq!(c.replaces_from.as_deref(), Some("2026-06-10T10:00:00Z"));
+        assert_eq!(
+            c.replaces_to.as_deref(),
+            Some("2026-06-10T10:30:00Z"),
+            "the RUN's span, not this batch's slice"
+        );
+
+        let appended = ScanGeneration {
+            id: "scan_1".into(),
+            read_whole: Default::default(),
+        };
+        let claims = appended.claims(&batch, &run).expect("a claim");
+        let c = &claims["s1"];
+        assert_eq!(c.id, "scan_1", "an append still names its scan");
+        assert!(
+            c.replaces_from.is_none() && c.replaces_to.is_none(),
+            "an append restates nothing, so it claims no span"
+        );
+
+        // No scan id at all ⇒ no claim, and the server falls back to its old
+        // rule rather than reading an empty id as a generation.
+        assert!(ScanGeneration::default().claims(&batch, &run).is_none());
+    }
+
     use super::*;
     use crate::testing::AnsweringRedactor;
     use modelstat_pipeline::NoEmbedder;
@@ -468,6 +620,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &accounts,
         )
         .await;
@@ -523,6 +676,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &accounts,
         )
         .await;
@@ -564,6 +718,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -606,6 +761,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -639,6 +795,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -686,6 +843,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -733,6 +891,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -756,6 +915,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -796,6 +956,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -861,6 +1022,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &actors,
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -920,6 +1082,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;
@@ -954,6 +1117,7 @@ mod tests {
             &mut acc,
             &mut ev_acc,
             &SessionActors::new(),
+            &ScanGeneration::default(),
             &Accounts::new(),
         )
         .await;

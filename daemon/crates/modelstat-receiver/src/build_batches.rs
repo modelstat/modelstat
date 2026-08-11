@@ -233,6 +233,10 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
         },
         summarizer_mode: None,
         redactor_mode: None,
+        // The receiver takes turns over HTTP rather than re-reading a
+        // transcript, so it has no generation to supersede: every batch is an
+        // append by construction (core#701).
+        segment_generations: None,
         repo_anchors: None,
     })
 }

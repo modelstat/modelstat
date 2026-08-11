@@ -228,6 +228,7 @@ async fn prepare_flush<S, E, N, G, CE>(
     run_segments: &mut BTreeMap<String, Vec<Segment>>,
     run_events: &mut BTreeMap<String, Vec<RawEvent>>,
     run_actors: &SessionActors,
+    generation: &crate::flush::ScanGeneration,
     accounts: &Accounts,
     resilient: &ResilientSummarizer<S>,
     embedder: &E,
@@ -277,6 +278,7 @@ where
         run_segments,
         run_events,
         run_actors,
+        generation,
         accounts,
     )
     .await;
@@ -374,6 +376,14 @@ where
     // session metadata is recomputed from the run-long (excerpt-shed) turns, so a
     // later flush's partial view can't overwrite a richer earlier one.
     let mut run_events: BTreeMap<String, Vec<RawEvent>> = BTreeMap::new();
+    // This scan's claim (core#701). The id is stable for the whole run and rises
+    // between runs, so the server can tell one scan's segments from the last's;
+    // `read_whole` collects the sessions this run parsed from byte 0, which are
+    // the only ones it may honestly say it restated.
+    let mut generation = crate::flush::ScanGeneration {
+        id: format!("scan_{}", chrono::Utc::now().timestamp_millis().max(0)),
+        read_whole: Default::default(),
+    };
     // Every agent-instance each session stated, folded across the whole run: one
     // session's sub-agents are one transcript EACH, so the roster is only
     // complete once every file that mentions the session has been read.
@@ -401,6 +411,7 @@ where
                 &mut run_segments,
                 &mut run_events,
                 &run_actors,
+                &generation,
                 accounts,
                 resilient,
                 embedder,
@@ -630,6 +641,15 @@ where
         // is the one the Cursor dead-schema weeks were lost to. Incremental
         // reads legitimately parse to nothing new, so they don't count.
         let read_whole = shipped_below == 0 && job.since_ms.is_none();
+        // Which sessions this scan may claim to have restated (core#701). Keyed
+        // on the sessions the FILE produced, because one transcript is one
+        // session's record — a session read whole in this file is one the
+        // server may supersede.
+        if read_whole {
+            for sid in live_seen.keys() {
+                generation.read_whole.insert(sid.clone());
+            }
+        }
         let file_has_bytes = cs.as_ref().is_some_and(|c| c.size > 0);
         if read_whole && file_has_bytes && parsed_events == 0 && r.tool_calls.is_empty() {
             tallies.files_silent += 1;

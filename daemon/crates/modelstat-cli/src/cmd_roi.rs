@@ -194,11 +194,7 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
 /// Parse a flag's value, or say which flag was wrong. A bad number is an error
 /// rather than a silent default: `--days=thirty` returning 30 would report a
 /// window nobody asked for.
-fn parse_flag<T: std::str::FromStr>(
-    args: &[String],
-    name: &str,
-    default: T,
-) -> Result<T, String> {
+fn parse_flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result<T, String> {
     match flag_value(args, name) {
         None => Ok(default),
         Some(v) => v
@@ -211,9 +207,9 @@ pub fn parse_roi_opts(args: &[String]) -> Result<RoiOpts, String> {
     let usd_per_mtok = match flag_value(args, "--usd-per-mtok") {
         None => None,
         Some(v) => {
-            let rate: f64 = v
-                .parse()
-                .map_err(|_| format!("modelstat roi: --usd-per-mtok expects a number, got `{v}`"))?;
+            let rate: f64 = v.parse().map_err(|_| {
+                format!("modelstat roi: --usd-per-mtok expects a number, got `{v}`")
+            })?;
             if !rate.is_finite() || rate <= 0.0 {
                 return Err("modelstat roi: --usd-per-mtok must be a positive number".into());
             }
@@ -677,7 +673,12 @@ pub fn render_human(view: &RoiView) -> String {
     // and `--limit` never reaches them — so the two halves always sum to the
     // total this same sentence announces.
     let cut = if shown.len() < view.rows.len() {
-        format!(", showing {} of {} by {}", shown.len(), view.rows.len(), view.sort.name())
+        format!(
+            ", showing {} of {} by {}",
+            shown.len(),
+            view.rows.len(),
+            view.sort.name()
+        )
     } else {
         String::new()
     };
@@ -769,7 +770,11 @@ pub fn render_human(view: &RoiView) -> String {
             ),
             None => String::new(),
         };
-        kv(&mut out, "attribution:", &format!("{c:.2} mean confidence{weak}"));
+        kv(
+            &mut out,
+            "attribution:",
+            &format!("{c:.2} mean confidence{weak}"),
+        );
         // Past half, the headline spend figure is mostly a guess about which
         // sessions produced these PRs, and a reader who quotes it should know
         // that before they do.
@@ -1022,7 +1027,10 @@ pub fn cmd_roi(args: &[String]) -> ExitCode {
     };
 
     let Some(repo) = resolve_repo_root(Some(&opts.repo)) else {
-        eprintln!("modelstat roi: `{}` is not inside a git repository", opts.repo);
+        eprintln!(
+            "modelstat roi: `{}` is not inside a git repository",
+            opts.repo
+        );
         return ExitCode::FAILURE;
     };
 
@@ -1222,7 +1230,10 @@ mod tests {
     fn help_says_what_is_measured_and_refuses_to_score() {
         let h = help_text();
         assert!(h.contains("does not score anyone"), "{h}");
-        assert!(h.contains("no\ncomposite") || h.contains("no composite"), "{h}");
+        assert!(
+            h.contains("no\ncomposite") || h.contains("no composite"),
+            "{h}"
+        );
         assert!(h.contains("cannot audit"), "{h}");
         // Every sort key the parser accepts is documented, and vice versa.
         for key in Sort::NAMES {
@@ -1247,7 +1258,9 @@ mod tests {
         assert!(!pr.contains("4.0M"), "raw sum in the table:\n{text}");
 
         let head = line(&text, "sessions");
-        for col in ["PR", "who", "files", "lines", "sessions", "tokens", "active"] {
+        for col in [
+            "PR", "who", "files", "lines", "sessions", "tokens", "active",
+        ] {
             assert!(head.contains(col), "no `{col}` column:\n{head}");
         }
         assert!(!head.contains("cache"), "class columns leaked:\n{head}");
@@ -1266,7 +1279,10 @@ mod tests {
 
     #[test]
     fn an_unreadable_diff_is_a_dash_never_a_zero() {
-        let v = view(vec![unread(row(7, true, 1_000_000)), row(8, true, 1_000_000)]);
+        let v = view(vec![
+            unread(row(7, true, 1_000_000)),
+            row(8, true, 1_000_000),
+        ]);
         let text = render_human(&v);
         let pr = line(&text, "#7");
         assert!(pr.contains('—'), "unread diff rendered as a number:\n{pr}");
@@ -1373,7 +1389,9 @@ mod tests {
 
     #[test]
     fn the_rollup_covers_the_window_however_small_the_limit() {
-        let rows: Vec<Row> = (0..9).map(|i| row(100 + i, i % 2 == 0, 1_000_000)).collect();
+        let rows: Vec<Row> = (0..9)
+            .map(|i| row(100 + i, i % 2 == 0, 1_000_000))
+            .collect();
         let header_at = |limit: usize| {
             let mut v = view(rows.clone());
             v.limit = limit;
@@ -1386,14 +1404,20 @@ mod tests {
         let (six_head, six_ai) = header_at(6);
         let (all_head, all_ai) = header_at(100);
 
-        assert!(six_head.contains("5 AI-assisted PRs, 4 human-authored"), "{six_head}");
+        assert!(
+            six_head.contains("5 AI-assisted PRs, 4 human-authored"),
+            "{six_head}"
+        );
         // `--limit` moves `showing` and nothing else — not the header split,
         // not the rollup. One population, whatever is printed.
         assert_eq!(
             six_head.split_once(", 30d").unwrap().0,
             all_head.split_once(", 30d").unwrap().0
         );
-        assert_eq!(six_ai, all_ai, "--limit reached the rollup:\n{six_ai}\n{all_ai}");
+        assert_eq!(
+            six_ai, all_ai,
+            "--limit reached the rollup:\n{six_ai}\n{all_ai}"
+        );
         assert!(six_head.contains("showing 6 of 9"), "{six_head}");
         assert!(!all_head.contains("showing"), "{all_head}");
     }
@@ -1420,8 +1444,14 @@ mod tests {
         let mut weak = row(41, true, 4_000_000);
         weak.attribution_confidence = 0.2;
         let text = render_human(&view(vec![weak, row(42, true, 4_000_000)]));
-        assert!(line(&text, "#41").contains("806k eq~"), "unmarked weak row:\n{text}");
-        assert!(!line(&text, "#42").contains('~'), "marked a strong row:\n{text}");
+        assert!(
+            line(&text, "#41").contains("806k eq~"),
+            "unmarked weak row:\n{text}"
+        );
+        assert!(
+            !line(&text, "#42").contains('~'),
+            "marked a strong row:\n{text}"
+        );
         // Exactly one legend line, and it names the threshold from the constant.
         let legend: Vec<&str> = text
             .lines()
@@ -1439,7 +1469,10 @@ mod tests {
         // anywhere, the mark never appears, so the legend stays away.
         let none = render_human(&view(vec![row(44, true, 0)]));
         assert!(!line(&none, "#44").contains('~'), "{none}");
-        assert!(!none.contains("~ ="), "legend with nothing to qualify:\n{none}");
+        assert!(
+            !none.contains("~ ="),
+            "legend with nothing to qualify:\n{none}"
+        );
         assert!(!is_weak(0.0, 0.0), "no tokens is not a weak attribution");
     }
 
@@ -1451,14 +1484,20 @@ mod tests {
         let text = render_human(&view(vec![weak.clone(), row(2, true, 4_000_000)]));
         let att = line(&text, "attribution:");
         assert!(att.contains("0.76 mean confidence"), "{att}");
-        assert!(att.contains("20% of volume from weak (mention-only) matches"), "{att}");
+        assert!(
+            att.contains("20% of volume from weak (mention-only) matches"),
+            "{att}"
+        );
         assert!(!text.contains("caution:"), "cautioned under half:\n{text}");
 
         // One big guess beside a small certainty: 90% of the volume is weak.
         let mut big_weak = row(3, true, 9_000_000);
         big_weak.attribution_confidence = 0.1;
         let text = render_human(&view(vec![row(2, true, 1_000_000), big_weak]));
-        assert!(line(&text, "attribution:").contains("90% of volume"), "{text}");
+        assert!(
+            line(&text, "attribution:").contains("90% of volume"),
+            "{text}"
+        );
         let caution = line(&text, "caution:");
         assert!(caution.contains("inferred from PR mentions"), "{caution}");
         assert!(caution.contains("token and time figures"), "{caution}");
@@ -1534,7 +1573,10 @@ mod tests {
         let text = render_human(&v);
         assert!(!text.contains("$0.00"), "priced nothing as free:\n{text}");
         // The per-row cell agrees with the rollup line above it.
-        assert!(!text.lines().any(|l| l.contains("#1") && l.contains('$')), "{text}");
+        assert!(
+            !text.lines().any(|l| l.contains("#1") && l.contains('$')),
+            "{text}"
+        );
         assert!(!line(&text, "AI-assisted:").contains('$'), "{text}");
     }
 
@@ -1550,7 +1592,10 @@ mod tests {
         assert!(raw.contains("16k out"), "{raw}");
         assert!(raw.contains("(raw total 4.0M)"), "{raw}");
         // And one line says why the equivalent and the raw total differ.
-        assert!(text.contains("cache reads bill at roughly a tenth"), "{text}");
+        assert!(
+            text.contains("cache reads bill at roughly a tenth"),
+            "{text}"
+        );
         assert!(text.contains("cache-read 0.1×"), "{text}");
     }
 
@@ -1558,11 +1603,17 @@ mod tests {
     fn empty_window_still_renders_a_rollup_and_invents_nothing() {
         let text = render_human(&view(Vec::new()));
         assert!(text.contains("no merged PRs in this window"), "{text}");
-        assert!(text.contains("0 AI-assisted PRs, 0 human-authored"), "{text}");
+        assert!(
+            text.contains("0 AI-assisted PRs, 0 human-authored"),
+            "{text}"
+        );
         assert!(!text.contains('$'), "{text}");
         // The mix line still prints, as zeros: an em-dash inside a sum is not
         // a number. An empty f64 sum folds from -0.0, which is nonsense to show.
-        assert!(line(&text, "raw mix (all):").contains("(raw total 0)"), "{text}");
+        assert!(
+            line(&text, "raw mix (all):").contains("(raw total 0)"),
+            "{text}"
+        );
         assert!(!text.contains("-0.0"), "{text}");
         assert_eq!(view(Vec::new()).totals().ai.equiv_tokens.to_string(), "0");
     }
@@ -1607,14 +1658,20 @@ mod tests {
         assert_eq!(t["all"]["files_changed"], 8);
         assert_eq!(t["all"]["diffs_read"], 2);
         assert_eq!(t["all"]["active_ms"], 90 * 60_000);
-        assert!(close(t["all"]["attribution_weak_volume_share"].as_f64().unwrap(), 0.2));
+        assert!(close(
+            t["all"]["attribution_weak_volume_share"].as_f64().unwrap(),
+            0.2
+        ));
         assert_eq!(t["human"]["attribution_weak_volume_share"], 0.0);
 
         // The device-wide leftovers carry the same pair, plus their time.
         let un = &t["unattributed_device"];
         assert_eq!(un["raw_total"], 2_000_000);
         assert_eq!(un["active_ms"], 90 * 60_000);
-        assert!(close(un["equiv_tokens"].as_f64().unwrap(), 403_100.0), "{un}");
+        assert!(
+            close(un["equiv_tokens"].as_f64().unwrap(), 403_100.0),
+            "{un}"
+        );
 
         // The weights are published, so the equivalent is re-derivable and a
         // consumer on another provider can see these are Anthropic-family.
@@ -1622,7 +1679,10 @@ mod tests {
         assert_eq!(doc["equiv_weights"]["cache_creation"], 1.25);
         assert_eq!(doc["equiv_weights"]["cache_read"], 0.1);
         assert_eq!(doc["equiv_weights"]["output"], 5.0);
-        assert!(close(doc["weak_confidence_threshold"].as_f64().unwrap(), 0.3));
+        assert!(close(
+            doc["weak_confidence_threshold"].as_f64().unwrap(),
+            0.3
+        ));
 
         // Nothing attributed ⇒ an explicit null, not a zero share that would
         // read as "none of this is guesswork".
@@ -1647,13 +1707,23 @@ mod tests {
         assert!(!none.json && none.usd_per_mtok.is_none());
 
         let a: Vec<String> = [
-            "--repo", "/tmp/x", "--days", "7", "--limit=3", "--json", "--sort", "active",
+            "--repo",
+            "/tmp/x",
+            "--days",
+            "7",
+            "--limit=3",
+            "--json",
+            "--sort",
+            "active",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         let o = parse_roi_opts(&a).unwrap();
-        assert_eq!((o.repo.as_str(), o.days, o.limit, o.json), ("/tmp/x", 7, 3, true));
+        assert_eq!(
+            (o.repo.as_str(), o.days, o.limit, o.json),
+            ("/tmp/x", 7, 3, true)
+        );
         assert_eq!(o.sort, Sort::Active);
     }
 
