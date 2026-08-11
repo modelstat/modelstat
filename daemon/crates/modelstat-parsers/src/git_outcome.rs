@@ -18,19 +18,15 @@ pub const MERGE_METHOD_SUBJECT_REF: &str = "subject_ref_convention";
 
 /// What the local git history says about one PR's fate — WITH the evidence.
 ///
-/// `merged` is not an observation, it is a reading of a convention: a commit
-/// subject that mentions `#<n>`. GitHub's default squash/merge templates write
-/// one, so the reading is usually right, and it is wrong in both directions —
-/// "Fix bug reported in #123" merges nothing, and a team with a custom squash
-/// template merges without ever writing the number. Shipping the bare boolean
-/// gave the server no way to notice either case, so the matched commit rides
-/// along: `merge_sha` + `merge_subject` are already-public repo facts (the same
-/// class as a slug), and `merge_method` names the reading.
+/// `merged` is three-state. `Some(true)` means a commit subject matched the PR
+/// convention. `None` means this bounded local git read did not find one. Local
+/// git cannot enumerate open PRs, so absence of a matching commit is never
+/// reported as `Some(false)`; only a forge API can make that claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrOutcome {
-    pub merged: bool,
+    pub merged: Option<bool>,
     pub merged_at: Option<String>,
-    pub reverted: bool,
+    pub reverted: Option<bool>,
     /// The commit whose subject matched, when one did.
     pub merge_sha: Option<String>,
     /// That commit's subject line, verbatim — the text the claim rests on.
@@ -139,22 +135,22 @@ pub fn is_reverted(commits: &[GitCommit], merge_sha: &str) -> bool {
 pub fn outcome_from_commits(commits: &[GitCommit], pr_number: u64) -> PrOutcome {
     match find_merge_commit_for_pr(commits, pr_number) {
         None => PrOutcome {
-            merged: false,
+            merged: None,
             merged_at: None,
-            reverted: false,
+            reverted: None,
             merge_sha: None,
             merge_subject: None,
             merge_method: None,
             change: None,
         },
         Some(merge) => PrOutcome {
-            merged: true,
+            merged: Some(true),
             merged_at: if merge.committed_at.is_empty() {
                 None
             } else {
                 Some(merge.committed_at.clone())
             },
-            reverted: is_reverted(commits, &merge.sha),
+            reverted: Some(is_reverted(commits, &merge.sha)),
             merge_sha: Some(merge.sha.clone()),
             // Verbatim: a subject the server can re-read is what makes the
             // convention checkable instead of trusted.
@@ -168,29 +164,93 @@ pub fn outcome_from_commits(commits: &[GitCommit], pr_number: u64) -> PrOutcome 
 /// The per-git-call ceiling for every read in this module.
 const GIT_TIMEOUT: Duration = Duration::from_millis(4_000);
 
-/// Run `git log` in `cwd` and determine the PR's outcome. Best-effort: None when
-/// `cwd` isn't a git repo or git fails. Bounded to recent history + a 4s timeout.
+/// Run `git log` in `cwd` and determine the PR's outcome. Best-effort: `None`
+/// when `cwd` isn't a git repo or every read failed.
 ///
-/// When a merge commit was found, its change primitives are measured too
+/// **Two-stage, cheapest first.** A merge is usually reachable from the checked
+/// out branch, and that walk is nearly free. Only when it is NOT found do we pay
+/// for the wider one — because the caller's checkout is routinely on a feature
+/// branch or behind the default branch, and a merge that landed on main is then
+/// invisible to a HEAD-only walk (this is what reported every merged PR as not
+/// merged).
+///
+/// The wide stage names the remote default branch rather than `--all`. Measured
+/// on a real 164-ref repo on this (network-backed) disk: HEAD-only `0.03s`,
+/// `--all` **`32.1s`** — three orders of magnitude, well past any sane ceiling,
+/// so `--all` turned every PR in a big repo into a timeout. One extra ref is
+/// where the merges actually are and costs a fraction of that.
+///
+/// When a merge commit is found, its change primitives are measured too
 /// ([`measure_pr_change`]) — the sha is already in hand and the numbers are the
 /// ones a forge would report, so a dashboard fed only by this daemon still has
 /// them. A failure there costs the outcome nothing: `change` stays None.
 pub fn check_pull_request_outcome(cwd: &str, pr_number: u64) -> Option<PrOutcome> {
-    let stdout = run_git(
-        &[
-            "log",
-            "-n",
-            "1000",
-            &format!("--format={}", git_log_format()),
-        ],
-        cwd,
-        GIT_TIMEOUT,
-    )?;
-    let mut outcome = outcome_from_commits(&parse_git_log(&stdout), pr_number);
+    let fmt = format!("--format={}", git_log_format());
+    let scan = |refs: &[String]| -> Option<PrOutcome> {
+        let mut args: Vec<&str> = vec!["log", "--max-count=1000"];
+        for r in refs {
+            args.push(r);
+        }
+        args.push(&fmt);
+        let stdout = run_git(&args, cwd, GIT_TIMEOUT)?;
+        Some(outcome_from_commits(&parse_git_log(&stdout), pr_number))
+    };
+
+    // Stage 1: the checked out branch. Nearly free, and usually enough.
+    let head = scan(&[]);
+    let mut outcome = match head {
+        Some(o) if o.merged == Some(true) => o,
+        head => {
+            // Stage 2: the handful of refs a merge actually lands on.
+            let refs = integration_refs(cwd);
+            match if refs.is_empty() { None } else { scan(&refs) } {
+                // Only a positive finding beats stage 1; a wider walk that also
+                // failed to find it adds no information.
+                Some(w) if w.merged == Some(true) => w,
+                _ => head?,
+            }
+        }
+    };
     if let Some(sha) = outcome.merge_sha.as_deref() {
         outcome.change = measure_pr_change(cwd, sha);
     }
     Some(outcome)
+}
+
+/// The refs a merge plausibly lands on, filtered to the ones that exist: the
+/// remote's default branch, and local/remote `main`/`master`.
+///
+/// Deliberately NOT `--all`. Naming a ref that does not exist makes git fail the
+/// whole read, so each is probed with a cheap `rev-parse` first; and a repo with
+/// many refs makes an all-refs walk pathologically slow — measured at 32.1s on a
+/// real 164-ref repo on this disk, versus 0.03s for HEAD alone. A merge lives on
+/// an integration branch, so those are the ones worth paying for.
+///
+/// Local names are included because a repo may have no remote configured at all
+/// (a fresh `git init`, a mirror) while still carrying the merge on `main`.
+fn integration_refs(cwd: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(name) = run_git(
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        cwd,
+        GIT_TIMEOUT,
+    ) {
+        let name = name.trim();
+        if !name.is_empty() {
+            out.push(name.to_string());
+        }
+    }
+    for r in ["origin/main", "origin/master", "main", "master"] {
+        if out.iter().any(|o| o == r) {
+            continue;
+        }
+        if run_git(&["rev-parse", "--verify", "--quiet", r], cwd, GIT_TIMEOUT)
+            .is_some_and(|o| !o.trim().is_empty())
+        {
+            out.push(r.to_string());
+        }
+    }
+    out
 }
 
 /// Measure what the commit `merge_sha` changed, in the repo at `cwd`. `None`
@@ -259,9 +319,9 @@ mod tests {
         let commits = parse_git_log(&stdout);
         assert_eq!(commits.len(), 2);
         let outcome = outcome_from_commits(&commits, 123);
-        assert!(outcome.merged);
+        assert_eq!(outcome.merged, Some(true));
         assert_eq!(outcome.merged_at.as_deref(), Some("2026-01-02T00:00:00Z"));
-        assert!(outcome.reverted);
+        assert_eq!(outcome.reverted, Some(true));
         // The evidence for `merged` rides with it, verbatim.
         assert_eq!(outcome.merge_sha.as_deref(), Some("aaaa"));
         assert_eq!(outcome.merge_subject.as_deref(), Some("fix: thing (#123)"));
@@ -275,7 +335,7 @@ mod tests {
         // convention says), but the server now sees exactly what it read.
         let commits = vec![commit("beef", "t", "fix: bug reported in #123", "")];
         let outcome = outcome_from_commits(&commits, 123);
-        assert!(outcome.merged);
+        assert_eq!(outcome.merged, Some(true));
         assert_eq!(
             outcome.merge_subject.as_deref(),
             Some("fix: bug reported in #123")
@@ -290,14 +350,14 @@ mod tests {
     }
 
     #[test]
-    fn no_merge_is_unmerged() {
+    fn no_merge_is_unknown() {
         let commits = vec![commit("a", "t", "wip", "")];
         assert_eq!(
             outcome_from_commits(&commits, 99),
             PrOutcome {
-                merged: false,
+                merged: None,
                 merged_at: None,
-                reverted: false,
+                reverted: None,
                 merge_sha: None,
                 merge_subject: None,
                 merge_method: None,
@@ -380,7 +440,7 @@ mod tests {
         ]);
 
         let merged = check_pull_request_outcome(&path, 42).expect("a repo git can read");
-        assert!(merged.merged);
+        assert_eq!(merged.merged, Some(true));
         let change = merged.change.expect("the merge commit is right here");
         // a.txt (+2) and the binary file: the binary row counts as a changed
         // file and adds no lines, rather than being dropped or read as zero.
@@ -409,7 +469,7 @@ mod tests {
         // A PR this repo never saw: the other fields still ship, the change
         // primitives are absent rather than zero.
         let absent = check_pull_request_outcome(&path, 9999).expect("still a readable repo");
-        assert!(!absent.merged);
+        assert_eq!(absent.merged, None);
         assert_eq!(absent.change, None);
         // …and neither is a sha that is not in the repo at all.
         assert_eq!(
@@ -421,6 +481,92 @@ mod tests {
             measure_pr_change("/nonexistent-modelstat-prchange", "HEAD"),
             None
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End-to-end over a real repo: the merge commit may be reachable from a
+    /// local ref even when the current checkout is on a branch that does not
+    /// contain it. A HEAD-only bounded log incorrectly reports that as unknown.
+    #[test]
+    #[cfg(unix)]
+    fn check_pull_request_outcome_reads_merge_from_non_head_ref() {
+        use std::process::{Command, Stdio};
+
+        let dir = std::env::temp_dir().join(format!("modelstat-prrefs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_str().unwrap().to_string();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        // Skip cleanly if git isn't available on this runner.
+        if !git(&["init", "-q"]) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let commit = |message: &str| {
+            git(&[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ])
+        };
+        let write = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+
+        write("base.txt", "base\n");
+        assert!(git(&["add", "-A"]));
+        assert!(commit("init"));
+        assert!(git(&["branch", "-M", "main"]));
+
+        assert!(git(&["checkout", "-q", "-b", "feature"]));
+        write("feature.txt", "landed\n");
+        assert!(git(&["add", "-A"]));
+        assert!(commit("feature work"));
+
+        assert!(git(&["checkout", "-q", "main"]));
+        assert!(git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge pull request #77 from acme/feature",
+            "feature",
+        ]));
+
+        assert!(git(&["checkout", "-q", "-b", "unrelated", "HEAD^1"]));
+        write("unrelated.txt", "current branch\n");
+        assert!(git(&["add", "-A"]));
+        assert!(commit("unrelated work"));
+
+        let outcome = check_pull_request_outcome(&path, 77).expect("a repo git can read");
+        assert_eq!(outcome.merged, Some(true));
+        assert_eq!(
+            outcome.merge_subject.as_deref(),
+            Some("Merge pull request #77 from acme/feature")
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

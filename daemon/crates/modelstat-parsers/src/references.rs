@@ -70,11 +70,11 @@ pub struct RepoRef {
 }
 
 /// A pull/merge request the session referenced. The `merged*`/`reverted` fields
-/// are the on-device verified-outcome signals filled by the pass's local
-/// git-check (`checkPullRequestOutcome`); they are `.optional()` in the TS schema,
-/// so they are OMITTED (not `null`) until enrichment sets them. `merged_at` is
-/// additionally nullable — an enriched-but-unmerged PR serializes it as `null` —
-/// hence the nested `Option<Option<…>>`.
+/// are verified-outcome signals. The local git-check only sets them when it
+/// finds a merge; a miss stays omitted because local git cannot enumerate open
+/// PRs. A future forge-backed source may set `merged: false`. `merged_at` is
+/// additionally nullable for a known outcome without a date, hence the nested
+/// `Option<Option<…>>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequestRef {
     #[serde(default)]
@@ -924,18 +924,19 @@ mod tests {
             lines_deleted: None,
             commits_count: None,
         };
-        // Unenriched: the three keys are omitted entirely.
+        // Unknown: the three keys are omitted entirely.
         let bare = serde_json::to_value(&pr).unwrap();
         assert!(bare.get("merged").is_none());
         assert!(bare.get("merged_at").is_none());
-        // Enriched-but-unmerged: keys present, merged_at is explicit null.
+        // A forge-backed known-open reading can still carry `false`; local git
+        // never writes this, because it cannot enumerate open PRs.
         pr.merged = Some(false);
         pr.merged_at = Some(None);
         pr.reverted = Some(false);
-        let enriched = serde_json::to_value(&pr).unwrap();
-        assert_eq!(enriched["merged"], serde_json::json!(false));
-        assert_eq!(enriched["merged_at"], serde_json::Value::Null);
-        assert!(enriched.get("merged_at").is_some());
+        let known_open = serde_json::to_value(&pr).unwrap();
+        assert_eq!(known_open["merged"], serde_json::json!(false));
+        assert_eq!(known_open["merged_at"], serde_json::Value::Null);
+        assert!(known_open.get("merged_at").is_some());
     }
 
     #[test]

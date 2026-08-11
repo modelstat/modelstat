@@ -295,9 +295,12 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
                     .and_then(|s| get_slug_cwd(&slug_to_cwd, &s.to_lowercase()));
                 let Some(cwd) = cwd else { continue };
                 if let Some(o) = g.check_pr_outcome(&cwd, pr.number) {
-                    pr.merged = Some(o.merged);
+                    if o.merged.is_none() {
+                        continue;
+                    }
+                    pr.merged = o.merged;
                     pr.merged_at = Some(o.merged_at);
-                    pr.reverted = Some(o.reverted);
+                    pr.reverted = o.reverted;
                     // The commit the `merged` reading rests on, so the server can
                     // check the convention rather than take it on faith.
                     pr.merge_sha = o.merge_sha;
@@ -511,9 +514,9 @@ mod tests {
         fake.outcomes.insert(
             ("/home/dev/api".into(), 42),
             PrOutcome {
-                merged: true,
+                merged: Some(true),
                 merged_at: Some("2026-07-16T11:00:00Z".into()),
-                reverted: false,
+                reverted: Some(false),
                 merge_sha: Some("c0ffee1".into()),
                 merge_subject: Some("feat: retries (#42)".into()),
                 merge_method: Some("subject_ref_convention"),

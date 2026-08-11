@@ -92,7 +92,7 @@ test("outcomeFromCommits: merged then reverted", () => {
   assert.equal(outcomeFromCommits(commits, 42).reverted, true);
 });
 
-test("outcomeFromCommits: no merge = not merged", () => {
+test("outcomeFromCommits: no merge = unknown", () => {
   const commits = parseGitLog(gitLog([["c", "2026-06-01T10:00:00Z", "wip", ""]]));
-  assert.deepEqual(outcomeFromCommits(commits, 42), { merged: false, merged_at: null, reverted: false });
+  assert.deepEqual(outcomeFromCommits(commits, 42), { merged: null, merged_at: null, reverted: null });
 });

@@ -61,9 +61,9 @@ export const PullRequestRef = z.object({
   source: RefSource.default("content"),
   confidence: z.number().min(0).max(1).default(0.9),
   // On-device verified-outcome signals — filled by the parsers' local git-check
-  // (`checkPullRequestOutcome`) when the PR's repo is on disk. `null` = unknown;
-  // the server's CPVO engine classifies verified/failed from these. Mirrors
-  // core's `PullRequestRef` field-for-field.
+  // (`checkPullRequestOutcome`) when the PR's repo is on disk and a matching
+  // merge commit is found. Absent/null = unknown; local git misses are never
+  // `merged: false`. Mirrors core's `PullRequestRef` field-for-field.
   merged: z.boolean().nullable().optional(),
   merged_at: z.string().max(40).nullable().optional(),
   reverted: z.boolean().nullable().optional(),

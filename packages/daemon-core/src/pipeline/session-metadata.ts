@@ -91,11 +91,12 @@ export interface SessionMetadataOptions {
   extractLinks?: LinkExtractor;
   /** Local git verified-outcome check for a PR in `cwd` (parsers'
    * `checkPullRequestOutcome`) — fills a referenced PR's merged/merged_at/
-   * reverted signals for the server's CPVO engine. Best-effort. */
+   * reverted signals for the server's CPVO engine when local git found a merge.
+   * Best-effort; a miss is unknown, not `merged: false`. */
   checkPrOutcome?: (
     cwd: string,
     prNumber: number,
-  ) => Promise<{ merged: boolean; merged_at: string | null; reverted: boolean } | null>;
+  ) => Promise<{ merged: boolean | null; merged_at: string | null; reverted: boolean | null } | null>;
   /** Aggregate the files a repo changed in [`since`, `until`] (parsers'
    * `collectFilesChanged`) — the per-file token re-spend signal. Best-effort. */
   collectFilesChanged?: (
@@ -265,10 +266,10 @@ export async function buildSessionMetadata(
           if (!cwd) continue;
           try {
             const o = await opts.checkPrOutcome(cwd, pr.number);
-            if (o) {
+            if (o?.merged != null) {
               pr.merged = o.merged;
               pr.merged_at = o.merged_at;
-              pr.reverted = o.reverted;
+              if (o.reverted != null) pr.reverted = o.reverted;
             }
           } catch {
             // best-effort — a failed git-check just leaves the PR unenriched.

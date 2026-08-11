@@ -18,12 +18,12 @@ const pexec = promisify(execFile);
 
 /** What the local git history says about one PR's fate. */
 export interface PrOutcome {
-  /** A merge commit for the PR was found in history. */
-  merged: boolean;
+  /** A merge commit for the PR was found in the bounded local history, or unknown. */
+  merged: boolean | null;
   /** ISO-8601 committer date of that merge commit, or null. */
   merged_at: string | null;
-  /** A later commit reverts the merge (`This reverts commit <sha>`). */
-  reverted: boolean;
+  /** A later commit reverts the merge (`This reverts commit <sha>`), or unknown. */
+  reverted: boolean | null;
 }
 
 /** One parsed commit. */
@@ -77,7 +77,7 @@ export function isReverted(commits: GitCommit[], mergeSha: string): boolean {
  * core of {@link checkPullRequestOutcome}. */
 export function outcomeFromCommits(commits: GitCommit[], prNumber: number): PrOutcome {
   const merge = findMergeCommitForPr(commits, prNumber);
-  if (!merge) return { merged: false, merged_at: null, reverted: false };
+  if (!merge) return { merged: null, merged_at: null, reverted: null };
   return {
     merged: true,
     merged_at: merge.committedAt || null,
@@ -87,15 +87,15 @@ export function outcomeFromCommits(commits: GitCommit[], prNumber: number): PrOu
 
 /**
  * Run `git log` in `cwd` and determine the PR's outcome. Best-effort: returns
- * null when `cwd` isn't a git repo or git fails (so the caller leaves the PR's
- * lifecycle fields unknown). Bounded to recent history + a short timeout.
+ * null when `cwd` isn't a git repo or git fails. Bounded to newest commits
+ * reachable from any local ref.
  */
 export async function checkPullRequestOutcome(
   cwd: string,
   prNumber: number,
 ): Promise<PrOutcome | null> {
   try {
-    const { stdout } = await pexec("git", ["log", "-n", "1000", `--format=${GIT_LOG_FORMAT}`], {
+    const { stdout } = await pexec("git", ["log", "--max-count=1000", "--all", `--format=${GIT_LOG_FORMAT}`], {
       cwd,
       timeout: 4_000,
       maxBuffer: 16 * 1024 * 1024,
