@@ -224,22 +224,16 @@ impl ScanObserver for StatusObserver<'_> {
 
     fn on_file(&mut self, path: &str, index: usize, total: usize) {
         let _ = path;
-        // How much is LEFT, including the one starting now — the number that
-        // answers "how long until this is done". A file's NAME is noise: it is a
-        // uuid the reader cannot act on, and it made the line too long to read.
-        let left = total.saturating_sub(index);
+        // A file's NAME is noise: it is a uuid the reader cannot act on, and it
+        // made the line too long to read. How much is LEFT is the number that
+        // answers "how long until this is done".
         self.with(|s| {
             s.set_progress(index as u64 + 1, total as u64);
             // The PHASE too, not just the message: the previous file left it on
             // `Uploading`, and a bare message change renders as the contradictory
             // "uploading — 12 sessions left".
-            s.set_phase(
-                Phase::Scanning,
-                match left {
-                    0 | 1 => "last session file".to_string(),
-                    n => format!("{n} session files left"),
-                },
-            );
+            let line = progress_message(s);
+            s.set_phase(Phase::Scanning, line);
             // Restarts the elapsed clock the tray ticks each second, so a file
             // that takes a while visibly shows work happening rather than a
             // frozen line.
@@ -259,7 +253,7 @@ impl ScanObserver for StatusObserver<'_> {
             // watcher is currently looking at. Files land once the pass ends, so
             // the two callers stay disjoint.
             s.bump_run(0, 0, events as u64, segments as u64);
-            let line = shipped_line(s, 0);
+            let line = progress_message(s);
             s.set_phase(Phase::Processing, line);
         });
     }
@@ -292,7 +286,7 @@ impl crate::uploader::UploadObserver for UploadStatusObserver {
         self.with(|s| {
             s.start_upload_set(batches, batches);
             s.set_queue(batches);
-            let line = shipped_line(s, 0);
+            let line = progress_message(s);
             s.set_phase(Phase::Uploading, line);
         });
     }
@@ -308,7 +302,7 @@ impl crate::uploader::UploadObserver for UploadStatusObserver {
             // Refresh the line so the "N events sent" counter visibly climbs while
             // a backlog drains, instead of freezing until the pass ends.
             if s.phase == Phase::Uploading {
-                let line = shipped_line(s, 0);
+                let line = progress_message(s);
                 s.set_message(line);
             }
         });
@@ -333,7 +327,7 @@ impl crate::uploader::UploadObserver for UploadStatusObserver {
             // same time now, and a finished upload must not overwrite "scanning —
             // 12 session files left" with "idle" while the scan is still going.
             if s.phase == Phase::Uploading {
-                let line = shipped_line(s, 0);
+                let line = progress_message(s);
                 if rejected > 0 {
                     // Never "idle" while the server is refusing work: that is the
                     // lie that hid this failure.
@@ -373,25 +367,28 @@ impl crate::uploader::UploadObserver for UploadStatusObserver {
     }
 }
 
-/// The scan's live progress line: how many events this run has SHIPPED, and which
-/// file it is on. Cumulative on purpose — a line built from the batch in flight
-/// reads as frozen, because every full batch is exactly `BATCH_MAX_EVENTS`
-/// ("Uploading 1000 events", batch after batch, forever). `in_flight` is the batch
-/// about to POST, counted in so the number moves the instant one starts.
+/// The ONE progress sentence every phase carries: how many session files are
+/// still to get through, counting the one being read right now.
 ///
-/// Events in every mode, never segments: a batch always carries events (cloud
-/// ships raw events and 0 segments; local / self-hosted ship both), so this can
-/// never read a misleading "0 segments".
-fn shipped_line(s: &Status, in_flight: u64) -> String {
-    // Position only — the events figure lives in ONE place (the totals row /
-    // `stats.events_uploaded`). This line used to carry it too, and after any
-    // restart the pass counter, the lifetime counter and this message all
-    // rendered the same number three times with one word.
-    let _ = in_flight;
-    if s.progress_total > 0 {
-        format!("shipping · file {}/{}", s.progress_done, s.progress_total)
-    } else {
-        "shipping batches".to_string()
+/// One number, one meaning, whichever loop wrote it. The scan said "N session
+/// files left" while the uploader said "file 3/71" and the tray said "168 new,
+/// 2089 skipped" — three renderings of one fact, which a reader has to
+/// reconcile before learning anything. The uploader's fraction was the worst of
+/// them: the same number as the scan's with the subtraction left undone.
+///
+/// No event or segment figure here. That total lives in exactly one place
+/// (`stats.events_uploaded`); a message that carried it too rendered the same
+/// count three times over with one word of difference.
+fn progress_message(s: &Status) -> String {
+    if s.progress_total == 0 {
+        return "shipping batches".to_string();
+    }
+    // `progress_done` counts files VISITED, the one in progress included — so the
+    // file on the wire is still work outstanding, and the count only reaches
+    // "last" on the final file.
+    match s.progress_total.saturating_sub(s.progress_done) + 1 {
+        0 | 1 => "last session file".to_string(),
+        n => format!("{} session files left", thousands(n)),
     }
 }
 
@@ -747,10 +744,13 @@ pub async fn scan_session(daemon: Arc<Daemon>, session_ids: Vec<String>, file: O
 
     daemon.with_status(|s| {
         s.set_phase(Phase::Watching, "Waiting for new events");
+        // Whether it found work, not how much: a segment count here is a fifth
+        // kind of number on a surface that shows four, and the one total anyone
+        // reads (`stats.events_uploaded`) already moves when this lands.
         s.set_message(if t.segments_spooled > 0 {
-            format!("Eager scan: {} segments queued to send", t.segments_spooled)
+            "Eager scan: queued to send"
         } else {
-            "Eager scan: nothing new".to_string()
+            "Eager scan: nothing new"
         });
         // The periodic sweep has always ended this way; the eager one never did,
         // so it left `busy_since_ms` pointing at its last file and readers went on
@@ -1031,44 +1031,58 @@ mod tests {
         assert_eq!(msg(), "570 session files left", "counts down, never up");
         obs.on_file("/x/3.jsonl", 651, 652);
         assert_eq!(msg(), "last session file", "no '1 session files left'");
+
+        // A backlog is four and five digits deep, and this is read at a glance.
+        obs.on_file("/x/4.jsonl", 0, 12_400);
+        assert_eq!(msg(), "12,400 session files left");
     }
 
     #[test]
-    fn the_upload_line_climbs_across_batches_instead_of_repeating_the_batch_size() {
-        // The bug this replaces: every full batch is exactly BATCH_MAX_EVENTS, so a
-        // message built from the in-flight size was byte-identical forever —
-        // "Uploading 1000 events" while 11 batches had already landed.
+    fn the_uploader_repeats_the_scans_number_instead_of_inventing_a_second_one() {
+        // Both loops write the same field, so both must render the same fact. The
+        // uploader used to answer with a position fraction ("file 3/71") while the
+        // scan answered with what is left ("69 session files left") — one quantity,
+        // two spellings, and the reader does the subtraction to find that out.
         use crate::uploader::UploadObserver;
         let status = Arc::new(StdMutex::new(Status::default()));
         {
             let mut scan_obs = StatusObserver { status: &status };
             scan_obs.on_file("/a/b/c.jsonl", 2, 71);
         }
+        let scan_line = status.lock().unwrap().message.clone();
+        assert_eq!(scan_line.as_deref(), Some("69 session files left"));
+
         let mut obs = UploadStatusObserver::new(
             status.clone(),
             Arc::new(TokioMutex::new(RuntimeState::default())),
         );
-
-        obs.on_pass_start(2);
+        obs.on_pass_start(3);
         obs.on_uploaded(1000, 0);
-        assert_eq!(
-            status.lock().unwrap().message.as_deref(),
-            Some("shipping · file 3/71")
-        );
-        obs.on_uploaded(1000, 0); // same batch size, DIFFERENT line
-        assert_eq!(
-            status.lock().unwrap().message.as_deref(),
-            Some("shipping · file 3/71")
-        );
+        {
+            let s = status.lock().unwrap();
+            assert_eq!(
+                s.message, scan_line,
+                "an upload mid-sweep says what the sweep says"
+            );
+            assert!(
+                s.uploading.is_some(),
+                "the clock the reader watches is the upload set's, not the message's"
+            );
+        }
+        // The elapsed clock on `uploading.since_ms` is what proves a long upload is
+        // moving; the message is not asked to animate, so a second landed batch
+        // leaves it alone rather than churning a number nobody is reading.
+        obs.on_uploaded(1000, 0);
+        assert_eq!(status.lock().unwrap().message, scan_line);
     }
 
     #[test]
-    fn the_upload_line_owns_position_and_the_stats_own_the_count() {
+    fn the_message_owns_work_left_and_the_stats_own_the_count() {
         // The message used to carry the events figure too — and after any
         // restart the pass counter, the lifetime counter and this message all
         // rendered the same number under one word ("events"), which read as
         // duplicate rows in the tray. One owner per fact now: the message says
-        // WHERE the upload is, `stats.events_uploaded` says HOW MUCH shipped.
+        // how much work is LEFT, `stats.events_uploaded` says how much shipped.
         use crate::uploader::UploadObserver;
         let (status, mut obs) = upload_observer();
 
