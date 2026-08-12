@@ -70,6 +70,19 @@ fn request_timeout() -> Duration {
         .unwrap_or(DEFAULT_REQUEST_TIMEOUT)
 }
 
+/// Why one classify request failed — the split that decides whether asking
+/// again with less can help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkError {
+    /// The endpoint itself failed (unreachable after retries, busy beyond
+    /// patience, bad credentials, protocol skew): no re-slicing of the texts
+    /// changes that, so the whole call holds.
+    Endpoint,
+    /// The server received this request and refused it — the one failure
+    /// where the CONTENT is implicated, so a smaller batch may still pass.
+    Refused,
+}
+
 pub struct RemoteRedactor {
     /// Endpoint BASE (`https://modelstat.ai`, or the org's box). Paths are
     /// appended here, so cloud and self-hosted are one code path.
@@ -141,9 +154,14 @@ impl RemoteRedactor {
         }
     }
 
-    /// POST one chunk, with retry on busy/unavailable/transport. `None` is
-    /// "hold": the caller's flush machinery owns what happens next.
-    async fn classify_chunk(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
+    /// POST one chunk, with retry on busy/unavailable/transport. A failure
+    /// names which side of it failed, because the two demand opposite moves:
+    /// [`ChunkError::Endpoint`] (unreachable, unauthorized, busy beyond
+    /// patience, protocol skew) — asking again with different texts learns
+    /// nothing, stop; [`ChunkError::Refused`] (any other non-2xx: the server
+    /// looked at THIS request and said no) — the content is implicated, so the
+    /// caller bisects rather than letting one poison text hold the rest.
+    async fn classify_chunk(&self, texts: &[String]) -> Result<Vec<Vec<PiiToken>>, ChunkError> {
         let body = ClassifyRequest {
             protocol: REDACT_PROTOCOL,
             texts: texts.to_vec(),
@@ -172,7 +190,7 @@ impl RemoteRedactor {
                         Ok(p) => p,
                         Err(e) => {
                             modelstat_log::log_warn!("remote redactor sent unreadable JSON: {e}");
-                            return None;
+                            return Err(ChunkError::Endpoint);
                         }
                     };
                     if parsed.protocol != REDACT_PROTOCOL {
@@ -181,7 +199,7 @@ impl RemoteRedactor {
                              holding; update the endpoint or the daemon",
                             parsed.protocol
                         );
-                        return None;
+                        return Err(ChunkError::Endpoint);
                     }
                     if parsed.results.len() != texts.len() {
                         modelstat_log::log_warn!(
@@ -189,15 +207,13 @@ impl RemoteRedactor {
                             parsed.results.len(),
                             texts.len()
                         );
-                        return None;
+                        return Err(ChunkError::Endpoint);
                     }
-                    return Some(
-                        parsed
-                            .results
-                            .into_iter()
-                            .map(|toks| toks.into_iter().map(Into::into).collect())
-                            .collect(),
-                    );
+                    return Ok(parsed
+                        .results
+                        .into_iter()
+                        .map(|toks| toks.into_iter().map(Into::into).collect())
+                        .collect());
                 }
                 // Busy / not ready: the server said when to come back.
                 429 | 503 => {
@@ -211,20 +227,70 @@ impl RemoteRedactor {
                         tokio::time::sleep(wait).await;
                     }
                 }
-                // Anything else (401, 400, 5xx) is not solved by retrying here.
+                // Credentials are chunk-independent: a request the server won't
+                // let in won't let a half of it in either.
+                401 | 403 => {
+                    modelstat_log::log_warn!(
+                        "remote redactor rejected the device credentials (HTTP {status}) — holding"
+                    );
+                    return Err(ChunkError::Endpoint);
+                }
+                // Anything else (400, 413, 5xx): the server saw THIS request
+                // and refused it — retrying it whole is not the move, but its
+                // halves may still be answerable.
                 other => {
                     modelstat_log::log_warn!(
-                        "remote redactor refused a chunk of {} texts: HTTP {other} — holding",
+                        "remote redactor refused a chunk of {} texts: HTTP {other}",
                         texts.len()
                     );
-                    return None;
+                    return Err(ChunkError::Refused);
                 }
             }
         }
         modelstat_log::log_warn!(
             "remote redactor did not answer after {ATTEMPTS} attempts — holding this flush"
         );
-        None
+        Err(ChunkError::Endpoint)
+    }
+
+    /// Classify one wire-sized chunk, isolating failures per text: an answered
+    /// chunk fills its texts' slots; a refused chunk is halved and each half
+    /// retried (as its own smaller batch) until the unanswerable text stands
+    /// alone, so it fails exactly as a single-text request always has — its
+    /// slot `None`, its 63 batch-mates answered. `Err` means the ENDPOINT
+    /// failed: this chunk's remaining slots are filled with `None` and the
+    /// caller should stop asking.
+    fn bisect<'a>(
+        &'a self,
+        texts: &'a [String],
+        out: &'a mut Vec<Option<Vec<PiiToken>>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ()>> + Send + 'a>> {
+        Box::pin(async move {
+            match self.classify_chunk(texts).await {
+                Ok(answers) => {
+                    out.extend(answers.into_iter().map(Some));
+                    Ok(())
+                }
+                Err(ChunkError::Endpoint) => {
+                    out.extend(texts.iter().map(|_| None));
+                    Err(())
+                }
+                Err(ChunkError::Refused) if texts.len() == 1 => {
+                    modelstat_log::log_warn!(
+                        "remote redactor cannot classify one text of {} bytes — \
+                         holding it (isolated; the rest of its batch is unaffected)",
+                        texts[0].len()
+                    );
+                    out.push(None);
+                    Ok(())
+                }
+                Err(ChunkError::Refused) => {
+                    let mid = texts.len() / 2;
+                    self.bisect(&texts[..mid], out).await?;
+                    self.bisect(&texts[mid..], out).await
+                }
+            }
+        })
     }
 
     /// Split `texts` into wire-sized chunks: at most [`MAX_TEXTS_PER_REQUEST`]
@@ -257,21 +323,33 @@ impl PiiModel for RemoteRedactor {
             .map(|mut v| v.remove(0))
     }
 
-    fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
+    fn classify_each(&self, texts: &[String]) -> Vec<Option<Vec<PiiToken>>> {
         if texts.is_empty() {
-            return Some(Vec::new());
+            return Vec::new();
         }
         debug_assert!(
             texts.iter().all(|t| t.len() < MAX_REQUEST_BYTES / 2),
             "a text exceeding the wire cap cannot be classified remotely"
         );
         self.block_on(async {
-            let mut out = Vec::with_capacity(texts.len());
+            let mut out: Vec<Option<Vec<PiiToken>>> = Vec::with_capacity(texts.len());
+            let mut endpoint_down = false;
             for chunk in Self::chunks(texts) {
-                out.extend(self.classify_chunk(chunk).await?);
+                let filled_before = out.len();
+                if endpoint_down || self.bisect(chunk, &mut out).await.is_err() {
+                    // A dead endpoint answers nothing else this call — every
+                    // slot the bisection never reached reads "unanswered".
+                    endpoint_down = true;
+                    out.resize(filled_before + chunk.len(), None);
+                }
             }
-            Some(out)
+            debug_assert_eq!(out.len(), texts.len(), "one slot per text, always");
+            out
         })
+    }
+
+    fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
+        self.classify_each(texts).into_iter().collect()
     }
 }
 
@@ -351,6 +429,23 @@ mod tests {
 
     fn ok_body(results: &str) -> String {
         format!(r#"{{"protocol":1,"model":"privacy-filter@abc123def456","results":{results}}}"#)
+    }
+
+    /// `results` for `n` texts none of which carried any entity.
+    fn empties(n: usize) -> String {
+        format!("[{}]", vec!["[]"; n].join(","))
+    }
+
+    /// The `texts` a recorded request carried.
+    fn texts_sent(req: &str) -> Vec<String> {
+        let body = &req[req.find("\r\n\r\n").unwrap() + 4..];
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        v["texts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap().to_string())
+            .collect()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -443,6 +538,116 @@ mod tests {
         let r = RemoteRedactor::new(&m.addr, Some("ds_live_stale".into()));
         assert_eq!(r.classify_many(&["x".into()]), None);
         assert_eq!(m.seen.lock().unwrap().len(), 1, "401 is not retried");
+    }
+
+    /// The reason batching exists: a flush of many texts must ride FEW requests
+    /// — at most [`MAX_TEXTS_PER_REQUEST`] texts each — and every answer must
+    /// land back on its own text, across the chunk boundary included.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn many_texts_ride_few_requests_and_answers_keep_their_order() {
+        // Distinguishable answers at the chunk seam: the 64th text (last of
+        // request 1) and the 65th (first of request 2).
+        let last_of_first = r#"[{"entity":"S-secret","word":"m63"}]"#;
+        let first_of_second = r#"[{"entity":"S-secret","word":"m64"}]"#;
+        let m = mock(vec![
+            (
+                200,
+                "",
+                ok_body(&format!("[{},{last_of_first}]", vec!["[]"; 63].join(","))),
+            ),
+            (
+                200,
+                "",
+                ok_body(&format!("[{first_of_second},{}]", vec!["[]"; 5].join(","))),
+            ),
+        ]);
+        let r = RemoteRedactor::new(&m.addr, None);
+        let texts: Vec<String> = (0..70).map(|i| format!("t{i}")).collect();
+        let out = r.classify_many(&texts).expect("healthy server answers");
+        assert_eq!(out.len(), 70, "one answer per text");
+        assert_eq!(out[63][0].word, "m63");
+        assert_eq!(out[64][0].word, "m64");
+        assert!(out[0].is_empty() && out[69].is_empty());
+        let seen = m.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "70 texts are 2 requests, not 70");
+        assert_eq!(texts_sent(&seen[0]).len(), MAX_TEXTS_PER_REQUEST);
+        assert_eq!(texts_sent(&seen[1]).len(), 6);
+        assert_eq!(texts_sent(&seen[0])[63], "t63");
+        assert_eq!(texts_sent(&seen[1])[0], "t64");
+    }
+
+    /// One unclassifiable text must not hold its batch-mates hostage: a refused
+    /// batch is halved until the poison stands alone, the clean texts get their
+    /// answers, and the poison fails exactly as a single-text request does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bisection_isolates_a_poison_text_and_answers_the_rest() {
+        let refused = || (400, "", r#"{"error":"too_large"}"#.to_string());
+        let m = mock(vec![
+            refused(),                       // [t0 t1 t2 t3] — the whole batch
+            refused(),                       // [t0 t1] — poison's half
+            (200, "", ok_body("[[]]")),      // [t0]
+            refused(),                       // [t1] — the poison, isolated
+            (200, "", ok_body(&empties(2))), // [t2 t3] — clean half, one request
+        ]);
+        let r = RemoteRedactor::new(&m.addr, None);
+        let texts: Vec<String> = (0..4).map(|i| format!("t{i}")).collect();
+        let each = r.classify_each(&texts);
+        assert_eq!(
+            each,
+            vec![Some(vec![]), None, Some(vec![]), Some(vec![])],
+            "63 hostages freed, one poison held"
+        );
+        // The all-or-nothing flush view still holds (no degrade, no egress).
+        assert_eq!(each.into_iter().collect::<Option<Vec<_>>>(), None);
+        let seen = m.seen.lock().unwrap();
+        let sequence: Vec<Vec<String>> = seen.iter().map(|s| texts_sent(s)).collect();
+        assert_eq!(
+            sequence,
+            vec![
+                vec!["t0".to_string(), "t1".into(), "t2".into(), "t3".into()],
+                vec!["t0".to_string(), "t1".into()],
+                vec!["t0".to_string()],
+                vec!["t1".to_string()],
+                vec!["t2".to_string(), "t3".into()],
+            ],
+            "halve, isolate, ship the clean halves — nothing lost, nothing reordered"
+        );
+    }
+
+    /// Auth is not a property of the texts: a 401 must fail the call in ONE
+    /// request, never spend a bisection tree re-asking with the same dead key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bad_credentials_hold_everything_without_bisecting() {
+        let m = mock(vec![(401, "", r#"{"error":"unauthorized"}"#.into())]);
+        let r = RemoteRedactor::new(&m.addr, Some("ds_live_stale".into()));
+        let each = r.classify_each(&["a".into(), "b".into()]);
+        assert_eq!(each, vec![None, None]);
+        assert_eq!(m.seen.lock().unwrap().len(), 1, "401 is never bisected");
+    }
+
+    /// An endpoint that dies mid-call: the chunks already answered keep their
+    /// answers (the span cache upstream will remember them), the rest hold.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_endpoint_failure_mid_call_keeps_the_answers_already_won() {
+        let unavailable = || {
+            (
+                503,
+                "Retry-After: 0\r\n",
+                r#"{"error":"redactor_unavailable"}"#.to_string(),
+            )
+        };
+        let m = mock(vec![
+            (200, "", ok_body(&empties(64))),
+            unavailable(),
+            unavailable(),
+            unavailable(),
+        ]);
+        let r = RemoteRedactor::new(&m.addr, None);
+        let texts: Vec<String> = (0..70).map(|i| format!("t{i}")).collect();
+        let each = r.classify_each(&texts);
+        assert_eq!(each.len(), 70);
+        assert!(each[..64].iter().all(Option::is_some));
+        assert!(each[64..].iter().all(Option::is_none));
     }
 
     #[test]
