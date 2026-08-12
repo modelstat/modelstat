@@ -61,8 +61,18 @@ pub enum RedactionPolicy {
 /// `with_*` setters.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The integration's own name — which app/service this SDK instance
+    /// instruments (e.g. `checkout-api`, `modelstat-pipeline`). This is the
+    /// name your usage appears under in the dashboard: the server registers a
+    /// real device per (org, app) and a real provider account per (provider,
+    /// app) from it, so SDK traffic is attributed at ingest like any other —
+    /// no shared placeholder entities. Defaults to the running binary's name;
+    /// set it explicitly when several services share one binary name.
+    pub app: String,
     /// Stable device/service identifier (`dev_…`). Should be stable per host so
-    /// dedupe keys are stable across restarts.
+    /// dedupe keys are stable across restarts. Leave the default: the server
+    /// derives the real device identity from (org, [`Config::app`]); this field
+    /// only matters for advanced setups that pre-registered their own device.
     pub device_id: String,
     /// The **agent** label for every record — which AI tool/integration the
     /// user used (e.g. `raw_sdk_openai`, `raw_sdk_anthropic`, `raw_sdk_generic`;
@@ -105,6 +115,7 @@ impl Config {
     #[must_use]
     pub fn new(ingest_key: impl Into<String>, agent: impl Into<String>) -> Self {
         Self {
+            app: default_app_name(),
             device_id: "dev_sdk".into(),
             agent: agent.into(),
             client_version: concat!("rust-sdk/", env!("CARGO_PKG_VERSION")).into(),
@@ -119,6 +130,15 @@ impl Config {
             auto_taxonomy: false,
             metadata: BTreeMap::new(),
         }
+    }
+
+    /// Name the integration this SDK instance instruments — the app your usage
+    /// appears under in the dashboard (see [`Config::app`]). Returns `self`
+    /// for chaining.
+    #[must_use]
+    pub fn with_app(mut self, app: impl Into<String>) -> Self {
+        self.app = app.into();
+        self
     }
 
     /// Add a constant attribution tag applied to every call (overwriting any
@@ -154,4 +174,16 @@ impl Config {
     pub(crate) fn sends_full_turns(&self) -> bool {
         matches!(self.mode, Mode::Remote { raw: true, .. })
     }
+}
+
+/// The running binary's file name — the [`Config::app`] default. An app name
+/// is required for the server to register the integration's own real entities,
+/// and the binary name is the one always-available honest answer; `sdk-app`
+/// only when even that can't be read (unusual embedders).
+fn default_app_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "sdk-app".to_string())
 }

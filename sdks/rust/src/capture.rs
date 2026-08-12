@@ -327,9 +327,23 @@ pub(crate) fn build_batch(
     let mut events = Vec::new();
     let mut tool_calls = Vec::new();
     let mut source_ids = Vec::new();
+    // Each session named to its account — the app — under the provider its
+    // events actually used, so attribution happens AT INGEST, per app, like a
+    // daemon-observed login. A session's calls share one provider in practice;
+    // if they ever didn't, last-write-wins matches the map semantics.
+    let mut session_installs = std::collections::BTreeMap::new();
 
     for call in calls {
         *seq += 1;
+        if !call.provider.is_empty() {
+            session_installs.insert(
+                call.session_id.clone(),
+                wire::SessionInstall {
+                    provider_account_id: cfg.app.clone(),
+                    provider: call.provider.clone(),
+                },
+            );
+        }
         let (event, tcs) = event_from_call(cfg, &call, *seq);
         source_ids.push(event.source_event_id.clone());
         tool_calls.extend(tcs);
@@ -340,8 +354,10 @@ pub(crate) fn build_batch(
         batch_id: wire::batch_id(&source_ids),
         device_id: cfg.device_id.clone(),
         daemon_version: cfg.client_version.clone(),
+        app: Some(cfg.app.clone()),
         events,
         tool_calls,
+        session_installs,
         // Always send an explicit value reflecting the config so backend usage
         // is off-by-default but users can opt in.
         auto_taxonomy: Some(cfg.auto_taxonomy),
@@ -390,14 +406,17 @@ mod tests {
         let mut seq = 0;
         let quiet = LlmCall::new("openai", "sess_1");
         let started = quiet.started_at;
-        let streamed = LlmCall::new("openai", "sess_2")
-            .first_token_at(started + Duration::from_millis(140));
+        let streamed =
+            LlmCall::new("openai", "sess_2").first_token_at(started + Duration::from_millis(140));
 
         let batch = build_batch(&cfg(), [quiet, streamed], &mut seq);
         let (a, b) = (&batch.events[0], &batch.events[1]);
 
         assert_eq!(a.started_at, Some(started));
-        assert_eq!(a.ts, started, "ts is unchanged — the new field sits beside it");
+        assert_eq!(
+            a.ts, started,
+            "ts is unchanged — the new field sits beside it"
+        );
         assert_eq!(a.first_token_at, None, "no stream, no first chunk to time");
         assert_eq!(
             b.first_token_at,
