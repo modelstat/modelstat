@@ -222,8 +222,30 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       only a re-read regenerates the segments that were retired without a
 ///       replacement. Cross-parser, because the loss is in supersession rather
 ///       than in any one parser — claude_code and pi were worst hit.
+/// capture v26 — tool calls carry their end instants, paired from what the
+///       logs state. A `ToolCallWire`'s `ended_at` is how the server splits a
+///       turn into model thinking vs waiting on tools, and history uploaded by
+///       earlier builds carries it almost nowhere — so tool wait read as ~0
+///       everywhere. Each source states the end in its own place and the
+///       parsers now read all of them: Claude Code's `tool_result` line dates
+///       the call it answers (and an UNDATED result line no longer stamps
+///       `ended_at: ""`, which parses as the epoch); codex's
+///       `*_tool_call_output` records already dated their calls, and its
+///       `event_msg`/`mcp_tool_call_end` — until now an unmodelled kind that
+///       only warned — states a whole MCP call by itself (invocation, result,
+///       end instant, measured duration), so those calls exist at all now;
+///       pi's `toolResult` line already dated its call. Cursor's bubble store
+///       states tool status but no end instant, so cursor honestly emits none
+///       (missing means unknown; a fabricated end poisons the decomposition).
+///       Rides with it: codex's `thread_goal_updated` and `turn_aborted`
+///       become modelled events instead of warnings, and
+///       `inter_agent_communication_metadata` (one undocumented boolean) is
+///       consumed as a decision instead of ledgered noise. All of it is
+///       local-only fact: only a re-read fills the historical spans, and the
+///       deterministic `tc_` ids mean the server upserts the ends onto the
+///       calls it already has. Cross-parser, so the CAPTURE aspect carries it.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
-    ("capture", LEGACY_WORLD_VERSION + 2),
+    ("capture", LEGACY_WORLD_VERSION + 3),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION + 2),
     ("codex", LEGACY_WORLD_VERSION + 4),

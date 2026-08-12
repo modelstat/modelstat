@@ -200,6 +200,27 @@ fn iso_from_epoch_ms(ms: i64) -> Option<String> {
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
 }
 
+/// The reverse reading, for arithmetic on two facts one record states together
+/// (an end instant and a measured duration). `None` when the string does not
+/// parse, so the caller states less rather than inventing a position on the
+/// timeline.
+fn epoch_ms_from_iso(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+/// The `{secs, nanos}` object codex stamps as `duration` on
+/// `mcp_tool_call_end` (the serde encoding of a Rust `Duration`), read into
+/// milliseconds. `None` when either field is absent or non-numeric — a
+/// duration whose shape moved states nothing.
+fn mcp_duration_ms(v: Option<&Value>) -> Option<i64> {
+    let d = v?;
+    let secs = d.get("secs").and_then(Value::as_i64)?;
+    let nanos = d.get("nanos").and_then(Value::as_i64)?;
+    Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
+}
+
 /// What one `token_count` line's `payload` says about token usage.
 #[derive(Debug, PartialEq, Eq)]
 enum CodexUsage {
@@ -1195,6 +1216,276 @@ fn parse_inner(
                 }
                 continue;
             }
+            // Codex states an MCP call's lifecycle on `event_msg` records of
+            // its own: `mcp_tool_call_begin` names the invocation (server,
+            // tool, arguments) when the call starts, and `mcp_tool_call_end`
+            // restates it plus the measured `duration` and the result. In
+            // every observed rollout the END is the only record of the call —
+            // no begin twin on any line, no `response_item` sharing its
+            // `call_id` — so the end arm builds the whole draft from what it
+            // alone states; when something DID open the call under this id (a
+            // begin, should codex start persisting them), the end closes that
+            // draft instead of minting a second one.
+            if ptype == "mcp_tool_call_begin" || ptype == "mcp_tool_call_end" {
+                let p = payload.unwrap();
+                let call_id = first_string(&[p.get("call_id"), p.get("id")]);
+
+                if ptype == "mcp_tool_call_end" {
+                    if let Some(idx) = call_id.as_ref().and_then(|c| open_calls.get(c).copied()) {
+                        open_calls.remove(call_id.as_ref().unwrap());
+                        // The wrapper is serde's `Result`: `{"Ok": …}` / `{"Err": …}`.
+                        let result = p.get("result").unwrap_or(&Value::Null);
+                        let inner = result
+                            .get("Ok")
+                            .or_else(|| result.get("Err"))
+                            .unwrap_or(result);
+                        let is_err = result.get("Err").is_some();
+                        let draft = &mut tool_calls[idx];
+                        draft.ended_at = Some(ts.clone());
+                        draft.result_bytes = json_bytes(inner);
+                        if draft.status == "unknown" {
+                            draft.status = if is_err { "error" } else { "success" }.to_string();
+                        }
+                        continue;
+                    }
+                }
+
+                let sid = match session_id.clone() {
+                    Some(s) => s,
+                    None => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let inv = p.get("invocation");
+                let server = inv
+                    .and_then(|i| i.get("server"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let tool = inv
+                    .and_then(|i| i.get("tool"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                let (server, tool) = match (server, tool) {
+                    (Some(s), Some(t)) => (mcp_server_name(s), normalize_tool_name(t)),
+                    // A kind we DO model, arriving without the fields it is
+                    // defined by — ledgered under its own name, as everywhere.
+                    _ => {
+                        skipped += 1;
+                        skips.drop_record(&ctx.source_file, &format!("event_msg/{ptype}"));
+                        continue;
+                    }
+                };
+                let input = inv
+                    .and_then(|i| i.get("arguments"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let src_id = source_event_id(
+                    &ctx.device_id,
+                    &EventSource::File {
+                        file: &ctx.source_file,
+                        byte_offset: offset,
+                    },
+                );
+                let hashes = hash_args(&input);
+                let external_call_id = slice_utf16(
+                    &call_id
+                        .clone()
+                        .unwrap_or_else(|| tc_fallback_id(&src_id, 0)),
+                    120,
+                );
+                if let Some((command, ctx_cwd)) = extract_local_tool_context(&ToolActionInput {
+                    server: &server,
+                    name: &tool,
+                    input: &input,
+                    cwd: cwd.as_deref(),
+                }) {
+                    script_contexts.push(LocalToolContext {
+                        external_call_id: external_call_id.clone(),
+                        command,
+                        cwd: ctx_cwd,
+                    });
+                }
+                let action = extract_tool_action(&ToolActionInput {
+                    server: &server,
+                    name: &tool,
+                    input: &input,
+                    cwd: cwd.as_deref(),
+                });
+                let (started_at, ended_at, status, result_bytes) = if ptype == "mcp_tool_call_end" {
+                    let result = p.get("result").unwrap_or(&Value::Null);
+                    let inner = result
+                        .get("Ok")
+                        .or_else(|| result.get("Err"))
+                        .unwrap_or(result);
+                    let status = if result.get("Err").is_some() {
+                        "error"
+                    } else if result.get("Ok").is_some() {
+                        "success"
+                    } else {
+                        "unknown"
+                    };
+                    // The record states the span WHOLE: its end (the line's
+                    // instant) and its measured length. `end − duration` is
+                    // those two facts re-expressed as the start the wire
+                    // wants — arithmetic on statements, never an inference.
+                    // A record stating no readable duration contributes its
+                    // end alone: a point on the timeline, not a fabricated
+                    // wait.
+                    let started = mcp_duration_ms(p.get("duration"))
+                        .and_then(|d| epoch_ms_from_iso(&ts).map(|e| e - d))
+                        .and_then(iso_from_epoch_ms)
+                        .unwrap_or_else(|| ts.clone());
+                    (started, Some(ts.clone()), status, json_bytes(inner))
+                } else {
+                    (ts.clone(), None, "unknown", 0)
+                };
+                tool_calls.push(ToolCallDraft {
+                    external_call_id,
+                    session_id: sid,
+                    source_event_id: src_id,
+                    agent: "codex_cli".to_string(),
+                    server: server.clone(),
+                    name: tool.clone(),
+                    turn_index: Some(turn_index),
+                    call_index: 0,
+                    started_at,
+                    ended_at,
+                    status: status.to_string(),
+                    args_hash: hashes.args_hash,
+                    signature_hash: hashes.signature_hash,
+                    args_bytes: hashes.args_bytes,
+                    result_bytes,
+                    model: model.clone(),
+                    action: Some(action),
+                });
+                if ptype == "mcp_tool_call_begin" {
+                    if let Some(cid) = &call_id {
+                        open_calls.insert(cid.clone(), tool_calls.len() - 1);
+                    }
+                }
+                *pending_aggregate
+                    .entry(tool_identity(&server, &tool))
+                    .or_insert(0) += 1;
+                continue;
+            }
+            if ptype == "thread_goal_updated" {
+                // The goal this thread is being held to, restated when it
+                // changes. `goal.objective` is prose somebody WROTE — the
+                // user's own words in every observed rollout — so it ships
+                // exactly as any other captured message does: verbatim through
+                // the redactor, or not at all. The counters beside it
+                // (`tokensUsed`, `timeUsedSeconds`) restate what `token_count`
+                // already ships and the ids restate the session; the objective
+                // is the one fact this record alone states.
+                let (content_excerpt, content_bytes) = message_text(
+                    payload
+                        .and_then(|p| p.get("goal"))
+                        .and_then(|g| g.get("objective"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                );
+                match session_id.clone() {
+                    Some(sid) => {
+                        sink.push(RawEvent {
+                            seq: Some(raw_lines),
+                            started_at: None,
+                            first_token_at: None,
+                            source_event_id: source_event_id(
+                                &ctx.device_id,
+                                &EventSource::File {
+                                    file: &ctx.source_file,
+                                    byte_offset: offset,
+                                },
+                            ),
+                            ts,
+                            kind: "thread_goal_updated".to_string(),
+                            agent: "codex_cli".to_string(),
+                            provider: "openai".to_string(),
+                            model: model.clone(),
+                            session_id: sid,
+                            actor_id: None,
+                            recipient_actor_id: None,
+                            turn_index: Some(turn_index),
+                            parent_event_id: None,
+                            cwd: cwd.clone(),
+                            git: None,
+                            tokens: None,
+                            tokens_unmapped: BTreeMap::new(),
+                            duration_ms: None,
+                            tool_calls: BTreeMap::new(),
+                            files_touched: Vec::new(),
+                            content_excerpt,
+                            content_bytes,
+                            reasoning_excerpt: None,
+                            reasoning_bytes: None,
+                            references: None,
+                            source_file: Some(ctx.source_file.clone()),
+                            source_byte_offset: Some(offset),
+                            redactions: Default::default(),
+                        });
+                        emitted += 1;
+                    }
+                    None => skipped += 1,
+                }
+                continue;
+            }
+            if ptype == "turn_aborted" {
+                // The turn codex GAVE UP on — the only record that says a
+                // reply ended without completing. A lifecycle record says
+                // nothing; it happens — so what ships is the record's own name
+                // as the kind, the line's instant, and the span the record
+                // states about itself (`duration_ms`; some abort records state
+                // a `started_at` epoch instead and measure nothing). Its
+                // `reason` is a single stated word ("interrupted", in every
+                // observed record) with no event field whose meaning fits it:
+                // the excerpt is message text, and a word that is not a
+                // message must not be filed as one.
+                match session_id.clone() {
+                    Some(sid) => {
+                        sink.push(RawEvent {
+                            seq: Some(raw_lines),
+                            started_at: None,
+                            first_token_at: None,
+                            source_event_id: source_event_id(
+                                &ctx.device_id,
+                                &EventSource::File {
+                                    file: &ctx.source_file,
+                                    byte_offset: offset,
+                                },
+                            ),
+                            ts,
+                            kind: "turn_aborted".to_string(),
+                            agent: "codex_cli".to_string(),
+                            provider: "openai".to_string(),
+                            model: model.clone(),
+                            session_id: sid,
+                            actor_id: None,
+                            recipient_actor_id: None,
+                            turn_index: Some(turn_index),
+                            parent_event_id: None,
+                            cwd: cwd.clone(),
+                            git: None,
+                            tokens: None,
+                            tokens_unmapped: BTreeMap::new(),
+                            duration_ms: record_duration_ms(&obj),
+                            tool_calls: BTreeMap::new(),
+                            files_touched: Vec::new(),
+                            content_excerpt: None,
+                            content_bytes: None,
+                            reasoning_excerpt: None,
+                            reasoning_bytes: None,
+                            references: None,
+                            source_file: Some(ctx.source_file.clone()),
+                            source_byte_offset: Some(offset),
+                            redactions: Default::default(),
+                        });
+                        emitted += 1;
+                    }
+                    None => skipped += 1,
+                }
+                continue;
+            }
             // An `event_msg` payload type nothing here models. `ts` is already
             // resolved above, so the only question left is the session.
             skips.drop_record(&ctx.source_file, &format!("event_msg/{ptype}"));
@@ -1223,6 +1514,20 @@ fn parse_inner(
                 }
                 None => skipped += 1,
             }
+            continue;
+        }
+
+        // Modelled and declined: codex writes this envelope beside every
+        // inter-agent `agent_message`, and its whole payload is one boolean of
+        // undocumented meaning (`{"trigger_turn": false}`) — no ids, no
+        // instant of its own, no content. The traffic it annotates is already
+        // captured from the `agent_message` records themselves, so shipping a
+        // structure nothing explains would be a guess dressed as a fact. A
+        // DECISION, not a failure to read (see `crate::skips`) — and at
+        // thousands per multi-agent rollout, ledgering it would drown the
+        // drops that mean something.
+        if kind == "inter_agent_communication_metadata" {
+            skipped += 1;
             continue;
         }
 
@@ -1868,13 +2173,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 
-    /// The one record type left UNMODELLED on purpose, and why: codex writes a
-    /// bare `{"trigger_turn": false}` beside every inter-agent message — one
-    /// boolean of undocumented meaning, no content, no ids. Capturing a
-    /// structure nothing explains would be a guess dressed as a fact, so it
-    /// stays in the ledger where it is counted and visible.
+    /// Modelled and DECLINED: codex writes a bare `{"trigger_turn": false}`
+    /// beside every inter-agent message — one boolean of undocumented meaning,
+    /// no content, no ids. Capturing a structure nothing explains would be a
+    /// guess dressed as a fact, and at thousands per multi-agent rollout,
+    /// ledgering it would drown the drops that mean something. So it is a
+    /// decision now: consumed silently, out of the ledger, no event.
     #[test]
-    fn the_undocumented_inter_agent_metadata_record_stays_in_the_ledger() {
+    fn the_undocumented_inter_agent_metadata_record_is_a_decision_not_a_drop() {
         let path = rollout(&[
             json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
                     "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
@@ -1885,8 +2191,243 @@ mod tests {
         let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
         assert_eq!(
             res.skipped_kinds.get("inter_agent_communication_metadata"),
-            Some(&1)
+            None,
+            "a decision stays out of the ledger"
         );
+        assert!(res.events.is_empty(), "and mints no event");
+        assert_eq!(res.stats.skipped, 1, "but the record is still accounted");
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// The MCP call whose ONLY record is its end. Real rollouts write
+    /// `event_msg`/`mcp_tool_call_end` with no begin twin and no
+    /// `response_item` sharing the `call_id`, and that one record states the
+    /// whole call: invocation, result, end instant, measured duration. The
+    /// draft's span is exactly those statements — start is end − duration,
+    /// arithmetic on two stated facts, never an interpolation.
+    #[test]
+    fn an_mcp_end_record_states_a_whole_call_by_itself() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            json!({ "timestamp": "2026-08-05T11:58:58.000Z", "type": "turn_context",
+                    "payload": { "cwd": "/Users/dev/Projects/acme", "model": "gpt-5-codex" } }),
+            line(
+                "2026-08-05T11:58:59.076Z",
+                "user_message",
+                json!({ "message": "look the endpoint up" }),
+            ),
+            line(
+                "2026-08-05T11:59:03.200Z",
+                "mcp_tool_call_end",
+                json!({
+                    "call_id": "exec-01234567-0123-4012-8012-0123456789ab",
+                    "invocation": { "server": "acme_docs", "tool": "search",
+                                    "arguments": { "query": "widget upload endpoint" } },
+                    "duration": { "secs": 1, "nanos": 250_000_000u64 },
+                    "result": { "Ok": { "content": [
+                        { "type": "text", "text": "POST /widgets accepts a widget body." }
+                    ]}}
+                }),
+            ),
+            line("2026-08-05T11:59:04.000Z", "token_count", usage(100)),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        assert_eq!(res.tool_calls.len(), 1);
+        let c = &res.tool_calls[0];
+        assert_eq!(c.server, "mcp:acme_docs");
+        assert_eq!(c.name, "search");
+        assert_eq!(
+            c.external_call_id,
+            "exec-01234567-0123-4012-8012-0123456789ab"
+        );
+        assert_eq!(c.ended_at.as_deref(), Some("2026-08-05T11:59:03.200Z"));
+        assert_eq!(
+            c.started_at, "2026-08-05T11:59:01.950Z",
+            "end − stated duration (1.25s), re-expressed — not interpolated"
+        );
+        assert_eq!(c.status, "success", "serde's Ok wrapper states the outcome");
+        assert!(c.args_bytes > 0, "the invocation's arguments are hashed");
+        assert!(c.result_bytes > 0, "the Ok value's size, not the wrapper's");
+        assert_eq!(
+            res.skipped_kinds.get("event_msg/mcp_tool_call_end"),
+            None,
+            "the kind is modelled now and leaves the ledger"
+        );
+        // The call also counts on the turn's aggregate, like every other call.
+        let assistant = res
+            .events
+            .iter()
+            .find(|e| e.kind == "assistant_message")
+            .unwrap();
+        assert_eq!(assistant.tool_calls.get("mcp:acme_docs/search"), Some(&1));
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// A begin/end pair is ONE call: the begin opens the draft at its own
+    /// instant, the end closes it — dating it, sizing its result, and stating
+    /// its outcome (an `Err` wrapper is codex saying the call failed).
+    #[test]
+    fn an_mcp_begin_end_pair_is_one_call_with_both_instants() {
+        let end_result = json!({ "Err": "example MCP server timed out" });
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            line(
+                "2026-08-05T11:59:01.000Z",
+                "mcp_tool_call_begin",
+                json!({
+                    "call_id": "exec-00000000-0000-4000-8000-000000000001",
+                    "invocation": { "server": "acme_docs", "tool": "search",
+                                    "arguments": { "query": "upload" } }
+                }),
+            ),
+            line(
+                "2026-08-05T11:59:02.500Z",
+                "mcp_tool_call_end",
+                json!({
+                    "call_id": "exec-00000000-0000-4000-8000-000000000001",
+                    "invocation": { "server": "acme_docs", "tool": "search",
+                                    "arguments": { "query": "upload" } },
+                    "duration": { "secs": 1, "nanos": 500_000_000u64 },
+                    "result": end_result
+                }),
+            ),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        assert_eq!(res.tool_calls.len(), 1, "a pair is one call, never two");
+        let c = &res.tool_calls[0];
+        assert_eq!(
+            c.started_at, "2026-08-05T11:59:01.000Z",
+            "the begin's own instant, not one derived from the end"
+        );
+        assert_eq!(c.ended_at.as_deref(), Some("2026-08-05T11:59:02.500Z"));
+        assert_eq!(c.status, "error");
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// A call whose completion the log never states keeps `ended_at` absent —
+    /// absent means UNKNOWN downstream, and an unmatched call contributing
+    /// nothing to tool-wait is the honest reading. Any fabricated end would
+    /// poison the thinking-vs-tools decomposition it feeds.
+    #[test]
+    fn a_call_the_log_never_completes_states_no_end() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            json!({ "timestamp": "2026-08-05T11:59:02.131Z", "type": "response_item",
+                    "payload": { "type": "function_call",
+                                 "call_id": "call_examplefake0000000001",
+                                 "name": "shell",
+                                 "arguments": "{\"command\":[\"true\"]}" } }),
+            line(
+                "2026-08-05T11:59:03.000Z",
+                "mcp_tool_call_begin",
+                json!({
+                    "call_id": "exec-00000000-0000-4000-8000-000000000002",
+                    "invocation": { "server": "acme_docs", "tool": "search",
+                                    "arguments": { "query": "upload" } }
+                }),
+            ),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        assert_eq!(res.tool_calls.len(), 2);
+        for c in &res.tool_calls {
+            assert_eq!(
+                c.ended_at, None,
+                "{}: the log stated no completion, so none ships",
+                c.external_call_id
+            );
+            assert_eq!(c.status, "unknown");
+        }
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// `thread_goal_updated` states one fact nothing else in the rollout does:
+    /// the OBJECTIVE the thread is being held to, in the words somebody wrote.
+    /// It ships as an event of the record's own kind, the objective on the
+    /// same verbatim-redacted excerpt path as every captured message.
+    #[test]
+    fn the_thread_s_goal_ships_in_its_author_s_own_words() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            line(
+                "2026-08-05T11:58:57.600Z",
+                "thread_goal_updated",
+                json!({
+                    "threadId": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+                    "goal": {
+                        "threadId": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+                        "objective": "Summarize what uploader.js does in one sentence.",
+                        "status": "active",
+                        "tokensUsed": 0, "timeUsedSeconds": 0,
+                        "createdAt": 1_785_931_137u64, "updatedAt": 1_785_931_137u64
+                    }
+                }),
+            ),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        let goal = res
+            .events
+            .iter()
+            .find(|e| e.kind == "thread_goal_updated")
+            .expect("the record is an event now");
+        assert_eq!(
+            goal.content_excerpt.as_deref(),
+            Some("Summarize what uploader.js does in one sentence."),
+            "verbatim — redaction is the only transformation"
+        );
+        assert_eq!(goal.ts, "2026-08-05T11:58:57.600Z");
+        assert_eq!(res.skipped_kinds.get("event_msg/thread_goal_updated"), None);
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// `turn_aborted` is the only record that says a reply ended WITHOUT
+    /// completing. It ships as a lifecycle event — the record's own name, the
+    /// instant, and the span it states about itself — and nothing more: its
+    /// `reason` is a word, not a message, and must not be filed as one.
+    #[test]
+    fn an_aborted_turn_ships_as_the_record_s_own_kind_with_its_stated_span() {
+        let path = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            line(
+                "2026-08-05T11:59:48.041Z",
+                "turn_aborted",
+                json!({ "turn_id": "01234567-0123-4012-8012-0123456789ab",
+                        "reason": "interrupted",
+                        "completed_at": 1_785_931_188u64, "duration_ms": 55_262 }),
+            ),
+            // The other shape real rollouts write: a start epoch, no measure.
+            line(
+                "2026-08-05T11:59:48.517Z",
+                "turn_aborted",
+                json!({ "turn_id": "01234567-0123-4012-8012-0123456789ac",
+                        "reason": "interrupted", "started_at": 1_785_931_129u64 }),
+            ),
+        ]);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        let aborts: Vec<_> = res
+            .events
+            .iter()
+            .filter(|e| e.kind == "turn_aborted")
+            .collect();
+        assert_eq!(aborts.len(), 2);
+        assert_eq!(
+            aborts[0].duration_ms,
+            Some(55_262),
+            "the span the record measured about itself"
+        );
+        assert_eq!(
+            aborts[1].duration_ms, None,
+            "a record that measured nothing states nothing"
+        );
+        assert!(
+            aborts.iter().all(|e| e.content_excerpt.is_none()),
+            "a lifecycle record says nothing; it happens"
+        );
+        assert_eq!(res.skipped_kinds.get("event_msg/turn_aborted"), None);
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 }
