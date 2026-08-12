@@ -84,13 +84,6 @@ struct SummarizerInfo: Decodable {
   let env_override: Bool?
 }
 
-/// One recently-active session from the daemon's live ledger.
-struct LiveEntry: Decodable {
-  let agent: String?
-  let label: String?
-  let last_ms: Int?
-}
-
 struct DeviceInfo: Decodable {
   let hostname: String?
   let os_family: String?
@@ -98,14 +91,11 @@ struct DeviceInfo: Decodable {
   let last_seen_at: String?
 }
 
+/// Server-side totals for an unclaimed device, from the device-view endpoint.
+/// Only the token total is rendered — it is the one figure the menu shows that
+/// the device cannot count for itself.
 struct AnalyzedInfo: Decodable {
-  let count: Int?
-  /// `processing` = sessions with at least one un-classified segment;
-  /// `finished` = every segment classified. From device-view endpoint.
-  let processing: Int?
-  let finished: Int?
   let totalTokens: String?
-  let totalCostUsd: Double?
 }
 
 struct LocalStatus: Decodable {
@@ -113,28 +103,18 @@ struct LocalStatus: Decodable {
   /// Stated by the daemon (busy right now?) — the tray must not re-derive it
   /// from phase names it happens to know.
   let active: Bool?
-  /// Sessions with fresh transcript activity, newest first — the daemon's own
-  /// answer to "what is running right now".
-  let live: [LiveEntry]?
+  /// The daemon's own sentence for the phase, and the only place the
+  /// work-remaining number comes from. The tray does not recompute it from
+  /// `progress_done`/`progress_total`: two renderings of one fact is exactly
+  /// what this menu had too much of.
   let message: String?
   /// Epoch ms when the work now in progress started, or nil when idle. A
   /// timestamp rather than a duration so this menu can tick the elapsed clock
   /// on its own 1s beat — the daemon does not rewrite its mirror to animate it.
   let busy_since_ms: Int64?
-  /// The upload fan-out in flight right now, if any. Sessions leave together, so
-  /// its `since_ms` also dates the longest one still running.
+  /// The batch in flight right now, if any. Sessions leave together, so its
+  /// `since_ms` dates the oldest one still running.
   let uploading: UploadingNow?
-  /// Where the sweep is in the file list it discovered — `done` counts files
-  /// VISITED (new + skipped), so `total - done` is the "N session files left"
-  /// the status line quotes.
-  let progress_done: Int?
-  let progress_total: Int?
-  /// What the sweep now running has got through, and when it started. nil
-  /// between sweeps — and on any daemon predating this block, which the row
-  /// below degrades around rather than going blank.
-  let run: RunProgress?
-  let queue_size: Int?
-  let last_event_at: String?
   let daemon_version: String?
   /// When the daemon last wrote the mirror. It rewrites at least every 10s
   /// even when nothing changed, so this is the local liveness signal: a stale
@@ -148,28 +128,11 @@ struct LocalStatus: Decodable {
 }
 
 struct UploadingNow: Decodable {
+  /// Sessions still in flight — counted down as each upload commits.
   let sessions: Int?
-  let uploads: Int?
-  /// Epoch ms the set started — a timestamp, so this menu ticks the elapsed
+  /// Epoch ms the batch started — a timestamp, so this menu ticks the elapsed
   /// clock on its own 1s beat without the daemon rewriting the mirror.
   let since_ms: Int64?
-}
-
-/// The sweep in progress. Scoped to THIS pass, unlike `stats`, which is
-/// cumulative since the daemon started and after a few days answers a question
-/// nobody asked.
-struct RunProgress: Decodable {
-  /// Epoch ms the sweep started. The one clock that spans the whole pass —
-  /// `busy_since_ms` restarts on every file, so it can only ever say how long
-  /// the current file has taken.
-  let since_ms: Int64?
-  /// Files that had new content and were parsed.
-  let files_new: Int?
-  /// Files skipped because their cursor says they're already shipped.
-  let files_unchanged: Int?
-  let events: Int?
-  /// 0 in cloud mode, which ships raw events and summarises server-side.
-  let segments: Int?
 }
 
 struct UpdateInfo: Decodable {
@@ -179,19 +142,12 @@ struct UpdateInfo: Decodable {
   let latest: String?
 }
 
+/// The lifetime counters the daemon keeps. It publishes many; the menu renders
+/// the one that measures the WORK (events that reached the server). Files
+/// scanned, batches, segments and detections are all by-products of producing
+/// that number, and a row for each turned the menu into a debug dump.
 struct LocalStatsCounters: Decodable {
-  let installations_detected: Int?
-  let identities_detected: Int?
-  let files_scanned: Int?
-  let files_unchanged: Int?
   let events_uploaded: Int?
-  let batches_uploaded: Int?
-  /// Lifetime count of cognition segments uploaded from this machine
-  /// (persisted by the daemon, so it survives restarts).
-  let segments_sent: Int?
-  /// Segments in the batch being uploaded right now — a gauge that
-  /// drops back to 0 between bursts. Usually 0 when idle.
-  let segments_sending: Int?
 }
 
 @MainActor
@@ -219,23 +175,26 @@ final class TrayController: NSObject {
   private var slowTimer: Timer?
   private var watchdogTimer: Timer?
 
-  // Menu items we update on every poll
+  // Menu items we update on every poll.
+  //
+  // FOUR numbers, one per kind, and no fifth. This menu once carried a dozen —
+  // files left, new, skipped, events this pass, events uploaded, files scanned,
+  // segments sent, live sessions, tools, accounts — which are four facts sliced
+  // nine ways. A reader had to work out which counter answered their question
+  // before they could read the answer, so the menu said less the more it said.
+  //   1. how much work is left        → files left        (statusMI)
+  //   2. how much has been measured   → events or tokens  (totalsMI)
+  //   3. how much is moving right now → sessions in flight (workMI)
+  //   4. how long that has taken      → the clock on workMI
+  /// Phase + the one work-remaining number, verbatim from the daemon.
   private let statusMI = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
-  /// What the current sweep is COSTING — the split between new and
-  /// already-shipped files, and the events/segments they produced. Deliberately
-  /// not the position: the row above already says how many files are left, and
-  /// repeating it as a fraction is the same fact wearing a different hat.
-  private let progressMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-  /// What is on the wire this second — the row that proves a long, quiet
-  /// upload pass is working rather than wedged.
-  private let uploadMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+  /// Sessions the daemon has in flight, and how long the oldest has been there.
+  /// The count says it is moving, the clock says it is not stuck — and a
+  /// duration only means anything beside the thing it times, so they share a row.
+  private let workMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+  /// The one total: everything this device has measured, ever.
+  private let totalsMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let deviceMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-  private let analyzedMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-  /// Pipeline activity — sessions processing/finished + events uploaded.
-  private let liveMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-  private let pipelineMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-  /// What the agent has discovered on this machine — installations + identities.
-  private let detectedMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let claimMI = NSMenuItem(title: "Open device page", action: #selector(openDashboard), keyEquivalent: "o")
   private let copyClaimMI = NSMenuItem(title: "Copy claim URL", action: #selector(copyClaimUrl), keyEquivalent: "c")
   private let jobsMI = NSMenuItem(title: "View pipeline…", action: #selector(openJobs), keyEquivalent: "j")
@@ -329,7 +288,7 @@ final class TrayController: NSObject {
 
   /// The non-clickable info rows at the top of the menu, in order.
   private var infoItems: [NSMenuItem] {
-    [statusMI, progressMI, uploadMI, liveMI, deviceMI, analyzedMI, pipelineMI, detectedMI]
+    [statusMI, workMI, totalsMI, deviceMI]
   }
 
   /// Set an info row's title, hiding the row when the title is empty.
@@ -574,7 +533,7 @@ final class TrayController: NSObject {
     let local = localLatest ?? s.local
     if s.paired == false {
       setInfo(statusMI, "Not paired — run `npx modelstat@latest`")
-      for mi in [progressMI, uploadMI, liveMI, deviceMI, analyzedMI, pipelineMI, detectedMI] {
+      for mi in [workMI, totalsMI, deviceMI] {
         setInfo(mi, "")
       }
       claimMI.title = "Open modelstat.ai"
@@ -606,35 +565,34 @@ final class TrayController: NSObject {
     let active = localLatest?.active ?? (localLatest?.busy_since_ms != nil)
     let dot = active ? (spinnerTick % 2 == 0 ? "●" : "○") : "●"
 
-    // The sweep detail row, recomputed every beat: how much work there is and
-    // how much of it is done. The phase line above carries NO clock — it names
-    // what is happening, not how long anything has taken. A duration only means
-    // something next to the thing it is timing, and the thing being timed is a
-    // file on the wire, which is the row below this one.
-    setInfo(progressMI, progressLine(local, phase: phase))
-
+    // Row 1: what is happening, and the ONE number for how much is left. The
+    // message is the daemon's own sentence and carries at most that one figure
+    // ("2,425 session files left") — the tray does not re-derive it, and adds no
+    // clock: a duration only means something beside the thing it times, and what
+    // is being timed is the work in flight, which is the row below.
     if let m = phaseMsg, !m.isEmpty {
       setInfo(statusMI, "\(dot) \(phase) — \(m)")
     } else {
       setInfo(statusMI, "\(dot) \(phase)")
     }
 
-    // What is on the wire, and for how long. The row above counts FILES, which
-    // can sit on one number for minutes while several sessions upload behind it —
-    // that is the line that read as wedged. Sessions in a fan-out leave together,
-    // so this clock is the longest one still running.
+    // Row 2: how many sessions are in flight, and how long the oldest of them
+    // has been there. The row above counts FILES, which can sit on one number
+    // for minutes while sessions move behind it — that is the line that read as
+    // wedged. Sessions in a batch leave together, so this clock dates the oldest
+    // one still running.
     if let up = local?.uploading, Self.mirrorIsFresh(local?.written_at),
       let n = up.sessions, n > 0
     {
       let noun = n == 1 ? "session" : "sessions"
-      var line = "⇡ \(n) \(noun) uploading"
+      var line = "⇡ \(n) \(noun) processing"
       if let since = up.since_ms {
         let secs = Int((Date().timeIntervalSince1970 * 1000 - Double(since)) / 1000)
         if secs >= 0 { line += " · \(Self.shortDuration(secs))" }
       }
-      setInfo(uploadMI, line)
+      setInfo(workMI, line)
     } else {
-      setInfo(uploadMI, "")
+      setInfo(workMI, "")
     }
 
     if s.claimed == true {
@@ -651,7 +609,8 @@ final class TrayController: NSObject {
       claimMI.title = "Open dashboard"
       copyClaimMI.isHidden = true
     } else {
-      // Unclaimed: device-view fills in the rich numbers.
+      // Unclaimed: name the machine instead, so the claim link below has a
+      // subject. Its token total is the one figure the device view adds.
       let host = s.device?.hostname ?? "unknown"
       let os = s.device?.os_family ?? ""
       setInfo(deviceMI, "\(host) · \(os)")
@@ -659,126 +618,18 @@ final class TrayController: NSObject {
       copyClaimMI.isHidden = (s.claim_url == nil || s.claim_url?.isEmpty == true)
     }
 
-    // Sessions / tokens / cost (only available for unclaimed since
-    // the device-view exposes them). Claimed devices show pipeline
-    // + detected counts instead — see below.
-    if let a = s.analyzed {
-      let tok = a.totalTokens ?? "0"
-      let cnt = a.count ?? 0
-      let usd = String(format: "%.2f", a.totalCostUsd ?? 0.0)
-      let proc = a.processing ?? 0
-      let done = a.finished ?? cnt
-      let breakdown = proc > 0 ? " (\(done) finished · \(proc) processing)" : ""
-      setInfo(analyzedMI, "\(cnt) sessions\(breakdown) · \(fmtTokens(tok)) tokens · $\(usd)")
+    // Row 3: the ONE total — how much this device has measured, ever. Tokens
+    // when the server has counted them, events otherwise: the same quantity at
+    // two resolutions, so it is the better one or the other, never both. Every
+    // other lifetime counter (files scanned, segments sent, batches, tools,
+    // accounts) is a by-product of producing this one and is not shown.
+    if let tok = s.analyzed?.totalTokens, (Double(tok) ?? 0) > 0 {
+      setInfo(totalsMI, "\(fmtTokens(tok)) tokens analyzed")
+    } else if let events = local?.stats?.events_uploaded, events > 0 {
+      setInfo(totalsMI, "\(fmtCount(events)) events analyzed")
     } else {
-      setInfo(analyzedMI, "")
+      setInfo(totalsMI, "")
     }
-
-    // What is running RIGHT NOW — the daemon's live ledger (sessions with
-    // transcript writes in the last 15 minutes), newest first. One line: the
-    // freshest session named, the rest counted.
-    if let live = local?.live, !live.isEmpty {
-      let nowMs = Int(Date().timeIntervalSince1970 * 1000)
-      let fresh = live.filter { nowMs - ($0.last_ms ?? 0) < 15 * 60 * 1000 }
-      if let first = fresh.first {
-        let label = first.label ?? first.agent ?? "session"
-        let agent = first.agent ?? ""
-        let ago = Self.shortDuration(max(0, (nowMs - (first.last_ms ?? nowMs)) / 1000))
-        var line = "▶ \(label)"
-        if !agent.isEmpty && agent != label { line += " · \(agent)" }
-        line += " · \(ago) ago"
-        if fresh.count > 1 { line += "  (+\(fresh.count - 1) more live)" }
-        setInfo(liveMI, line)
-      } else {
-        setInfo(liveMI, "")
-      }
-    } else {
-      setInfo(liveMI, "")
-    }
-
-    // Pipeline activity — segments are the headline (what the user
-    // asked to see): how many are uploading right now, and how many
-    // have been sent in total. Events / files trail as context. All
-    // sourced from the local heartbeat mirror so it works for both
-    // claimed and unclaimed devices.
-    if let c = local?.stats {
-      let sending = c.segments_sending ?? 0
-      let sent = c.segments_sent ?? 0
-      let events = c.events_uploaded ?? 0
-      let scanned = c.files_scanned ?? 0
-      let queue = local?.queue_size ?? 0
-      var bits: [String] = []
-      if sending > 0 { bits.append("↑ \(sending) sending") }
-      if sent > 0 { bits.append("\(fmtCount(sent)) segments sent") }
-      if events > 0 { bits.append("\(fmtCount(events)) events uploaded") }
-      // "scanned", not bare "files": the sweep row above counts files too, and
-      // these are the lifetime total rather than this pass's.
-      if scanned > 0 { bits.append("\(scanned) files scanned") }
-      if queue > 0 { bits.append("\(queue) in queue") }
-      setInfo(pipelineMI, bits.joined(separator: " · "))
-    } else {
-      setInfo(pipelineMI, "")
-    }
-
-    // What the agent found on this machine — installations +
-    // identities (Claude Keychain, Codex JWT, …). Mirror of the
-    // discover() output the daemon ran at startup.
-    if let c = local?.stats {
-      let installs = c.installations_detected ?? 0
-      let ids = c.identities_detected ?? 0
-      if installs > 0 || ids > 0 {
-        setInfo(detectedMI, "\(installs) tools · \(ids) accounts detected")
-      } else {
-        setInfo(detectedMI, "")
-      }
-    } else {
-      setInfo(detectedMI, "")
-    }
-  }
-
-  /// The sweep detail row: how far into the current pass the daemon is and what
-  /// it has got through. Empty when nothing is sweeping, which is the caller's
-  /// signal to hide the row.
-  ///
-  /// Counts only, no clock. Elapsed time lives on the streaming row below,
-  /// against the files actually on the wire — that is the only place a duration
-  /// has a subject. A clock up here would be timing "the pass", which is not a
-  /// thing anyone is waiting on.
-  ///
-  /// Every number is scoped to THIS pass. The lifetime counters live further
-  /// down and answer a different question — after a few days they read in the
-  /// tens of thousands and say nothing about what is happening now.
-  private func progressLine(_ local: LocalStatus?, phase: String) -> String {
-    guard let ls = local, Self.mirrorIsFresh(ls.written_at),
-      ls.active ?? (ls.busy_since_ms != nil)
-    else {
-      return ""
-    }
-    var bits: [String] = []
-
-    // NO position fraction here. The status row above already says "N session
-    // files left", and "2/655 files" is the same sentence with the subtraction
-    // left undone — two lines saying one thing, which reads as more information
-    // than it is. This row earns its slot only by saying what the sweep is
-    // COSTING, which the row above cannot.
-    //
-    // What those files actually cost. Most of a sweep is usually files the
-    // cursor already covers, so the split is what distinguishes a long pass
-    // doing real work from a cheap re-walk of a backlog already shipped.
-    if let run = ls.run {
-      var split: [String] = []
-      if let n = run.files_new, n > 0 { split.append("\(n) new") }
-      if let n = run.files_unchanged, n > 0 { split.append("\(n) skipped") }
-      if !split.isEmpty { bits.append(split.joined(separator: ", ")) }
-      if let n = run.events, n > 0 { bits.append("+\(fmtCount(n)) events this pass") }
-      if let n = run.segments, n > 0 { bits.append("+\(fmtCount(n)) segments") }
-    }
-    // Segments on the wire RIGHT NOW — a gauge, not a total, so it only earns a
-    // slot while a batch is actually in flight. Always 0 in cloud mode, which
-    // ships raw events and summarises server-side.
-    if let n = ls.stats?.segments_sending, n > 0 { bits.append("↑ \(n) sending") }
-
-    return bits.joined(separator: " · ")
   }
 
   /// Reflect the daemon's auto-update setting + any pending update in the menu.
