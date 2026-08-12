@@ -60,6 +60,15 @@ const RESHIP_LAG_MS: i64 = 10 * 60 * 1000;
 
 const STREAM_CHANNEL_CAP: usize = 4;
 
+/// How many files may be in flight at once: the one whose events are being
+/// flushed plus the next few PARSING ahead on their blocking threads. While a
+/// flush waits on the network (cloud redaction round-trips), the upcoming
+/// files' parsers fill their bounded channels and park — so the wire wait and
+/// the parse work overlap instead of taking turns. Memory stays flat: each
+/// file ahead holds at most [`STREAM_CHANNEL_CAP`] chunks, and files are
+/// CONSUMED strictly in order, so cursor semantics don't change.
+const PIPELINE_FILES: usize = 3;
+
 /// Per-cycle scan bounds. `scan_all` passes `{ Some(MAX_FILES_PER_SCAN), false }`;
 /// the eager single-session force-scan passes `{ None, true }`.
 #[derive(Debug, Clone, Copy)]
@@ -291,8 +300,10 @@ where
 }
 
 /// The shared parse → summarise → redact → park loop over an ordered job list.
-/// Holds at most ~one batch in memory and advances each file's cursor only once
-/// that batch is durable, so a mid-scan failure re-tries the same events next run.
+/// Holds at most ~one batch (plus [`PIPELINE_FILES`] files' bounded parse
+/// channels) in memory and advances each file's cursor only once that batch is
+/// durable, so a mid-scan failure re-tries the same events next run. Files are
+/// consumed strictly in job order; only their PARSING runs ahead.
 /// Both the incremental `scan_all` and the eager single-session scan funnel
 /// through here; their only differences are [`RunScanOptions`].
 ///
@@ -451,6 +462,19 @@ where
         }};
     }
 
+    /// One file whose parse has STARTED: the sync streaming parser is running
+    /// on its blocking thread, feeding the bounded channel, parked whenever
+    /// the channel is full. Everything decided before the parse (cursor,
+    /// checksum, ship floor) travels with it to consumption time.
+    struct StartedParse {
+        job: ScanJob,
+        cur: Option<FileCursor>,
+        cs: Option<FileCursor>,
+        shipped_below: u64,
+        rx: tokio::sync::mpsc::Receiver<Vec<RawEvent>>,
+        handle: tokio::task::JoinHandle<std::io::Result<ParseResult>>,
+    }
+
     let total = ordered.len();
     // Consumed, not iterated by reference: holding a `&ScanJob` (and the slice
     // iterator behind it) across the awaits below makes this future's `Send`-ness
@@ -458,76 +482,117 @@ where
     // which fails to compile as "implementation of `Send` is not general enough"
     // once the flush inside also holds borrowed futures. Owning each job sidesteps
     // the whole question.
-    for (i, job) in ordered.into_iter().enumerate() {
-        observer.on_file(&job.path, i, total);
-        let cur = cursors.get_cursor(&job.path);
-        let cs = checksum(&job.path);
-        // Incremental scans skip a file whose size + tail are unchanged since the
-        // last upload (NOT mtime — a touch that didn't change bytes re-uses the
-        // cursor). force_read_all bypasses this so a targeted session re-uploads.
-        if !opts.force_read_all {
-            if let (Some(cs), Some(cur)) = (cs.as_ref(), cur.as_ref()) {
-                if cur.size == cs.size && cur.tail_hash == cs.tail_hash {
-                    tallies.files_unchanged += 1;
-                    continue;
+    let mut jobs = ordered.into_iter().enumerate();
+    // The parse pipeline: files started, oldest first. The front is the file
+    // being consumed; the ones behind it are parsing ahead so a flush's network
+    // wait and the next files' parse work overlap. Consumption order IS job
+    // order, so everything downstream (buffering, flushing, cursors) sees the
+    // exact sequence the sequential loop produced.
+    let mut in_flight: std::collections::VecDeque<StartedParse> = Default::default();
+    // Changed files STARTED (≠ consumed) — the fill gate for `max_files`, so
+    // the pipeline never parses a file the cap would have kept this cycle from
+    // reaching anyway.
+    let mut started_changed = 0usize;
+
+    loop {
+        // Fill the pipeline: examine jobs in order (skipping unchanged files)
+        // and start parses until enough files are in flight or the per-cycle
+        // cap says no more.
+        while in_flight.len() < PIPELINE_FILES
+            && opts.max_files.is_none_or(|max| started_changed < max)
+        {
+            let Some((i, job)) = jobs.next() else { break };
+            observer.on_file(&job.path, i, total);
+            let cur = cursors.get_cursor(&job.path);
+            let cs = checksum(&job.path);
+            // Incremental scans skip a file whose size + tail are unchanged since the
+            // last upload (NOT mtime — a touch that didn't change bytes re-uses the
+            // cursor). force_read_all bypasses this so a targeted session re-uploads.
+            if !opts.force_read_all {
+                if let (Some(cs), Some(cur)) = (cs.as_ref(), cur.as_ref()) {
+                    if cur.size == cs.size && cur.tail_hash == cs.tail_hash {
+                        tallies.files_unchanged += 1;
+                        continue;
+                    }
                 }
             }
+            started_changed += 1;
+            // Everything below this byte offset already landed on a CONFIRMED upload,
+            // so this scan parses it but does not re-send it. Without the floor a live
+            // transcript re-ships in FULL every time the session appends a line — a
+            // 67MB/17k-event file re-summarised + re-uploaded per cycle, so the tray
+            // never leaves "Uploading <BATCH_MAX_EVENTS> events".
+            //
+            // The floor gates the SEND, not the READ: the whole file is still parsed
+            // because the parsers carry cross-line state (model attribution,
+            // tool_use ↔ tool_result pairing) that a mid-file start would lose.
+            //
+            // Taken only when the file GREW in place (`cs.size >= cur.size`) — a
+            // truncated/rewritten file invalidates every recorded offset, so it
+            // re-ships whole. The eager force scan re-uploads a processed session on
+            // purpose, so it never takes a floor.
+            let shipped_below: u64 = match (opts.force_read_all, cur.as_ref(), cs.as_ref()) {
+                (false, Some(cur), Some(cs)) if cs.size >= cur.size => cur.size,
+                _ => 0,
+            };
+            // A key/value source (Cursor) has no byte coordinate: its floor is a
+            // timestamp watermark carried on the job, and the parser applies it
+            // (its rows carry no cross-record state, unlike a transcript line).
+            // Never on a force scan — that exists to re-upload on purpose.
+            let mut job = job;
+            job.since_ms = match (opts.force_read_all, job.kind, cur.as_ref()) {
+                (false, ParserKind::Cursor, Some(cur)) => cur
+                    .shipped_through_ms
+                    .map(|ms| ms.saturating_sub(RESHIP_LAG_MS)),
+                _ => None,
+            };
+            // Stream this file's events through a bounded channel while the SYNC
+            // streaming parser runs on a spawn-blocking thread. The parser can't await
+            // the async flush, so the channel bridges them: the async side drains a
+            // chunk, buffers it, and flushes the moment a full batch accumulates; the
+            // parser parks on a full channel (backpressure) so it never reads ahead of
+            // the flush — memory stays near one batch + the pipeline's channels even
+            // mid-file, so a multi-hundred-MB transcript never fully materialises. A
+            // held flush stops the scan — no in-flight file's cursor was queued yet
+            // (that happens post-parse below), so they all re-parse next cycle.
+            let (tx, rx) = tokio::sync::mpsc::channel::<Vec<RawEvent>>(STREAM_CHANNEL_CAP);
+            let parse_one = parse.clone();
+            let job_owned = job.clone();
+            let handle = tokio::task::spawn_blocking(move || {
+                let mut emit = move |chunk: Vec<RawEvent>| {
+                    // A closed channel (the async side held + returned) just drops the
+                    // remainder — the cursor never advanced, so the file re-parses.
+                    let _ = tx.blocking_send(chunk);
+                };
+                parse_one(&job_owned, &mut emit)
+            });
+            in_flight.push_back(StartedParse {
+                job,
+                cur,
+                cs,
+                shipped_below,
+                rx,
+                handle,
+            });
         }
-        tallies.files_scanned += 1;
-        // Everything below this byte offset already landed on a CONFIRMED upload,
-        // so this scan parses it but does not re-send it. Without the floor a live
-        // transcript re-ships in FULL every time the session appends a line — a
-        // 67MB/17k-event file re-summarised + re-uploaded per cycle, so the tray
-        // never leaves "Uploading <BATCH_MAX_EVENTS> events".
-        //
-        // The floor gates the SEND, not the READ: the whole file is still parsed
-        // because the parsers carry cross-line state (model attribution,
-        // tool_use ↔ tool_result pairing) that a mid-file start would lose.
-        //
-        // Taken only when the file GREW in place (`cs.size >= cur.size`) — a
-        // truncated/rewritten file invalidates every recorded offset, so it
-        // re-ships whole. The eager force scan re-uploads a processed session on
-        // purpose, so it never takes a floor.
-        let shipped_below: u64 = match (opts.force_read_all, cur.as_ref(), cs.as_ref()) {
-            (false, Some(cur), Some(cs)) if cs.size >= cur.size => cur.size,
-            _ => 0,
-        };
-        // A key/value source (Cursor) has no byte coordinate: its floor is a
-        // timestamp watermark carried on the job, and the parser applies it
-        // (its rows carry no cross-record state, unlike a transcript line).
-        // Never on a force scan — that exists to re-upload on purpose.
-        let mut job = job;
-        job.since_ms = match (opts.force_read_all, job.kind, cur.as_ref()) {
-            (false, ParserKind::Cursor, Some(cur)) => cur
-                .shipped_through_ms
-                .map(|ms| ms.saturating_sub(RESHIP_LAG_MS)),
-            _ => None,
+        // Consume the oldest in-flight file; done when the pipeline drained.
+        let Some(StartedParse {
+            job,
+            cur,
+            cs,
+            shipped_below,
+            mut rx,
+            handle: parse_handle,
+        }) = in_flight.pop_front()
+        else {
+            break;
         };
         let job = &job;
+        tallies.files_scanned += 1;
         // Highest record instant actually buffered from this file — the next
         // watermark, applied only by a successful flush (below), exactly like a
         // byte cursor.
         let mut max_record_ms: Option<i64> = None;
-        // Stream this file's events through a bounded channel while the SYNC
-        // streaming parser runs on a spawn-blocking thread. The parser can't await
-        // the async flush, so the channel bridges them: the async side drains a
-        // chunk, buffers it, and flushes the moment a full batch accumulates; the
-        // parser parks on a full channel (backpressure) so it never reads ahead of
-        // the flush — memory stays near one batch + the channel even mid-file, so
-        // a multi-hundred-MB transcript never fully materialises. A held flush
-        // stops the scan — the file's cursor was never queued (that happens
-        // post-parse below), so it re-parses whole next cycle.
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<RawEvent>>(STREAM_CHANNEL_CAP);
-        let parse_one = parse.clone();
-        let job_owned = job.clone();
-        let parse_handle = tokio::task::spawn_blocking(move || {
-            let mut emit = move |chunk: Vec<RawEvent>| {
-                // A closed channel (the async side held + returned) just drops the
-                // remainder — the cursor never advanced, so the file re-parses.
-                let _ = tx.blocking_send(chunk);
-            };
-            parse_one(&job_owned, &mut emit)
-        });
         let mut held = false;
         let mut parsed_events = 0usize;
         // Per-session newest instant seen in this file — feeds the live-session
@@ -1380,6 +1445,90 @@ mod tests {
         // Only the first file's events shipped + cursor advanced.
         assert!(cursors.get_cursor("/a.jsonl").is_some());
         assert!(cursors.get_cursor("/b.jsonl").is_none());
+    }
+
+    /// Files parse AHEAD of the flush loop — bounded. While one file's events
+    /// are being flushed (in the real daemon: network round-trips), the next
+    /// files' parsers must already be running, and never more than
+    /// [`PIPELINE_FILES`] at once — that bound is what keeps memory flat.
+    /// Consumption order stays job order, so every cursor still advances.
+    #[tokio::test]
+    async fn file_parses_overlap_and_respect_the_pipeline_bound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (running2, peak2) = (running.clone(), peak.clone());
+        let parse = move |j: &ScanJob, emit: &mut dyn FnMut(Vec<RawEvent>)| {
+            let now = running2.fetch_add(1, Ordering::SeqCst) + 1;
+            peak2.fetch_max(now, Ordering::SeqCst);
+            // Long enough that the pipeline's parses demonstrably overlap.
+            std::thread::sleep(Duration::from_millis(40));
+            emit(vec![ev(
+                &format!("s{}", j.path),
+                "2026-07-16T10:00:00.000Z",
+            )]);
+            running2.fetch_sub(1, Ordering::SeqCst);
+            Ok(ParseResult {
+                events: Vec::new(),
+                tool_calls: Vec::new(),
+                script_contexts: Vec::new(),
+                stats: ParseStats::default(),
+                skipped_kinds: std::collections::BTreeMap::new(),
+                session_actors: Default::default(),
+                source_file: j.path.clone(),
+            })
+        };
+        let resilient = healthy();
+        let mut git = NoGit;
+        let sink = RecordingSink::default();
+        let mut cursors = RuntimeState::default();
+        let mut obs = ();
+        let jobs: Vec<ScanJob> = (0..6).map(|i| job(&format!("/f{i}.jsonl"))).collect();
+        let t = run_scan_over_jobs(
+            jobs,
+            "dev1",
+            "9.9.9",
+            "local",
+            opts(Some(12), false),
+            &resilient,
+            &NoEmbedder,
+            &AnsweringRedactor,
+            &mut git,
+            None,
+            parse,
+            checksum,
+            |e| e,
+            &no_exists,
+            &no_read,
+            &sink,
+            &mut cursors,
+            &mut obs,
+            &Accounts::new(),
+        )
+        .await;
+
+        assert_eq!(t.files_scanned, 6);
+        assert!(!t.held);
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= PIPELINE_FILES,
+            "the pipeline bound leaked: {peak} parses ran at once"
+        );
+        assert!(
+            peak >= 2,
+            "parses never overlapped — the pipeline is not pipelining"
+        );
+        // Order preserved: every file's cursor advanced, and the spooled events
+        // arrive in job order (all six fit one trailing batch).
+        for i in 0..6 {
+            assert!(cursors.get_cursor(&format!("/f{i}.jsonl")).is_some());
+        }
+        let ids: Vec<String> = sink.offered().concat();
+        let want: Vec<String> = (0..6)
+            .map(|i| format!("s/f{i}.jsonl:2026-07-16T10:00:00.000Z"))
+            .collect();
+        assert_eq!(ids, want, "pipelined parses must not reorder events");
     }
 
     #[tokio::test]

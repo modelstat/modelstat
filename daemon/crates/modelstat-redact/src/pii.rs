@@ -33,13 +33,28 @@ pub struct PiiToken {
 pub trait PiiModel {
     fn classify(&self, text: &str) -> Option<Vec<PiiToken>>;
 
+    /// One slot per text, in order, TOTAL: `Some(tokens)` for every text the
+    /// model answered, `None` for each one it could not — never fewer slots
+    /// than texts. This is the seam the span cache and the remote client meet
+    /// at: the cache needs to know which texts of a batch WERE answered (so a
+    /// repeat never pays again, even when a neighbour failed), and the remote
+    /// client needs to answer per text (so one unclassifiable text cannot
+    /// pretend the other 63 failed with it).
+    ///
+    /// The default is the sequential loop every in-process model wants.
+    fn classify_each(&self, texts: &[String]) -> Vec<Option<Vec<PiiToken>>> {
+        texts.iter().map(|t| self.classify(t)).collect()
+    }
+
     /// One answer per text — or `None` if ANY text could not be answered,
     /// because the callers that batch (a flush's worth of turns) hold
     /// all-or-nothing anyway: a flush with one unclassifiable turn does not
     /// ship its other turns around it.
     ///
-    /// The default is the sequential loop every in-process model wants;
-    /// network-backed models override it to put many texts in one request.
+    /// The default is the sequential loop every in-process model wants (it
+    /// stops at the first unanswered text); batching models override it —
+    /// usually as [`Self::classify_each`] collected — to put many texts in
+    /// one request.
     fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
         texts.iter().map(|t| self.classify(t)).collect()
     }
@@ -459,6 +474,29 @@ mod tests {
             pii_redact(&UnavailableRedactor, "Katherine Johnson").text,
             "Katherine Johnson"
         );
+    }
+
+    /// The two batch views agree: `classify_each` answers every slot it can
+    /// (total, order-preserving), `classify_many` is its all-or-nothing fold.
+    #[test]
+    fn classify_each_is_total_and_classify_many_is_its_all_or_nothing_fold() {
+        struct FailsOnMarked;
+        impl PiiModel for FailsOnMarked {
+            fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
+                if text.contains("unreadable") {
+                    None
+                } else {
+                    Some(Vec::new())
+                }
+            }
+        }
+        let texts: Vec<String> = vec!["a".into(), "unreadable".into(), "b".into()];
+        assert_eq!(
+            FailsOnMarked.classify_each(&texts),
+            vec![Some(vec![]), None, Some(vec![])],
+            "every text gets a slot, answered or not"
+        );
+        assert_eq!(FailsOnMarked.classify_many(&texts), None);
     }
 
     /// Answers, finds nothing.

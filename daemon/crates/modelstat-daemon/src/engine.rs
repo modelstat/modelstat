@@ -407,6 +407,15 @@ impl PiiModel for DaemonRedactor {
         }
     }
 
+    fn classify_each(&self, texts: &[String]) -> Vec<Option<Vec<PiiToken>>> {
+        match self {
+            DaemonRedactor::Unavailable(n) => n.classify_each(texts),
+            DaemonRedactor::Remote(n) => n.classify_each(texts),
+            #[cfg(feature = "onnx")]
+            DaemonRedactor::PrivacyFilter(n) => n.classify_each(texts),
+        }
+    }
+
     fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
         match self {
             DaemonRedactor::Unavailable(n) => n.classify_many(texts),

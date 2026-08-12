@@ -257,6 +257,46 @@ impl<N: PiiModel> PiiModel for CachedNer<N> {
         store.put(text, &answer);
         Some(answer)
     }
+
+    /// The batch stays a batch through the cache: hits answer from the store,
+    /// and every miss travels to the wrapped model in ONE `classify_each` call
+    /// (deduped — a text repeated within the batch is asked once, exactly as
+    /// two sequential calls would have hit the store). Splitting the batch
+    /// into per-text calls here is what silently degraded a remote redactor
+    /// to one HTTP round-trip per text.
+    fn classify_each(&self, texts: &[String]) -> Vec<Option<Vec<PiiToken>>> {
+        let Some(store) = &self.store else {
+            return self.inner.classify_each(texts);
+        };
+        let mut out: Vec<Option<Vec<PiiToken>>> = texts.iter().map(|t| store.get(t)).collect();
+        let mut ask: Vec<String> = Vec::new();
+        let mut slot_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, t) in texts.iter().enumerate() {
+            if out[i].is_none() && !slot_of.contains_key(t.as_str()) {
+                slot_of.insert(t, ask.len());
+                ask.push(t.clone());
+            }
+        }
+        if ask.is_empty() {
+            return out;
+        }
+        let answers = self.inner.classify_each(&ask);
+        for tokens in answers.iter().zip(&ask) {
+            if let (Some(tokens), text) = tokens {
+                store.put(text, tokens);
+            }
+        }
+        for (i, t) in texts.iter().enumerate() {
+            if out[i].is_none() {
+                out[i] = answers[slot_of[t.as_str()]].clone();
+            }
+        }
+        out
+    }
+
+    fn classify_many(&self, texts: &[String]) -> Option<Vec<Vec<PiiToken>>> {
+        self.classify_each(texts).into_iter().collect()
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +410,112 @@ mod tests {
         cached.classify("x");
         cached.classify("x");
         assert_eq!(cached.inner().calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Records the size of every batch the wrapped model was asked; texts
+    /// containing "poison" go unanswered.
+    struct BatchRecorder {
+        batches: Mutex<Vec<usize>>,
+    }
+    impl BatchRecorder {
+        fn new() -> Self {
+            BatchRecorder {
+                batches: Mutex::new(Vec::new()),
+            }
+        }
+        fn batches(&self) -> Vec<usize> {
+            self.batches.lock().unwrap().clone()
+        }
+        fn answer(text: &str) -> Option<Vec<PiiToken>> {
+            if text.contains("poison") {
+                None
+            } else {
+                Some(Vec::new())
+            }
+        }
+    }
+    impl PiiModel for BatchRecorder {
+        fn classify(&self, text: &str) -> Option<Vec<PiiToken>> {
+            self.batches.lock().unwrap().push(1);
+            Self::answer(text)
+        }
+        fn classify_each(&self, texts: &[String]) -> Vec<Option<Vec<PiiToken>>> {
+            self.batches.lock().unwrap().push(texts.len());
+            texts.iter().map(|t| Self::answer(t)).collect()
+        }
+    }
+
+    /// The regression that made a remote redactor pay one round-trip per text:
+    /// a batch must cross the cache as ONE `classify_each` call carrying every
+    /// miss, not decay into per-text calls.
+    #[test]
+    fn a_batch_of_misses_reaches_the_model_as_one_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cached = CachedNer::new(BatchRecorder::new(), Some(store(tmp.path(), "fp")));
+        let texts: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        assert_eq!(
+            cached.classify_many(&texts),
+            Some(vec![vec![], vec![], vec![]])
+        );
+        assert_eq!(cached.inner().batches(), vec![3], "one call, three texts");
+        // Second pass: everything hits the store, the model hears nothing.
+        assert!(cached.classify_many(&texts).is_some());
+        assert_eq!(cached.inner().batches(), vec![3]);
+    }
+
+    #[test]
+    fn hits_stay_home_and_only_misses_travel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cached = CachedNer::new(BatchRecorder::new(), Some(store(tmp.path(), "fp")));
+        cached.classify_many(&["a".into()]);
+        let out = cached.classify_many(&["a".into(), "b".into(), "c".into()]);
+        assert_eq!(out, Some(vec![vec![], vec![], vec![]]));
+        assert_eq!(
+            cached.inner().batches(),
+            vec![1, 2],
+            "the hit was not re-sent"
+        );
+    }
+
+    #[test]
+    fn a_text_repeated_within_one_batch_is_asked_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cached = CachedNer::new(BatchRecorder::new(), Some(store(tmp.path(), "fp")));
+        let out = cached.classify_many(&["x".into(), "x".into(), "y".into()]);
+        assert_eq!(out, Some(vec![vec![], vec![], vec![]]));
+        assert_eq!(
+            cached.inner().batches(),
+            vec![2],
+            "the repeat rode the first ask"
+        );
+    }
+
+    /// A poison text holds ITS flush (all-or-nothing, unchanged) — but its
+    /// clean batch-mates' answers are already in the store, so the retry pays
+    /// one single-text request instead of re-running the whole batch.
+    #[test]
+    fn a_poison_text_cannot_unteach_its_clean_batch_mates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cached = CachedNer::new(BatchRecorder::new(), Some(store(tmp.path(), "fp")));
+        let texts: Vec<String> = vec!["a".into(), "the poison".into(), "b".into()];
+        assert_eq!(cached.classify_many(&texts), None, "the flush still holds");
+        assert_eq!(cached.inner().batches(), vec![3]);
+        // The retry re-asks ONLY the text that failed.
+        assert_eq!(cached.classify_many(&texts), None);
+        assert_eq!(cached.inner().batches(), vec![3, 1]);
+        // And the clean texts alone ship without touching the model.
+        assert_eq!(
+            cached.classify_many(&["a".into(), "b".into()]),
+            Some(vec![vec![], vec![]])
+        );
+        assert_eq!(cached.inner().batches(), vec![3, 1]);
+    }
+
+    #[test]
+    fn without_a_store_a_batch_still_passes_through_whole() {
+        let cached = CachedNer::new(BatchRecorder::new(), None);
+        cached.classify_many(&["a".into(), "b".into()]);
+        assert_eq!(cached.inner().batches(), vec![2]);
     }
 
     #[test]
