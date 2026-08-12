@@ -199,9 +199,22 @@ pub struct ToolCallWire {
     pub command_families: Vec<String>,
 }
 
-/// The full ingest payload. The SDK only ever emits `events` (+ `tool_calls`);
-/// segmentation, summarization, titles, and session-installs are produced
-/// downstream by the daemon or server.
+/// The account a session belongs to, named on the wire — the same
+/// `session_installs` layer daemons ship. Naming it here is what makes SDK
+/// usage attribute AT INGEST to a real per-app account instead of falling to
+/// server-side guesswork.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionInstall {
+    /// The provider-side account reference. For an SDK integration this is the
+    /// app's name ([`crate::Config::app`]) — the API key's usage IS the app's.
+    pub provider_account_id: String,
+    /// The provider the account belongs to (half of the lookup key).
+    pub provider: String,
+}
+
+/// The full ingest payload. The SDK emits `events` (+ `tool_calls`) and names
+/// the app + each session's account; segmentation, summarization, and titles
+/// are produced downstream by the daemon or server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IngestBatch {
     pub batch_id: String,
@@ -210,9 +223,18 @@ pub struct IngestBatch {
     /// `daemon_version` field — the server's name for the producing client's
     /// version; an SDK is just another producer of the ingest contract.
     pub daemon_version: String,
+    /// The integration's own name ([`crate::Config::app`]). The server derives
+    /// the batch's REAL device identity from (org, app) — registered, named
+    /// after the app, owned in the key's org — so no two integrations ever
+    /// share a device row. Absent only from pre-app SDK builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
     pub events: Vec<RawEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallWire>,
+    /// session_id → the account that produced it (see [`SessionInstall`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub session_installs: std::collections::BTreeMap<String, SessionInstall>,
     /// Per-batch taxonomy auto-detection toggle. Omitted/`null` = server default
     /// (taxonomy auto/on); `Some(false)` = skip taxonomy auto-detection for this
     /// batch; `Some(true)` = force it on. SDK/backend integrations default this
