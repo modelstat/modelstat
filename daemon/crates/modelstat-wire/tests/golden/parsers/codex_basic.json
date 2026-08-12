@@ -23,8 +23,30 @@
       "source_byte_offset": 503
     },
     {
-      "source_event_id": "evt_36pa237q80av4",
-      "seq": 8,
+      "source_event_id": "evt_2owq0qzhz2mdw",
+      "seq": 3,
+      "ts": "2026-08-05T11:58:57.600Z",
+      "kind": "thread_goal_updated",
+      "agent": "codex_cli",
+      "provider": "openai",
+      "model": null,
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "content_excerpt": "Summarize what uploader.js does in one sentence.",
+      "content_bytes": 48,
+      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
+      "source_byte_offset": 750
+    },
+    {
+      "source_event_id": "evt_36pa237q88q6n",
+      "seq": 9,
       "ts": "2026-08-05T11:58:59.076Z",
       "kind": "user_message",
       "agent": "codex_cli",
@@ -42,11 +64,11 @@
       "content_excerpt": "Read uploader.js and tell me in one sentence what it does.",
       "content_bytes": 58,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 7771
+      "source_byte_offset": 8166
     },
     {
       "source_event_id": "evt_igy5dnley1h1",
-      "seq": 14,
+      "seq": 15,
       "ts": "2026-08-05T11:59:02.811Z",
       "kind": "assistant_message",
       "agent": "codex_cli",
@@ -72,11 +94,11 @@
       "content_excerpt": "I’ll inspect `uploader.js` and summarize its behavior in one sentence.",
       "content_bytes": 70,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 11142
+      "source_byte_offset": 11537
     },
     {
       "source_event_id": "evt_10tuaeq1kb166",
-      "seq": 17,
+      "seq": 19,
       "ts": "2026-08-05T11:59:04.046Z",
       "kind": "assistant_message",
       "agent": "codex_cli",
@@ -95,16 +117,18 @@
         "reasoning": 0
       },
       "duration_ms": null,
-      "tool_calls": {},
+      "tool_calls": {
+        "mcp:acme_docs/search": 1
+      },
       "files_touched": [],
       "content_excerpt": "`uploader.js` exports an `upload` function that POSTs its input to the `/widgets` endpoint.",
       "content_bytes": 91,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 12697
+      "source_byte_offset": 13504
     },
     {
-      "source_event_id": "evt_14p55gfuzrir",
-      "seq": 18,
+      "source_event_id": "evt_14p55gfv0hli",
+      "seq": 20,
       "ts": "2026-08-05T11:59:04.063Z",
       "kind": "task_complete",
       "agent": "codex_cli",
@@ -120,14 +144,34 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 13546
+      "source_byte_offset": 14353
+    },
+    {
+      "source_event_id": "evt_14p55gfv0kxr",
+      "seq": 21,
+      "ts": "2026-08-05T11:59:05.100Z",
+      "kind": "turn_aborted",
+      "agent": "codex_cli",
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": "/private/tmp/modelstat-fixture-gen/api",
+      "git": null,
+      "tokens": null,
+      "duration_ms": 1037,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
+      "source_byte_offset": 14729
     }
   ],
   "toolCalls": [
     {
       "external_call_id": "call_mqV5UTEptgHbhQ0ivRwonitC",
       "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
-      "source_event_id": "evt_14p55gfv3ogg",
+      "source_event_id": "evt_14p55gfv3l6g",
       "agent": "codex_cli",
       "server": "builtin",
       "name": "exec",
@@ -155,6 +199,38 @@
         "confidence": 0.0,
         "extractor": "shell.v3"
       }
+    },
+    {
+      "external_call_id": "exec-01234567-0123-4012-8012-0123456789ab",
+      "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+      "source_event_id": "evt_14p55gfv24jc",
+      "agent": "codex_cli",
+      "server": "mcp:acme_docs",
+      "name": "search",
+      "turn_index": 0,
+      "call_index": 0,
+      "started_at": "2026-08-05T11:59:01.950Z",
+      "ended_at": "2026-08-05T11:59:03.200Z",
+      "status": "success",
+      "args_hash": "2b45a069653f56ac615bdb05f4a838a43e69ae8ca141f492976dcec3a97a3e7a",
+      "signature_hash": "a8b771920b8319e47251d1360f5e880bc18e8d329b0f0d003ea3c7e615558947",
+      "args_bytes": 34,
+      "result_bytes": 75,
+      "model": "gpt-5.6-terra",
+      "action": {
+        "surface": "mcp",
+        "executable": "search",
+        "action": null,
+        "object": null,
+        "qualifiers": [],
+        "param_shape": null,
+        "keywords": [],
+        "abstract": null,
+        "command_redacted": null,
+        "scripts": [],
+        "confidence": 0.0,
+        "extractor": "mcp.v1"
+      }
     }
   ],
   "scriptContexts": [
@@ -165,8 +241,8 @@
     }
   ],
   "stats": {
-    "rawLines": 18,
-    "emittedEvents": 5,
-    "skipped": 9
+    "rawLines": 22,
+    "emittedEvents": 7,
+    "skipped": 10
   }
 }

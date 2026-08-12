@@ -592,11 +592,17 @@ fn parse_inner(
                         None => continue,
                     };
                     if let Some(idx) = pending_by_call_id.remove(ref_id) {
-                        let ts = obj.get("timestamp").and_then(Value::as_str).unwrap_or("");
                         let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
                         let result = block.get("content").cloned().unwrap_or(Value::Null);
                         let draft = &mut tool_calls[idx];
-                        draft.ended_at = Some(ts.to_string());
+                        // The end instant only when the line STATES one. A
+                        // result on an undated line still ends the call's
+                        // status, but `ended_at: ""` parses as the epoch and
+                        // drags every wait derived from it — absent means
+                        // unknown, and unknown is the honest reading.
+                        if let Some(ts) = stated_ts(&obj) {
+                            draft.ended_at = Some(ts);
+                        }
                         draft.status = if is_error { "error" } else { "success" }.to_string();
                         draft.result_bytes = json_bytes(&result);
                     }
@@ -1090,6 +1096,68 @@ mod tests {
             res.tool_calls[0].ended_at.as_deref(),
             Some("2026-06-01T10:00:03.500Z")
         );
+    }
+
+    /// A call whose result the transcript never records — the session was
+    /// killed mid-tool, or the file ends before the pairing line — keeps
+    /// `ended_at` absent. Absent means UNKNOWN downstream and the call
+    /// contributes nothing to tool-wait, which is the honest reading; any
+    /// fabricated end would poison the thinking-vs-tools decomposition.
+    #[test]
+    fn a_call_the_transcript_never_answers_states_no_end() {
+        let (path, _guard) = transcript(&[
+            user_line("u-1", "read the file"),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "a-1",
+                "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "timestamp": "2026-06-01T10:00:02.000Z",
+                "message": { "model": "claude-opus-4-8", "content": [
+                    { "type": "tool_use", "id": "toolu_0123", "name": "Read",
+                      "input": { "file_path": "/Users/dev/Projects/acme/x.ts" } }
+                ]},
+            }),
+        ]);
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", path)).unwrap();
+        assert_eq!(res.tool_calls.len(), 1);
+        assert_eq!(res.tool_calls[0].ended_at, None);
+        assert_eq!(res.tool_calls[0].status, "unknown");
+    }
+
+    /// A result on an UNDATED line still ends the call's story — status and
+    /// result size are stated right there — but the end instant is not, and
+    /// `ended_at: ""` parses as the epoch and drags every derived wait with
+    /// it. The instant ships only when the line states one.
+    #[test]
+    fn an_undated_result_ends_the_call_s_status_but_not_its_clock() {
+        let (path, _guard) = transcript(&[
+            user_line("u-1", "read the file"),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "a-1",
+                "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "timestamp": "2026-06-01T10:00:02.000Z",
+                "message": { "model": "claude-opus-4-8", "content": [
+                    { "type": "tool_use", "id": "toolu_0123", "name": "Read",
+                      "input": { "file_path": "/Users/dev/Projects/acme/x.ts" } }
+                ]},
+            }),
+            serde_json::json!({
+                "type": "user",
+                "uuid": "u-2",
+                "sessionId": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
+                "message": { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_0123",
+                      "content": "ok", "is_error": true }
+                ]},
+            }),
+        ]);
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", path)).unwrap();
+        assert_eq!(res.tool_calls.len(), 1);
+        let c = &res.tool_calls[0];
+        assert_eq!(c.ended_at, None, "no stated instant, no shipped instant");
+        assert_eq!(c.status, "error", "what the line DID state still ships");
+        assert!(c.result_bytes > 0);
     }
 
     /// A sub-agent transcript, in the shape Claude Code actually writes it
