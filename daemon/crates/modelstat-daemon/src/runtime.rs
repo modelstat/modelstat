@@ -149,7 +149,10 @@ pub struct Daemon {
     pub redactor_mode_built: StdMutex<String>,
     /// Auto-update dedup (§13): the `(verdict, target)` keys already acted on this
     /// process, so a heartbeat every 10s never stacks a second self-update.
-    pub handled_updates: Arc<StdMutex<std::collections::HashSet<String>>>,
+    /// When each (verdict, target) was last ATTEMPTED — an expiring dedup, so a
+    /// failed update is retried rather than skipped forever. See
+    /// `modelstat_update::AUTO_UPDATE_RETRY_AFTER_MS`.
+    pub handled_updates: Arc<StdMutex<std::collections::HashMap<String, i64>>>,
 }
 
 impl Daemon {
@@ -186,7 +189,7 @@ impl Daemon {
             mode,
             redactor_mode_built: StdMutex::new(config.redactor_mode()),
             config,
-            handled_updates: Arc::new(StdMutex::new(std::collections::HashSet::new())),
+            handled_updates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         }))
     }
 

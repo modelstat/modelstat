@@ -26,7 +26,7 @@
 //!   restores the previous bundle before returning, so a failed swap leaves a
 //!   working tray rather than none.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -605,7 +605,7 @@ pub async fn upgrade_now() -> UpgradeOutcome {
 /// caller-owned dedup set (was a module-level `Set` in TS).
 pub fn maybe_auto_update(
     release: &DaemonRelease,
-    handled: &mut HashSet<String>,
+    attempted: &mut HashMap<String, i64>,
     now_ms: i64,
 ) -> AutoUpdateStep {
     let verdict = release.verdict();
@@ -617,10 +617,22 @@ pub fn maybe_auto_update(
     }
     let target = release.latest.clone().unwrap_or_default();
     let key = format!("{:?}:{target}", verdict);
-    if handled.contains(&key) {
+    // The dedup EXPIRES, and that is the whole point. It used to be a plain
+    // set: one attempt per (verdict, target) for the life of the process,
+    // inserted BEFORE the attempt and never removed when the attempt failed.
+    // A single transient download error therefore pinned the daemon to its
+    // current build until somebody restarted it — while the failure log
+    // promised "will retry" (observed 2026-08-13: one attempt, 17 hours of
+    // uptime, no second try). A success is invisible here anyway, since the
+    // new build restarts the process, so this window only ever governs
+    // FAILURES: retry them on a bounded cadence instead of never.
+    if attempted
+        .get(&key)
+        .is_some_and(|&at| now_ms.saturating_sub(at) < AUTO_UPDATE_RETRY_AFTER_MS)
+    {
         return AutoUpdateStep::Skip;
     }
-    handled.insert(key);
+    attempted.insert(key, now_ms);
 
     if !auto_update_enabled() {
         let what = if verdict.is_required() {
@@ -637,6 +649,12 @@ pub fn maybe_auto_update(
         target: release.latest.clone(),
     }
 }
+
+/// How long a failed auto-update attempt suppresses the next one for the same
+/// target. Long enough that a permanently broken release cannot hammer the
+/// download host, short enough that a network blip costs one window rather
+/// than the rest of the process's life.
+pub const AUTO_UPDATE_RETRY_AFTER_MS: i64 = 30 * 60 * 1000;
 
 /// What the heartbeat loop should do with a release verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -933,7 +951,7 @@ mod tests {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let mut handled = HashSet::new();
+        let mut handled = HashMap::new();
         let now = 1_000_000_000_000;
         // Scope MODELSTAT_HOME so the marker/prefs don't touch the real home.
         let tmp = std::env::temp_dir().join(format!("msu-dec-{}", std::process::id()));
@@ -968,12 +986,12 @@ mod tests {
         assert_eq!(
             maybe_auto_update(&avail, &mut handled, now),
             AutoUpdateStep::Skip,
-            "same (verdict,target) handled once per process"
+            "the same (verdict,target) is not re-attempted inside the retry window"
         );
 
         // Auto-update off ⇒ Nudge naming `modelstat upgrade`.
         std::env::set_var("MODELSTAT_AUTO_UPDATE", "off");
-        let mut h2 = HashSet::new();
+        let mut h2 = HashMap::new();
         let req = DaemonRelease {
             verdict: Some("upgrade_required".into()),
             latest: Some("2.0.0".into()),
@@ -992,6 +1010,51 @@ mod tests {
             Some(v) => std::env::set_var("MODELSTAT_HOME", v),
             None => std::env::remove_var("MODELSTAT_HOME"),
         }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A FAILED attempt must be retried. The dedup used to be permanent for the
+    /// process: one transient download error and the daemon stayed on its old
+    /// build until somebody restarted it, while the log promised a retry
+    /// (observed 2026-08-13 — one attempt across 17 hours of uptime). The
+    /// window is what makes that promise true, and it must still suppress the
+    /// immediate re-attempt so a broken release cannot hammer the host.
+    #[test]
+    fn a_failed_attempt_is_retried_after_the_window_not_never() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("msu-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("MODELSTAT_HOME", &tmp);
+        std::env::remove_var("MODELSTAT_AUTO_UPDATE");
+        let avail = DaemonRelease {
+            verdict: Some("update_available".into()),
+            latest: Some("1.28.0".into()),
+            ..Default::default()
+        };
+        let mut attempted = HashMap::new();
+        let t0 = 1_000_000_000_000;
+        assert!(
+            matches!(
+                maybe_auto_update(&avail, &mut attempted, t0),
+                AutoUpdateStep::Proceed { .. }
+            ),
+            "the first sight of a newer build proceeds"
+        );
+        assert_eq!(
+            maybe_auto_update(&avail, &mut attempted, t0 + 60_000),
+            AutoUpdateStep::Skip,
+            "a minute later is the same attempt — no hammering the download host"
+        );
+        assert!(
+            matches!(
+                maybe_auto_update(&avail, &mut attempted, t0 + AUTO_UPDATE_RETRY_AFTER_MS),
+                AutoUpdateStep::Proceed { .. }
+            ),
+            "past the window it tries again — the failure log's promise, kept"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

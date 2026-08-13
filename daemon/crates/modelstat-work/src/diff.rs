@@ -152,7 +152,15 @@ pub fn classify_path(path: &str) -> PathClass {
     }
 
     const TEST_DIRS: &[&str] = &[
-        "test", "tests", "spec", "specs", "__tests__", "testdata", "e2e", "fixtures", "__mocks__",
+        "test",
+        "tests",
+        "spec",
+        "specs",
+        "__tests__",
+        "testdata",
+        "e2e",
+        "fixtures",
+        "__mocks__",
         "it",
     ];
     let test_file = file == "conftest.py"
@@ -270,7 +278,10 @@ pub fn features_from(numstat: &str) -> DiffFeatures {
     for row in &rows {
         // Saturating, like the totals below: a numstat is untrusted input, and
         // this crate's contract is "degrade, never panic".
-        let churn = row.added.unwrap_or(0).saturating_add(row.deleted.unwrap_or(0));
+        let churn = row
+            .added
+            .unwrap_or(0)
+            .saturating_add(row.deleted.unwrap_or(0));
         f.lines_added = f.lines_added.saturating_add(row.added.unwrap_or(0));
         f.lines_deleted = f.lines_deleted.saturating_add(row.deleted.unwrap_or(0));
         match classify_path(row.path) {
@@ -427,7 +438,10 @@ mod tests {
         assert_eq!(rows[0].added, Some(12));
         assert_eq!(rows[0].deleted, Some(3));
         assert_eq!(rows[0].path, "src/lib.rs");
-        assert_eq!(rows[1].added, None, "binary row keeps its place, not its lines");
+        assert_eq!(
+            rows[1].added, None,
+            "binary row keeps its place, not its lines"
+        );
         assert_eq!(rows[2].path, "README.md");
     }
 
