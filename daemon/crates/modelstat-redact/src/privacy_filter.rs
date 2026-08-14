@@ -404,12 +404,41 @@ pub fn plan_windows(len: usize, window: usize, overlap: usize) -> Vec<(usize, us
     }
 }
 
-/// Threads for one forward pass. Capped: this is a background process on a machine
-/// someone is using, and the measured gain past a handful of threads is small.
+/// Threads for one forward pass.
+///
+/// The default leaves two cores alone because the usual host is a machine
+/// someone is USING: the filter runs in the background while they work, and the
+/// measured gain past a handful of threads is small. That heuristic reads the
+/// core count and nothing else, which is right exactly when idle cores mean
+/// spare capacity.
+///
+/// `MODELSTAT_REDACT_INTRA_THREADS` exists because that is not always true. When
+/// the filter shares a host with latency-sensitive services — a database
+/// answering interactive queries, say — "cores are idle" and "cores are free"
+/// stop being the same claim: a burst that grabs everything but two cores is
+/// invisible in a throughput graph and very visible to whoever is waiting on the
+/// query it displaced. Only the operator knows what else lives on the box, so
+/// the number is theirs to set. Unset, unparseable, or zero keeps the default —
+/// a typo must not silently serialize inference.
 fn intra_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(2).clamp(1, 8))
-        .unwrap_or(4)
+    intra_threads_from(
+        std::env::var("MODELSTAT_REDACT_INTRA_THREADS")
+            .ok()
+            .as_deref(),
+        std::thread::available_parallelism().map(std::num::NonZeroUsize::get),
+    )
+}
+
+/// The decision behind [`intra_threads`], as a pure function so it is testable
+/// without mutating process-global environment state from parallel tests.
+fn intra_threads_from(override_raw: Option<&str>, cores: std::io::Result<usize>) -> usize {
+    if let Some(n) = override_raw
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        return n.min(64);
+    }
+    cores.map(|n| n.saturating_sub(2).clamp(1, 8)).unwrap_or(4)
 }
 
 /// `id2label` from the checkpoint config, as a dense id-indexed vec.
@@ -448,6 +477,45 @@ pub const CATEGORIES: [&str; 8] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intra_threads_defaults_to_leaving_two_cores_for_whoever_owns_the_machine() {
+        assert_eq!(intra_threads_from(None, Ok(8)), 6);
+        assert_eq!(intra_threads_from(None, Ok(4)), 2);
+        // Never zero: a 1- or 2-core host still has to make progress.
+        assert_eq!(intra_threads_from(None, Ok(1)), 1);
+        assert_eq!(intra_threads_from(None, Ok(2)), 1);
+        // Still capped on a big host — the gain past a handful is small.
+        assert_eq!(intra_threads_from(None, Ok(64)), 8);
+        // An unknowable core count is not a reason to serialize.
+        assert_eq!(
+            intra_threads_from(None, Err(std::io::Error::other("no"))),
+            4
+        );
+    }
+
+    #[test]
+    fn an_operator_override_wins_over_the_core_count() {
+        // The point of the knob: fewer threads than the heuristic would pick,
+        // because something latency-sensitive shares the host.
+        assert_eq!(intra_threads_from(Some("3"), Ok(8)), 3);
+        assert_eq!(intra_threads_from(Some(" 3 "), Ok(8)), 3);
+        // And more, on a host that really is dedicated to this.
+        assert_eq!(intra_threads_from(Some("16"), Ok(8)), 16);
+    }
+
+    /// A typo must not silently serialize inference — that would be a 6x
+    /// slowdown announced by nothing at all.
+    #[test]
+    fn a_malformed_override_falls_back_to_the_default_rather_than_to_one() {
+        for bad in ["", "  ", "0", "-4", "many", "3.5", "8x"] {
+            assert_eq!(
+                intra_threads_from(Some(bad), Ok(8)),
+                6,
+                "override {bad:?} should fall back to the heuristic"
+            );
+        }
+    }
 
     #[test]
     fn every_token_lands_in_a_window() {
