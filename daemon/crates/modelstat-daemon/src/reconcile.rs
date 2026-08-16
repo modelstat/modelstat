@@ -105,6 +105,10 @@ const RESHIP_BACKOFF_MAX_MS: i64 = 24 * 60 * 60_000; // never wait longer than a
 /// The server-side digest source (`GET /v1/backfill/digests`). `None` = the
 /// digest is unreachable or the route degraded to the SPA-fallback — the pass is
 /// a no-op and retries next time (never a crash).
+// In-crate seam only (the daemon's HTTP client + tests implement it); no caller
+// ever needs `Send` bounds on the futures, so plain `async fn` stays the
+// clearer spelling.
+#[allow(async_fn_in_trait)]
 pub trait BackfillDigest {
     async fn fetch_days(&mut self) -> Option<BackfillDays>;
     async fn fetch_day_sessions(&mut self, day: &str) -> Option<BackfillDaySessions>;

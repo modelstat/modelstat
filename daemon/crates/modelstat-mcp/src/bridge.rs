@@ -23,6 +23,10 @@ pub struct ApiError {
 
 /// The backend seam: the HTTP forward + eager kick, injected so the dispatch is
 /// testable without a network.
+// In-crate seam only (the stdio dispatch + tests implement it); no caller ever
+// needs `Send` bounds on the futures, so plain `async fn` stays the clearer
+// spelling.
+#[allow(async_fn_in_trait)]
 pub trait McpBackend {
     /// `GET /v1/mcp/tools` (with the on-disk cache) → the tool list, or `None`
     /// when both live + cache are unavailable (caller falls back to static).
@@ -73,10 +77,7 @@ pub async fn handle_request<B: McpBackend>(
     let params = req.get("params").cloned().unwrap_or(Value::Null);
 
     // Notifications (no id) get no reply.
-    if id.is_none() {
-        return None;
-    }
-    let id = id.unwrap();
+    let id = id?;
 
     let result: Result<Value, (i64, String)> = match method {
         "initialize" => Ok(json!({
@@ -179,7 +180,7 @@ async fn handle_tool_call<B: McpBackend>(params: &Value, backend: &B) -> Value {
                 let detail = e
                     .body
                     .as_deref()
-                    .map(|b| format!(": {}", &b.chars().take(400).collect::<String>()))
+                    .map(|b| format!(": {}", b.chars().take(400).collect::<String>()))
                     .unwrap_or_default();
                 error_result(&format!("modelstat API error ({status}){detail}"))
             }

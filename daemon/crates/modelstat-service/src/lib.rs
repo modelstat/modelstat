@@ -270,16 +270,16 @@ pub fn service_pid(component: Component, scope: Scope) -> Option<i64> {
     #[cfg(target_os = "macos")]
     {
         let target = format!("{}/{}", launchd_domain(def.scope), def.label);
-        return launchd_service_pid(&target);
+        launchd_service_pid(&target)
     }
     #[cfg(target_os = "linux")]
     {
         let unit = format!("{}.service", def.unit_name);
         let (ok, out, _e) = systemctl(def.scope, &["show", "-p", "MainPID", "--value", &unit]);
-        return match out.trim().parse::<i64>() {
+        match out.trim().parse::<i64>() {
             Ok(pid) if ok && pid > 0 => Some(pid),
             _ => None,
-        };
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -293,15 +293,15 @@ pub fn service_status(component: Component, scope: Scope) -> ServiceStatus {
     let def = service_def(component, scope);
     #[cfg(target_os = "macos")]
     {
-        return mac_status(&def);
+        mac_status(&def)
     }
     #[cfg(target_os = "linux")]
     {
-        return linux_status(&def);
+        linux_status(&def)
     }
     #[cfg(target_os = "windows")]
     {
-        return windows_status(&def);
+        windows_status(&def)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

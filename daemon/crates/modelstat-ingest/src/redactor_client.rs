@@ -553,12 +553,12 @@ mod tests {
             (
                 200,
                 "",
-                ok_body(&format!("[{},{last_of_first}]", vec!["[]"; 63].join(","))),
+                ok_body(&format!("[{},{last_of_first}]", ["[]"; 63].join(","))),
             ),
             (
                 200,
                 "",
-                ok_body(&format!("[{first_of_second},{}]", vec!["[]"; 5].join(","))),
+                ok_body(&format!("[{first_of_second},{}]", ["[]"; 5].join(","))),
             ),
         ]);
         let r = RemoteRedactor::new(&m.addr, None);

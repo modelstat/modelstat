@@ -100,6 +100,9 @@ pub async fn enqueue<Q: QueueStore>(store: &Q, batch: &WireBatch) -> std::io::Re
 /// The drain-upload seam. `Ok(accepted)` = a confirmed commit (mark the events
 /// sent); `Err(Hold)` = a non-commit (leave them queued, retry next tick). The
 /// daemon backs this with `DeviceApi::upload_batch`; tests use a fake.
+// In-crate seam only (the receiver + tests implement it); no caller ever needs
+// `Send` bounds on the futures, so plain `async fn` stays the clearer spelling.
+#[allow(async_fn_in_trait)]
 pub trait DrainUploader {
     async fn upload(&mut self, batch: &IngestBatch) -> Result<u64, Hold>;
 }

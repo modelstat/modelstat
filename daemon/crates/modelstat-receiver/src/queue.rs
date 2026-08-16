@@ -46,6 +46,9 @@ pub struct QueueItem {
 /// The durable queue contract (put / has / list-unsent / mark-sent / count).
 /// Async to match the TS `QueueStore` interface (the receiver awaits it); the
 /// file impl below runs sync under the hood (the files are tiny).
+// In-crate seam only (the receiver + tests implement it); no caller ever needs
+// `Send` bounds on the futures, so plain `async fn` stays the clearer spelling.
+#[allow(async_fn_in_trait)]
 pub trait QueueStore {
     async fn put(&self, item: QueueItem) -> std::io::Result<()>;
     async fn has(&self, source_event_id: &str) -> bool;

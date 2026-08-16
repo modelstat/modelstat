@@ -422,6 +422,10 @@ pub struct HealResult {
 /// Self-heal wiring (`wire --heal`, run by the daemon on startup). Configures ONLY
 /// clients not already tracked (so a client the user removed is left alone), then
 /// records every currently-installed client so a later run won't touch them again.
+/// One named wiring attempt, deferred so `heal_wire` can skip the ones the
+/// state file says already ran.
+type WireRunner<'a> = Box<dyn Fn() -> WireStatus + 'a>;
+
 /// Best-effort. `state_path` + `include_claude_code` injected for tests.
 pub fn heal_wire(
     home: &Path,
@@ -431,7 +435,7 @@ pub fn heal_wire(
     state_path: &Path,
 ) -> HealResult {
     let recorded = read_wired_set(state_path);
-    let mut runners: Vec<(&'static str, Box<dyn Fn() -> WireStatus + '_>)> = Vec::new();
+    let mut runners: Vec<(&'static str, WireRunner<'_>)> = Vec::new();
     if include_claude_code {
         runners.push(("Claude Code", Box::new(move || wire_claude_code(exe))));
     }

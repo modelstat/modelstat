@@ -299,7 +299,7 @@ pub fn select_anchor_commits<'a>(
         })
         .filter_map(|c| Some((pr_number_from_subject(&c.subject)?, c)))
         .collect();
-    hits.sort_by_key(|(_, c)| std::cmp::Reverse(parse_ms(&c.committed_at)));
+    hits.sort_by_cached_key(|(_, c)| std::cmp::Reverse(parse_ms(&c.committed_at)));
     // A backport or cherry-pick carries the original `(#123)` forward, so one PR
     // can appear twice on a mainline. Counting it twice would weight that PR
     // double in the baseline; the newest occurrence wins.
