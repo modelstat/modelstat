@@ -391,11 +391,22 @@ pub const CONFIDENCE_TOOL: f64 = 0.8;
 /// A reference mined out of turn text — a PR URL somebody pasted or wrote. See
 /// [`CONFIDENCE_GIT`].
 pub const CONFIDENCE_CONTENT: f64 = 0.6;
+/// A repo slug that is only the parser's path-shape guess — below `content`
+/// (a reference actually observed in the conversation outranks a guess about
+/// the cwd's shape) but above `model`. See [`CONFIDENCE_GIT`].
+pub const CONFIDENCE_GIT_GUESS: f64 = 0.5;
 /// A reference an on-device model reported. Weakest: re-parsed free text. See
 /// [`CONFIDENCE_GIT`].
 pub const CONFIDENCE_MODEL: f64 = 0.4;
 
-/// The parsers' source rank (`git` > `tool` > `content` > `model`) as a weight.
+// The ordering IS the contract: the guess tier sits STRICTLY between an
+// observed mention and a model's re-read — same order as the parsers'
+// `source_rank`. Enforced at compile time.
+const _: () = assert!(CONFIDENCE_CONTENT > CONFIDENCE_GIT_GUESS);
+const _: () = assert!(CONFIDENCE_GIT_GUESS > CONFIDENCE_MODEL);
+
+/// The parsers' source rank (`git` > `tool` > `content` > `git_guess` >
+/// `model`) as a weight.
 ///
 /// Unknown sources read as `model` — the weakest — for the same reason the
 /// parsers' own `source_rank` does: an unrecognised provenance is not a strong
@@ -406,6 +417,7 @@ pub fn source_confidence(source: &str) -> f64 {
         "git" => CONFIDENCE_GIT,
         "tool" => CONFIDENCE_TOOL,
         "content" => CONFIDENCE_CONTENT,
+        "git_guess" => CONFIDENCE_GIT_GUESS,
         _ => CONFIDENCE_MODEL,
     }
 }
@@ -907,7 +919,9 @@ fn split_weights(weights: &[f64]) -> (Vec<f64>, f64) {
         .map(|x| if x.is_finite() && *x > 0.0 { *x } else { 0.0 })
         .collect();
     let mut sum: f64 = w.iter().sum();
-    if !(sum > 0.0) {
+    // `w` holds only finite non-negatives (the map above), so the sum is never
+    // NaN and `<= 0.0` reads the same as the old NaN-guarding `!(sum > 0.0)`.
+    if sum <= 0.0 {
         w = vec![1.0; weights.len()];
         sum = weights.len() as f64;
     }
@@ -1886,10 +1900,13 @@ mod tests {
 
     #[test]
     fn source_rank_is_a_split_weight_and_no_longer_the_confidence() {
+        // (The git_guess-strictly-between-content-and-model ordering is a
+        // compile-time const assertion beside the constants themselves.)
         for (source, weight) in [
             ("git", CONFIDENCE_GIT),
             ("tool", CONFIDENCE_TOOL),
             ("content", CONFIDENCE_CONTENT),
+            ("git_guess", CONFIDENCE_GIT_GUESS),
             ("model", CONFIDENCE_MODEL),
             ("something_new", CONFIDENCE_MODEL),
         ] {
