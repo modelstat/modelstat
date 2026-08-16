@@ -35,6 +35,9 @@ pub const INGEST_BATCH_MAX_TOOL_CALLS: usize = 20_000;
 /// unavailable → HOLD (no-degrade: keep the events queued and retry), matching
 /// the file-scan path's `build_for_one_session` Held outcome. The receiver backs
 /// this with the real pipeline; tests use a fake.
+// In-crate seam only (the receiver + tests implement it); no caller ever needs
+// `Send` bounds on the futures, so plain `async fn` stays the clearer spelling.
+#[allow(async_fn_in_trait)]
 pub trait PipelineRunner {
     async fn run(&self, events: &[RawEvent]) -> Option<Vec<Segment>>;
 }
@@ -100,7 +103,7 @@ where
     let mut session_ids_cur: Vec<String> = Vec::new();
     let mut calls_cur: Vec<ToolCallDraft> = Vec::new();
 
-    for (_sid, items) in &by_session {
+    for items in by_session.values() {
         if items.is_empty() {
             continue;
         }
@@ -154,7 +157,7 @@ where
             pipeline,
             &opts.device_id,
             &opts.daemon_version,
-            git.as_deref_mut(),
+            git,
             &opts.accounts,
         )
         .await
@@ -173,6 +176,9 @@ where
 // lifetime). Written as one `&mut (dyn … + Send)` they unify, and the per-call
 // reborrow below would then have to last as long as the ORIGINAL handle — which
 // the loop can't give, since it reborrows once per batch.
+// Eight named scalars/seams, each documented above; a param struct would only
+// re-spell the same list one hop away.
+#[allow(clippy::too_many_arguments)]
 async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
     events: &[RawEvent],
     session_ids: &[String],
@@ -199,7 +205,7 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
         by_session.entry(sid).or_default().push(ev.clone());
     }
     let mut segments: Vec<Segment> = Vec::new();
-    for (_sid, sess_events) in &by_session {
+    for sess_events in by_session.values() {
         match pipeline.run(sess_events).await {
             Some(segs) => segments.extend(segs),
             None => return None, // engine down → hold the whole pass

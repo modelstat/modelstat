@@ -75,6 +75,12 @@ export interface GitContext {
   remote_slug?: string;
   host?: string;
   branch?: string;
+  /**
+   * How `remote_slug` was reached. Producers that read the slug from git
+   * config (`remote.origin.url`) should set `"git_remote"`; unset means the
+   * slug's provenance is unstated and the server treats it as unverified.
+   */
+  slug_source?: string;
 }
 
 /**

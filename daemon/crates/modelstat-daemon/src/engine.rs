@@ -380,6 +380,9 @@ pub fn build_embedder() -> DaemonEmbedder {
 /// constructed. Whatever the variant, "could not classify" makes the flush
 /// HOLD (fail-closed, §9.5) rather than ship less-redacted content; the
 /// layer-1 floor has run on-device before any of these ever see a byte.
+// One long-lived value per daemon, never stored in a collection — boxing the
+// big ONNX variant would buy nothing but an indirection on the hot path.
+#[allow(clippy::large_enum_variant)]
 pub enum DaemonRedactor {
     /// Detector inactive — only the deterministic floor (layer 1) applies, and
     /// every flush that must classify holds (no egress).

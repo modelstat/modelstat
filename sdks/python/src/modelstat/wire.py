@@ -165,11 +165,18 @@ class ToolCallStatus(str, Enum):
 
 @dataclass
 class GitContext:
-    """Git context captured at the moment of the call (all optional)."""
+    """Git context captured at the moment of the call (all optional).
+
+    ``slug_source`` states how ``remote_slug`` was reached. Producers that
+    read the slug from git config (``remote.origin.url``) should set
+    ``"git_remote"``; unset means the slug's provenance is unstated and the
+    server treats it as unverified.
+    """
 
     remote_slug: Optional[str] = None
     host: Optional[str] = None
     branch: Optional[str] = None
+    slug_source: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
@@ -179,6 +186,8 @@ class GitContext:
             out["host"] = self.host
         if self.branch is not None:
             out["branch"] = self.branch
+        if self.slug_source is not None:
+            out["slug_source"] = self.slug_source
         return out
 
 

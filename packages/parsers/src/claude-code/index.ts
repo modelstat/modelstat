@@ -30,7 +30,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { RawEvent } from "@modelstat/core";
 import { detectEventReferences, redact, sourceEventId } from "@modelstat/core";
-import { guessRepoSlugFromPath } from "../git.js";
+import { guessRepoSlugFromPath, pathGuessedGitContext } from "../git.js";
 import { extractLocalToolContext, extractToolAction } from "../tool-action/index.js";
 import {
   fallbackCallId,
@@ -438,15 +438,7 @@ export async function parseClaudeCodeJsonl(ctx: ParserContext): Promise<ParseRes
         // git context) for cwds the path heuristic doesn't match (e.g.
         // ~/Documents/<repo>), starving the session-metadata join. The branch
         // is the historical one Claude Code recorded for the turn.
-        git:
-          slug || gitBranch
-            ? {
-                remote_url: null,
-                remote_host: slug?.includes("/") ? "github.com" : null,
-                remote_slug: slug,
-                branch: gitBranch,
-              }
-            : null,
+        git: pathGuessedGitContext(slug, gitBranch),
         tokens: {
           input: usage.input_tokens ?? 0,
           output: usage.output_tokens ?? 0,

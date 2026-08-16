@@ -137,8 +137,15 @@
  *      in the rollout JSONL on each device and never reached the server. The
  *      re-scan also re-prices every event against the current rate card, fixing
  *      the historical $0.00 costs for models that had no rate row.
+ * v18 — provenance tiering. Repo slugs now carry their `slug_source` provenance
+ *      end to end: the `projects` hint reads the first VERIFIED slug in the
+ *      slice (confidence tiered 1 / 0.5, `reason` = the marker verbatim) and
+ *      session-metadata repo refs ship `git` vs `git_guess` from the same
+ *      predicate. Re-scan so historical segments re-derive their projects
+ *      hints + repo ref sources — only the daemon can, from the events on
+ *      disk.
  */
-export const PROCESSING_VERSION = 17;
+export const PROCESSING_VERSION = 18;
 
 export interface ProcessingState {
   processingVersion: number | null;

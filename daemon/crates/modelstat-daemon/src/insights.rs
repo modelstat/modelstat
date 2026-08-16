@@ -119,6 +119,10 @@ pub fn read_cached_insights_sync(sessions_dir: &Path, session_id: &str) -> Optio
 /// unexpected body (the caller treats it as "nothing to cache this round"). The
 /// daemon backs this with an authed POST to `/v1/mcp/call`; tests use a fake.
 /// Returns the RAW insights JSON so unknown server fields survive the cache.
+// In-crate seam only (the daemon's HTTP client + tests implement it); no caller
+// ever needs `Send` bounds on the futures, so plain `async fn` stays the
+// clearer spelling.
+#[allow(async_fn_in_trait)]
 pub trait SessionInsightsFetcher {
     async fn fetch(&self, session_ids: &[String], eager: bool) -> Option<Value>;
 }

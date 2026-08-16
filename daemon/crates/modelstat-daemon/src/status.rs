@@ -519,8 +519,6 @@ mod tests {
         assert!(s.live.len() <= 9, "capped (8 + the survivor at most)");
     }
 
-    use super::*;
-
     #[test]
     fn snapshot_body_carries_every_field_and_device_id_null_when_absent() {
         let mut s = Status::default();

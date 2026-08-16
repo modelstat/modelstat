@@ -3,7 +3,7 @@
 //! `buildSessionMetadata` bundled behind one trait (feature §7.4).
 //!
 //! The pass ([`modelstat-pipeline`]) is generic over this trait so it stays pure
-//! + unit-testable (fakes for the git I/O) and never shells out itself. The real
+//! and unit-testable (fakes for the git I/O), never shelling out itself. The real
 //! collector wires [`RealGitEnrichment`], which fronts the (process-lifetime
 //! cached) [`GitResolver`] plus the two stateless git-history reads. All three
 //! calls are best-effort: `None` means "no signal", never an error the pass must

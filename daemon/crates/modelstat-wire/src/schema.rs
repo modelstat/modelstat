@@ -53,6 +53,31 @@ pub const SLUG_SOURCE_REPO_ROOT_DIR: &str = "repo_root_dir";
 /// no repo reachable at all. A guess about a path, not an observation of git.
 pub const SLUG_SOURCE_PATH_SHAPE: &str = "path_shape";
 
+/// The `projects` hint confidence for a slug whose provenance is verified
+/// ([`slug_is_verified`]) — a fact read off the repo itself.
+pub const PROJECT_SLUG_CONFIDENCE_VERIFIED: f64 = 1.0;
+/// The `projects` hint confidence for a surviving guess (path shape, or
+/// unstated provenance with no remote evidence) — below the server's
+/// project-node minting bar on purpose.
+pub const PROJECT_SLUG_CONFIDENCE_GUESS: f64 = 0.5;
+
+/// True when the context's slug was read off the repo itself. Two kinds of
+/// evidence qualify:
+///   - the `slug_source` marker states it (`git_remote` / `repo_root_dir`);
+///   - the context carries a `remote_url` — NO guess path, current or
+///     historical, has ever written one, so a pre-marker event with a remote
+///     URL was read off git config even though it predates the marker.
+///
+/// False for a path-shape guess AND for an absent marker without a remote URL:
+/// unstated provenance is not verification (SDK producers, and events from
+/// daemons predating the marker).
+pub fn slug_is_verified(git: &GitContext) -> bool {
+    matches!(
+        git.slug_source.as_deref(),
+        Some(SLUG_SOURCE_GIT_REMOTE) | Some(SLUG_SOURCE_REPO_ROOT_DIR)
+    ) || git.remote_url.is_some()
+}
+
 /// Git context — the four original fields nullable (present, may be null), plus
 /// the additive `slug_source` provenance marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -806,6 +831,32 @@ mod tests {
         assert_eq!(tu, TokenUsage::default());
         let json = serde_json::to_string(&tu).unwrap();
         assert!(json.contains("\"reasoning\":0"));
+    }
+
+    #[test]
+    fn slug_verification_is_evidence_based() {
+        let git = |slug_source: Option<&str>, remote_url: Option<&str>| GitContext {
+            remote_url: remote_url.map(str::to_string),
+            remote_host: None,
+            remote_slug: Some("acme/web".into()),
+            branch: None,
+            slug_source: slug_source.map(str::to_string),
+        };
+        // The marker states it.
+        assert!(slug_is_verified(&git(Some(SLUG_SOURCE_GIT_REMOTE), None)));
+        assert!(slug_is_verified(&git(
+            Some(SLUG_SOURCE_REPO_ROOT_DIR),
+            None
+        )));
+        // A pre-marker event carrying a real remote URL: no guess path, current
+        // or historical, ever wrote one, so the URL itself is the evidence.
+        assert!(slug_is_verified(&git(
+            None,
+            Some("https://github.com/acme/web.git")
+        )));
+        // A guess stays a guess, marker or no marker.
+        assert!(!slug_is_verified(&git(Some(SLUG_SOURCE_PATH_SHAPE), None)));
+        assert!(!slug_is_verified(&git(None, None)));
     }
 
     #[test]

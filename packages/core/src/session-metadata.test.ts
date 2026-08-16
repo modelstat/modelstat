@@ -9,8 +9,14 @@ import {
   detectReferences,
   type FileRef,
   isEmptySessionMetadata,
+  type RefSource,
+  type RepoRef,
   repoRefFromGit,
   SessionMetadata,
+  SLUG_SOURCE_GIT_REMOTE,
+  SLUG_SOURCE_PATH_SHAPE,
+  SLUG_SOURCE_REPO_ROOT_DIR,
+  slugIsVerified,
 } from "./session-metadata.js";
 
 test("detects a GitHub PR URL and its repo", () => {
@@ -108,11 +114,76 @@ test("detectBranchTickets pulls a key out of a branch name", () => {
 });
 
 test("repoRefFromGit builds a repo with its branch, or null without a slug", () => {
-  const ok = repoRefFromGit({ remote_host: "github.com", remote_slug: "acme/web", branch: "main" });
+  const ok = repoRefFromGit({
+    remote_host: "github.com",
+    remote_slug: "acme/web",
+    branch: "main",
+    slug_source: SLUG_SOURCE_GIT_REMOTE,
+  });
   assert.equal(ok?.slug, "acme/web");
   assert.deepEqual(ok?.branches, ["main"]);
   assert.equal(ok?.source, "git");
   assert.equal(repoRefFromGit({ remote_slug: null, branch: "x" }), null);
+});
+
+test("repoRefFromGit derives the source from the context's own provenance", () => {
+  // Unstated provenance with no remote evidence is a GUESS — a caller cannot
+  // launder a path-shape slug into a `git` fact by forgetting the argument.
+  assert.equal(repoRefFromGit({ remote_slug: "acme/web" })?.source, "git_guess");
+  assert.equal(
+    repoRefFromGit({ remote_slug: "acme/web", slug_source: SLUG_SOURCE_PATH_SHAPE })?.source,
+    "git_guess",
+  );
+  // The two verified markers are `git` facts, as is a pre-marker context
+  // carrying a real remote URL (no guess path ever wrote one).
+  assert.equal(
+    repoRefFromGit({ remote_slug: "acme/web", slug_source: SLUG_SOURCE_REPO_ROOT_DIR })?.source,
+    "git",
+  );
+  assert.equal(
+    repoRefFromGit({ remote_slug: "acme/web", remote_url: "https://github.com/acme/web.git" })
+      ?.source,
+    "git",
+  );
+  // An explicit source still overrides the derivation.
+  assert.equal(repoRefFromGit({ remote_slug: "acme/web" }, "tool")?.source, "tool");
+});
+
+test("slugIsVerified is evidence-based", () => {
+  // The marker states it…
+  assert.ok(slugIsVerified({ slug_source: SLUG_SOURCE_GIT_REMOTE }));
+  assert.ok(slugIsVerified({ slug_source: SLUG_SOURCE_REPO_ROOT_DIR }));
+  // …or a real remote URL does (pre-marker daemons: no guess path, current or
+  // historical, ever wrote one).
+  assert.ok(slugIsVerified({ remote_url: "git@github.com:acme/web.git" }));
+  // A guess stays a guess, marker or no marker.
+  assert.ok(!slugIsVerified({ slug_source: SLUG_SOURCE_PATH_SHAPE }));
+  assert.ok(!slugIsVerified({}));
+  assert.ok(!slugIsVerified({ slug_source: null, remote_url: null }));
+});
+
+test("git_guess ranks below every observation but above model", () => {
+  // A guessed slug colliding with the same slug from a stronger channel must
+  // lose the label: `git` (verified) and `content` (actually seen in the
+  // conversation) both beat it; only `model` ranks lower.
+  const guess: RepoRef = { host: null, slug: "acme/api", branches: [], source: "git_guess" };
+  const cases: Array<[RefSource, RefSource]> = [
+    ["git", "git"],
+    ["content", "content"],
+    ["model", "git_guess"],
+  ];
+  for (const [other, expected] of cases) {
+    const m = dedupeSessionMetadata([
+      { repos: [guess], pull_requests: [], issues: [] },
+      {
+        repos: [{ host: "github.com", slug: "acme/api", branches: [], source: other }],
+        pull_requests: [],
+        issues: [],
+      },
+    ]);
+    assert.equal(m.repos.length, 1);
+    assert.equal(m.repos[0]?.source, expected, `vs ${other}`);
+  }
 });
 
 test("dedupe merges repos by slug, unioning branches and keeping strongest source", () => {
@@ -132,7 +203,32 @@ test("dedupe merges repos by slug, unioning branches and keeping strongest sourc
   assert.equal(m.repos.length, 1, "case-insensitive slug merge");
   assert.equal(m.repos[0]?.host, "github.com");
   assert.equal(m.repos[0]?.source, "git", "git beats content");
+  // The higher-ranked ref supplies the canonical TEXT too: the verified
+  // remote's casing wins even though the content mention arrived first.
+  assert.equal(m.repos[0]?.slug, "Acme/Web");
   assert.deepEqual([...m.repos[0]!.branches].sort(), ["feature/x", "main"]);
+});
+
+test("a verified ref arriving second supplies the casing and host", () => {
+  // guess first (path-shape casing, no host), verified second — the repo the
+  // dashboard shows must carry the remote's own casing and host.
+  const m = dedupeSessionMetadata([
+    {
+      repos: [{ host: null, slug: "acme/api", branches: ["wip"], source: "git_guess" }],
+      pull_requests: [],
+      issues: [],
+    },
+    {
+      repos: [{ host: "github.com", slug: "Acme/API", branches: ["main"], source: "git" }],
+      pull_requests: [],
+      issues: [],
+    },
+  ]);
+  assert.equal(m.repos.length, 1);
+  assert.equal(m.repos[0]?.slug, "Acme/API", "verified casing wins");
+  assert.equal(m.repos[0]?.host, "github.com", "verified host wins");
+  assert.equal(m.repos[0]?.source, "git");
+  assert.deepEqual([...m.repos[0]!.branches].sort(), ["main", "wip"]);
 });
 
 test("dedupe keeps the highest-confidence/strongest copy of a PR", () => {

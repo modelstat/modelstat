@@ -185,7 +185,7 @@ fn recent_cwds(events: &[RawEvent]) -> Vec<String> {
         *slot = (*slot).max(ms);
     }
     let mut ranked: Vec<(&str, i64)> = newest.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|&(_, ms)| std::cmp::Reverse(ms));
     ranked.into_iter().map(|(cwd, _)| cwd.to_string()).collect()
 }
 

@@ -2,12 +2,12 @@
 //! `apps/daemon/src/supervise.ts`. `modelstat _daemon-health` prints this JSON;
 //! the Swift tray stays a thin "run command, switch on decision".
 //!
-//!   - **adopt**   — a live daemon owns the lock and is heartbeating (or is a
-//!                   fresh boot inside the grace window): use it as-is.
-//!   - **spawn**   — no lock, or the owner is dead: start a new daemon.
+//!   - **adopt** — a live daemon owns the lock and is heartbeating (or is a
+//!     fresh boot inside the grace window): use it as-is.
+//!   - **spawn** — no lock, or the owner is dead: start a new daemon.
 //!   - **replace** — a live owner is wedged (stale heartbeat past the grace) OR
-//!                   is an OLD version after an upgrade re-staged the bundle
-//!                   (it survives launchd's group kill + never picks up new code).
+//!     is an OLD version after an upgrade re-staged the bundle (it survives
+//!     launchd's group kill + never picks up new code).
 
 use serde_json::{json, Value};
 

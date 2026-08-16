@@ -73,6 +73,11 @@ pub struct GitContext {
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// How `remote_slug` was reached. Producers that read the slug from git
+    /// config (`remote.origin.url`) should set `"git_remote"`; unset means the
+    /// slug's provenance is unstated and the server treats it as unverified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug_source: Option<String>,
 }
 
 /// One LLM call as it crosses the ingest boundary: small and numeric, with at

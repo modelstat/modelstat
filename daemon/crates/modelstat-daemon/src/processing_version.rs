@@ -244,8 +244,19 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       local-only fact: only a re-read fills the historical spans, and the
 ///       deterministic `tc_` ids mean the server upserts the ends onto the
 ///       calls it already has. Cross-parser, so the CAPTURE aspect carries it.
+/// capture v27 — provenance tiering for repo slugs. Segments derive their
+///       `projects` hint from stored events at scan time, and that derivation
+///       changed shape: the hint now reads the first VERIFIED slug in the
+///       slice (not blindly the first event), tiers its confidence by
+///       `slug_source` — with a real `remote_url` accepted as evidence on
+///       pre-marker events, since no guess path ever wrote one — and ships the
+///       marker verbatim as the hint's `reason`; session-metadata repo refs
+///       ship `git` vs `git_guess` from the same predicate. All of it is
+///       re-derived from the local logs, so a re-read is the only way
+///       historical segments gain the tiering. Cross-parser (every parser's
+///       events carry git context), so the CAPTURE aspect carries it.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
-    ("capture", LEGACY_WORLD_VERSION + 3),
+    ("capture", LEGACY_WORLD_VERSION + 4),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION + 2),
     ("codex", LEGACY_WORLD_VERSION + 4),

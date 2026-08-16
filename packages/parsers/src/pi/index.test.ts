@@ -124,6 +124,9 @@ test("emits user + assistant events with mapped tokens", async () => {
   });
   assert.equal(asst.cwd, "/Users/dev/projects/acme/myrepo");
   assert.equal(asst.git?.remote_slug, "acme/myrepo");
+  // The slug is a path-shape guess: it says so, and it names no forge.
+  assert.equal(asst.git?.slug_source, "path_shape");
+  assert.equal(asst.git?.remote_host, null);
 });
 
 test("pairs toolCall with its toolResult and aggregates", async () => {

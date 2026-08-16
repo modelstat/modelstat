@@ -496,13 +496,10 @@ pub async fn perform_upgrade(target: &str, sha256: Option<&str>, now_ms: i64) ->
             // the update landed); clear here too for the manual-CLI path.
             clear_upgrade_marker();
             UpgradeOutcome::Completed(format!(
-                "updated to {} — the service is running the new build{}",
+                "updated to {} — the service is running the new build{}{}",
                 bare_version(target),
-                format!(
-                    "{}{}",
-                    sidecar_note.unwrap_or_default(),
-                    tray_note.unwrap_or_default()
-                )
+                sidecar_note.unwrap_or_default(),
+                tray_note.unwrap_or_default()
             ))
         }
         Err(e) => {

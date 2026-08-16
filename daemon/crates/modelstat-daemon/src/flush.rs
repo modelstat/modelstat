@@ -149,6 +149,10 @@ impl ScanGeneration {
     }
 }
 
+// The flush IS the meeting point of every per-run accumulator (segments,
+// events, actors, generation, accounts) plus the engine seams — each parameter
+// is documented in place, and a bag struct would only re-spell the list.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_flush_batches<S, E, N>(
     device_id: &str,
     daemon_version: &str,
@@ -292,7 +296,7 @@ where
                         // honestly (see `accounts::session_installs_for`). One session
                         // per raw batch, so only its own entry rides.
                         session_installs: installs_for_session,
-                        session_actors: None,
+                        session_actors: actors_for_session,
                         session_titles: None,
                         // One session per batch ⇒ ship that session's entry alone. A
                         // session the pass found nothing for stays absent rather than
@@ -511,7 +515,6 @@ mod tests {
         assert!(ScanGeneration::default().claims(&batch, &run).is_none());
     }
 
-    use super::*;
     use crate::testing::AnsweringRedactor;
     use modelstat_pipeline::NoEmbedder;
     use modelstat_redact::UnavailableRedactor;

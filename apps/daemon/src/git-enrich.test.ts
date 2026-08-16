@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { GitContext, RawEvent } from "@modelstat/core";
+import {
+  type GitContext,
+  type RawEvent,
+  SLUG_SOURCE_GIT_REMOTE,
+  SLUG_SOURCE_PATH_SHAPE,
+  SLUG_SOURCE_REPO_ROOT_DIR,
+} from "@modelstat/core";
 import { type GitResolver, type RootResolver, resolveAuthoritativeGit } from "./git-enrich.js";
 
 function mkGit(over: Partial<GitContext> = {}): GitContext {
@@ -64,6 +70,8 @@ test("overwrites a path-guessed slug with the authoritative remote, keeping the 
   assert.equal(out?.git?.remote_host, "github.com");
   assert.equal(out?.git?.remote_url, "git@github.com:acme/backend.git");
   assert.equal(out?.git?.branch, "feature/x", "keeps the branch the parser recorded for the turn");
+  // The correction re-labels the provenance too: the path guess is gone.
+  assert.equal(out?.git?.slug_source, SLUG_SOURCE_GIT_REMOTE);
 });
 
 test("no remote → uses the repo-ROOT dir name (bare, never a subpath)", async () => {
@@ -85,6 +93,8 @@ test("no remote → uses the repo-ROOT dir name (bare, never a subpath)", async 
   assert.equal(out?.git?.remote_slug, "backend", "bare repo-root name, not app/case-studies");
   assert.equal(out?.git?.remote_host, null);
   assert.equal(out?.git?.branch, "feature/x", "historical branch preserved");
+  // A directory name is not an `owner/repo` off a forge, and says so.
+  assert.equal(out?.git?.slug_source, SLUG_SOURCE_REPO_ROOT_DIR);
 });
 
 test("repo-root fallback overrides a subpath guess even when the event had no branch", async () => {
@@ -103,7 +113,7 @@ test("repo-root fallback overrides a subpath guess even when the event had no br
 test("no remote AND no reachable .git → keeps the parser's guess (last resort)", async () => {
   const ev = mkEvent({
     cwd: "/tmp/gone-repo/src/app/thing",
-    git: mkGit({ remote_slug: "app/thing", branch: "main" }),
+    git: mkGit({ remote_slug: "app/thing", branch: "main", slug_source: SLUG_SOURCE_PATH_SHAPE }),
   });
   const resolveGit = resolverFor({}); // no remote
 
@@ -111,6 +121,7 @@ test("no remote AND no reachable .git → keeps the parser's guess (last resort)
 
   assert.equal(out, ev, "unchanged event reference — nothing to override");
   assert.equal(out?.git?.remote_slug, "app/thing");
+  assert.equal(out?.git?.slug_source, SLUG_SOURCE_PATH_SHAPE, "still labeled a guess");
 });
 
 test("adds git identity when the event had none but disk resolves a remote", async () => {

@@ -9,7 +9,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
-import type { GitContext } from "@modelstat/core";
+import {
+  type GitContext,
+  SLUG_SOURCE_GIT_REMOTE,
+  SLUG_SOURCE_PATH_SHAPE,
+} from "@modelstat/core";
 
 const pexec = promisify(execFile);
 const cache = new Map<string, GitContext>();
@@ -96,6 +100,8 @@ export async function resolveGitContext(cwd: string | null): Promise<GitContext 
     remote_host: parsed.host,
     remote_slug: parsed.slug,
     branch,
+    // The one path allowed to name a host: git told us.
+    ...(parsed.slug ? { slug_source: SLUG_SOURCE_GIT_REMOTE } : {}),
   };
   cache.set(target, ctx);
   return ctx;
@@ -117,4 +123,28 @@ export function guessRepoSlugFromPath(cwd: string | null): string | null {
   // can't resolve the real remote at parse time and we fall through to here.)
   if (b.startsWith(".") || b === "worktrees") return a;
   return `${a}/${b}`;
+}
+
+/** The {@link GitContext} a parser may claim when it could not ask git: the
+ * slug (if any) came from {@link guessRepoSlugFromPath}, so the ONLY things
+ * known are the path shape and whatever branch the transcript itself recorded.
+ *
+ * `remote_host` is therefore null. It used to be stamped `"github.com"`
+ * whenever the guessed slug contained a `/` — a forge invented from a
+ * directory layout, written into the same field {@link resolveGitContext}
+ * fills from `git config`, so the server could not tell the two apart.
+ * `slug_source` now labels the guess instead. Null when there is nothing at
+ * all to say. */
+export function pathGuessedGitContext(
+  slug: string | null,
+  branch: string | null,
+): GitContext | null {
+  if (!slug && !branch) return null;
+  return {
+    remote_url: null,
+    remote_host: null,
+    remote_slug: slug,
+    branch,
+    ...(slug ? { slug_source: SLUG_SOURCE_PATH_SHAPE } : {}),
+  };
 }

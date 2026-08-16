@@ -5,4 +5,4 @@ Read both at runtime (to build ``Config.client_version`` -> the wire
 ``[tool.hatch.version]``), so the two can never drift.
 """
 
-__version__ = "0.0.6"
+__version__ = "0.0.7"

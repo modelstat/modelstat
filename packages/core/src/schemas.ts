@@ -28,6 +28,19 @@ export const TokenUsage = z.object({
 });
 export type TokenUsage = z.infer<typeof TokenUsage>;
 
+// The `slug_source` markers + verification predicate live in
+// `session-metadata.js` (which this module already depends on) so the repo-ref
+// helpers there can share them without an import cycle; re-exported here beside
+// `GitContext`, their wire home.
+export {
+  PROJECT_SLUG_CONFIDENCE_GUESS,
+  PROJECT_SLUG_CONFIDENCE_VERIFIED,
+  SLUG_SOURCE_GIT_REMOTE,
+  SLUG_SOURCE_PATH_SHAPE,
+  SLUG_SOURCE_REPO_ROOT_DIR,
+  slugIsVerified,
+} from "./session-metadata.js";
+
 /** Git context derived from cwd → nearest `.git`. */
 export const GitContext = z.object({
   remote_url: z.string().nullable(),
@@ -41,8 +54,9 @@ export const GitContext = z.object({
    * `git_remote` (the repo's configured remote — the only source that can also
    * name a host), `repo_root_dir` (a real repo with no remote, keyed on its
    * root directory name), `path_shape` (inferred from the cwd's shape, no repo
-   * reachable). Absent when there is no slug, and from daemons predating it. */
-  slug_source: z.string().max(40).optional(),
+   * reachable). Absent when there is no slug, and from daemons predating it.
+   * Nullish like every sibling git field — an explicit null must parse. */
+  slug_source: z.string().max(40).nullish(),
 });
 export type GitContext = z.infer<typeof GitContext>;
 

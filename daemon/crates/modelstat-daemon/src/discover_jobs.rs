@@ -547,7 +547,7 @@ pub fn parse_job_streaming(
 
 /// Sort newest-first by file mtime so a just-finished session uploads first.
 pub fn order_jobs_newest_first(mut jobs: Vec<ScanJob>) -> Vec<ScanJob> {
-    jobs.sort_by(|a, b| mtime_ms(&b.path).cmp(&mtime_ms(&a.path)));
+    jobs.sort_by_cached_key(|j| std::cmp::Reverse(mtime_ms(&j.path)));
     jobs
 }
 

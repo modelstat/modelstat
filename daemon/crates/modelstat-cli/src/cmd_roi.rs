@@ -514,14 +514,14 @@ pub fn weak_volume_share(rows: &[&Row]) -> Option<f64> {
 pub fn sort_rows(rows: &mut [Row], sort: Sort) {
     match sort {
         Sort::Recent => {}
-        Sort::Pr => rows.sort_by(|a, b| b.pr_number.cmp(&a.pr_number)),
-        Sort::Files => rows.sort_by(|a, b| b.files_changed.cmp(&a.files_changed)),
-        Sort::Added => rows.sort_by(|a, b| b.lines_added.cmp(&a.lines_added)),
-        Sort::Deleted => rows.sort_by(|a, b| b.lines_deleted.cmp(&a.lines_deleted)),
-        Sort::Lines => rows.sort_by(|a, b| b.churn().cmp(&a.churn())),
-        Sort::Sessions => rows.sort_by(|a, b| b.sessions.cmp(&a.sessions)),
+        Sort::Pr => rows.sort_by_key(|r| std::cmp::Reverse(r.pr_number)),
+        Sort::Files => rows.sort_by_key(|r| std::cmp::Reverse(r.files_changed)),
+        Sort::Added => rows.sort_by_key(|r| std::cmp::Reverse(r.lines_added)),
+        Sort::Deleted => rows.sort_by_key(|r| std::cmp::Reverse(r.lines_deleted)),
+        Sort::Lines => rows.sort_by_key(|r| std::cmp::Reverse(r.churn())),
+        Sort::Sessions => rows.sort_by_key(|r| std::cmp::Reverse(r.sessions)),
         Sort::Tokens => rows.sort_by(|a, b| b.equiv_tokens.total_cmp(&a.equiv_tokens)),
-        Sort::Active => rows.sort_by(|a, b| b.active_ms.cmp(&a.active_ms)),
+        Sort::Active => rows.sort_by_key(|r| std::cmp::Reverse(r.active_ms)),
     }
 }
 

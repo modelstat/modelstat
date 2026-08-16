@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { GitContext } from "@modelstat/core/schemas";
-import { RawEvent, Segment } from "@modelstat/core/schemas";
+import { RawEvent, Segment, SLUG_SOURCE_GIT_REMOTE } from "@modelstat/core/schemas";
 import {
   buildLinkExtractUserPrompt,
   buildSessionMetadata,
@@ -64,7 +64,12 @@ function mkSegment(session_id: string, abstract: string): Segment {
 
 test("repos come from event git context, with the branch", async () => {
   const ev = mkEvent({
-    git: mkGit({ remote_host: "github.com", remote_slug: "acme/web", branch: "main" }),
+    git: mkGit({
+      remote_host: "github.com",
+      remote_slug: "acme/web",
+      branch: "main",
+      slug_source: SLUG_SOURCE_GIT_REMOTE,
+    }),
   });
   const seg = mkSegment("s1", "Refactored the auth module.");
   const out = await buildSessionMetadata([seg], [ev]);
@@ -72,6 +77,39 @@ test("repos come from event git context, with the branch", async () => {
   assert.equal(out.s1?.repos[0]?.slug, "acme/web");
   assert.deepEqual(out.s1?.repos[0]?.branches, ["main"]);
   assert.equal(out.s1?.repos[0]?.source, "git");
+});
+
+test("a guessed event slug ships git_guess, not git", async () => {
+  // The event's slug is only the parser's path-shape guess (no `.git` was
+  // reachable, so authoritative enrichment left it standing) — the repo ref
+  // must say so instead of claiming a `git` fact. Same for an UNSTATED
+  // provenance (SDK producers, events from daemons predating the marker).
+  for (const slug_source of ["path_shape", undefined] as const) {
+    const ev = mkEvent({ git: mkGit({ remote_slug: "acme/web", slug_source }) });
+    const out = await buildSessionMetadata([mkSegment("s1", "Did some work.")], [ev]);
+    assert.equal(out.s1?.repos.length, 1, `slug_source ${slug_source}`);
+    assert.equal(out.s1?.repos[0]?.source, "git_guess", `slug_source ${slug_source}`);
+  }
+});
+
+test("a pre-marker event with a real remote URL is verified", async () => {
+  // Events from daemons predating the `slug_source` marker carry no
+  // provenance (`mkGit` normally stamps it — this is the ABSENT-marker path).
+  // A real remote_url is evidence on its own: no guess path, current or
+  // historical, ever wrote one, so the repo ref ships `git`, not `git_guess`,
+  // and dedupe canonicalises to it over a same-slug guess.
+  const verified = mkEvent({
+    git: mkGit({
+      remote_url: "https://github.com/acme/web.git",
+      remote_host: "github.com",
+      remote_slug: "Acme/Web",
+    }),
+  });
+  const guessed = mkEvent({ git: mkGit({ remote_slug: "acme/web", slug_source: "path_shape" }) });
+  const out = await buildSessionMetadata([mkSegment("s1", "Did some work.")], [guessed, verified]);
+  assert.equal(out.s1?.repos.length, 1);
+  assert.equal(out.s1?.repos[0]?.source, "git");
+  assert.equal(out.s1?.repos[0]?.slug, "Acme/Web", "verified casing wins");
 });
 
 test("PRs + issues are mined from redacted abstracts", async () => {
