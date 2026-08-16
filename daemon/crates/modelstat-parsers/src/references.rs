@@ -47,12 +47,16 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Trust ranking — higher wins when the same entity is seen twice.
+/// Trust ranking — higher wins when the same entity is seen twice. `git_guess`
+/// (a repo ref whose slug is only the parser's path-shape guess) sits below
+/// `content`: a reference actually observed in the conversation outranks a
+/// guess about the cwd's shape.
 fn source_rank(s: &str) -> i32 {
     match s {
-        "git" => 3,
-        "tool" => 2,
-        "content" => 1,
+        "git" => 4,
+        "tool" => 3,
+        "content" => 2,
+        "git_guess" => 1,
         _ => 0, // "model"
     }
 }
@@ -855,6 +859,34 @@ mod tests {
         assert_eq!(meta.repos[0].source, "git");
         assert_eq!(meta.repos[0].branches, vec!["main".to_string()]);
         assert!(meta.files.is_empty());
+    }
+
+    #[test]
+    fn git_guess_ranks_below_every_observation_but_above_model() {
+        // A guessed slug colliding with the same slug from a stronger channel
+        // must lose the label: `git` (verified) and `content` (actually seen in
+        // the conversation) both beat it; only `model` ranks lower.
+        let guess = |slug: &str| RepoRef {
+            host: None,
+            slug: slug.into(),
+            branches: Vec::new(),
+            source: "git_guess".into(),
+        };
+        let with = |source: &str| RepoRef {
+            host: Some("github.com".into()),
+            slug: "acme/api".into(),
+            branches: Vec::new(),
+            source: source.into(),
+        };
+        for (other, expected) in [("git", "git"), ("content", "content"), ("model", "git_guess")] {
+            let mut a = DetectedRefs::default();
+            a.repos.push(guess("acme/api"));
+            let mut b = DetectedRefs::default();
+            b.repos.push(with(other));
+            let meta = dedupe_session_metadata(vec![a, b]);
+            assert_eq!(meta.repos.len(), 1);
+            assert_eq!(meta.repos[0].source, expected, "vs {other}");
+        }
     }
 
     #[test]

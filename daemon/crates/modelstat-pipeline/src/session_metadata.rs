@@ -27,7 +27,7 @@ use modelstat_parsers::{
     dedupe_files, dedupe_session_metadata, detect_branch_tickets, detect_references,
     is_empty_session_metadata, DetectedRefs, FileRef, GitEnrichment, RepoRef, SessionMetadata,
 };
-use modelstat_wire::{RawEvent, Segment};
+use modelstat_wire::{slug_is_verified, RawEvent, Segment};
 
 use crate::passes::{sample_abstracts, strip_cognition_suffix};
 use crate::prompts::LINK_EXTRACT_MAX_ABSTRACTS;
@@ -202,11 +202,20 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
             let Some(g) = &e.git else { continue };
             let mut refs = DetectedRefs::default();
             if let Some(slug) = g.remote_slug.as_ref().filter(|s| !s.is_empty()) {
+                // A slug the daemon verified on disk (`git_remote` /
+                // `repo_root_dir`) is a `git` fact; a surviving path-shape
+                // guess ships `git_guess` so the spend→outcome join can't
+                // take it on faith.
+                let source = if slug_is_verified(g.slug_source.as_deref()) {
+                    "git"
+                } else {
+                    "git_guess"
+                };
                 refs.repos.push(RepoRef {
                     host: g.remote_host.clone(),
                     slug: slug.clone(),
                     branches: branch_vec(&g.branch),
-                    source: "git".into(),
+                    source: source.into(),
                 });
             }
             if let Some(b) = g.branch.as_ref().filter(|b| !b.is_empty()) {
@@ -420,7 +429,7 @@ mod tests {
             remote_host: Some(host.into()),
             remote_slug: Some(slug.into()),
             branch: Some(branch.into()),
-            slug_source: None,
+            slug_source: Some(modelstat_wire::SLUG_SOURCE_GIT_REMOTE.into()),
         }
     }
 
@@ -467,6 +476,28 @@ mod tests {
         assert_eq!(m.issues.len(), 1);
         assert_eq!(m.issues[0].key, "ENG-742");
         assert_eq!(m.issues[0].source, "git");
+    }
+
+    #[tokio::test]
+    async fn guessed_event_slug_ships_git_guess_not_git() {
+        // The event's slug is only the parser's path-shape guess (no `.git` was
+        // reachable, so authoritative enrichment left it standing) — the repo
+        // ref must say so instead of claiming a `git` fact. Same for an
+        // UNSTATED provenance (SDK producers, pre-marker daemons).
+        for source in [Some(modelstat_wire::SLUG_SOURCE_PATH_SHAPE), None] {
+            let mut e = ev("s1", "2026-07-16T10:00:00.000Z");
+            e.git = Some(GitContext {
+                remote_url: None,
+                remote_host: None,
+                remote_slug: Some("acme/api".into()),
+                branch: None,
+                slug_source: source.map(str::to_string),
+            });
+            let out = build_session_metadata(&[], &[e], None, None).await;
+            let m = out.get("s1").expect("session present");
+            assert_eq!(m.repos.len(), 1, "slug_source {source:?}");
+            assert_eq!(m.repos[0].source, "git_guess", "slug_source {source:?}");
+        }
     }
 
     #[tokio::test]
