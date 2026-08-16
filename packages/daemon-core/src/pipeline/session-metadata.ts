@@ -7,7 +7,8 @@
  * channels, in descending order of trust (see {@link RefSource}):
  *
  *   1. git context already on each event (`event.git`) — repo slug, host,
- *      branch (the historical branch, captured at session time).
+ *      branch (the historical branch, captured at session time). A verified
+ *      slug ships `git`; a surviving path-shape guess ships `git_guess`.
  *   2. `resolveGit` — an injected, best-effort read of the repo on disk for
  *      the session's cwds (authoritative remote slug/host; wires up the
  *      otherwise-dormant `git.ts`). Cwd-cached by the caller.
@@ -24,7 +25,12 @@
  * `buildSessionTitles` in shape: group by session, enrich, fall back
  * gracefully — a model or git hiccup never blocks the batch.
  */
-import type { GitContext, RawEvent, Segment } from "@modelstat/core/schemas";
+import {
+  type GitContext,
+  type RawEvent,
+  type Segment,
+  slugIsVerified,
+} from "@modelstat/core/schemas";
 import {
   type DetectedRefs,
   dedupeFiles,
@@ -193,11 +199,14 @@ export async function buildSessionMetadata(
         if (!e.git) continue;
         const refs = emptyDetectedRefs();
         if (e.git.remote_slug) {
+          // A slug the daemon verified on disk (`git_remote` / `repo_root_dir`)
+          // is a `git` fact; a surviving path-shape guess ships `git_guess` so
+          // the spend→outcome join can't take it on faith.
           refs.repos.push({
             host: e.git.remote_host ?? null,
             slug: e.git.remote_slug,
             branches: e.git.branch ? [e.git.branch] : [],
-            source: "git",
+            source: slugIsVerified(e.git.slug_source) ? "git" : "git_guess",
           });
         }
         if (e.git.branch) refs.issues.push(...detectBranchTickets(e.git.branch));

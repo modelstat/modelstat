@@ -18,7 +18,7 @@
 import type { Agent } from "@modelstat/core/enums";
 import { segmentId } from "@modelstat/core/ids";
 import { redact } from "@modelstat/core/redact";
-import type { RawEvent, Segment } from "@modelstat/core/schemas";
+import { type RawEvent, type Segment, slugIsVerified } from "@modelstat/core/schemas";
 import {
   type CognitionTags,
   cognitionHints,
@@ -494,7 +494,16 @@ Write a ≤${ABSTRACT_OUTPUT_MAX_CHARS}-char summary (1-2 sentences) naming exac
   ];
   if (first.model) tags.push({ root_key: "models", name: first.model, confidence: 1 });
   if (first.git?.remote_slug) {
-    tags.push({ root_key: "projects", name: first.git.remote_slug, confidence: 1 });
+    // Confidence states the slug's provenance tier: 1 when it was read off the
+    // repo itself (`git_remote` / `repo_root_dir`), 0.5 when only the parser's
+    // path-shape guess survived (no `.git` reachable — the browser path never
+    // reaches disk at all) — so the server can gate project-node minting on
+    // verified identity.
+    tags.push({
+      root_key: "projects",
+      name: first.git.remote_slug,
+      confidence: slugIsVerified(first.git.slug_source) ? 1 : 0.5,
+    });
   }
   if (first.git?.branch) {
     const env = inferEnvironment(first.git.branch);

@@ -9,6 +9,8 @@ import {
   detectReferences,
   type FileRef,
   isEmptySessionMetadata,
+  type RefSource,
+  type RepoRef,
   repoRefFromGit,
   SessionMetadata,
 } from "./session-metadata.js";
@@ -113,6 +115,30 @@ test("repoRefFromGit builds a repo with its branch, or null without a slug", () 
   assert.deepEqual(ok?.branches, ["main"]);
   assert.equal(ok?.source, "git");
   assert.equal(repoRefFromGit({ remote_slug: null, branch: "x" }), null);
+});
+
+test("git_guess ranks below every observation but above model", () => {
+  // A guessed slug colliding with the same slug from a stronger channel must
+  // lose the label: `git` (verified) and `content` (actually seen in the
+  // conversation) both beat it; only `model` ranks lower.
+  const guess: RepoRef = { host: null, slug: "acme/api", branches: [], source: "git_guess" };
+  const cases: Array<[RefSource, RefSource]> = [
+    ["git", "git"],
+    ["content", "content"],
+    ["model", "git_guess"],
+  ];
+  for (const [other, expected] of cases) {
+    const m = dedupeSessionMetadata([
+      { repos: [guess], pull_requests: [], issues: [] },
+      {
+        repos: [{ host: "github.com", slug: "acme/api", branches: [], source: other }],
+        pull_requests: [],
+        issues: [],
+      },
+    ]);
+    assert.equal(m.repos.length, 1);
+    assert.equal(m.repos[0]?.source, expected, `vs ${other}`);
+  }
 });
 
 test("dedupe merges repos by slug, unioning branches and keeping strongest source", () => {

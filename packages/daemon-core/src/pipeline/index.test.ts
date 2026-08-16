@@ -121,6 +121,41 @@ describe("buildSegmentsForSession tool_calls tags", () => {
     assert.deepEqual(toolCallTags(segments[0]!.tags), []);
   });
 
+  it("tiers the projects hint confidence by slug provenance", async () => {
+    // Verified tiers (`git_remote` / `repo_root_dir`) ship 1; the surviving
+    // path-shape guess — and an UNSTATED provenance (SDK producers, events
+    // from daemons predating the marker) — ship 0.5, so the server never
+    // mints a workstream node from a guess.
+    const cases: Array<[string | undefined, number]> = [
+      ["git_remote", 1],
+      ["repo_root_dir", 1],
+      ["path_shape", 0.5],
+      [undefined, 0.5],
+    ];
+    for (const [slug_source, confidence] of cases) {
+      const events = [
+        ev({
+          source_event_id: "e1",
+          ts: "2026-06-01T10:00:00.000Z",
+          git: {
+            remote_url: null,
+            remote_host: null,
+            remote_slug: "acme/web",
+            branch: null,
+            ...(slug_source ? { slug_source } : {}),
+          },
+        }),
+      ];
+      const segments = await buildSegmentsForSession(events, adapters);
+      const hint = segments[0]!.tags.find((t) => t.root_key === "projects");
+      assert.deepEqual(
+        hint,
+        { root_key: "projects", name: "acme/web", confidence },
+        `slug_source ${slug_source}`,
+      );
+    }
+  });
+
   it("clamps confidence into [0.05, 1]", async () => {
     const events = [
       ev({

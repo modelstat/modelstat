@@ -12,15 +12,18 @@
  * can run in any daemon runtime (Node CLI, browser extension) and be
  * exhaustively unit-tested without a model, a network, or a filesystem.
  *
- * Three detection channels feed it, each stamped on every reference as a
+ * The detection channels feed it, each stamped on every reference as a
  * `source` for trust + precedence:
- *   - `git`     — resolved from the repo on disk / the event's git context
- *                 (highest trust: deterministic, not user content).
- *   - `tool`    — extracted from a tool call (e.g. a `gh pr create` result).
- *   - `content` — pattern-matched from a redacted excerpt / segment abstract.
- *   - `model`   — surfaced by the on-device LLM from session content, then
- *                 re-parsed deterministically here (works for ANY provider,
- *                 even ones whose logs carry no structured git data).
+ *   - `git`       — resolved from the repo on disk / a VERIFIED event git
+ *                   context (highest trust: deterministic, not user content).
+ *   - `tool`      — extracted from a tool call (e.g. a `gh pr create` result).
+ *   - `content`   — pattern-matched from a redacted excerpt / segment abstract.
+ *   - `git_guess` — an event git context whose slug is only the parser's
+ *                   path-shape guess (`slug_source` ≠ verified): a claim about
+ *                   the cwd's layout, not an observation of git.
+ *   - `model`     — surfaced by the on-device LLM from session content, then
+ *                   re-parsed deterministically here (works for ANY provider,
+ *                   even ones whose logs carry no structured git data).
  *
  * Privacy: only public reference shapes ride this — `org/repo`, PR/issue
  * numbers, ticket keys, and the URLs that contain them. Raw prompts, code,
@@ -32,12 +35,20 @@ import { z } from "zod";
 /** How a reference was detected. Drives dedupe precedence (see
  * {@link dedupeSessionMetadata}): a deterministic `git` hit beats a
  * `content`/`model` guess for the same entity. */
-export const REF_SOURCES = ["git", "tool", "content", "model"] as const;
+export const REF_SOURCES = ["git", "tool", "content", "git_guess", "model"] as const;
 export const RefSource = z.enum(REF_SOURCES);
 export type RefSource = z.infer<typeof RefSource>;
 
-/** Trust ranking — higher wins when the same entity is seen twice. */
-const SOURCE_RANK: Record<RefSource, number> = { git: 3, tool: 2, content: 1, model: 0 };
+/** Trust ranking — higher wins when the same entity is seen twice. `git_guess`
+ * sits below `content`: a reference actually observed in the conversation
+ * outranks a guess about the cwd's shape. */
+const SOURCE_RANK: Record<RefSource, number> = {
+  git: 4,
+  tool: 3,
+  content: 2,
+  git_guess: 1,
+  model: 0,
+};
 
 /** A git host + `org/repo` the session worked in, with every branch seen.
  * Plural by design: one session can span several repos and branches. */
