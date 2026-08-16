@@ -464,16 +464,18 @@ pub fn parse_codex_rollout_streaming(
     })
 }
 
-fn parse_inner(
-    ctx: &ParserContext,
-    sink: &mut Sink,
-) -> std::io::Result<(
+/// Everything `parse_inner` accumulates besides the events it emits through the
+/// sink: tool-call drafts, their local script contexts, the parse tallies, the
+/// skip ledger, and the session's actor map.
+type ParsedExtras = (
     Vec<ToolCallDraft>,
     Vec<LocalToolContext>,
     ParseStats,
     SkipLedger,
     SessionActors,
-)> {
+);
+
+fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedExtras> {
     let mut tool_calls: Vec<ToolCallDraft> = Vec::new();
     let mut script_contexts: Vec<LocalToolContext> = Vec::new();
     let mut session_actors: SessionActors = SessionActors::new();

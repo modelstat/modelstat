@@ -299,7 +299,7 @@ pub fn select_anchor_commits<'a>(
         })
         .filter_map(|c| Some((pr_number_from_subject(&c.subject)?, c)))
         .collect();
-    hits.sort_by(|a, b| parse_ms(&b.1.committed_at).cmp(&parse_ms(&a.1.committed_at)));
+    hits.sort_by_key(|(_, c)| std::cmp::Reverse(parse_ms(&c.committed_at)));
     // A backport or cherry-pick carries the original `(#123)` forward, so one PR
     // can appear twice on a mainline. Counting it twice would weight that PR
     // double in the baseline; the newest occurrence wins.
@@ -535,9 +535,9 @@ mod tests {
         assert_eq!(active_minutes(&two_days), Some(10 + 20 + 60));
 
         // The gap is strict: exactly 90 minutes is still one sitting, a minute
-        // more is two.
+        // more is two (each with a zero span — only the two ramps count).
         assert_eq!(active_minutes(&[0, 90 * MIN]), Some(90 + 30));
-        assert_eq!(active_minutes(&[0, 91 * MIN]), Some(0 + 0 + 60));
+        assert_eq!(active_minutes(&[0, 91 * MIN]), Some(60));
 
         // Input order is not the caller's problem — `git log` is newest-first.
         assert_eq!(active_minutes(&[40 * MIN, 0, 20 * MIN]), Some(70));
