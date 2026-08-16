@@ -18,7 +18,13 @@
 import type { Agent } from "@modelstat/core/enums";
 import { segmentId } from "@modelstat/core/ids";
 import { redact } from "@modelstat/core/redact";
-import { type RawEvent, type Segment, slugIsVerified } from "@modelstat/core/schemas";
+import {
+  PROJECT_SLUG_CONFIDENCE_GUESS,
+  PROJECT_SLUG_CONFIDENCE_VERIFIED,
+  type RawEvent,
+  type Segment,
+  slugIsVerified,
+} from "@modelstat/core/schemas";
 import {
   type CognitionTags,
   cognitionHints,
@@ -493,16 +499,24 @@ Write a ≤${ABSTRACT_OUTPUT_MAX_CHARS}-char summary (1-2 sentences) naming exac
     { root_key: "providers", name: first.provider, confidence: 1 },
   ];
   if (first.model) tags.push({ root_key: "models", name: first.model, confidence: 1 });
-  if (first.git?.remote_slug) {
-    // Confidence states the slug's provenance tier: 1 when it was read off the
-    // repo itself (`git_remote` / `repo_root_dir`), 0.5 when only the parser's
-    // path-shape guess survived (no `.git` reachable — the browser path never
-    // reaches disk at all) — so the server can gate project-node minting on
-    // verified identity.
+  // The projects hint reads the first event whose slug is VERIFIED
+  // (`slugIsVerified`), falling back to the first event with any slug — a
+  // slice can open on a guessed context (cwd outside the repo) and reach the
+  // real one a turn later. Confidence states the provenance tier so the server
+  // can gate project-node minting on verified identity; `reason` carries the
+  // event's `slug_source` verbatim so the server reads the exact tier.
+  const projectGit = (
+    slice.find((e) => e.git?.remote_slug && slugIsVerified(e.git)) ??
+    slice.find((e) => e.git?.remote_slug)
+  )?.git;
+  if (projectGit?.remote_slug) {
     tags.push({
       root_key: "projects",
-      name: first.git.remote_slug,
-      confidence: slugIsVerified(first.git.slug_source) ? 1 : 0.5,
+      name: projectGit.remote_slug,
+      confidence: slugIsVerified(projectGit)
+        ? PROJECT_SLUG_CONFIDENCE_VERIFIED
+        : PROJECT_SLUG_CONFIDENCE_GUESS,
+      ...(projectGit.slug_source != null ? { reason: projectGit.slug_source } : {}),
     });
   }
   if (first.git?.branch) {

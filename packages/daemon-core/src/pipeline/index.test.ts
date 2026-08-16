@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { RawEvent } from "@modelstat/core/schemas";
+import {
+  PROJECT_SLUG_CONFIDENCE_GUESS,
+  PROJECT_SLUG_CONFIDENCE_VERIFIED,
+  type RawEvent,
+} from "@modelstat/core/schemas";
 import {
   buildSegmentsForSession,
   type PipelineAdapters,
@@ -125,20 +129,23 @@ describe("buildSegmentsForSession tool_calls tags", () => {
     // Verified tiers (`git_remote` / `repo_root_dir`) ship 1; the surviving
     // path-shape guess — and an UNSTATED provenance (SDK producers, events
     // from daemons predating the marker) — ship 0.5, so the server never
-    // mints a workstream node from a guess.
-    const cases: Array<[string | undefined, number]> = [
-      ["git_remote", 1],
-      ["repo_root_dir", 1],
-      ["path_shape", 0.5],
-      [undefined, 0.5],
+    // mints a workstream node from a guess. A pre-marker event carrying a
+    // real remote URL is verified: no guess path ever wrote one. The hint's
+    // `reason` carries the marker verbatim (unset stays unset).
+    const cases: Array<[string | undefined, string | null, number]> = [
+      ["git_remote", null, PROJECT_SLUG_CONFIDENCE_VERIFIED],
+      ["repo_root_dir", null, PROJECT_SLUG_CONFIDENCE_VERIFIED],
+      [undefined, "https://github.com/acme/web.git", PROJECT_SLUG_CONFIDENCE_VERIFIED],
+      ["path_shape", null, PROJECT_SLUG_CONFIDENCE_GUESS],
+      [undefined, null, PROJECT_SLUG_CONFIDENCE_GUESS],
     ];
-    for (const [slug_source, confidence] of cases) {
+    for (const [slug_source, remote_url, confidence] of cases) {
       const events = [
         ev({
           source_event_id: "e1",
           ts: "2026-06-01T10:00:00.000Z",
           git: {
-            remote_url: null,
+            remote_url,
             remote_host: null,
             remote_slug: "acme/web",
             branch: null,
@@ -150,10 +157,76 @@ describe("buildSegmentsForSession tool_calls tags", () => {
       const hint = segments[0]!.tags.find((t) => t.root_key === "projects");
       assert.deepEqual(
         hint,
-        { root_key: "projects", name: "acme/web", confidence },
-        `slug_source ${slug_source}`,
+        {
+          root_key: "projects",
+          name: "acme/web",
+          confidence,
+          ...(slug_source ? { reason: slug_source } : {}),
+        },
+        `slug_source ${slug_source} remote_url ${remote_url}`,
       );
     }
+  });
+
+  it("reads the first VERIFIED slug in the slice, not blindly the first event", async () => {
+    // A slice can open on a guessed context (cwd outside the repo) and reach
+    // the real repo a turn later — the verified slug wins the hint.
+    const events = [
+      ev({
+        source_event_id: "e1",
+        ts: "2026-06-01T10:00:00.000Z",
+        git: {
+          remote_url: null,
+          remote_host: null,
+          remote_slug: "guessed/subdir",
+          branch: null,
+          slug_source: "path_shape",
+        },
+      }),
+      ev({
+        source_event_id: "e2",
+        ts: "2026-06-01T10:01:00.000Z",
+        git: {
+          remote_url: null,
+          remote_host: "github.com",
+          remote_slug: "acme/web",
+          branch: null,
+          slug_source: "git_remote",
+        },
+      }),
+    ];
+    const segments = await buildSegmentsForSession(events, adapters);
+    assert.equal(segments.length, 1, "two close events make one segment");
+    const hint = segments[0]!.tags.find((t) => t.root_key === "projects");
+    assert.deepEqual(hint, {
+      root_key: "projects",
+      name: "acme/web",
+      confidence: PROJECT_SLUG_CONFIDENCE_VERIFIED,
+      reason: "git_remote",
+    });
+    // With no verified slug anywhere, the FIRST slug still wins as before.
+    const guessesOnly = [
+      events[0]!,
+      ev({
+        source_event_id: "e3",
+        ts: "2026-06-01T10:01:00.000Z",
+        git: {
+          remote_url: null,
+          remote_host: null,
+          remote_slug: "other/guess",
+          branch: null,
+          slug_source: "path_shape",
+        },
+      }),
+    ];
+    const fallback = await buildSegmentsForSession(guessesOnly, adapters);
+    const fallbackHint = fallback[0]!.tags.find((t) => t.root_key === "projects");
+    assert.deepEqual(fallbackHint, {
+      root_key: "projects",
+      name: "guessed/subdir",
+      confidence: PROJECT_SLUG_CONFIDENCE_GUESS,
+      reason: "path_shape",
+    });
   });
 
   it("clamps confidence into [0.05, 1]", async () => {

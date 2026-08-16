@@ -26,7 +26,8 @@ use modelstat_redact::{pii_redact_checked, redact, PiiModel};
 use modelstat_sumclient::CompleteRequest;
 use modelstat_wire::{
     segment_id, slug_is_verified, RawEvent, RedactionReport, Segment, SegmentBehavior,
-    SegmentLocalTime, TaxonomyHintRooted, TokenUsage,
+    SegmentLocalTime, TaxonomyHintRooted, TokenUsage, PROJECT_SLUG_CONFIDENCE_GUESS,
+    PROJECT_SLUG_CONFIDENCE_VERIFIED,
 };
 
 use crate::embed::{Embedder, EMBED_DIM};
@@ -290,18 +291,33 @@ where
     if let Some(model) = &first.model {
         tags.push(hint("models", model, 1.0));
     }
-    if let Some(git) = &first.git {
+    // The projects hint reads the first event whose slug is VERIFIED
+    // (`slug_is_verified`), falling back to the first event with any slug — a
+    // slice can open on a guessed context (cwd outside the repo) and reach the
+    // real one a turn later. Confidence states the provenance tier so the
+    // server can gate project-node minting on verified identity; `reason`
+    // carries the event's `slug_source` verbatim so the server reads the exact
+    // tier.
+    let project_git = slice
+        .iter()
+        .filter_map(|e| e.git.as_ref())
+        .find(|g| g.remote_slug.is_some() && slug_is_verified(g))
+        .or_else(|| {
+            slice
+                .iter()
+                .filter_map(|e| e.git.as_ref())
+                .find(|g| g.remote_slug.is_some())
+        });
+    if let Some(git) = project_git {
         if let Some(slug) = &git.remote_slug {
-            // Confidence states the slug's provenance tier: 1.0 when it was read
-            // off the repo itself (`git_remote` / `repo_root_dir`), 0.5 when only
-            // the parser's path-shape guess survived — so the server can gate
-            // project-node minting on verified identity.
-            let confidence = if slug_is_verified(git.slug_source.as_deref()) {
-                1.0
+            let confidence = if slug_is_verified(git) {
+                PROJECT_SLUG_CONFIDENCE_VERIFIED
             } else {
-                0.5
+                PROJECT_SLUG_CONFIDENCE_GUESS
             };
-            tags.push(hint("projects", slug, confidence));
+            let mut h = hint("projects", slug, confidence);
+            h.reason = git.slug_source.clone();
+            tags.push(h);
         }
         // No `environments` hint: the branch ships verbatim in GitContext and
         // the server owns what a branch name means for a given org.
@@ -895,17 +911,36 @@ mod tests {
 
     #[tokio::test]
     async fn projects_hint_confidence_states_the_slug_provenance_tier() {
-        // (slug_source, expected confidence): verified tiers ship 1.0, the
-        // surviving path guess — and an UNSTATED provenance (SDK producers,
-        // pre-marker daemons) — ship 0.5 so the server never mints a
-        // workstream node from a guess.
-        let cases: [(Option<&str>, f64); 4] = [
-            (Some(modelstat_wire::SLUG_SOURCE_GIT_REMOTE), 1.0),
-            (Some(modelstat_wire::SLUG_SOURCE_REPO_ROOT_DIR), 1.0),
-            (Some(modelstat_wire::SLUG_SOURCE_PATH_SHAPE), 0.5),
-            (None, 0.5),
+        // (slug_source, remote_url, expected confidence): verified tiers ship
+        // 1.0, the surviving path guess — and an UNSTATED provenance (SDK
+        // producers, pre-marker daemons) — ship 0.5 so the server never mints
+        // a workstream node from a guess. A pre-marker event carrying a real
+        // remote URL is verified: no guess path ever wrote one. The hint's
+        // `reason` carries the marker verbatim (unset stays unset).
+        let cases: [(Option<&str>, Option<&str>, f64); 5] = [
+            (
+                Some(modelstat_wire::SLUG_SOURCE_GIT_REMOTE),
+                None,
+                modelstat_wire::PROJECT_SLUG_CONFIDENCE_VERIFIED,
+            ),
+            (
+                Some(modelstat_wire::SLUG_SOURCE_REPO_ROOT_DIR),
+                None,
+                modelstat_wire::PROJECT_SLUG_CONFIDENCE_VERIFIED,
+            ),
+            (
+                None,
+                Some("https://github.com/acme/web.git"),
+                modelstat_wire::PROJECT_SLUG_CONFIDENCE_VERIFIED,
+            ),
+            (
+                Some(modelstat_wire::SLUG_SOURCE_PATH_SHAPE),
+                None,
+                modelstat_wire::PROJECT_SLUG_CONFIDENCE_GUESS,
+            ),
+            (None, None, modelstat_wire::PROJECT_SLUG_CONFIDENCE_GUESS),
         ];
-        for (source, expected) in cases {
+        for (source, remote_url, expected) in cases {
             let mut e = ev(
                 "e1",
                 "2026-06-01T10:00:00.000Z",
@@ -913,7 +948,7 @@ mod tests {
                 Some("worked on the thing"),
             );
             e.git = Some(GitContext {
-                remote_url: None,
+                remote_url: remote_url.map(str::to_string),
                 remote_host: None,
                 remote_slug: Some("acme/web".into()),
                 branch: None,
@@ -931,7 +966,100 @@ mod tests {
                 .find(|t| t.root_key == "projects")
                 .expect("projects hint present");
             assert_eq!(hint.confidence, expected, "slug_source {source:?}");
+            assert_eq!(
+                hint.reason.as_deref(),
+                source,
+                "reason is the marker verbatim, slug_source {source:?}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn projects_hint_reads_the_first_verified_slug_in_the_slice() {
+        // A slice can open on a guessed context (cwd outside the repo) and
+        // reach the real repo a turn later — the verified slug wins the hint.
+        let guess = |id: &str, ts: &str, slug: &str| {
+            let mut e = ev(id, ts, "assistant_message", Some("worked on the thing"));
+            e.git = Some(GitContext {
+                remote_url: None,
+                remote_host: None,
+                remote_slug: Some(slug.into()),
+                branch: None,
+                slug_source: Some(modelstat_wire::SLUG_SOURCE_PATH_SHAPE.into()),
+            });
+            e
+        };
+        let mut verified = ev(
+            "e2",
+            "2026-06-01T10:01:00.000Z",
+            "assistant_message",
+            Some("still working"),
+        );
+        verified.git = Some(GitContext {
+            remote_url: None,
+            remote_host: Some("github.com".into()),
+            remote_slug: Some("acme/web".into()),
+            branch: None,
+            slug_source: Some(modelstat_wire::SLUG_SOURCE_GIT_REMOTE.into()),
+        });
+        let r = resilient(Fake::reply("Did the work"));
+        let BuildOutcome::Ready(segs) = build_for_one_session(
+            &[
+                guess("e1", "2026-06-01T10:00:00.000Z", "guessed/subdir"),
+                verified,
+            ],
+            &r,
+            &NoEmbedder,
+            &AnsweringRedactor,
+        )
+        .await
+        else {
+            panic!("expected Ready");
+        };
+        let hint = segs[0]
+            .tags
+            .iter()
+            .find(|t| t.root_key == "projects")
+            .expect("projects hint present");
+        assert_eq!(hint.name, "acme/web");
+        assert_eq!(
+            hint.confidence,
+            modelstat_wire::PROJECT_SLUG_CONFIDENCE_VERIFIED
+        );
+        assert_eq!(
+            hint.reason.as_deref(),
+            Some(modelstat_wire::SLUG_SOURCE_GIT_REMOTE)
+        );
+
+        // With no verified slug anywhere, the FIRST slug still wins as before.
+        let r = resilient(Fake::reply("Did the work"));
+        let BuildOutcome::Ready(segs) = build_for_one_session(
+            &[
+                guess("e1", "2026-06-01T10:00:00.000Z", "guessed/subdir"),
+                guess("e3", "2026-06-01T10:01:00.000Z", "other/guess"),
+            ],
+            &r,
+            &NoEmbedder,
+            &AnsweringRedactor,
+        )
+        .await
+        else {
+            panic!("expected Ready");
+        };
+        let hint = segs[0]
+            .tags
+            .iter()
+            .find(|t| t.root_key == "projects")
+            .expect("projects hint present");
+        assert_eq!(hint.name, "guessed/subdir");
+        assert_eq!(
+            hint.confidence,
+            modelstat_wire::PROJECT_SLUG_CONFIDENCE_GUESS
+        );
+        assert_eq!(
+            hint.reason.as_deref(),
+            Some(modelstat_wire::SLUG_SOURCE_PATH_SHAPE)
+        );
     }
 
     #[tokio::test]
