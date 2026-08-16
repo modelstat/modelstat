@@ -878,7 +878,11 @@ mod tests {
             branches: Vec::new(),
             source: source.into(),
         };
-        for (other, expected) in [("git", "git"), ("content", "content"), ("model", "git_guess")] {
+        for (other, expected) in [
+            ("git", "git"),
+            ("content", "content"),
+            ("model", "git_guess"),
+        ] {
             let mut a = DetectedRefs::default();
             a.repos.push(guess("acme/api"));
             let mut b = DetectedRefs::default();
