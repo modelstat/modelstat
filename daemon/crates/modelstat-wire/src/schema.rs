@@ -53,6 +53,17 @@ pub const SLUG_SOURCE_REPO_ROOT_DIR: &str = "repo_root_dir";
 /// no repo reachable at all. A guess about a path, not an observation of git.
 pub const SLUG_SOURCE_PATH_SHAPE: &str = "path_shape";
 
+/// True when `slug_source` states the slug was read off the repo itself — its
+/// configured remote, or its root directory on disk. False for a path-shape
+/// guess AND for an absent marker: unstated provenance is not verification
+/// (SDK producers, and events from daemons predating the marker).
+pub fn slug_is_verified(slug_source: Option<&str>) -> bool {
+    matches!(
+        slug_source,
+        Some(SLUG_SOURCE_GIT_REMOTE) | Some(SLUG_SOURCE_REPO_ROOT_DIR)
+    )
+}
+
 /// Git context — the four original fields nullable (present, may be null), plus
 /// the additive `slug_source` provenance marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

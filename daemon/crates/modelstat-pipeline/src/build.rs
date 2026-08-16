@@ -25,8 +25,8 @@ use std::collections::{BTreeMap, HashSet};
 use modelstat_redact::{pii_redact_checked, redact, PiiModel};
 use modelstat_sumclient::CompleteRequest;
 use modelstat_wire::{
-    segment_id, RawEvent, RedactionReport, Segment, SegmentBehavior, SegmentLocalTime,
-    TaxonomyHintRooted, TokenUsage,
+    segment_id, slug_is_verified, RawEvent, RedactionReport, Segment, SegmentBehavior,
+    SegmentLocalTime, TaxonomyHintRooted, TokenUsage,
 };
 
 use crate::embed::{Embedder, EMBED_DIM};
@@ -292,7 +292,16 @@ where
     }
     if let Some(git) = &first.git {
         if let Some(slug) = &git.remote_slug {
-            tags.push(hint("projects", slug, 1.0));
+            // Confidence states the slug's provenance tier: 1.0 when it was read
+            // off the repo itself (`git_remote` / `repo_root_dir`), 0.5 when only
+            // the parser's path-shape guess survived — so the server can gate
+            // project-node minting on verified identity.
+            let confidence = if slug_is_verified(git.slug_source.as_deref()) {
+                1.0
+            } else {
+                0.5
+            };
+            tags.push(hint("projects", slug, confidence));
         }
         // No `environments` hint: the branch ships verbatim in GitContext and
         // the server owns what a branch name means for a given org.
@@ -846,7 +855,7 @@ mod tests {
             remote_host: Some("github.com".into()),
             remote_slug: Some("acme/web".into()),
             branch: Some("main".into()),
-            slug_source: None,
+            slug_source: Some(modelstat_wire::SLUG_SOURCE_GIT_REMOTE.into()),
         });
         e.files_touched = vec!["core/rust/main.rs".into(), "core/rust/lib.rs".into()];
         e.tool_calls = [("Bash".to_string(), 3u64), ("Read".to_string(), 1u64)]
@@ -859,10 +868,11 @@ mod tests {
             panic!("expected Ready");
         };
         let s = &segs[0];
+        // A slug read off the repo's own remote is a fact: full confidence.
         assert!(s
             .tags
             .iter()
-            .any(|t| t.root_key == "projects" && t.name == "acme/web"));
+            .any(|t| t.root_key == "projects" && t.name == "acme/web" && t.confidence == 1.0));
         // `main` used to be tagged `environments: Prod` here — a client-side
         // guess at the server's node names. The branch itself is what ships.
         assert!(!s.tags.iter().any(|t| t.root_key == "environments"));
@@ -881,6 +891,47 @@ mod tests {
             .find(|t| t.root_key == "tool_calls" && t.name == "Bash")
             .unwrap();
         assert!((bash.confidence - 0.75).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn projects_hint_confidence_states_the_slug_provenance_tier() {
+        // (slug_source, expected confidence): verified tiers ship 1.0, the
+        // surviving path guess — and an UNSTATED provenance (SDK producers,
+        // pre-marker daemons) — ship 0.5 so the server never mints a
+        // workstream node from a guess.
+        let cases: [(Option<&str>, f64); 4] = [
+            (Some(modelstat_wire::SLUG_SOURCE_GIT_REMOTE), 1.0),
+            (Some(modelstat_wire::SLUG_SOURCE_REPO_ROOT_DIR), 1.0),
+            (Some(modelstat_wire::SLUG_SOURCE_PATH_SHAPE), 0.5),
+            (None, 0.5),
+        ];
+        for (source, expected) in cases {
+            let mut e = ev(
+                "e1",
+                "2026-06-01T10:00:00.000Z",
+                "assistant_message",
+                Some("worked on the thing"),
+            );
+            e.git = Some(GitContext {
+                remote_url: None,
+                remote_host: None,
+                remote_slug: Some("acme/web".into()),
+                branch: None,
+                slug_source: source.map(str::to_string),
+            });
+            let r = resilient(Fake::reply("Did the work"));
+            let BuildOutcome::Ready(segs) =
+                build_for_one_session(&[e], &r, &NoEmbedder, &AnsweringRedactor).await
+            else {
+                panic!("expected Ready");
+            };
+            let hint = segs[0]
+                .tags
+                .iter()
+                .find(|t| t.root_key == "projects")
+                .expect("projects hint present");
+            assert_eq!(hint.confidence, expected, "slug_source {source:?}");
+        }
     }
 
     #[tokio::test]
