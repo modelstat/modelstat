@@ -18,8 +18,8 @@
  *      that can NEVER be a subdirectory — for a repo with no remote (local-only,
  *      or origin unset).
  * Only when NO `.git` is reachable at all (a repo already deleted from disk by
- * parse time) do we leave the parser's path guess — a rare residual the one-off
- * server cleanup mops up.
+ * parse time) do we leave the parser's path guess — which stays labeled
+ * `path_shape`, so downstream never reads it as a verified identity.
  *
  * Both paths are ANCHORED on where `.git` actually is, so a subdirectory can
  * never be emitted — no hard-coded directory-name list. The HISTORICAL branch
@@ -27,7 +27,12 @@
  * detection want the branch as it was); only the repo identity is corrected.
  */
 import { basename } from "node:path";
-import type { GitContext, RawEvent } from "@modelstat/core";
+import {
+  type GitContext,
+  type RawEvent,
+  SLUG_SOURCE_GIT_REMOTE,
+  SLUG_SOURCE_REPO_ROOT_DIR,
+} from "@modelstat/core";
 import { resolveGitContext, resolveRepoRoot } from "@modelstat/parsers";
 
 /** Resolve a cwd to its on-disk git context. Injected in tests; defaults to the
@@ -43,6 +48,10 @@ interface RepoIdentity {
   remote_host: string | null;
   remote_slug: string;
   branch: string | null;
+  /** Which of the two corrections produced `remote_slug` — the configured
+   * remote, or the repo-root directory name. Rides to the server so a bare
+   * root name is never mistaken for an `owner/repo` off a real forge. */
+  slug_source: string;
 }
 
 export async function resolveAuthoritativeGit(
@@ -70,6 +79,7 @@ export async function resolveAuthoritativeGit(
         remote_host: g.remote_host,
         remote_slug: g.remote_slug,
         branch: g.branch,
+        slug_source: SLUG_SOURCE_GIT_REMOTE,
       });
       continue;
     }
@@ -88,6 +98,7 @@ export async function resolveAuthoritativeGit(
         remote_host: null,
         remote_slug: name,
         branch: g?.branch ?? null,
+        slug_source: SLUG_SOURCE_REPO_ROOT_DIR,
       });
     }
     // else: no `.git` reachable — leave the event's parsed value untouched.
@@ -103,6 +114,7 @@ export async function resolveAuthoritativeGit(
         remote_url: id.remote_url,
         remote_host: id.remote_host,
         remote_slug: id.remote_slug,
+        slug_source: id.slug_source,
         // Keep the branch the parser recorded for THIS turn; fall back to the
         // on-disk branch only when the event carried none.
         branch: e.git?.branch ?? id.branch,

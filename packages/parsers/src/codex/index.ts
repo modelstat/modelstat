@@ -32,7 +32,7 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import type { RawEvent } from "@modelstat/core";
 import { sourceEventId } from "@modelstat/core";
-import { guessRepoSlugFromPath } from "../git.js";
+import { guessRepoSlugFromPath, pathGuessedGitContext } from "../git.js";
 import { extractLocalToolContext, extractToolAction } from "../tool-action/index.js";
 import {
   fallbackCallId,
@@ -526,14 +526,7 @@ export async function parseCodexRollout(ctx: ParserContext): Promise<ParseResult
           turn_index: turnIndex,
           parent_event_id: null,
           cwd,
-          git: slug
-            ? {
-                remote_url: null,
-                remote_host: slug.includes("/") ? "github.com" : null,
-                remote_slug: slug,
-                branch: null,
-              }
-            : null,
+          git: pathGuessedGitContext(slug, null),
           tokens,
           duration_ms: null,
           tool_calls: pendingToolAggregate,

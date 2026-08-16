@@ -28,6 +28,25 @@ export const TokenUsage = z.object({
 });
 export type TokenUsage = z.infer<typeof TokenUsage>;
 
+/** `GitContext.slug_source` markers — how `remote_slug` was reached. Only the
+ * first read the repo's own configured remote; the daemon reaches a slug three
+ * ways and they are not equally true. */
+export const SLUG_SOURCE_GIT_REMOTE = "git_remote";
+/** The slug is the repo-ROOT directory name — a real repo on disk, but one with
+ * no configured remote, so it names no forge and no owner. */
+export const SLUG_SOURCE_REPO_ROOT_DIR = "repo_root_dir";
+/** The slug was inferred from the SHAPE of the cwd (`…/projects/<a>/<b>`) with
+ * no repo reachable at all. A guess about a path, not an observation of git. */
+export const SLUG_SOURCE_PATH_SHAPE = "path_shape";
+
+/** True when `slug_source` states the slug was read off the repo itself — its
+ * configured remote, or its root directory on disk. False for a path-shape
+ * guess AND for an absent marker: unstated provenance is not verification
+ * (SDK producers, and events from daemons predating the marker). */
+export function slugIsVerified(slugSource: string | null | undefined): boolean {
+  return slugSource === SLUG_SOURCE_GIT_REMOTE || slugSource === SLUG_SOURCE_REPO_ROOT_DIR;
+}
+
 /** Git context derived from cwd → nearest `.git`. */
 export const GitContext = z.object({
   remote_url: z.string().nullable(),
