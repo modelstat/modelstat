@@ -29,5 +29,6 @@ pub use schema::{
     slug_is_verified, AnchorPr, Fingerprint, GitContext, HeartbeatPayload, IngestBatch, RawEvent,
     RedactionReport, RegisterRequest, RepoAnchors, ScriptSummary, Segment, SegmentBehavior,
     SegmentGeneration, SegmentLocalTime, TaxonomyHintRooted, TokenUsage, ToolAction, ToolCallWire,
-    SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_PATH_SHAPE, SLUG_SOURCE_REPO_ROOT_DIR,
+    PROJECT_SLUG_CONFIDENCE_GUESS, PROJECT_SLUG_CONFIDENCE_VERIFIED, SLUG_SOURCE_GIT_REMOTE,
+    SLUG_SOURCE_PATH_SHAPE, SLUG_SOURCE_REPO_ROOT_DIR,
 };

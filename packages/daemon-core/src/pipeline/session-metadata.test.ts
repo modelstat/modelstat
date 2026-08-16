@@ -92,6 +92,26 @@ test("a guessed event slug ships git_guess, not git", async () => {
   }
 });
 
+test("a pre-marker event with a real remote URL is verified", async () => {
+  // Events from daemons predating the `slug_source` marker carry no
+  // provenance (`mkGit` normally stamps it — this is the ABSENT-marker path).
+  // A real remote_url is evidence on its own: no guess path, current or
+  // historical, ever wrote one, so the repo ref ships `git`, not `git_guess`,
+  // and dedupe canonicalises to it over a same-slug guess.
+  const verified = mkEvent({
+    git: mkGit({
+      remote_url: "https://github.com/acme/web.git",
+      remote_host: "github.com",
+      remote_slug: "Acme/Web",
+    }),
+  });
+  const guessed = mkEvent({ git: mkGit({ remote_slug: "acme/web", slug_source: "path_shape" }) });
+  const out = await buildSessionMetadata([mkSegment("s1", "Did some work.")], [guessed, verified]);
+  assert.equal(out.s1?.repos.length, 1);
+  assert.equal(out.s1?.repos[0]?.source, "git");
+  assert.equal(out.s1?.repos[0]?.slug, "Acme/Web", "verified casing wins");
+});
+
 test("PRs + issues are mined from redacted abstracts", async () => {
   const ev = mkEvent({});
   const seg = mkSegment("s1", "Reviewed https://github.com/acme/web/pull/42 and fixed acme/web#7.");

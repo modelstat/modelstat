@@ -449,7 +449,18 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
         let key = r.slug.to_lowercase();
         match repos.get_mut(&key) {
             Some(existing) => {
-                if existing.host.is_none() {
+                // The higher-ranked ref supplies the canonical text — slug
+                // casing and host — so a verified remote's casing never loses
+                // to a guess that arrived first. Branches union and the
+                // rank-max source survives, as before; the loser still
+                // backfills a missing host.
+                if source_rank(&r.source) > source_rank(&existing.source) {
+                    existing.slug = r.slug.clone();
+                    if r.host.is_some() {
+                        existing.host = r.host.clone();
+                    }
+                    existing.source = r.source.clone();
+                } else if existing.host.is_none() {
                     existing.host = r.host.clone();
                 }
                 for b in r.branches {
@@ -458,7 +469,6 @@ fn dedupe(parts: DetectedRefs) -> (Vec<RepoRef>, Vec<PullRequestRef>, Vec<IssueR
                     }
                 }
                 existing.branches.truncate(50);
-                existing.source = stronger(&existing.source, &r.source);
             }
             None => {
                 repo_order.push(key.clone());
@@ -670,6 +680,33 @@ pub fn detect_branch_tickets(branch: Option<&str>) -> Vec<IssueRef> {
     out
 }
 
+/// Build a [`RepoRef`] from a git context (an event's `git` field or an
+/// on-disk resolve). `None` when there's no slug to anchor on.
+///
+/// The source derives from the context's own provenance
+/// ([`modelstat_wire::slug_is_verified`]): a verified slug is a `git` fact,
+/// anything else ships `git_guess` — so a caller cannot launder a path-shape
+/// guess into a deterministic claim. Port of `repoRefFromGit`.
+pub fn repo_ref_from_git(git: &modelstat_wire::GitContext) -> Option<RepoRef> {
+    let slug = git.remote_slug.as_ref().filter(|s| !s.is_empty())?;
+    Some(RepoRef {
+        host: git.remote_host.clone(),
+        slug: slug.clone(),
+        branches: git
+            .branch
+            .as_ref()
+            .filter(|b| !b.is_empty())
+            .map(|b| vec![b.clone()])
+            .unwrap_or_default(),
+        source: if modelstat_wire::slug_is_verified(git) {
+            "git"
+        } else {
+            "git_guess"
+        }
+        .into(),
+    })
+}
+
 /// Fold any number of [`DetectedRefs`] (from every channel + every event/segment
 /// of a session) into one validated, deduped, capped [`SessionMetadata`]. Reuses
 /// the exact per-field [`dedupe`] core (caps 50/100/100, reconcile, keep-valid);
@@ -859,6 +896,74 @@ mod tests {
         assert_eq!(meta.repos[0].source, "git");
         assert_eq!(meta.repos[0].branches, vec!["main".to_string()]);
         assert!(meta.files.is_empty());
+    }
+
+    #[test]
+    fn a_verified_ref_arriving_second_supplies_the_casing_and_host() {
+        // guess first (path-shape casing, no host), verified second — the repo
+        // the dashboard shows must carry the remote's own casing and host.
+        let mut a = DetectedRefs::default();
+        a.repos.push(RepoRef {
+            host: None,
+            slug: "acme/api".into(),
+            branches: vec!["wip".into()],
+            source: "git_guess".into(),
+        });
+        let mut b = DetectedRefs::default();
+        b.repos.push(RepoRef {
+            host: Some("github.com".into()),
+            slug: "Acme/API".into(),
+            branches: vec!["main".into()],
+            source: "git".into(),
+        });
+        let meta = dedupe_session_metadata(vec![a, b]);
+        assert_eq!(meta.repos.len(), 1);
+        assert_eq!(meta.repos[0].slug, "Acme/API", "verified casing wins");
+        assert_eq!(
+            meta.repos[0].host.as_deref(),
+            Some("github.com"),
+            "verified host wins"
+        );
+        assert_eq!(meta.repos[0].source, "git");
+        let mut branches = meta.repos[0].branches.clone();
+        branches.sort();
+        assert_eq!(branches, vec!["main".to_string(), "wip".to_string()]);
+    }
+
+    #[test]
+    fn repo_ref_from_git_derives_the_source_from_provenance() {
+        let git =
+            |slug_source: Option<&str>, remote_url: Option<&str>| modelstat_wire::GitContext {
+                remote_url: remote_url.map(str::to_string),
+                remote_host: Some("github.com".into()),
+                remote_slug: Some("acme/web".into()),
+                branch: Some("main".into()),
+                slug_source: slug_source.map(str::to_string),
+            };
+        // Verified markers — and a pre-marker context with a real remote URL —
+        // are `git` facts.
+        for ctx in [
+            git(Some(modelstat_wire::SLUG_SOURCE_GIT_REMOTE), None),
+            git(Some(modelstat_wire::SLUG_SOURCE_REPO_ROOT_DIR), None),
+            git(None, Some("https://github.com/acme/web.git")),
+        ] {
+            let r = repo_ref_from_git(&ctx).expect("slug present");
+            assert_eq!(r.source, "git", "slug_source {:?}", ctx.slug_source);
+            assert_eq!(r.slug, "acme/web");
+            assert_eq!(r.branches, vec!["main".to_string()]);
+        }
+        // A guess — marked or unstated — ships `git_guess`.
+        for ctx in [
+            git(Some(modelstat_wire::SLUG_SOURCE_PATH_SHAPE), None),
+            git(None, None),
+        ] {
+            let r = repo_ref_from_git(&ctx).expect("slug present");
+            assert_eq!(r.source, "git_guess", "slug_source {:?}", ctx.slug_source);
+        }
+        // No slug → no ref.
+        let mut empty = git(None, None);
+        empty.remote_slug = None;
+        assert!(repo_ref_from_git(&empty).is_none());
     }
 
     #[test]

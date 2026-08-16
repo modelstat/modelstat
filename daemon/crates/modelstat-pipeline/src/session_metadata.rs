@@ -25,9 +25,10 @@ use std::pin::Pin;
 
 use modelstat_parsers::{
     dedupe_files, dedupe_session_metadata, detect_branch_tickets, detect_references,
-    is_empty_session_metadata, DetectedRefs, FileRef, GitEnrichment, RepoRef, SessionMetadata,
+    is_empty_session_metadata, repo_ref_from_git, DetectedRefs, FileRef, GitEnrichment,
+    SessionMetadata,
 };
-use modelstat_wire::{slug_is_verified, RawEvent, Segment};
+use modelstat_wire::{RawEvent, Segment};
 
 use crate::passes::{sample_abstracts, strip_cognition_suffix};
 use crate::prompts::LINK_EXTRACT_MAX_ABSTRACTS;
@@ -51,14 +52,6 @@ pub type LinkExtractor<'a> = dyn Fn(Vec<String>) -> Pin<Box<dyn Future<Output = 
 /// window closes — so the per-file capture extends `until` by this grace period
 /// (capped at the next session's start). 4h covers "commit when you're done".
 const COMMIT_GRACE_MS: i64 = 4 * 60 * 60 * 1000;
-
-/// `git.branch ? [branch] : []` — the single observed branch, or none.
-fn branch_vec(branch: &Option<String>) -> Vec<String> {
-    match branch {
-        Some(b) if !b.is_empty() => vec![b.clone()],
-        _ => Vec::new(),
-    }
-}
 
 /// Insertion-ordered `Map::set`: update an existing key's value in place (keeping
 /// its position, like JS `Map`), else append. Small N (a few repos per session).
@@ -201,22 +194,13 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
             }
             let Some(g) = &e.git else { continue };
             let mut refs = DetectedRefs::default();
-            if let Some(slug) = g.remote_slug.as_ref().filter(|s| !s.is_empty()) {
-                // A slug the daemon verified on disk (`git_remote` /
-                // `repo_root_dir`) is a `git` fact; a surviving path-shape
-                // guess ships `git_guess` so the spend→outcome join can't
-                // take it on faith.
-                let source = if slug_is_verified(g.slug_source.as_deref()) {
-                    "git"
-                } else {
-                    "git_guess"
-                };
-                refs.repos.push(RepoRef {
-                    host: g.remote_host.clone(),
-                    slug: slug.clone(),
-                    branches: branch_vec(&g.branch),
-                    source: source.into(),
-                });
+            // A verified slug (`git_remote` / `repo_root_dir`, or a real
+            // remote URL from a pre-marker daemon) is a `git` fact; a
+            // surviving path-shape guess ships `git_guess` so the
+            // spend→outcome join can't take it on faith. `repo_ref_from_git`
+            // derives that from the context.
+            if let Some(repo) = repo_ref_from_git(g) {
+                refs.repos.push(repo);
             }
             if let Some(b) = g.branch.as_ref().filter(|b| !b.is_empty()) {
                 refs.issues.extend(detect_branch_tickets(Some(b)));
@@ -235,12 +219,12 @@ pub async fn build_session_metadata<'g, 'o: 'g>(
                 };
                 set_slug_cwd(&mut slug_to_cwd, slug.to_lowercase(), cwd.clone());
                 let mut refs = DetectedRefs::default();
-                refs.repos.push(RepoRef {
-                    host: ctx.remote_host.clone(),
-                    slug: slug.clone(),
-                    branches: branch_vec(&ctx.branch),
-                    source: "git".into(),
-                });
+                // Source derives from the resolver result's own provenance
+                // (its `slug_source`, via `repo_ref_from_git`), never a
+                // hard-coded `git`.
+                if let Some(repo) = repo_ref_from_git(&ctx) {
+                    refs.repos.push(repo);
+                }
                 if let Some(b) = ctx.branch.as_ref().filter(|b| !b.is_empty()) {
                     refs.issues.extend(detect_branch_tickets(Some(b)));
                 }
@@ -498,6 +482,38 @@ mod tests {
             assert_eq!(m.repos.len(), 1, "slug_source {source:?}");
             assert_eq!(m.repos[0].source, "git_guess", "slug_source {source:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_pre_marker_event_with_a_remote_url_is_verified() {
+        // Events from daemons predating the `slug_source` marker carry no
+        // provenance (the `gitctx` helper always stamps it — this is the
+        // ABSENT-marker path). A real remote_url is evidence on its own: no
+        // guess path, current or historical, ever wrote one, so the repo ref
+        // ships `git`, not `git_guess`, and dedupe canonicalises to it.
+        let mut e = ev("s1", "2026-07-16T10:00:00.000Z");
+        e.git = Some(GitContext {
+            remote_url: Some("https://github.com/acme/api.git".into()),
+            remote_host: Some("github.com".into()),
+            remote_slug: Some("Acme/API".into()),
+            branch: None,
+            slug_source: None,
+        });
+        // A same-slug path-shape guess rides along; the verified ref must
+        // supply the canonical casing through the dedupe fold.
+        let mut g = ev("s1", "2026-07-16T10:01:00.000Z");
+        g.git = Some(GitContext {
+            remote_url: None,
+            remote_host: None,
+            remote_slug: Some("acme/api".into()),
+            branch: None,
+            slug_source: Some(modelstat_wire::SLUG_SOURCE_PATH_SHAPE.into()),
+        });
+        let out = build_session_metadata(&[], &[g, e], None, None).await;
+        let m = out.get("s1").expect("session present");
+        assert_eq!(m.repos.len(), 1);
+        assert_eq!(m.repos[0].source, "git");
+        assert_eq!(m.repos[0].slug, "Acme/API", "verified casing wins");
     }
 
     #[tokio::test]

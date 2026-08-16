@@ -28,24 +28,18 @@ export const TokenUsage = z.object({
 });
 export type TokenUsage = z.infer<typeof TokenUsage>;
 
-/** `GitContext.slug_source` markers — how `remote_slug` was reached. Only the
- * first read the repo's own configured remote; the daemon reaches a slug three
- * ways and they are not equally true. */
-export const SLUG_SOURCE_GIT_REMOTE = "git_remote";
-/** The slug is the repo-ROOT directory name — a real repo on disk, but one with
- * no configured remote, so it names no forge and no owner. */
-export const SLUG_SOURCE_REPO_ROOT_DIR = "repo_root_dir";
-/** The slug was inferred from the SHAPE of the cwd (`…/projects/<a>/<b>`) with
- * no repo reachable at all. A guess about a path, not an observation of git. */
-export const SLUG_SOURCE_PATH_SHAPE = "path_shape";
-
-/** True when `slug_source` states the slug was read off the repo itself — its
- * configured remote, or its root directory on disk. False for a path-shape
- * guess AND for an absent marker: unstated provenance is not verification
- * (SDK producers, and events from daemons predating the marker). */
-export function slugIsVerified(slugSource: string | null | undefined): boolean {
-  return slugSource === SLUG_SOURCE_GIT_REMOTE || slugSource === SLUG_SOURCE_REPO_ROOT_DIR;
-}
+// The `slug_source` markers + verification predicate live in
+// `session-metadata.js` (which this module already depends on) so the repo-ref
+// helpers there can share them without an import cycle; re-exported here beside
+// `GitContext`, their wire home.
+export {
+  PROJECT_SLUG_CONFIDENCE_GUESS,
+  PROJECT_SLUG_CONFIDENCE_VERIFIED,
+  SLUG_SOURCE_GIT_REMOTE,
+  SLUG_SOURCE_PATH_SHAPE,
+  SLUG_SOURCE_REPO_ROOT_DIR,
+  slugIsVerified,
+} from "./session-metadata.js";
 
 /** Git context derived from cwd → nearest `.git`. */
 export const GitContext = z.object({
@@ -60,8 +54,9 @@ export const GitContext = z.object({
    * `git_remote` (the repo's configured remote — the only source that can also
    * name a host), `repo_root_dir` (a real repo with no remote, keyed on its
    * root directory name), `path_shape` (inferred from the cwd's shape, no repo
-   * reachable). Absent when there is no slug, and from daemons predating it. */
-  slug_source: z.string().max(40).optional(),
+   * reachable). Absent when there is no slug, and from daemons predating it.
+   * Nullish like every sibling git field — an explicit null must parse. */
+  slug_source: z.string().max(40).nullish(),
 });
 export type GitContext = z.infer<typeof GitContext>;
 

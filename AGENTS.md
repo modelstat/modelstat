@@ -96,6 +96,13 @@ Things to know:
   - it is stable across scans, because a positional parser always reads its file
     from the top (the upload cursor gates the SEND, never the READ) and Cursor
     counts in its own total order BEFORE the since-floor applies.
+- **A repo slug must carry its `slug_source` provenance.** Every producer of a
+  `GitContext.remote_slug` states how it reached the slug (`git_remote`,
+  `repo_root_dir`, `path_shape`); unstated provenance is treated as a GUESS —
+  downstream (`slug_is_verified`, the `projects` hint tiering, the
+  `git`/`git_guess` repo-ref split) never takes an unmarked slug on faith. The
+  one exception is evidence: a context carrying a real `remote_url` is verified
+  even without the marker, because no guess path has ever written one.
 - **The device's time zone** is stated by `modelstat-ingest::timezone`: the IANA
   NAME plus the current UTC offset ride the heartbeat, and the offset alone is
   stamped on every `IngestBatch` **at build time** (not at upload — a spooled

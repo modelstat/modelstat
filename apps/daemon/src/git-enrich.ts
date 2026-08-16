@@ -50,8 +50,9 @@ interface RepoIdentity {
   branch: string | null;
   /** Which of the two corrections produced `remote_slug` — the configured
    * remote, or the repo-root directory name. Rides to the server so a bare
-   * root name is never mistaken for an `owner/repo` off a real forge. */
-  slug_source: string;
+   * root name is never mistaken for an `owner/repo` off a real forge. Typed
+   * to the two VERIFIED tiers: this resolver never emits a guess. */
+  slug_source: typeof SLUG_SOURCE_GIT_REMOTE | typeof SLUG_SOURCE_REPO_ROOT_DIR;
 }
 
 export async function resolveAuthoritativeGit(

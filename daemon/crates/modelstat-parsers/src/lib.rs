@@ -69,6 +69,6 @@ pub use git_files::FileChange;
 pub use git_outcome::PrOutcome;
 pub use references::{
     dedupe_files, dedupe_session_metadata, detect_branch_tickets, detect_event_references,
-    detect_references, is_empty_session_metadata, DetectedRefs, FileRef, IssueRef, PullRequestRef,
-    RepoRef, SessionMetadata,
+    detect_references, is_empty_session_metadata, repo_ref_from_git, DetectedRefs, FileRef,
+    IssueRef, PullRequestRef, RepoRef, SessionMetadata,
 };

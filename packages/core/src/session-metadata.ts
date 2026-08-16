@@ -50,6 +50,50 @@ const SOURCE_RANK: Record<RefSource, number> = {
   model: 0,
 };
 
+// ── Slug provenance ──────────────────────────────────────────────────
+// (`GitContext.slug_source` markers — defined here, beside the repo-ref
+// helpers that read them, and re-exported from `schemas.js` next to the
+// `GitContext` wire schema itself.)
+
+/** `GitContext.slug_source` markers — how `remote_slug` was reached. Only the
+ * first read the repo's own configured remote; the daemon reaches a slug three
+ * ways and they are not equally true. */
+export const SLUG_SOURCE_GIT_REMOTE = "git_remote";
+/** The slug is the repo-ROOT directory name — a real repo on disk, but one with
+ * no configured remote, so it names no forge and no owner. */
+export const SLUG_SOURCE_REPO_ROOT_DIR = "repo_root_dir";
+/** The slug was inferred from the SHAPE of the cwd (`…/projects/<a>/<b>`) with
+ * no repo reachable at all. A guess about a path, not an observation of git. */
+export const SLUG_SOURCE_PATH_SHAPE = "path_shape";
+
+/** The `projects` hint confidence for a slug whose provenance is verified
+ * ({@link slugIsVerified}) — a fact read off the repo itself. */
+export const PROJECT_SLUG_CONFIDENCE_VERIFIED = 1;
+/** The `projects` hint confidence for a surviving guess (path shape, or
+ * unstated provenance with no remote evidence) — below the server's
+ * project-node minting bar on purpose. */
+export const PROJECT_SLUG_CONFIDENCE_GUESS = 0.5;
+
+/** True when the context's slug was read off the repo itself. Two kinds of
+ * evidence qualify:
+ *   - the `slug_source` marker states it (`git_remote` / `repo_root_dir`);
+ *   - the context carries a `remote_url` — NO guess path, current or
+ *     historical, has ever written one, so a pre-marker event with a remote
+ *     URL was read off git config even though it predates the marker.
+ * False for a path-shape guess AND for an absent marker without a remote URL:
+ * unstated provenance is not verification (SDK producers, and events from
+ * daemons predating the marker). */
+export function slugIsVerified(git: {
+  slug_source?: string | null;
+  remote_url?: string | null;
+}): boolean {
+  return (
+    git.slug_source === SLUG_SOURCE_GIT_REMOTE ||
+    git.slug_source === SLUG_SOURCE_REPO_ROOT_DIR ||
+    git.remote_url != null
+  );
+}
+
 /** A git host + `org/repo` the session worked in, with every branch seen.
  * Plural by design: one session can span several repos and branches. */
 export const RepoRef = z.object({
@@ -363,17 +407,28 @@ export function detectBranchTickets(branch: string | null | undefined): IssueRef
 }
 
 /** Build a {@link RepoRef} from a git context (the event's `git` field or a
- * `resolveGitContext` result). Null when there's no slug to anchor on. */
+ * `resolveGitContext` result). Null when there's no slug to anchor on.
+ *
+ * When `source` is not given it is derived from the context's own provenance
+ * ({@link slugIsVerified}): a verified slug is a `git` fact, anything else
+ * ships `git_guess` — so a caller cannot accidentally launder a path-shape
+ * guess into a deterministic claim by forgetting the argument. */
 export function repoRefFromGit(
-  git: { remote_host?: string | null; remote_slug?: string | null; branch?: string | null },
-  source: RefSource = "git",
+  git: {
+    remote_url?: string | null;
+    remote_host?: string | null;
+    remote_slug?: string | null;
+    branch?: string | null;
+    slug_source?: string | null;
+  },
+  source?: RefSource,
 ): RepoRef | null {
   if (!git.remote_slug) return null;
   return {
     host: git.remote_host ?? null,
     slug: git.remote_slug,
     branches: git.branch ? [git.branch] : [],
-    source,
+    source: source ?? (slugIsVerified(git) ? "git" : "git_guess"),
   };
 }
 
@@ -416,15 +471,22 @@ export function dedupeSessionMetadata(parts: DetectedRefs[]): SessionMetadata {
     all.issues.push(...p.issues);
   }
 
+  // The higher-ranked ref supplies the canonical text — slug casing and host —
+  // so a verified remote's `Acme/api` never displays with a guess's casing just
+  // because the guess arrived first. Branches union and the rank-max source
+  // survives, as before; the loser still backfills a missing host.
   const repos = dedupe(
     all.repos,
     (r) => r.slug.toLowerCase(),
-    (a, b) => ({
-      host: a.host ?? b.host,
-      slug: a.slug,
-      branches: [...new Set([...a.branches, ...b.branches])].slice(0, 50),
-      source: stronger(a.source, b.source),
-    }),
+    (a, b) => {
+      const [win, lose] = SOURCE_RANK[a.source] >= SOURCE_RANK[b.source] ? [a, b] : [b, a];
+      return {
+        host: win.host ?? lose.host,
+        slug: win.slug,
+        branches: [...new Set([...a.branches, ...b.branches])].slice(0, 50),
+        source: win.source,
+      };
+    },
   );
 
   // Higher score wins a tie-break: source trust dominates, confidence breaks

@@ -25,12 +25,7 @@
  * `buildSessionTitles` in shape: group by session, enrich, fall back
  * gracefully — a model or git hiccup never blocks the batch.
  */
-import {
-  type GitContext,
-  type RawEvent,
-  type Segment,
-  slugIsVerified,
-} from "@modelstat/core/schemas";
+import { type GitContext, type RawEvent, type Segment } from "@modelstat/core/schemas";
 import {
   type DetectedRefs,
   dedupeFiles,
@@ -40,6 +35,7 @@ import {
   emptyDetectedRefs,
   type FileRef,
   isEmptySessionMetadata,
+  repoRefFromGit,
   type SessionMetadata,
 } from "@modelstat/core/session-metadata";
 import { sampleAbstracts, stripCognitionSuffix } from "./title.js";
@@ -198,17 +194,12 @@ export async function buildSessionMetadata(
         if (e.cwd) cwds.add(e.cwd);
         if (!e.git) continue;
         const refs = emptyDetectedRefs();
-        if (e.git.remote_slug) {
-          // A slug the daemon verified on disk (`git_remote` / `repo_root_dir`)
-          // is a `git` fact; a surviving path-shape guess ships `git_guess` so
-          // the spend→outcome join can't take it on faith.
-          refs.repos.push({
-            host: e.git.remote_host ?? null,
-            slug: e.git.remote_slug,
-            branches: e.git.branch ? [e.git.branch] : [],
-            source: slugIsVerified(e.git.slug_source) ? "git" : "git_guess",
-          });
-        }
+        // A verified slug (`git_remote` / `repo_root_dir`, or a real remote
+        // URL from a pre-marker daemon) is a `git` fact; a surviving
+        // path-shape guess ships `git_guess` so the spend→outcome join can't
+        // take it on faith. `repoRefFromGit` derives that from the context.
+        const eventRepo = repoRefFromGit(e.git);
+        if (eventRepo) refs.repos.push(eventRepo);
         if (e.git.branch) refs.issues.push(...detectBranchTickets(e.git.branch));
         parts.push(refs);
       }
@@ -225,12 +216,10 @@ export async function buildSessionMetadata(
           if (!g?.remote_slug) continue;
           slugToCwd.set(g.remote_slug.toLowerCase(), cwd);
           const refs = emptyDetectedRefs();
-          refs.repos.push({
-            host: g.remote_host ?? null,
-            slug: g.remote_slug,
-            branches: g.branch ? [g.branch] : [],
-            source: "git",
-          });
+          // Source derives from the resolver result's own provenance (its
+          // `slug_source`, via `repoRefFromGit`), never a hard-coded `git`.
+          const diskRepo = repoRefFromGit(g);
+          if (diskRepo) refs.repos.push(diskRepo);
           if (g.branch) refs.issues.push(...detectBranchTickets(g.branch));
           parts.push(refs);
         }
