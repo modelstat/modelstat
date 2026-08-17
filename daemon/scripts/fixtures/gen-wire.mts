@@ -195,6 +195,8 @@ const ingestBatch = {
     ],
   },
   session_titles: { "11111111-1111-1111-1111-111111111111": "Ingest retry matrix" },
+  tz: "America/Los_Angeles",
+  tz_offset_minutes: -420,
   summarizer_mode: "cloud",
   repo_anchors: [
     {
