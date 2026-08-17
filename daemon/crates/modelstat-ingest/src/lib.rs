@@ -51,7 +51,7 @@ pub use ingest::{
 pub use machine_key::{build_fingerprint, intended_device_uuid, machine_key_source};
 pub use paths::{home_path, logs_dir, modelstat_home};
 pub use state::{state_path, RuntimeState};
-pub use timezone::{device_timezone, device_utc_offset_minutes};
+pub use timezone::{device_timezone, device_tz_offset_minutes, device_utc_offset_minutes};
 
 /// Serialize the env-mutating tests across this crate. `cargo test` runs a
 /// crate's tests on multiple threads in one process, so tests that flip
