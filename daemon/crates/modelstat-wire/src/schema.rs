@@ -670,12 +670,32 @@ pub struct IngestBatch {
     /// Stamped per batch rather than looked up per device, so each batch answers
     /// for itself instead of inheriting whatever the device last said.
     ///
-    /// The offset alone, here, on purpose: it is the reading that survives being
-    /// stored beside the events. The zone's NAME — the durable fact behind the
-    /// reading — rides [`HeartbeatPayload::timezone`], which is where a fact
-    /// about the device belongs.
+    /// Predates [`Self::tz`] / [`Self::tz_offset_minutes`] — the pair the
+    /// server's contract declares and reads — and still shipped beside them so
+    /// nothing that grew a reading of this field loses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utc_offset_minutes: Option<i32>,
+    /// The device's IANA zone name (`Europe/Berlin`), verbatim from the OS at
+    /// the moment the batch was built — the durable fact behind
+    /// [`Self::tz_offset_minutes`], and the field the server reads to recover
+    /// time-of-day from a wire that is otherwise all UTC.
+    ///
+    /// Verbatim means never checked against a roster of zones this build has
+    /// heard of: the zone database gains and moves entries, and a name we
+    /// cannot place is still the truthful answer to what the machine is set
+    /// to. Absent when the OS states none — no zone is not UTC, and an absent
+    /// name is never guessed from the offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+    /// Minutes east of UTC in force when the batch was built (`-420` for
+    /// UTC-7), DST included — stated beside [`Self::tz`] because the offset
+    /// cannot reconstruct the zone and the zone alone cannot date a past
+    /// instant without a tz database the reader may not have.
+    ///
+    /// `i16` mirrors the server's declaration of the field, so a reading the
+    /// server must reject is unrepresentable here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz_offset_minutes: Option<i16>,
     /// Where this batch was REDACTED — `local` (on the device, the default and the
     /// only mode where nothing unscrubbed can leave), `cloud`, or `self-hosted`.
     /// Separate from `summarizer_mode` because the two are separate questions, and
@@ -726,6 +746,7 @@ impl IngestBatch {
     /// permanently-rejectable batch can be produced.
     pub fn clamp(&mut self) {
         clamp_in_place(&mut self.daemon_version, caps::DAEMON_VERSION_MAX);
+        clamp_opt(&mut self.tz, caps::TIMEZONE_MAX);
         for e in &mut self.events {
             e.clamp();
         }
@@ -971,6 +992,8 @@ mod tests {
             session_metadata: None,
             summarizer_mode: None,
             utc_offset_minutes: None,
+            tz: None,
+            tz_offset_minutes: None,
             redactor_mode: None,
             repo_anchors: None,
             segment_generations: None,
@@ -1136,11 +1159,14 @@ mod tests {
             session_metadata: None,
             summarizer_mode: None,
             utc_offset_minutes: None,
+            tz: Some("字".repeat(100)), // 300 bytes > 64
+            tz_offset_minutes: None,
             redactor_mode: None,
             repo_anchors: Some(vec![repo; 12]), // > 10
             segment_generations: None,
         };
         batch.clamp();
+        assert!(batch.tz.as_ref().unwrap().len() <= caps::TIMEZONE_MAX);
         let anchors = batch.repo_anchors.as_ref().unwrap();
         assert_eq!(anchors.len(), caps::REPO_ANCHORS_COUNT_MAX);
         assert_eq!(anchors[0].anchors.len(), caps::ANCHORS_PER_REPO_COUNT_MAX);

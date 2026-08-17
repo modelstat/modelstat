@@ -115,8 +115,12 @@ fn ingest_batch_accepts_and_roundtrips() {
     let batch: IngestBatch = roundtrip("ingest_batch.json");
     assert_eq!(batch.events.len(), 3);
     // The zone the building machine was in — the one working-day fact that is
-    // lost the moment a batch ships nothing but UTC.
+    // lost the moment a batch ships nothing but UTC. Both readings ride: the
+    // IANA NAME (the durable fact) and the offset in force, in the two
+    // spellings the wire has carried.
     assert_eq!(batch.utc_offset_minutes, Some(-420));
+    assert_eq!(batch.tz.as_deref(), Some("America/Los_Angeles"));
+    assert_eq!(batch.tz_offset_minutes, Some(-420));
     assert_eq!(batch.segments.len(), 1);
     assert_eq!(batch.tool_calls.len(), 1);
     assert_eq!(batch.summarizer_mode.as_deref(), Some("cloud"));

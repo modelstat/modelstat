@@ -73,8 +73,11 @@ test("TS schemas accept the Rust-emitted wire fixtures (TS accepts Rust wire)", 
   assert.equal(batch.tool_calls.length, 1);
   assert.equal(batch.summarizer_mode, "cloud");
   // The additive facts of this wave survive Rust's serialization: the source-log
-  // ordinal, the SDK's own call instants, and the device's zone offset.
+  // ordinal, the SDK's own call instants, and the device's zone — offset AND
+  // IANA name, in the contract pair the server reads.
   assert.equal(batch.utc_offset_minutes, -420);
+  assert.equal(batch.tz, "America/Los_Angeles");
+  assert.equal(batch.tz_offset_minutes, -420);
   assert.equal(batch.events[0]!.seq, 128);
   const sdk = batch.events[2]!;
   assert.equal(sdk.started_at, "2026-06-01T10:00:00.000Z");

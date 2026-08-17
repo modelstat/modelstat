@@ -589,10 +589,22 @@ export const IngestBatch = z.object({
    * device moves: a laptop crosses zones, a zone changes its rules. Stamped per
    * batch rather than looked up per device, so each batch answers for itself.
    *
-   * The offset alone here on purpose: it is the reading that survives being
-   * stored beside the events. The zone's NAME rides the heartbeat, which is
-   * where a fact about the device belongs. */
+   * Predates `tz` / `tz_offset_minutes` — the pair the server's contract
+   * declares and reads — and still shipped beside them so nothing that grew a
+   * reading of this field loses it. */
   utc_offset_minutes: z.number().int().min(-840).max(840).optional(),
+  /** The device's IANA zone name (`Europe/Berlin`), verbatim from the OS at the
+   * moment the batch was built — the durable fact behind `tz_offset_minutes`,
+   * and the field the server reads to recover time-of-day from a wire that is
+   * otherwise all UTC. Validated as a bounded string, never against a roster of
+   * zones this build has heard of. Absent when the OS states none — no zone is
+   * not UTC, and an absent name is never guessed from the offset. */
+  tz: z.string().max(64).optional(),
+  /** Minutes east of UTC in force when the batch was built (`-420` for UTC-7),
+   * DST included — stated beside `tz` because the offset cannot reconstruct the
+   * zone and the zone alone cannot date a past instant without a tz database
+   * the reader may not have. */
+  tz_offset_minutes: z.number().int().min(-840).max(840).optional(),
   summarizer_mode: z.enum(["local", "self-hosted", "cloud"]).optional(),
   /** Where this batch's layer-2 PII detection ran when it was BUILT: "local"
    * (on-device model), "cloud" (modelstat's /v1/redact classifier), or

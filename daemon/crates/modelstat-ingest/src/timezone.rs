@@ -42,6 +42,17 @@ pub fn device_utc_offset_minutes() -> i32 {
     Local::now().offset().fix().local_minus_utc() / 60
 }
 
+/// [`device_utc_offset_minutes`] in the width the batch wire states
+/// (`tz_offset_minutes: Option<i16>`, matching the server's contract).
+///
+/// `None` on a reading `i16` cannot hold — unreachable while chrono bounds an
+/// offset to ±1440 minutes, but the honest answer if it ever weren't: an
+/// unrepresentable reading ships as silence, never as a clipped guess.
+#[must_use]
+pub fn device_tz_offset_minutes() -> Option<i16> {
+    i16::try_from(device_utc_offset_minutes()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,6 +67,16 @@ mod tests {
         assert!(
             (-840..=840).contains(&mins),
             "{mins} is outside the wire's range"
+        );
+    }
+
+    /// The wire-width reading is the same number as the `i32` probe — the cast
+    /// changes representation, never the value.
+    #[test]
+    fn the_wire_width_offset_is_the_same_reading() {
+        assert_eq!(
+            device_tz_offset_minutes().map(i32::from),
+            Some(device_utc_offset_minutes())
         );
     }
 

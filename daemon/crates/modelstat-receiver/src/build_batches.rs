@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use modelstat_ingest::accounts::{session_installs_for, Accounts};
-use modelstat_ingest::device_utc_offset_minutes;
+use modelstat_ingest::{device_timezone, device_tz_offset_minutes, device_utc_offset_minutes};
 use modelstat_parsers::{GitEnrichment, ToolCallDraft};
 use modelstat_pipeline::{attach_segment_ids, batch_id, build_session_metadata};
 use modelstat_wire::{IngestBatch, RawEvent, Segment};
@@ -242,8 +242,13 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
         // The zone this machine is in, as it is at the moment the batch is
         // built. Stamped at build rather than at upload: a batch can wait in the
         // spool for hours, and the offset that belongs to it is the one that was
-        // in force when its events were gathered.
+        // in force when its events were gathered. The NAME and the offset both,
+        // verbatim from the OS — an OS that states no zone ships None, never a
+        // guess. The receiver is the LOOPBACK door, so this machine IS the
+        // device whose SDK events these are.
         utc_offset_minutes: Some(device_utc_offset_minutes()),
+        tz: device_timezone(),
+        tz_offset_minutes: device_tz_offset_minutes(),
         redactor_mode: None,
         // The receiver takes turns over HTTP rather than re-reading a
         // transcript, so it has no generation to supersede: every batch is an
@@ -381,6 +386,12 @@ mod tests {
             (-840..=840).contains(&offset),
             "{offset} is outside the wire's range"
         );
+        // The contract pair the server reads: the IANA NAME and the offset,
+        // exactly as the OS states them — None where the OS states none, never
+        // a guess.
+        assert_eq!(b[0].tz, device_timezone());
+        assert_eq!(b[0].tz_offset_minutes, device_tz_offset_minutes());
+        assert_eq!(b[0].tz_offset_minutes.map(i32::from), Some(offset));
     }
 
     #[tokio::test]

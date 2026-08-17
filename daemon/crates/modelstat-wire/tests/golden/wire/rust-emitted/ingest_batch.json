@@ -210,6 +210,8 @@
   },
   "summarizer_mode": "cloud",
   "utc_offset_minutes": -420,
+  "tz": "America/Los_Angeles",
+  "tz_offset_minutes": -420,
   "repo_anchors": [
     {
       "slug": "acme/api",

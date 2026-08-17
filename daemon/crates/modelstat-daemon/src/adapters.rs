@@ -297,6 +297,8 @@ mod tests {
                 session_metadata: None,
                 summarizer_mode: None,
                 utc_offset_minutes: None,
+                tz: None,
+                tz_offset_minutes: None,
                 redactor_mode: None,
                 segment_generations: None,
                 repo_anchors: None,

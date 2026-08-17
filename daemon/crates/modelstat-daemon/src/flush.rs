@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use modelstat_ingest::accounts::{session_installs_for, Accounts};
-use modelstat_ingest::device_utc_offset_minutes;
+use modelstat_ingest::{device_timezone, device_tz_offset_minutes, device_utc_offset_minutes};
 use modelstat_parsers::{
     detect_references, DetectedRefs, GitEnrichment, SessionActors, ToolCallDraft,
 };
@@ -307,8 +307,13 @@ where
                             .and_then(|m| serde_json::to_value(BTreeMap::from([(&sid, m)])).ok()),
                         summarizer_mode: None,
                         // As on the local path below: the zone in force when the
-                        // batch was built, not when it is finally uploaded.
+                        // batch was built, not when it is finally uploaded. The
+                        // NAME and the offset both, verbatim from the OS — the
+                        // server buckets time-of-day from them, and an OS that
+                        // states no zone ships None, never a guess.
                         utc_offset_minutes: Some(device_utc_offset_minutes()),
+                        tz: device_timezone(),
+                        tz_offset_minutes: device_tz_offset_minutes(),
                         redactor_mode: None,
                         repo_anchors: None,
                         // Cloud ships no local segments, so there is no generation to
@@ -431,8 +436,12 @@ where
         // The zone this machine is in, as it is at the moment the batch is
         // built. Stamped at build rather than at upload: a batch can wait in the
         // spool for hours, and the offset that belongs to it is the one that was
-        // in force when its events were gathered.
+        // in force when its events were gathered. The NAME and the offset both,
+        // verbatim from the OS — an OS that states no zone ships None, never a
+        // guess.
         utc_offset_minutes: Some(device_utc_offset_minutes()),
+        tz: device_timezone(),
+        tz_offset_minutes: device_tz_offset_minutes(),
         redactor_mode: None,
         repo_anchors: None,
         segment_generations,
@@ -747,6 +756,64 @@ mod tests {
                 assert!(batches[0].batch.events.iter().all(|e| e.tokens.is_some()));
             }
             FlushOutcome::Held => panic!("healthy engine must not hold"),
+        }
+    }
+
+    /// Both paths — cloud/raw and local — stamp the batch with the zone this
+    /// machine is in: the IANA NAME and the offset, exactly as the OS states
+    /// them. Asserted against the OS probes rather than a literal, so the test
+    /// holds in any CI zone — and where the OS states no zone, the batch says
+    /// None too, never a guess.
+    #[tokio::test]
+    async fn every_flush_path_states_the_devices_zone() {
+        for mode in ["cloud", "local"] {
+            let resilient = ResilientSummarizer::with_cooldown(
+                Fake {
+                    reply: "Did the thing".into(),
+                    failing: false,
+                },
+                Duration::ZERO,
+            );
+            let mut acc = BTreeMap::new();
+            let mut ev_acc = BTreeMap::new();
+            let events = vec![ev("s1", "2026-07-16T10:00:00.000Z", "hello")];
+            let out = build_flush_batches(
+                "dev1",
+                "9.9.9",
+                mode,
+                events,
+                Vec::new(),
+                &resilient,
+                &NoEmbedder,
+                &LiveRedactor,
+                None,
+                None,
+                &mut acc,
+                &mut ev_acc,
+                &SessionActors::new(),
+                &ScanGeneration::default(),
+                &Accounts::new(),
+            )
+            .await;
+            let FlushOutcome::Ready(batches) = out else {
+                panic!("{mode}: healthy engine + live detector must not hold");
+            };
+            let batch = &batches[0].batch;
+            assert_eq!(
+                batch.tz,
+                device_timezone(),
+                "{mode}: the batch must state the zone NAME exactly as the OS does"
+            );
+            assert_eq!(
+                batch.tz_offset_minutes,
+                device_tz_offset_minutes(),
+                "{mode}: the batch must state the offset the OS is in force under"
+            );
+            assert_eq!(
+                batch.tz_offset_minutes.map(i32::from),
+                batch.utc_offset_minutes,
+                "{mode}: the two offset spellings must be the same reading"
+            );
         }
     }
 
