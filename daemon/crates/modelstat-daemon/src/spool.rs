@@ -423,7 +423,6 @@ mod tests {
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,
-            utc_offset_minutes: None,
             tz: None,
             tz_offset_minutes: None,
             redactor_mode: None,

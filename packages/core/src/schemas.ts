@@ -581,29 +581,22 @@ export const IngestBatch = z.object({
    * mode — only the summarisation LOCATION differs. Additive — old daemons omit
    * it, old servers ignore it; the server records it as the scope's last-seen
    * mode for ops-alert enrichment. */
-  /** Minutes east of UTC on the machine that BUILT this batch, at the moment it
-   * was built (`-420` for UTC-7), DST included.
+  /** The device's IANA zone name (`Europe/Berlin`), verbatim from the OS at the
+   * moment the batch was built — the durable fact behind `tz_offset_minutes`.
    *
    * Every instant on the wire is UTC, so once a batch leaves the box nothing can
    * recover what time of day the work happened for the person doing it — and a
    * device moves: a laptop crosses zones, a zone changes its rules. Stamped per
    * batch rather than looked up per device, so each batch answers for itself.
    *
-   * Predates `tz` / `tz_offset_minutes` — the pair the server's contract
-   * declares and reads — and still shipped beside them so nothing that grew a
-   * reading of this field loses it. */
-  utc_offset_minutes: z.number().int().min(-840).max(840).optional(),
-  /** The device's IANA zone name (`Europe/Berlin`), verbatim from the OS at the
-   * moment the batch was built — the durable fact behind `tz_offset_minutes`,
-   * and the field the server reads to recover time-of-day from a wire that is
-   * otherwise all UTC. Validated as a bounded string, never against a roster of
-   * zones this build has heard of. Absent when the OS states none — no zone is
-   * not UTC, and an absent name is never guessed from the offset. */
+   * Validated as a bounded string, never against a roster of zones this build
+   * has heard of. Absent when the OS states none — no zone is not UTC, and an
+   * absent name is never guessed from the offset. */
   tz: z.string().max(64).optional(),
   /** Minutes east of UTC in force when the batch was built (`-420` for UTC-7),
    * DST included — stated beside `tz` because the offset cannot reconstruct the
    * zone and the zone alone cannot date a past instant without a tz database
-   * the reader may not have. */
+   * the reader may not have. The one spelling of this fact on the batch. */
   tz_offset_minutes: z.number().int().min(-840).max(840).optional(),
   summarizer_mode: z.enum(["local", "self-hosted", "cloud"]).optional(),
   /** Where this batch's layer-2 PII detection ran when it was BUILT: "local"

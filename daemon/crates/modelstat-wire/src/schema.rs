@@ -661,24 +661,15 @@ pub struct IngestBatch {
     pub session_metadata: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summarizer_mode: Option<String>,
-    /// Minutes east of UTC on the machine that BUILT this batch, at the moment
-    /// it was built (`-420` for UTC-7), DST included.
+    /// The device's IANA zone name (`Europe/Berlin`), verbatim from the OS at
+    /// the moment the batch was built — the durable fact behind
+    /// [`Self::tz_offset_minutes`].
     ///
     /// Every instant on the wire is UTC, so once a batch leaves the box nothing
     /// can recover what time of day the work happened for the person doing it —
     /// and a device moves: a laptop crosses zones, a zone changes its rules.
     /// Stamped per batch rather than looked up per device, so each batch answers
     /// for itself instead of inheriting whatever the device last said.
-    ///
-    /// Predates [`Self::tz`] / [`Self::tz_offset_minutes`] — the pair the
-    /// server's contract declares and reads — and still shipped beside them so
-    /// nothing that grew a reading of this field loses it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub utc_offset_minutes: Option<i32>,
-    /// The device's IANA zone name (`Europe/Berlin`), verbatim from the OS at
-    /// the moment the batch was built — the durable fact behind
-    /// [`Self::tz_offset_minutes`], and the field the server reads to recover
-    /// time-of-day from a wire that is otherwise all UTC.
     ///
     /// Verbatim means never checked against a roster of zones this build has
     /// heard of: the zone database gains and moves entries, and a name we
@@ -692,8 +683,9 @@ pub struct IngestBatch {
     /// cannot reconstruct the zone and the zone alone cannot date a past
     /// instant without a tz database the reader may not have.
     ///
-    /// `i16` mirrors the server's declaration of the field, so a reading the
-    /// server must reject is unrepresentable here.
+    /// The one spelling of this fact on the batch, and `i16` mirrors the
+    /// server's declaration of it, so a reading the server must reject is
+    /// unrepresentable here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tz_offset_minutes: Option<i16>,
     /// Where this batch was REDACTED — `local` (on the device, the default and the
@@ -991,7 +983,6 @@ mod tests {
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,
-            utc_offset_minutes: None,
             tz: None,
             tz_offset_minutes: None,
             redactor_mode: None,
@@ -1158,7 +1149,6 @@ mod tests {
             session_titles: None,
             session_metadata: None,
             summarizer_mode: None,
-            utc_offset_minutes: None,
             tz: Some("字".repeat(100)), // 300 bytes > 64
             tz_offset_minutes: None,
             redactor_mode: None,

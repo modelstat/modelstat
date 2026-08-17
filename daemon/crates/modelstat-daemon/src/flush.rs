@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use modelstat_ingest::accounts::{session_installs_for, Accounts};
-use modelstat_ingest::{device_timezone, device_tz_offset_minutes, device_utc_offset_minutes};
+use modelstat_ingest::{device_timezone, device_tz_offset_minutes};
 use modelstat_parsers::{
     detect_references, DetectedRefs, GitEnrichment, SessionActors, ToolCallDraft,
 };
@@ -311,7 +311,6 @@ where
                         // NAME and the offset both, verbatim from the OS — the
                         // server buckets time-of-day from them, and an OS that
                         // states no zone ships None, never a guess.
-                        utc_offset_minutes: Some(device_utc_offset_minutes()),
                         tz: device_timezone(),
                         tz_offset_minutes: device_tz_offset_minutes(),
                         redactor_mode: None,
@@ -439,7 +438,6 @@ where
         // in force when its events were gathered. The NAME and the offset both,
         // verbatim from the OS — an OS that states no zone ships None, never a
         // guess.
-        utc_offset_minutes: Some(device_utc_offset_minutes()),
         tz: device_timezone(),
         tz_offset_minutes: device_tz_offset_minutes(),
         redactor_mode: None,
@@ -808,11 +806,6 @@ mod tests {
                 batch.tz_offset_minutes,
                 device_tz_offset_minutes(),
                 "{mode}: the batch must state the offset the OS is in force under"
-            );
-            assert_eq!(
-                batch.tz_offset_minutes.map(i32::from),
-                batch.utc_offset_minutes,
-                "{mode}: the two offset spellings must be the same reading"
             );
         }
     }
