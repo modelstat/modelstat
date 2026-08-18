@@ -125,12 +125,6 @@ importers:
       '@modelstat/core':
         specifier: workspace:*
         version: link:../core
-      '@modelstat/remote-config':
-        specifier: workspace:*
-        version: link:../remote-config
-      ulid:
-        specifier: ^2.3.0
-        version: 2.4.0
       zod:
         specifier: ^3.24.1
         version: 3.25.76
@@ -163,16 +157,6 @@ importers:
       zod:
         specifier: 3.25.76
         version: 3.25.76
-
-  packages/remote-config:
-    dependencies:
-      zod:
-        specifier: ^3.24.1
-        version: 3.25.76
-    devDependencies:
-      typescript:
-        specifier: ^5.7.3
-        version: 5.9.3
 
 packages:
 

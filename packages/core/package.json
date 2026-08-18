@@ -12,8 +12,7 @@
     "./ids": "./src/ids.ts",
     "./redact": "./src/redact.ts",
     "./redact-floor": "./src/redact-floor.ts",
-    "./session-metadata": "./src/session-metadata.ts",
-    "./policies": "./src/policies.ts"
+    "./session-metadata": "./src/session-metadata.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -1,6 +1,6 @@
 //! Batch-assembly primitives — the pure pieces the scan loop (M4 Part 3)
-//! composes into an `IngestBatch`. Ports `core/ids.ts::batchId` and
-//! `daemon-core/queue::attachSegmentIds`; cloud raw-event preparation and
+//! composes into an `IngestBatch`. Ports `core/ids.ts::batchId` and the
+//! retired TypeScript daemon's `attachSegmentIds`; cloud raw-event preparation and
 //! tool-call redaction enrichment are owned here.
 //!
 //! Kept here (not in the daemon) because they're pure + testable and operate on

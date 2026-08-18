@@ -52,8 +52,8 @@ function rawEventFromStored(typed: StoredEvent): RawEvent {
     // map stays empty and this path never populates
     // IngestBatch.tool_calls either. When a capture source starts
     // exposing tool activity, mirror the CLI plumbing:
-    // QueueItem.tool_calls → buildBatches → attachSegmentIds
-    // (@modelstat/daemon-core/queue).
+    // QueueItem.tool_calls → buildBatches → attachSegmentIds, as
+    // `modelstat-receiver` does on the CLI side.
     tool_calls: {},
     files_touched: [],
     source_file: null,

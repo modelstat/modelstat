@@ -1,6 +1,6 @@
-//! The six LLM passes (feature §9, §18) — a port of `pipeline/passes.ts` + the
-//! parsers in the sibling TS modules (`cognition.ts`, `title.ts`, `redaction.ts`,
-//! `script-summary.ts`, `session-metadata.ts`).
+//! The six LLM passes (feature §9, §18) — a port of the retired TypeScript
+//! daemon's pass layer and its sibling parsers (cognition, title, redaction,
+//! script-summary, session-metadata).
 //!
 //! Each pass is thin: guard the input → build the frozen prompt → run one
 //! completion over the summarizer protocol → parse/slice. The **summarize** pass

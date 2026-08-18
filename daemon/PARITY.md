@@ -7,9 +7,10 @@ are now the RECORD of why the Rust behaves as it does — every one of them is a
 frozen commitment, not a diff against a live sibling. Devices, SDKs and the
 server all still depend on these choices; change one only with a migration.
 
-The surviving TypeScript is `packages/core` + `packages/daemon-core` (shipped by
-the Chrome extension and the MCP server), and it is still held byte-identical to
-`modelstat-wire` by the golden fixtures. Add a row here (and, for intentional
+The surviving TypeScript is `packages/core` (the wire/redaction reference the
+golden fixtures are generated from) plus the segmentation pipeline in
+`packages/daemon-core` that the Chrome extension ships, and it is still held
+byte-identical to `modelstat-wire` by the golden fixtures. Add a row here (and, for intentional
 divergences, a line in feature §23) rather than leaving a silent choice.
 
 ## Faithful ports (behavior identical, implementation adapted)
