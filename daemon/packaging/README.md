@@ -12,7 +12,6 @@ its own home at cutover (M9). See feature §3/§13/§22 and plan §8/D9.
 | [`../../.github/workflows/release-daemon-rs.yml`](../../.github/workflows/release-daemon-rs.yml) | already in place | tag `daemon-<semver>` → build 6 targets → checksum/sign → GitHub Release |
 | [`homebrew/modelstat.rb`](homebrew/modelstat.rb) | tap repo `modelstat/homebrew-tap` → `Formula/modelstat.rb` | binary formula (installs both binaries) |
 | [`homebrew/bump-formula.yml`](homebrew/bump-formula.yml) | tap repo → `.github/workflows/bump-formula.yml` | the missing `agent-released` listener that bumps the formula per release |
-| [`npm-deprecation/`](npm-deprecation/) | published as the FINAL `modelstat` npm version (M9) | postinstall bridges stranded Node daemons onto the native installer |
 
 ## Release → distribution flow
 
