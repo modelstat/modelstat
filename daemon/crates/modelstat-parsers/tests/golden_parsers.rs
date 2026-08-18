@@ -184,9 +184,14 @@ fn parser_golden_parity() {
     // 4b. Codex fork replay — a subagent/resume rollout opens with its OWN
     //     `session_meta`, then replays the ancestor's whole history with the
     //     timestamps rewritten to the fork moment, then does its own new work.
-    //     Every replayed round trip must land on the SAME source_event_id the
-    //     ancestor's own file produced, so the store collapses it instead of
-    //     billing the conversation twice; the fork's new turn must NOT.
+    //     Two independent facts, and the fix for either breaks the other if
+    //     they are conflated:
+    //       · the fork is its OWN SESSION, named by its filename — the ancestor
+    //         `session_meta` it replays is an ancestor pointer, not an identity;
+    //       · every replayed round trip still lands on the SAME source_event_id
+    //         the ancestor's own file produced, so the store collapses it
+    //         instead of billing the conversation twice. The fork's new turn
+    //         must NOT.
     {
         let anc = format!(
             "{BASE}/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl"
@@ -196,6 +201,20 @@ fn parser_golden_parity() {
         );
         let anc_res = parse_codex_rollout(&ctx(&anc)).unwrap();
         let fork_res = parse_codex_rollout(&ctx(&fork)).unwrap();
+
+        // The session each file's events belong to is the file itself. Taking
+        // the replayed declaration instead bound 447 of 485 real rollout files
+        // to one session of 7.3M events — 64% of the events table, past every
+        // processing ceiling, so it produced no tasks and no attribution.
+        for (res, want) in [
+            (&anc_res, "019fd1ca-816d-7af2-9332-a6db0bfc4d25"),
+            (&fork_res, "019fd1d5-2a4c-7bd1-9f03-1c7e5a90b442"),
+        ] {
+            assert!(
+                !res.events.is_empty() && res.events.iter().all(|e| e.session_id == want),
+                "every event belongs to the rollout its filename names ({want})"
+            );
+        }
 
         let ids = |r: &modelstat_parsers::ParseResult| -> Vec<String> {
             r.events

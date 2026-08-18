@@ -67,7 +67,7 @@ pub enum EventSource<'a> {
     /// embedded in the line (Claude Code resume-copy dedupe): `uuid::<lineUuid>`.
     LineUuid { line_uuid: &'a str },
     /// Position-independent key for a codex round trip:
-    /// `codex::<session>::<input>:<cached>:<output>:<reasoning>`, the
+    /// `codex::<conversation>::<input>:<cached>:<output>:<reasoning>`, the
     /// conversation's CUMULATIVE counter at that turn.
     ///
     /// Codex has no per-line uuid, so [`LineUuid`](EventSource::LineUuid) — the
@@ -78,7 +78,14 @@ pub enum EventSource<'a> {
     /// cumulative counter does, byte for byte, and it is what upstream itself
     /// treats as the conversation's running total.
     CodexTurn {
-        session_id: &'a str,
+        /// The CONVERSATION whose running total this is — the id the rollout
+        /// region declares, which inside a replayed prefix is the ANCESTOR's.
+        /// Deliberately NOT the session id: a fork rollout is its own session
+        /// (its filename says so) while the history it replays still belongs,
+        /// counter and all, to the conversation it was copied from. Keying on
+        /// the session instead would mint a fresh id per fork file and bill one
+        /// conversation once per fork — the bug this shape exists to prevent.
+        conversation_id: &'a str,
         /// `total_token_usage`, in the order upstream declares it.
         cumulative: [u64; 4],
     },
@@ -95,10 +102,12 @@ pub fn source_event_id(device_id: &str, source: &EventSource) -> String {
             conversation_id,
             message_id,
         } => format!("web::{host}::{conversation_id}::{message_id}"),
+        // The key string here is frozen: `codex::…` is what every id already
+        // landed under, so naming the field honestly must not move a hash.
         EventSource::CodexTurn {
-            session_id,
+            conversation_id,
             cumulative: [i, c, o, r],
-        } => format!("codex::{session_id}::{i}:{c}:{o}:{r}"),
+        } => format!("codex::{conversation_id}::{i}:{c}:{o}:{r}"),
     };
     format!("evt_{}", djb2_base36(&format!("{device_id}::{key}")))
 }
