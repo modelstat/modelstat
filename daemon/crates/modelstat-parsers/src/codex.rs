@@ -10,6 +10,12 @@
 //! [`codex_last_token_usage`] for why that exact path, and why a counter that
 //! has moved is reported rather than either zeroed or thrown.
 //!
+//! IDENTITY: a rollout FILE is a session, named by the uuid in its own filename.
+//! A fork replays its ancestor's history verbatim, `session_meta` and all, so
+//! the ids a file DECLARES describe the conversation each region was copied
+//! from — not the session doing the work. The two are tracked separately in
+//! [`parse_inner`]: the path names the session, the declarations key the turns.
+//!
 //! PARITY: the TS event_msg path falls back to `new Date().toISOString()` when a
 //! line has no timestamp. That is non-deterministic and non-replayable, so the
 //! Rust port falls back to the last-seen line timestamp instead (deterministic);
@@ -488,7 +494,17 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
     let file = File::open(&ctx.source_file)?;
     let mut lines = OffsetLines::new(BufReader::new(file), ctx.byte_offset_start);
 
+    // WHICH SESSION these events belong to: the rollout FILE, named by the uuid
+    // in its own filename. A fork rollout is its own session — codex gave it its
+    // own file and its own uuid — and the history it replays does not make it
+    // the ancestor. See the `session_meta` arm for what the declared id is for.
     let mut session_id: Option<String> = derive_session_id_from_rollout_path(&ctx.source_file);
+    // WHICH CONVERSATION the lines being read belong to — the id the last
+    // `session_meta` declared, which inside a replayed prefix is the ANCESTOR's.
+    // It is not an identity for anything shipped; it keys the turns
+    // (`EventSource::CodexTurn`) so a replayed round trip collapses onto the
+    // original instead of billing the conversation a second time.
+    let mut conversation_id: Option<String> = session_id.clone();
     let mut cwd: Option<String> = None;
     let mut model: Option<String> = None;
     // Conversation turn ordinal (SPEC 0005) — the SAME quantity the other three
@@ -545,14 +561,34 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
         let kind = obj.get("type").and_then(Value::as_str).unwrap_or("");
 
         if kind == "session_meta" {
+            // `id` and NOT `session_id`: a subagent rollout states BOTH, and its
+            // `session_id` is the ROOT conversation's (474 of 485 real rollout
+            // files on one machine state a `session_id` that is not their own
+            // `id`). `id` is the thread this record opens.
             let id = obj.get("id").and_then(Value::as_str).or_else(|| {
                 obj.get("payload")
                     .and_then(|p| p.get("id"))
                     .and_then(Value::as_str)
             });
             if let Some(id) = id {
-                if Some(id) != session_id.as_deref() {
-                    session_id = Some(id.to_string());
+                if Some(id) != conversation_id.as_deref() {
+                    conversation_id = Some(id.to_string());
+                    // A rollout file is its OWN session, and its filename says
+                    // which. A fork opens with its own `session_meta`, then
+                    // REPLAYS the ancestor's history — ancestor `session_meta`
+                    // included — so a declared id that disagrees with the path
+                    // is an ancestor pointer, never this file's identity.
+                    // Taking it rebound every fork onto its ancestor: 447 of 485
+                    // real rollout files collapsed into ONE session holding 7.3M
+                    // events, 64% of the events table, past every processing
+                    // ceiling, so it produced no tasks and no attribution.
+                    //
+                    // The payload wins only when the path names nobody — an
+                    // ad-hoc or renamed file, where the declaration is the sole
+                    // identity there is and a session with no id ships nothing.
+                    if session_id.is_none() {
+                        session_id = conversation_id.clone();
+                    }
                     pending_aggregate.clear();
                     open_calls.clear();
                     // Each conversation runs its own cumulative counter, so the
@@ -909,7 +945,10 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                         Some(cumulative) => source_event_id(
                             &ctx.device_id,
                             &EventSource::CodexTurn {
-                                session_id: &sid,
+                                // The CONVERSATION's counter, so a replayed turn
+                                // keys exactly as the original did even though
+                                // the fork replaying it is its own session.
+                                conversation_id: conversation_id.as_deref().unwrap_or(sid.as_str()),
                                 cumulative,
                             },
                         ),
@@ -1587,14 +1626,22 @@ mod tests {
     /// A rollout of `lines` at a path codex's own naming rule matches. Shapes
     /// only — every value is fabricated to match the FORM codex writes.
     fn rollout(lines: &[Value]) -> String {
+        rollout_named(
+            "rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
+            lines,
+        )
+    }
+
+    /// The same, at a filename the caller chooses — so a test can write a FORK
+    /// (its own uuid in the name) or a file codex's naming rule does not match.
+    fn rollout_named(file_name: &str, lines: &[Value]) -> String {
         let dir = std::env::temp_dir().join(format!(
             "modelstat-codex-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path =
-            dir.join("rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl");
+        let path = dir.join(file_name);
         let text: String = lines
             .iter()
             .map(|l| format!("{}\n", serde_json::to_string(l).unwrap()))
@@ -1618,6 +1665,167 @@ mod tests {
             "input_tokens": input, "cached_input_tokens": 0,
             "output_tokens": 10, "reasoning_output_tokens": 0
         }}})
+    }
+
+    /// A `token_count` payload that also states the conversation's RUNNING
+    /// total, which is what keys the round trip across replays.
+    fn usage_totalling(input: u64, total_input: u64) -> Value {
+        json!({ "info": {
+            "last_token_usage": {
+                "input_tokens": input, "cached_input_tokens": 0,
+                "output_tokens": 10, "reasoning_output_tokens": 0
+            },
+            "total_token_usage": {
+                "input_tokens": total_input, "cached_input_tokens": 0,
+                "output_tokens": 10, "reasoning_output_tokens": 0
+            }
+        }})
+    }
+
+    /// The `session_meta` a fork rollout opens with, in codex's own shape: `id`
+    /// is THIS thread, `session_id` is the ROOT conversation's, and
+    /// `forked_from_id` / `parent_thread_id` name the ancestor. All three of the
+    /// ancestor-shaped fields disagree with `id` on purpose — that disagreement
+    /// is the whole fork signal.
+    fn fork_meta(ts: &str, own: &str, ancestor: &str) -> Value {
+        json!({ "timestamp": ts, "type": "session_meta", "payload": {
+            "id": own,
+            "session_id": ancestor,
+            "forked_from_id": ancestor,
+            "parent_thread_id": ancestor,
+            "thread_source": "subagent",
+            "source": { "subagent": { "thread_spawn": {
+                "parent_thread_id": ancestor, "depth": 1,
+                "agent_path": "/root/history_audit", "agent_nickname": "Copernicus" } } },
+            "cwd": "/Users/dev/Projects/acme", "model_provider": "openai"
+        }})
+    }
+
+    fn plain_meta(ts: &str, id: &str) -> Value {
+        json!({ "timestamp": ts, "type": "session_meta",
+                "payload": { "id": id, "session_id": id } })
+    }
+
+    const FORK_FILE: &str =
+        "rollout-2026-08-05T14-41-18-019fd1d5-2a4c-7bd1-9f03-1c7e5a90b442.jsonl";
+    const FORK_ID: &str = "019fd1d5-2a4c-7bd1-9f03-1c7e5a90b442";
+    const ANCESTOR_ID: &str = "019fd1ca-816d-7af2-9332-a6db0bfc4d25";
+
+    /// A rollout file is its OWN session. A fork opens with its own
+    /// `session_meta`, then REPLAYS the ancestor's history — the ancestor's
+    /// `session_meta` included — and taking that declaration as identity bound
+    /// every fork to its ancestor: 447 of 485 real rollout files on one machine
+    /// collapsed into a single session of 7.3M events, past every processing
+    /// ceiling, yielding no tasks and no attribution.
+    #[test]
+    fn a_fork_rollout_keys_on_its_own_filename_not_the_replayed_ancestor() {
+        let path = rollout_named(
+            FORK_FILE,
+            &[
+                fork_meta("2026-08-05T12:41:18.204Z", FORK_ID, ANCESTOR_ID),
+                // The replayed ancestor `session_meta` — an ancestor pointer,
+                // never this file's identity.
+                plain_meta("2026-08-05T12:41:18.204Z", ANCESTOR_ID),
+                line(
+                    "2026-08-05T12:41:20.000Z",
+                    "user_message",
+                    json!({ "message": "replayed ask" }),
+                ),
+                line(
+                    "2026-08-05T12:41:22.000Z",
+                    "token_count",
+                    usage_totalling(100, 100),
+                ),
+            ],
+        );
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        assert!(!res.events.is_empty(), "the fork emitted events");
+        assert!(
+            res.events.iter().all(|e| e.session_id == FORK_ID),
+            "every event belongs to the rollout the filename names, not to the \
+             ancestor the replayed meta declares: {:?}",
+            res.events
+                .iter()
+                .map(|e| e.session_id.clone())
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// …and the replay still costs nothing. The fork's session moved to its own
+    /// uuid; the round trip's KEY stays the ancestor conversation's, so the
+    /// store collapses the copy onto the original exactly as before (#128).
+    #[test]
+    fn a_replayed_round_trip_keeps_the_ancestor_s_event_id() {
+        let turns = |extra_prefix: bool| -> Vec<Value> {
+            let mut out = vec![];
+            if extra_prefix {
+                out.push(fork_meta("2026-08-05T12:41:18.204Z", FORK_ID, ANCESTOR_ID));
+            }
+            out.push(plain_meta("2026-08-05T11:58:57.508Z", ANCESTOR_ID));
+            out.push(line(
+                "2026-08-05T11:58:59.076Z",
+                "user_message",
+                json!({ "message": "the ask" }),
+            ));
+            out.push(line(
+                "2026-08-05T11:59:02.811Z",
+                "token_count",
+                usage_totalling(100, 100),
+            ));
+            out
+        };
+        let anc = rollout(&turns(false));
+        // The fork: one more line ahead of the same round trip, so its byte
+        // offset moves — the reason a positional key double-billed.
+        let fork = rollout_named(FORK_FILE, &turns(true));
+
+        let ids = |path: &str| -> Vec<String> {
+            parse_codex_rollout(&ParserContext::new("dev_1", path))
+                .unwrap()
+                .events
+                .iter()
+                .filter(|e| e.kind == "assistant_message")
+                .map(|e| e.source_event_id.clone())
+                .collect()
+        };
+        let anc_ids = ids(&anc);
+        let fork_ids = ids(&fork);
+        assert_eq!(anc_ids.len(), 1, "one round trip each");
+        assert_eq!(
+            fork_ids, anc_ids,
+            "the replayed round trip is the SAME work and keeps the ancestor \
+             conversation's event id, however the file replaying it is named"
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&anc).parent().unwrap());
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&fork).parent().unwrap());
+    }
+
+    /// The one case the override was ever needed for: a rollout whose FILENAME
+    /// states no uuid. There the declaration is the only identity in existence,
+    /// and a session with no id ships nothing at all — so the payload still
+    /// wins, exactly as it always did.
+    #[test]
+    fn a_rollout_whose_filename_states_no_uuid_still_keys_on_the_payload() {
+        let path = rollout_named(
+            "codex-transcript.jsonl",
+            &[
+                plain_meta("2026-08-05T11:58:57.508Z", ANCESTOR_ID),
+                line(
+                    "2026-08-05T11:58:59.076Z",
+                    "user_message",
+                    json!({ "message": "the ask" }),
+                ),
+                line("2026-08-05T11:59:02.811Z", "token_count", usage(100)),
+            ],
+        );
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        assert!(!res.events.is_empty(), "the rollout emitted events");
+        assert!(
+            res.events.iter().all(|e| e.session_id == ANCESTOR_ID),
+            "with no uuid in the path the payload is the only identity there is"
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 
     /// The ordinal counts TYPED PROMPTS, the same quantity claude_code, pi and

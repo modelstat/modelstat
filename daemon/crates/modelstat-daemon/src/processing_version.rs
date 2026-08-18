@@ -255,11 +255,29 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       re-derived from the local logs, so a re-read is the only way
 ///       historical segments gain the tiering. Cross-parser (every parser's
 ///       events carry git context), so the CAPTURE aspect carries it.
+/// codex v28 — a rollout file is its OWN session. A fork (`codex resume`, a
+///       subagent spawn) opens with its own `session_meta` naming its own uuid,
+///       then REPLAYS the ancestor's history — the ancestor's `session_meta`
+///       included — and the parser took every declared id as identity. So each
+///       fork rebound to its ancestor the moment the replay began, and its own
+///       new work landed there too: on one real machine 447 of 485 rollout files
+///       collapsed into ONE session holding 7,339,890 event rows spanning two
+///       weeks — 64% of the entire events table. That session exceeds every
+///       processing ceiling, so it yielded no tasks, no taxonomy and no
+///       attribution, while its 9,138 uploads starved the summarise queue. The
+///       filename's uuid is the identity now; a declared id that disagrees is an
+///       ancestor pointer, and the payload wins only when the path names nobody.
+///       Round-trip KEYS are untouched — they still hash the conversation the
+///       region declares, which is what makes a replayed turn collapse onto the
+///       original (v26) rather than bill twice. A re-scan is what re-keys the
+///       history to the sessions that actually did the work: the events the old
+///       binding landed are the server's to tombstone. Only codex's files
+///       re-read.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
     ("capture", LEGACY_WORLD_VERSION + 4),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION + 2),
-    ("codex", LEGACY_WORLD_VERSION + 4),
+    ("codex", LEGACY_WORLD_VERSION + 5),
     ("cursor", LEGACY_WORLD_VERSION),
     ("pi", LEGACY_WORLD_VERSION),
 ];
