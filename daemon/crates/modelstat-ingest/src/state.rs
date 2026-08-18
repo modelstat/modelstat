@@ -82,6 +82,13 @@ pub struct RuntimeState {
     /// Per-aspect pipeline versions (capture / redaction / one per parser) —
     /// the marker that scopes re-scans to exactly what a change invalidated.
     pub processing_aspects: BTreeMap<String, i64>,
+    /// Aspects whose re-scan is UNDER WAY: aspect → the version it is working
+    /// toward. Its sibling above still holds the OLD version for as long as an
+    /// entry sits here, because a bump is only honoured once the files it
+    /// invalidated have actually been re-read. Stamping the new version at wipe
+    /// time instead would let a daemon killed (or updated) mid-re-scan come
+    /// back to a state file claiming a repair that most of the corpus never saw.
+    pub processing_rescans: BTreeMap<String, i64>,
     pub reconcile_cache: Value,
     #[serde(rename = "summariserDegraded")]
     pub summariser_degraded: bool,
@@ -111,6 +118,7 @@ impl Default for RuntimeState {
             segments_sent: 0,
             processing_version: None,
             processing_aspects: BTreeMap::new(),
+            processing_rescans: BTreeMap::new(),
             reconcile_cache: json!({}),
             summariser_degraded: false,
             summariser_recovery_at: 0,
@@ -133,6 +141,7 @@ struct PartialState {
     segments_sent: Option<i64>,
     processing_version: Option<i64>,
     processing_aspects: Option<BTreeMap<String, i64>>,
+    processing_rescans: Option<BTreeMap<String, i64>>,
     reconcile_cache: Option<Value>,
     #[serde(rename = "summariserDegraded")]
     summariser_degraded: Option<bool>,
@@ -168,6 +177,7 @@ pub fn load_state() -> RuntimeState {
         segments_sent: obj.segments_sent.unwrap_or(d.segments_sent),
         processing_version: obj.processing_version,
         processing_aspects: obj.processing_aspects.unwrap_or_default(),
+        processing_rescans: obj.processing_rescans.unwrap_or_default(),
         reconcile_cache: obj.reconcile_cache.unwrap_or(d.reconcile_cache),
         summariser_degraded: obj.summariser_degraded.unwrap_or(d.summariser_degraded),
         summariser_recovery_at: obj
@@ -305,6 +315,7 @@ mod tests {
             let w = want.as_object_mut().unwrap();
             w.remove("processingVersion");
             w.insert("processingAspects".into(), json!({}));
+            w.insert("processingRescans".into(), json!({}));
             w.insert("redactorMode".into(), json!("cloud"));
             assert_eq!(mine, want);
         });

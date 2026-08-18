@@ -397,7 +397,7 @@ fn progress_message(s: &Status) -> String {
 
 /// `12345` → `"12,345"`. The tray menu and `modelstat status` are read at a
 /// glance; a bare five-digit count is not.
-fn thousands(n: u64) -> String {
+pub(crate) fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -702,11 +702,54 @@ pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
         daemon.with_status(|s| s.set_phase(Phase::Processing, "Catching up on history…"));
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    // The backlog drained — the ONE moment this daemon knows nothing is queued,
+    // and therefore the only honest place to declare a version bump's re-scan
+    // finished. A held run returned above with the mandate still outstanding.
+    settle_rescans(&daemon).await;
     daemon.with_status(|s| {
         s.set_phase(Phase::Watching, "Waiting for new events");
         s.set_progress(0, 0);
         s.clear_busy();
     });
+}
+
+/// Advance any aspect whose mandated re-scan has actually finished, and refresh
+/// the line the status surfaces show for the ones that have not.
+///
+/// The completion test is "no discovered file this aspect owns is still missing
+/// a cursor". Discovery is re-run here rather than reused from the sweep so the
+/// answer reflects the tree as it is NOW: files that appeared mid-sweep are
+/// still owed, and files that VANISHED mid-sweep are owed nothing — a deleted
+/// transcript cannot be re-read, and treating it as outstanding work would
+/// re-wipe the corpus on every boot forever.
+async fn settle_rescans(daemon: &Arc<Daemon>) {
+    let discovered: std::collections::BTreeMap<String, &'static str> = discover_jobs()
+        .into_iter()
+        .map(|j| (j.path, j.kind.aspect()))
+        .collect();
+    let (notes, pending) = {
+        let mut state = daemon.state.lock().await;
+        let done = crate::processing_version::settle_processing_rescans(&mut *state, &discovered);
+        if done.changed {
+            if let Err(e) = save_state(&state) {
+                modelstat_log::log_warn!("couldn't persist the completed re-scan: {e}");
+            }
+        }
+        (
+            done.notes,
+            crate::processing_version::rescans_in_progress(&*state, &discovered),
+        )
+    };
+    for note in &notes {
+        modelstat_log::log_info!("pipeline reconcile: {note}");
+    }
+    // Still owed after a drained sweep means files the scan could not read
+    // (a parse error holds its cursor back). Say so every sweep — silence here
+    // is what let a stalled repair look like a healthy daemon.
+    for p in &pending {
+        modelstat_log::log_info!("pipeline reconcile: {p}");
+    }
+    daemon.with_status(|s| s.set_rescan(crate::processing_version::rescan_line(&pending)));
 }
 
 /// Force-scan a specific session/file (the loopback control endpoint's eager

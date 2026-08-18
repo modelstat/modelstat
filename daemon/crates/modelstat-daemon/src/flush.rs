@@ -112,6 +112,24 @@ impl ScanGeneration {
     /// names the generation's span rather than its own slice. Sessions this
     /// scan only appended to get an id and NO span: the server then retires
     /// nothing for them, because what it did not re-read is still the truth.
+    ///
+    /// # The local file is the source; the server is the record
+    ///
+    /// A claim is derived ONLY from segments this run actually produced, and
+    /// that is what keeps a DELETED transcript harmless. Claude Code prunes
+    /// `~/.claude/projects`; codex rollouts get cleaned up; a laptop is
+    /// reimaged. When the file is gone the scan produces no segments for that
+    /// session, so no entry is written for it here and the server retires
+    /// nothing — the session it already holds stands. An empty batch is not
+    /// even representable as a claim: the loop has nothing to iterate and the
+    /// final `then_some` returns `None`.
+    ///
+    /// Never re-shape this to claim a span for a session the run did NOT
+    /// re-read (e.g. "everything since the last generation"). That turns a
+    /// vanished file into a retirement order, and losing history because a
+    /// local file aged out is the one outcome this design forbids. The
+    /// matching seam on the discovery side is the GC in
+    /// [`crate::reconcile`] — absence prunes local bookkeeping ONLY.
     #[must_use]
     pub fn claims(
         &self,
@@ -519,6 +537,83 @@ mod tests {
         // No scan id at all ⇒ no claim, and the server falls back to its old
         // rule rather than reading an empty id as a generation.
         assert!(ScanGeneration::default().claims(&batch, &run).is_none());
+    }
+
+    /// The retention invariant: a transcript deleted between scans must cost
+    /// the server NOTHING. The local file is the source and may vanish at any
+    /// time — the agent prunes its own history, a rollout is cleaned up, a
+    /// machine is reimaged — while the server is the durable record.
+    ///
+    /// Job 1 makes forced re-scans routine, which is exactly what makes this
+    /// load-bearing: a re-scan that no longer finds a file must not conclude
+    /// that the file's sessions should be retired.
+    #[test]
+    fn a_transcript_that_vanished_between_scans_retires_nothing() {
+        let seg = |sid: &str, from: &str, to: &str| Segment {
+            segment_id: format!("seg_{sid}_{from}"),
+            session_id: sid.into(),
+            agent: "claude_code".into(),
+            started_at: from.into(),
+            ended_at: to.into(),
+            r#abstract: String::new(),
+            tokens: TokenUsage::default(),
+            tags: Vec::new(),
+            redaction: Default::default(),
+            source_event_ids: Vec::new(),
+            abstract_embedding: None,
+            behavior: None,
+            user_intent: None,
+            local_time: None,
+        };
+
+        // A forced re-scan (every cursor wiped, so every session it finds is
+        // read WHOLE). `s_gone` was shipped by an earlier scan; its transcript
+        // has since been deleted, so this run produced nothing for it.
+        let generation = ScanGeneration {
+            id: "scan_2".into(),
+            read_whole: ["s_kept".to_string(), "s_gone".to_string()]
+                .into_iter()
+                .collect(),
+        };
+        let run: BTreeMap<String, Vec<Segment>> = [(
+            "s_kept".to_string(),
+            vec![seg(
+                "s_kept",
+                "2026-06-10T10:00:00Z",
+                "2026-06-10T10:10:00Z",
+            )],
+        )]
+        .into_iter()
+        .collect();
+        let batch = vec![seg(
+            "s_kept",
+            "2026-06-10T10:00:00Z",
+            "2026-06-10T10:10:00Z",
+        )];
+
+        let claims = generation
+            .claims(&batch, &run)
+            .expect("the survivor claims");
+        assert!(
+            claims.contains_key("s_kept"),
+            "the session still on disk restates its own span"
+        );
+        assert!(
+            !claims.contains_key("s_gone"),
+            "a session whose transcript vanished must produce NO claim — a claim              is a retirement order, and the server's copy is the only copy left"
+        );
+        assert_eq!(
+            claims.len(),
+            1,
+            "no tombstone is invented for the absent one"
+        );
+
+        // And the whole corpus vanishing is not an order to retire the world:
+        // a scan that produced no segments produces no claim at all.
+        assert!(
+            generation.claims(&[], &BTreeMap::new()).is_none(),
+            "an empty scan must not supersede anything"
+        );
     }
 
     use crate::testing::AnsweringRedactor;

@@ -28,6 +28,10 @@ pub fn cmd_reset() -> ExitCode {
     for (aspect, v) in ASPECT_VERSIONS {
         state.processing_aspects.insert((*aspect).to_string(), *v);
     }
+    // Every cursor just went, so the next scan re-reads the world regardless of
+    // any aspect's outstanding mandate. Clearing the markers keeps the status
+    // surfaces honest: nothing is owed that this reset has not already ordered.
+    state.processing_rescans.clear();
     if let Err(e) = save_state(&state) {
         eprintln!("modelstat: couldn't reset cursors: {e}");
         return ExitCode::FAILURE;
@@ -128,7 +132,16 @@ pub fn cmd_ensure_daemon(version: &str) -> ExitCode {
     match health.decision {
         SuperviseDecision::Adopt => {
             let pid = health.lock.as_ref().map(|l| l.pid).unwrap_or(0);
-            modelstat_log::log_info!("daemon healthy (pid {pid}) — nothing to do");
+            // Say which question was answered. This line reports SUPERVISION
+            // ("is exactly one live daemon running?"), and it used to read
+            // "nothing to do" — printed, in the field, beside a daemon whose
+            // own status said "scanning — 3,398 session files left". A verdict
+            // that does not name its subject is indistinguishable from a claim
+            // that there is no work.
+            modelstat_log::log_info!(
+                "daemon healthy (pid {pid}) — no supervision action needed \
+                 (this says nothing about scan progress; see `modelstat status`)"
+            );
             ExitCode::SUCCESS
         }
         SuperviseDecision::Spawn => {
