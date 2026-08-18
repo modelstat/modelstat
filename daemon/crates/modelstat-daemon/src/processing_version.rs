@@ -324,11 +324,48 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       belong to the session its filename names, as codex v28 established. A
 ///       re-scan is what re-keys the history; the events the old key landed are
 ///       the server's to tombstone. Only claude_code's files re-read.
+/// codex v29 — the records a fork replays, keyed on what codex CALLS them.
+///       v26 keyed the token-bearing round trips and v25's `patch_apply_end`
+///       keyed on `call_id`, but every other codex record still hashed
+///       `(file, byte offset)` — and a fork replays the ancestor's whole
+///       history at a fresh offset with a rewritten timestamp, so each copy
+///       minted a brand-new event. On one real machine of 485 rollout files
+///       that is 454,155 of the 467,750 records now covered: the same work
+///       counted up to 348 times, worst in the multi-agent runs, where 437,195
+///       `sub_agent_activity` lines are 5,498 real lifecycle events and 431,697
+///       replays of them. Also 3,109 duplicate inter-agent `agent_message`
+///       records, 6,350 duplicate typed prompts (6,491 records are 136 prompts,
+///       because every fork replays the root prompt), and 13,000 duplicate
+///       `web_search_end` / `task_started` / `task_complete` records.
+///       Codex states an id on these records and it survives a copy byte for
+///       byte — the FIELD differs by record type (`call_id`, `client_id`,
+///       `event_id`, `turn_id`, `id`, or `turn_id` nested in the passthrough
+///       envelope), so one narrowest-first vocabulary is tried against every
+///       record instead of a table of type→field. An id alone is not a record:
+///       it names a CONTAINER, so the key is `(stated id, record type,
+///       ordinal under that id in this file)` — the type because a turn's
+///       `task_started` and `task_complete` state the same uuid, the ordinal
+///       because one turn carries up to 157 inter-agent messages and a replay
+///       copies them in order. Verified against the whole corpus: no key value
+///       covers two records that differ in any field.
+///       NOT content-keyed, though a content hash was the obvious candidate:
+///       codex rewrites a record between copies — an observed `turn_aborted`
+///       ships once with `completed_at`/`duration_ms` and once without — so
+///       hashing content splits one event in two, and it would also fuse the
+///       same prompt genuinely typed twice. Records that state no id keep their
+///       position, which is the honest answer rather than a lesser one:
+///       `context_compacted` is the literal payload `{"type":"..."}` (40,101 of
+///       them), and `thread_settings_applied` and `thread_goal_updated` name
+///       nothing either. `turn_aborted` also stays positional — it is the one
+///       record type whose content is known to vary between copies, so its
+///       key needs evidence this corpus does not give.
+///       A re-scan is what re-keys the history; the events the old key already
+///       landed are the server's to tombstone. Only codex's files re-read.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
     ("capture", LEGACY_WORLD_VERSION + 4),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION + 3),
-    ("codex", LEGACY_WORLD_VERSION + 5),
+    ("codex", LEGACY_WORLD_VERSION + 6),
     ("cursor", LEGACY_WORLD_VERSION),
     ("pi", LEGACY_WORLD_VERSION),
 ];

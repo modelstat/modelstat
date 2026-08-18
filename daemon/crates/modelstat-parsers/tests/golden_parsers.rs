@@ -286,6 +286,37 @@ fn parser_golden_parity() {
             );
         }
 
+        // Every OTHER replayed record collapses too, on the id codex states
+        // about it rather than on the token counter a round trip happens to
+        // carry: the typed prompt (`client_id`) and the turn's own lifecycle
+        // records (`turn_id`). Positional keys minted a fresh id for each of
+        // these on every fork — 454,155 duplicate events across 485 real
+        // rollout files, most of them in multi-agent runs.
+        let kind_ids = |r: &modelstat_parsers::ParseResult, kind: &str| -> Vec<String> {
+            r.events
+                .iter()
+                .filter(|e| e.kind == kind)
+                .map(|e| e.source_event_id.clone())
+                .collect()
+        };
+        for kind in ["user_message", "task_started", "task_complete"] {
+            let a = kind_ids(&anc_res, kind);
+            let f = kind_ids(&fork_res, kind);
+            assert_eq!(a.len(), 1, "the ancestor states one {kind}");
+            assert_eq!(
+                a, f,
+                "the replayed {kind} keeps the ancestor's event id — one record, \
+                 whichever rollout it was read from"
+            );
+        }
+        // And a record that states NO id still keeps its position, which is the
+        // honest answer where codex names nothing: `thread_goal_updated` and
+        // `turn_aborted` are replay-exposed but unkeyable from their payload.
+        assert!(
+            !kind_ids(&anc_res, "thread_goal_updated").is_empty(),
+            "the ancestor's goal record ships"
+        );
+
         let ids = |r: &modelstat_parsers::ParseResult| -> Vec<String> {
             r.events
                 .iter()
