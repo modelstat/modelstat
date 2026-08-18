@@ -54,8 +54,7 @@ fn base36(mut n: u64) -> String {
 /// The legal `source` shapes for [`source_event_id`], mirroring the TS
 /// discriminated union. The key string each produces is the frozen contract.
 pub enum EventSource<'a> {
-    /// CLI daemon parsing JSONL: `fs::<file>::<byteOffset>`. The legacy 3-arg
-    /// `sourceEventId(deviceId, filePath, byteOffset)` form hashes identically.
+    /// CLI daemon parsing JSONL: `fs::<file>::<byteOffset>`.
     File { file: &'a str, byte_offset: u64 },
     /// Chrome-extension web capture: `web::<host>::<conv>::<msg>`.
     Web {

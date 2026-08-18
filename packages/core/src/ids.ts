@@ -73,32 +73,24 @@ export function uuidv7(): string {
  * collision-free at our event scale (< 1e10 events lifetime) and keeps ids
  * short. Deterministic across Node + browser; no Web Crypto needed.
  *
- * Legacy signature `sourceEventId(deviceId, filePath, byteOffset)` is
- * preserved for backward compat — existing callers don't change. The key
- * derivation for existing shapes is a wire contract: the server dedupes on
+ * The key derivation for each shape is a wire contract: the server dedupes on
  * (scope_id, source_event_id), so changing how a shape hashes would re-ingest
  * all previously-uploaded history under new ids.
  */
 export function sourceEventId(
   deviceId: string,
-  sourceOrFilePath:
-    | string
+  source:
     | { file: string; byteOffset: number }
     | { host: string; conversationId: string; messageId: string }
     | { lineUuid: string },
-  byteOffsetMaybe?: number,
 ): string {
   let key: string;
-  if (typeof sourceOrFilePath === "string") {
-    // Legacy 3-arg form.
-    const byteOffset = byteOffsetMaybe ?? 0;
-    key = `fs::${sourceOrFilePath}::${byteOffset}`;
-  } else if ("file" in sourceOrFilePath) {
-    key = `fs::${sourceOrFilePath.file}::${sourceOrFilePath.byteOffset}`;
-  } else if ("lineUuid" in sourceOrFilePath) {
-    key = `uuid::${sourceOrFilePath.lineUuid}`;
+  if ("file" in source) {
+    key = `fs::${source.file}::${source.byteOffset}`;
+  } else if ("lineUuid" in source) {
+    key = `uuid::${source.lineUuid}`;
   } else {
-    key = `web::${sourceOrFilePath.host}::${sourceOrFilePath.conversationId}::${sourceOrFilePath.messageId}`;
+    key = `web::${source.host}::${source.conversationId}::${source.messageId}`;
   }
   const s = `${deviceId}::${key}`;
   // djb2 hash, base36

@@ -55,12 +55,6 @@ function idsFixtures(): void {
     return { ...c, expected };
   });
 
-  // Legacy 3-arg form must equal the object form (wire contract).
-  const legacy_equivalence = {
-    three_arg: sourceEventId("dev_1", "/x/a.jsonl", 42),
-    object_form: sourceEventId("dev_1", { file: "/x/a.jsonl", byteOffset: 42 }),
-  };
-
   // --- segment_id (source_event_ids are SORTED before hashing) ---
   const segmentCases = [
     { session_id: "s1", started_at_ms: 1000, ended_at_ms: 2000, source_event_ids: ["evt_b", "evt_a"] },
@@ -84,7 +78,7 @@ function idsFixtures(): void {
     expected: fallbackCallId(c.source_event_id, c.call_index),
   }));
 
-  writeGolden("ids.json", { source_event_id, legacy_equivalence, segment_id, tc_fallback_id });
+  writeGolden("ids.json", { source_event_id, segment_id, tc_fallback_id });
 }
 
 function toolingFixtures(): void {

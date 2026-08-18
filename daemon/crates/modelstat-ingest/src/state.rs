@@ -348,8 +348,7 @@ mod tests {
                 written.contains("redactorMode"),
                 "the redactor mode is the file's own fact and always writes"
             );
-            // apiUrl legacy value is preserved at the store layer (the localhost
-            // reinterpretation is a Config-layer concern, not the store's).
+            // apiUrl is round-tripped verbatim — the store never reinterprets it.
             assert_eq!(s.api_url, "http://localhost:3010");
         });
     }

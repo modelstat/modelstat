@@ -40,7 +40,6 @@ export type State = {
 };
 
 const PROD_API = "https://modelstat.ai";
-const LEGACY_LOCALHOST = "http://localhost:3010";
 
 /** The daemon's single home dir — mirrors the daemon's own
  * home resolution (MODELSTAT_HOME override, else ~/.modelstat) so the MCP
@@ -119,7 +118,7 @@ export function loadState(): State {
   const authPath = mcpAuthPath();
 
   const normaliseApi = (api: string | undefined): string | undefined =>
-    api && api.length > 0 && api !== LEGACY_LOCALHOST ? api : undefined;
+    api && api.length > 0 ? api : undefined;
 
   // 0. Explicit env bearer wins (CI / self-host).
   if (envToken) {

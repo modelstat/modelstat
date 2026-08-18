@@ -17,13 +17,6 @@ use crate::timefmt::now_iso;
 /// Production API. Dev/e2e overrides via `DAEMON_API_URL`.
 const DEFAULT_API_URL: &str = "https://modelstat.ai";
 
-/// The localhost value `@modelstat/daemon@0.0.7` persisted on first run. Seeing
-/// exactly this stored (with no env override) is treated as *unset* so upgrades
-/// from 0.0.7 self-heal onto the production default. Port of TS
-/// `LEGACY_LOCALHOST_API`. (Feature §22 notes the shim is dropped one release
-/// after cutover; kept here for read-compat until then.)
-const LEGACY_LOCALHOST_API: &str = "http://localhost:3010";
-
 /// The fields a fresh self-register seeds. Mirror of the TS
 /// `saveFreshIdentity` input.
 pub struct FreshIdentity {
@@ -62,8 +55,8 @@ impl Config {
         self.version
     }
 
-    /// Resolution order: `DAEMON_API_URL` → stored override (unless it's the
-    /// legacy localhost) → production default. Port of TS `state.apiUrl`.
+    /// Resolution order: `DAEMON_API_URL` → stored override → production
+    /// default. Port of TS `state.apiUrl`.
     pub fn api_url(&self) -> String {
         if let Ok(v) = std::env::var("DAEMON_API_URL") {
             if !v.is_empty() {
@@ -71,7 +64,7 @@ impl Config {
             }
         }
         let stored = state::get_api_url();
-        if !stored.is_empty() && stored != LEGACY_LOCALHOST_API {
+        if !stored.is_empty() {
             return stored;
         }
         DEFAULT_API_URL.to_string()
@@ -87,7 +80,7 @@ impl Config {
             }
         }
         let stored = state::get_api_url();
-        if !stored.is_empty() && stored != LEGACY_LOCALHOST_API {
+        if !stored.is_empty() {
             return false;
         }
         true
@@ -281,11 +274,7 @@ mod tests {
             state::set_api_url("https://stored.example").unwrap();
             assert_eq!(c.api_url(), "https://stored.example");
             assert!(!c.is_prod_default_api());
-            // 3. Legacy localhost is treated as unset.
-            state::set_api_url(LEGACY_LOCALHOST_API).unwrap();
-            assert_eq!(c.api_url(), DEFAULT_API_URL);
-            assert!(c.is_prod_default_api());
-            // 4. Env override beats everything.
+            // 3. Env override beats everything.
             std::env::set_var("DAEMON_API_URL", "https://env.example");
             assert_eq!(c.api_url(), "https://env.example");
             assert!(!c.is_prod_default_api());
