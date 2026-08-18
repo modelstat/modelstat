@@ -17,9 +17,11 @@ Nobody uses this service yet — there's no data or behaviour to preserve. Every
 The modelstat **daemon** — everything that runs on a user's machine and feeds
 the server: the native Rust daemon in `daemon/` (what `install.sh` installs and
 what ships), the macOS tray app (`apps/tray-mac`), the MCP server
-(`packages/mcp`), and the standalone SDKs (`sdks/*`). The TypeScript daemon is retired and its tree is deleted; `packages/daemon-core`
-and `packages/core` remain because the Chrome extension and the MCP server ship
-them — never publish a package named `modelstat` from this repo.
+(`packages/mcp`), and the standalone SDKs (`sdks/*`). The TypeScript daemon is
+retired and its tree is deleted; `packages/core` remains as the wire/redaction
+reference the golden fixtures are generated from, and `packages/daemon-core`
+keeps only the segmentation pipeline the Chrome extension ships — never publish
+a package named `modelstat` from this repo.
  The server (ingest/pipeline/dashboard,
 modelstat.ai) is a separate private service (closed-source) and is out of scope
 for this repo.

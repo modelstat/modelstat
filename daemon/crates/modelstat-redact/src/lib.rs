@@ -2,7 +2,7 @@
 //!
 //! A byte-for-byte port of the wire floor (`packages/core/src/redact.ts` +
 //! `redact-floor.ts`): 18 ordered secret patterns, an additive policy bundle
-//! (`policies.ts`), the entropy pass, email + absolute-path redaction (with the
+//! ([`crate::policy`]), the entropy pass, email + absolute-path redaction (with the
 //! Windows shapes feature §17.4 mandates), and repo-root relativization.
 //! Fail-closed and never remotely weakenable (feature §21.6).
 //!

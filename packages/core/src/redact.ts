@@ -6,11 +6,11 @@
  * Goal: high recall on secrets + PII; minimal false positives on code.
  *
  * The secret catalogue lives in `./redact-floor` (the single source of truth,
- * shared with the SDK redactor so the two can't drift). A signed,
- * additive `policies` bundle may *union in* extra patterns via
- * {@link setRemoteRedactionPatterns}; that augment runs AFTER the baseline and
- * can only ADD redactions. The baseline floor here is unconditional and can
- * never be removed or disabled by remote config.
+ * shared with the SDK redactor so the two can't drift). This module is the
+ * reference implementation the golden redaction fixtures are generated from
+ * (`daemon/scripts/fixtures/gen-redaction.mts`); the shipping daemon runs the
+ * Rust port in `daemon/crates/modelstat-redact`, which also owns the additive
+ * server-delivered `policies` augment.
  */
 
 import { SECRET_FLOOR } from "./redact-floor.js";
@@ -22,32 +22,6 @@ export interface RedactionResult {
     emails_redacted: number;
     paths_redacted_absolute: number;
   };
-}
-
-/** A compiled, additive secret pattern delivered by the signed `policies`
- * augment. Same shape as a floor entry, minus the replacement template (the
- * wire floor always redacts the whole match). */
-export interface RemoteRedactionPattern {
-  name: string;
-  pattern: RegExp;
-}
-
-// Process-wide additive augment. Empty until a verified `policies` bundle is
-// applied; set by the long-lived daemon after it loads + verifies one. Reading
-// it here (rather than threading a param through every call site) is what lets
-// "the server adds a pattern fleet-wide" take effect with zero changes at the
-// dozens of `redact()` calls.
-let remotePatterns: ReadonlyArray<RemoteRedactionPattern> = [];
-
-/** Apply a verified, additive set of remote secret patterns over the baseline
- * floor. Additive-only: this cannot remove or weaken the baseline below. */
-export function setRemoteRedactionPatterns(patterns: ReadonlyArray<RemoteRedactionPattern>): void {
-  remotePatterns = patterns;
-}
-
-/** Drop the remote augment back to nothing (the baseline floor still applies). */
-export function clearRemoteRedactionPatterns(): void {
-  remotePatterns = [];
 }
 
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
@@ -80,16 +54,8 @@ export function redact(text: string, repoRootAbs?: string): RedactionResult {
     paths_redacted_absolute: 0,
   };
 
-  // 1. Baseline floor — always applied first, never server-weakenable.
+  // Baseline floor — always applied first, never server-weakenable.
   for (const { name, pattern } of SECRET_FLOOR) {
-    out = out.replace(pattern, () => {
-      counts.secrets_found += 1;
-      return `[REDACTED:${name}]`;
-    });
-  }
-
-  // 2. Additive signed augment — runs after the floor, can only ADD.
-  for (const { name, pattern } of remotePatterns) {
     out = out.replace(pattern, () => {
       counts.secrets_found += 1;
       return `[REDACTED:${name}]`;

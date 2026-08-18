@@ -1,5 +1,5 @@
-//! `build_batches` — the queue → `IngestBatch` builder, a port of
-//! `packages/daemon-core/src/queue/index.ts`'s `buildBatches` + `finalise`. One
+//! `build_batches` — the queue → `IngestBatch` builder, a port of the retired
+//! TypeScript daemon's `buildBatches` + `finalise`. One
 //! pass over the durable [`QueueStore`](crate::queue::QueueStore): gather unsent
 //! events per session, debounce sessions still producing, split before the event
 //! / tool-call caps, run the segmentation pipeline per session, and assemble the

@@ -46,10 +46,6 @@ fn source_event_id_matches_ts() {
         };
         assert_eq!(source_event_id(device, &src), expected, "case {s}");
     }
-
-    // Legacy 3-arg form hashes identically to the object form.
-    let le = &j["legacy_equivalence"];
-    assert_eq!(le["three_arg"], le["object_form"]);
 }
 
 #[test]

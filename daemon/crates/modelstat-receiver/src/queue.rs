@@ -1,6 +1,6 @@
 //! `FileQueueStore` — a zero-native-dependency durable queue for the loopback
-//! receiver, a port of `packages/daemon-core/src/node/file-queue-store.ts` +
-//! the `QueueItem` / `QueueStore` contract (`queue/index.ts`).
+//! receiver, a port of the retired TypeScript daemon's `FileQueueStore` and its
+//! `QueueItem` / `QueueStore` contract.
 //!
 //! Persists queue state as ONE JSON document; every mutation writes atomically
 //! (temp file → rename, keeping a single `.bak` generation) so a crash mid-write

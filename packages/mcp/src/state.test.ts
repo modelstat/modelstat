@@ -48,12 +48,6 @@ test("MODELSTAT_TOKEN is the fast path (no daemon needed)", () => {
   assert.equal(s.source, "env");
 });
 
-test("a legacy localhost api url is ignored in favour of prod default", () => {
-  process.env.MODELSTAT_TOKEN = "tok";
-  process.env.MODELSTAT_API_URL = "http://localhost:3010";
-  assert.equal(loadState().apiUrl, "https://modelstat.ai");
-});
-
 test("persistMcpAuth round-trips through mcp-auth.json (daemon field names)", () => {
   persistMcpAuth({ bearer: "tok_mcp", deviceId: "dev_1", deviceUuid: "uuid_1" });
   const onDisk = JSON.parse(readFileSync(mcpAuthPath(), "utf8"));

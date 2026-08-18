@@ -6,12 +6,7 @@ import { fallbackCallId, paramShape, sourceEventId } from "./ids.js";
 // wire contract: if these golden values change, every previously-uploaded
 // event re-ingests under a new id and history double-counts.
 test("fs-shape derivation is stable (wire contract)", () => {
-  assert.equal(sourceEventId("dev_1", "/x/a.jsonl", 42), "evt_16zw770jnvito");
-  // Legacy 3-arg form and the object form hash identically.
-  assert.equal(
-    sourceEventId("dev_1", "/x/a.jsonl", 42),
-    sourceEventId("dev_1", { file: "/x/a.jsonl", byteOffset: 42 }),
-  );
+  assert.equal(sourceEventId("dev_1", { file: "/x/a.jsonl", byteOffset: 42 }), "evt_16zw770jnvito");
 });
 
 test("lineUuid shape ignores file position and is stable (wire contract)", () => {
@@ -21,7 +16,7 @@ test("lineUuid shape ignores file position and is stable (wire contract)", () =>
   // whole point (resume-copy dedupe).
   assert.notEqual(
     sourceEventId("dev_1", { lineUuid: uuid }),
-    sourceEventId("dev_1", "/x/a.jsonl", 42),
+    sourceEventId("dev_1", { file: "/x/a.jsonl", byteOffset: 42 }),
   );
   assert.notEqual(
     sourceEventId("dev_1", { lineUuid: uuid }),

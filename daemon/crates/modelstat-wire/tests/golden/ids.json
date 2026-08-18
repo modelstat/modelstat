@@ -54,10 +54,6 @@
       "expected": "evt_15vr7td9hv9kg"
     }
   ],
-  "legacy_equivalence": {
-    "three_arg": "evt_16zw770jnvito",
-    "object_form": "evt_16zw770jnvito"
-  },
   "segment_id": [
     {
       "session_id": "s1",

@@ -64,8 +64,6 @@ pub struct DayCount {
 /// Drill level: one day's per-session counts (fetched only for divergent days).
 #[derive(Debug, Clone, Deserialize)]
 pub struct BackfillDaySessions {
-    #[allow(dead_code)]
-    pub day: String,
     pub sessions: Vec<SessionCount>,
 }
 
@@ -405,7 +403,6 @@ mod tests {
         async fn fetch_day_sessions(&mut self, day: &str) -> Option<BackfillDaySessions> {
             self.day_fetches.push(day.to_string());
             self.sessions.get(day).map(|list| BackfillDaySessions {
-                day: day.to_string(),
                 sessions: list
                     .iter()
                     .map(|(s, e)| SessionCount {

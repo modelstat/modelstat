@@ -1,5 +1,5 @@
 //! The `policies` config kind — an ADDITIVE redaction augment layered over the
-//! compiled-in floor. Port of `packages/core/src/policies.ts`.
+//! compiled-in floor. This crate is the source of truth for the kind.
 //!
 //! Hard invariant, enforced by construction: a bundle can only ADD patterns.
 //! There is no field that removes, disables, or replaces the floor — the worst a
