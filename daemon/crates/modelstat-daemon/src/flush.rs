@@ -136,20 +136,73 @@ impl ScanGeneration {
         batch_segments: &[Segment],
         run_segments: &BTreeMap<String, Vec<Segment>>,
     ) -> Option<BTreeMap<String, SegmentGeneration>> {
-        if self.id.is_empty() {
-            return None;
-        }
-        let mut out: BTreeMap<String, SegmentGeneration> = BTreeMap::new();
-        for sid in batch_segments.iter().map(|s| s.session_id.as_str()) {
-            if out.contains_key(sid) {
-                continue;
-            }
-            let span = if self.read_whole.contains(sid) {
+        self.claims_over(
+            batch_segments.iter().map(|s| s.session_id.as_str()),
+            |sid| {
                 run_segments.get(sid).and_then(|segs| {
                     let from = segs.iter().map(|s| s.started_at.as_str()).min()?;
                     let to = segs.iter().map(|s| s.ended_at.as_str()).max()?;
                     Some((from.to_string(), to.to_string()))
                 })
+            },
+        )
+    }
+
+    /// The CLOUD twin of [`claims`](Self::claims).
+    ///
+    /// Cloud mode ships no local segments — the server cuts them from the raw
+    /// turns — so for a long time it shipped no claim either, and the whole
+    /// retirement mechanism was inert on the path production actually runs.
+    /// Measured on production 2026-08-18: 24.6% of live summary rows were a
+    /// stale generation nothing would ever retire.
+    ///
+    /// Nothing about the claim needs a segment. It states WHICH SCAN shipped
+    /// this session and WHAT SPAN that scan re-read — both of which the daemon
+    /// knows from reading the file, not from summarising it. The span is the
+    /// extent of the RUN's turns for the session, which for a whole read is the
+    /// session; the server's own cut of those same turns lands inside it.
+    ///
+    /// The safety property that makes a vanished transcript harmless carries
+    /// over unchanged, and for the same structural reason: a session the run
+    /// produced no turns for has no entry in `run_events`, so `span_of` answers
+    /// `None`, so the claim carries no span and the server retires nothing.
+    /// Absence never becomes a retirement order.
+    #[must_use]
+    pub fn claims_from_events(
+        &self,
+        batch_sessions: &[String],
+        run_events: &BTreeMap<String, Vec<RawEvent>>,
+    ) -> Option<BTreeMap<String, SegmentGeneration>> {
+        self.claims_over(batch_sessions.iter().map(String::as_str), |sid| {
+            run_events.get(sid).and_then(|evs| {
+                let from = evs.iter().map(|e| e.ts.as_str()).min()?;
+                let to = evs.iter().map(|e| e.ts.as_str()).max()?;
+                Some((from.to_string(), to.to_string()))
+            })
+        })
+    }
+
+    /// The claim itself, over whatever the mode uses to state a session's span.
+    /// ONE rule for both paths: an unnamed scan claims nothing, a session is
+    /// claimed once, and only a session this scan read WHOLE names a span.
+    fn claims_over<'a>(
+        &self,
+        sessions: impl Iterator<Item = &'a str>,
+        span_of: impl Fn(&str) -> Option<(String, String)>,
+    ) -> Option<BTreeMap<String, SegmentGeneration>> {
+        if self.id.is_empty() {
+            return None;
+        }
+        let mut out: BTreeMap<String, SegmentGeneration> = BTreeMap::new();
+        for sid in sessions {
+            if out.contains_key(sid) {
+                continue;
+            }
+            // A session this scan only APPENDED to still gets the id, with no
+            // span. That is not a no-op: it stamps the generation onto the rows
+            // this batch lands, so a later whole read can retire them.
+            let span = if self.read_whole.contains(sid) {
+                span_of(sid)
             } else {
                 None
             };
@@ -295,6 +348,14 @@ where
         }
         let session_metadata =
             build_session_metadata(&[], &metadata_input, git, extract_links).await;
+        // What this scan restates, per session — the same claim the local path
+        // makes, taken off the run's turns because cloud cuts no segments here.
+        // Computed once for the whole flush and read per batch below: one
+        // session per raw batch, so each takes its own entry.
+        let cloud_sessions: Vec<String> = by_session.keys().cloned().collect();
+        let cloud_claims = generation
+            .claims_from_events(&cloud_sessions, run_events_by_session)
+            .unwrap_or_default();
         let out = by_session
             .into_iter()
             .map(|(sid, (evs, calls))| {
@@ -332,9 +393,12 @@ where
                         tz_offset_minutes: device_tz_offset_minutes(),
                         redactor_mode: None,
                         repo_anchors: None,
-                        // Cloud ships no local segments, so there is no generation to
-                        // supersede (core#701).
-                        segment_generations: None,
+                        // THIS session's claim alone — one session per raw batch,
+                        // so shipping the whole map would have every batch of a
+                        // flush restate its siblings' spans.
+                        segment_generations: cloud_claims
+                            .get(&sid)
+                            .map(|g| BTreeMap::from([(sid.clone(), g.clone())])),
                     },
                     raw: true,
                     segment_count: 0,
@@ -537,6 +601,76 @@ mod tests {
         // No scan id at all ⇒ no claim, and the server falls back to its old
         // rule rather than reading an empty id as a generation.
         assert!(ScanGeneration::default().claims(&batch, &run).is_none());
+    }
+
+    /// The cloud path's claim, and the properties that keep it from deleting
+    /// work it is not replacing. Cloud is the mode PRODUCTION runs, and it made
+    /// no claim at all until this test's subject existed.
+    #[test]
+    fn a_cloud_claim_names_the_runs_turns_and_only_for_a_whole_read() {
+        // The module's own turn builder — a claim reads `ts` and `session_id`
+        // and nothing else, so the rest of the shape is irrelevant here.
+        let turn = |sid: &str, ts: &str| ev(sid, ts, "");
+        // Same shape as the local case: the run holds more turns than any one
+        // batch carries, and the claim must name the RUN's extent.
+        let run: BTreeMap<String, Vec<RawEvent>> = [(
+            "s1".to_string(),
+            vec![
+                turn("s1", "2026-06-10T10:00:00Z"),
+                turn("s1", "2026-06-10T10:30:00Z"),
+            ],
+        )]
+        .into_iter()
+        .collect();
+        let sessions = vec!["s1".to_string()];
+
+        let whole = ScanGeneration {
+            id: "scan_1".into(),
+            read_whole: ["s1".to_string()].into_iter().collect(),
+        };
+        let c = &whole.claims_from_events(&sessions, &run).expect("a claim")["s1"];
+        assert_eq!(c.id, "scan_1");
+        assert_eq!(c.replaces_from.as_deref(), Some("2026-06-10T10:00:00Z"));
+        assert_eq!(
+            c.replaces_to.as_deref(),
+            Some("2026-06-10T10:30:00Z"),
+            "the RUN's turns, not this batch's slice"
+        );
+
+        let appended = ScanGeneration {
+            id: "scan_1".into(),
+            read_whole: Default::default(),
+        };
+        let c = &appended
+            .claims_from_events(&sessions, &run)
+            .expect("a claim")["s1"];
+        assert_eq!(
+            c.id, "scan_1",
+            "an append still stamps its scan on the rows"
+        );
+        assert!(
+            c.replaces_from.is_none() && c.replaces_to.is_none(),
+            "an append restates nothing, so it retires nothing"
+        );
+
+        // THE PROPERTY THAT PROTECTS A DELETED TRANSCRIPT. Claude Code prunes
+        // ~/.claude/projects and a reimaged laptop takes everything: the scan
+        // then produces no turns for the session. It must claim NO SPAN, so the
+        // server keeps the history it already holds. Losing work because a local
+        // file aged out is the one outcome this design forbids.
+        let vanished = whole
+            .claims_from_events(&sessions, &BTreeMap::new())
+            .expect("a claim");
+        assert!(
+            vanished["s1"].replaces_from.is_none(),
+            "a session the run produced no turns for must never retire anything"
+        );
+
+        // An unnamed scan claims nothing at all — an empty id would invert the
+        // server's rule and retire every DECLARED row instead of the stale ones.
+        assert!(ScanGeneration::default()
+            .claims_from_events(&sessions, &run)
+            .is_none());
     }
 
     /// The retention invariant: a transcript deleted between scans must cost
