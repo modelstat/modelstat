@@ -1,12 +1,37 @@
 //! Claude Code JSONL parser — a byte-for-byte port of
 //! `packages/parsers/src/claude-code/index.ts`.
 //!
-//! Resume-copy dedupe (the module's core subtlety): `claude --resume` writes a
-//! NEW `<new-uuid>.jsonl` beginning with byte-identical copies of the ancestor
-//! session's lines (each keeping its original `sessionId`/`uuid`). A line whose
-//! `sessionId` ≠ the filename uuid is a resume copy — dropped when the ancestor's
-//! own `<sid>.jsonl` still exists anywhere under the projects root (else emitted
-//! once, keyed by line uuid, so orphaned history survives exactly once).
+//! Resume-copy dedupe (the module's core subtlety): `claude --resume` /
+//! `--continue` writes a NEW `<new-uuid>.jsonl` that opens with copies of the
+//! ancestor session's lines. Claude Code has written that copy two ways, and a
+//! rule keyed on either spelling is a rule that misses the other:
+//!
+//!   * the OLD shape keeps the ancestor's `sessionId` on every copied line, so
+//!     `sessionId` ≠ the filename uuid names the copy outright;
+//!   * the CURRENT shape REWRITES `sessionId` to the new file's own uuid. The
+//!     record is otherwise byte-identical — same `uuid`, same `timestamp`, same
+//!     `parentUuid`, same content — and states nothing at all about where it was
+//!     copied from.
+//!
+//! And a transcript also repeats records to ITSELF: 15 files in one real corpus
+//! re-append a record they already hold — same `uuid`, same `requestId`, same
+//! `message.id`, same counters, the later copy differing only by a field the
+//! first was written before (a `slug`). 4,752 distinct uuids over 5,935 lines in
+//! the worst of them, and each repeat billed its tokens again.
+//!
+//! So identity does not come from the declaration, and it does not come from the
+//! position either: a record's identity is its own `uuid`, which every copy
+//! preserves under every shape above. Every uuid-bearing record is keyed
+//! [`EventSource::LineUuid`], so a repeat lands on exactly the id its original
+//! produced and the store collapses the two instead of counting the turn twice.
+//! Only a record that states no `uuid` falls back to its byte offset — there is
+//! nothing else to key it on.
+//!
+//! The ancestor probe survives for the OLD shape alone, and only to decide
+//! whether to bother: a copy that still declares the ancestor is redundant while
+//! the ancestor's own `<sid>.jsonl` exists anywhere under the projects root, and
+//! is emitted (under the ancestor's session, on the same uuid key) when it does
+//! not, so orphaned history survives exactly once.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -343,35 +368,40 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
     // cases the turns are captured all the same.
     let mut pending_actor_meta = read_actor_meta(&ctx.source_file);
 
-    // Dedupe id for the line about to be emitted, or None to drop it (a resume
-    // copy whose ancestor transcript is still on disk).
+    // Dedupe id for the line about to be emitted, or None to drop it (an
+    // old-shape resume copy whose ancestor transcript is still on disk).
+    //
+    // The id is the line's own `uuid` — see the module doc. A resume file
+    // replays its ancestor's records verbatim, and current Claude Code rewrites
+    // the copy's `sessionId` to the new file's own uuid, so a copy shares
+    // neither its position nor any declaration with the original: on one real
+    // machine 14,865 of 413,066 emitted records were the same line read out of
+    // two transcripts, across 32 files, plus 9,553 lines that 15 transcripts
+    // repeated to THEMSELVES — every one of them counted twice under a fresh
+    // positional id. The uuid survives both, byte for byte, so keying on it
+    // makes the repeat land on the original's id and collapse. Verified safe:
+    // across 400,224 uuids no two DIFFERENT records ever share one — every
+    // repeat agrees with its original on type, instant, `requestId` and
+    // `message.id`.
     let dedupe_id_for = |session_id: &Option<String>,
                          line_uuid: &str,
-                         byte_offset: u64,
                          ancestors: &mut AncestorCache|
      -> Option<String> {
-        let is_resume_copy = match (&filename_session_id, session_id) {
+        // The OLD copy shape: the line still declares the ancestor's session.
+        // That transcript reports the same line under the same key, so this copy
+        // adds nothing while it is on disk — and is the only surviving witness
+        // when it is not.
+        let declares_an_ancestor = match (&filename_session_id, session_id) {
             (Some(f), Some(s)) => s != f,
             _ => false,
         };
-        if !is_resume_copy {
-            return Some(source_event_id(
-                &ctx.device_id,
-                &EventSource::File {
-                    file: &ctx.source_file,
-                    byte_offset,
-                },
-            ));
+        if declares_an_ancestor && ancestors.exists(session_id.as_deref().unwrap_or("")) {
+            return None; // drop
         }
-        let sid = session_id.as_deref().unwrap_or("");
-        if ancestors.exists(sid) {
-            None // drop
-        } else {
-            Some(source_event_id(
-                &ctx.device_id,
-                &EventSource::LineUuid { line_uuid },
-            ))
-        }
+        Some(source_event_id(
+            &ctx.device_id,
+            &EventSource::LineUuid { line_uuid },
+        ))
     };
 
     while let Some((line, offset)) = lines.next_line()? {
@@ -468,7 +498,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
             }
             let uuid = uuid.unwrap().to_string();
             let ts = ts.unwrap();
-            let event_id = match dedupe_id_for(&session_id, &uuid, offset, &mut ancestors) {
+            let event_id = match dedupe_id_for(&session_id, &uuid, &mut ancestors) {
                 Some(id) => id,
                 None => {
                     skipped += 1;
@@ -624,7 +654,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
             }
             let uuid = uuid.unwrap().to_string();
             let ts = ts.unwrap();
-            let event_id = match dedupe_id_for(&session_id, &uuid, offset, &mut ancestors) {
+            let event_id = match dedupe_id_for(&session_id, &uuid, &mut ancestors) {
                 Some(id) => id,
                 None => {
                     skipped += 1;
@@ -751,11 +781,12 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
             let sid = session_id.clone().or_else(|| filename_session_id.clone());
             let ts = obj.get("timestamp").and_then(Value::as_str);
             // Resume copies duplicate every line of their ancestor, unknown ones
-            // included, so they take the same dedupe as a turn: keyed by line
-            // uuid when the ancestor is gone, dropped when it is still on disk.
-            // Without this an `attachment` would double on every `--resume`.
+            // included, so they take the same dedupe as a turn: keyed by the
+            // line's own uuid. Without this an `attachment` — 8,885 of them in
+            // one real corpus — would double on every `--resume`. A record that
+            // states no uuid has only its position to be named by.
             let event_id = match obj.get("uuid").and_then(Value::as_str) {
-                Some(uuid) => dedupe_id_for(&session_id, uuid, offset, &mut ancestors),
+                Some(uuid) => dedupe_id_for(&session_id, uuid, &mut ancestors),
                 None => Some(source_event_id(
                     &ctx.device_id,
                     &EventSource::File {
@@ -953,6 +984,132 @@ mod tests {
             "cwd": "/Users/dev/Projects/acme",
             "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
         })
+    }
+
+    /// A transcript at an ARBITRARY session uuid, so two files can hold the same
+    /// records. `sid` is written on every line, as Claude Code writes it.
+    fn transcript_as(sid: &str, lines: &[Value]) -> (String, tempdir::Guard) {
+        let dir = std::env::temp_dir().join(format!(
+            "modelstat-cc-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{sid}.jsonl"));
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                let mut l = l.clone();
+                l["sessionId"] = Value::String(sid.to_string());
+                format!("{}\n", serde_json::to_string(&l).unwrap())
+            })
+            .collect();
+        std::fs::write(&path, text).unwrap();
+        (
+            path.to_string_lossy().into_owned(),
+            tempdir::Guard(dir.to_string_lossy().into_owned()),
+        )
+    }
+
+    /// A record's identity is its `uuid`, not where it sits.
+    ///
+    /// `claude --resume`/`--continue` replays the ancestor's records into a new
+    /// transcript and REWRITES each copy's `sessionId` to the new file's own
+    /// uuid — the record is otherwise byte-identical, and it states nothing that
+    /// separates it from work the new session actually did. Keyed on
+    /// `(file, byte offset)` every replay minted a fresh id, so the same turn
+    /// was counted once per transcript that carried it: 14,865 of 413,066
+    /// emitted records on one real machine, across 32 files. The uuid survives
+    /// the copy, so the copy lands on the original's id and collapses.
+    #[test]
+    fn a_replayed_record_keeps_the_id_its_original_produced() {
+        let original = [user_line("u-1", "first"), user_line("u-2", "second")];
+        let (first, _g1) = transcript_as("11111111-1111-1111-1111-111111111111", &original);
+        // The continuation replays both, then does one new thing of its own.
+        let replay = [
+            user_line("u-1", "first"),
+            user_line("u-2", "second"),
+            user_line("u-3", "only this session did this"),
+        ];
+        let (second, _g2) = transcript_as("22222222-2222-2222-2222-222222222222", &replay);
+
+        let ids = |path: &str| -> Vec<String> {
+            parse_claude_code_jsonl(&ParserContext::new("dev_1", path))
+                .unwrap()
+                .events
+                .iter()
+                .map(|e| e.source_event_id.clone())
+                .collect()
+        };
+        let (a, b) = (ids(&first), ids(&second));
+        assert_eq!(a.len(), 2);
+        assert_eq!(b.len(), 3);
+        assert_eq!(&b[..2], &a[..], "a replayed record re-derives its own id");
+        assert!(
+            !a.contains(&b[2]),
+            "the continuation's own new record is not one of the ancestor's"
+        );
+    }
+
+    /// The rewrite does not move the SESSION: each transcript's records belong
+    /// to the session its own filename names, exactly as the codex fork rule
+    /// says. What collapses is the id, not the identity.
+    #[test]
+    fn a_replayed_record_still_belongs_to_the_transcript_holding_it() {
+        let (path, _g) = transcript_as(
+            "22222222-2222-2222-2222-222222222222",
+            &[user_line("u-1", "replayed"), user_line("u-2", "new")],
+        );
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", path)).unwrap();
+        assert!(res
+            .events
+            .iter()
+            .all(|e| e.session_id == "22222222-2222-2222-2222-222222222222"));
+    }
+
+    /// The OLD copy shape still deduplicates by dropping: a line that declares
+    /// an ancestor whose transcript is on disk adds nothing, because that file
+    /// reports the same record under the same key.
+    #[test]
+    fn an_ancestor_declaring_copy_is_dropped_while_its_ancestor_is_on_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "modelstat-cc-anc-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(dir.join("proj")).unwrap();
+        let _guard = tempdir::Guard(dir.to_string_lossy().into_owned());
+        let anc_sid = "11111111-1111-1111-1111-111111111111";
+        let write = |name: &str, lines: &[String]| {
+            let p = dir.join("proj").join(name);
+            std::fs::write(&p, lines.concat()).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let line = |uuid: &str, sid: &str| {
+            let mut l = user_line(uuid, "carried over");
+            l["sessionId"] = Value::String(sid.to_string());
+            format!("{}\n", serde_json::to_string(&l).unwrap())
+        };
+        let ancestor = write(&format!("{anc_sid}.jsonl"), &[line("u-1", anc_sid)]);
+        let resumed = write(
+            "22222222-2222-2222-2222-222222222222.jsonl",
+            &[
+                line("u-1", anc_sid), // the copy, still declaring the ancestor
+                line("u-2", "22222222-2222-2222-2222-222222222222"),
+            ],
+        );
+        let anc_res = parse_claude_code_jsonl(&ParserContext::new("dev_1", ancestor)).unwrap();
+        let res = parse_claude_code_jsonl(&ParserContext::new("dev_1", resumed)).unwrap();
+        assert_eq!(anc_res.events.len(), 1);
+        assert_eq!(
+            res.events.len(),
+            1,
+            "the ancestor-declaring copy is dropped"
+        );
+        assert_ne!(
+            res.events[0].source_event_id,
+            anc_res.events[0].source_event_id
+        );
     }
 
     /// `seq` is the LINE the record sat on, not the count of events emitted —

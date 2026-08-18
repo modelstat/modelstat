@@ -3,7 +3,7 @@
   "sourceFile": "/tmp/modelstat-fixtures/claude-resume/projects/myproj/44444444-4444-4444-4444-444444444444.jsonl",
   "events": [
     {
-      "source_event_id": "evt_3a6y8dhy020k5",
+      "source_event_id": "evt_1mif5gg6lap25",
       "seq": 2,
       "ts": "2026-06-01T11:00:00.000Z",
       "kind": "user_message",

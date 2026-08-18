@@ -145,6 +145,72 @@ fn parser_golden_parity() {
         assert_eq!(res.events, events_of(&g), "claude_resume_copy events");
     }
 
+    // 3a. Claude continuation replay — the shape a resume copy has NOW.
+    //     `--resume`/`--continue` replays the ancestor's records into the new
+    //     transcript and REWRITES each copy's `sessionId` to the new file's own
+    //     uuid, so the copy declares nothing that distinguishes it from native
+    //     work: the record is byte-identical to its original apart from that one
+    //     field. Two facts, and a rule that only reads the declaration sees
+    //     neither:
+    //       · a replayed record lands on the SAME source_event_id its original
+    //         produced, so the store collapses the two. Keyed positionally it did
+    //         not — 14,865 of 413,066 records on one real machine were the same
+    //         line read out of two transcripts, all counted twice;
+    //       · the continuation's OWN new record must mint its own id.
+    {
+        let dir = format!("{BASE}/claude-resume/projects/myproj");
+        let ancestor = parse_claude_code_jsonl(&ctx(&format!(
+            "{dir}/33333333-3333-3333-3333-333333333333.jsonl"
+        )))
+        .unwrap();
+        let resumed = parse_claude_code_jsonl(&ctx(&format!(
+            "{dir}/44444444-4444-4444-4444-444444444444.jsonl"
+        )))
+        .unwrap();
+        let continued = parse_claude_code_jsonl(&ctx(&format!(
+            "{dir}/55555555-5555-5555-5555-555555555555.jsonl"
+        )))
+        .unwrap();
+
+        let ids = |r: &modelstat_parsers::ParseResult| -> Vec<String> {
+            r.events.iter().map(|e| e.source_event_id.clone()).collect()
+        };
+        // Every line the continuation replayed already exists under exactly the
+        // id its own transcript produced.
+        for original in ids(&ancestor).iter().chain(ids(&resumed).iter()) {
+            assert!(
+                ids(&continued).contains(original),
+                "a replayed record must land on the id its original produced ({original})"
+            );
+        }
+        // …and the continuation's own work is NOT one of them.
+        assert_eq!(
+            ids(&continued).len(),
+            ids(&ancestor).len() + ids(&resumed).len() + 1,
+            "the continuation adds exactly its own new record"
+        );
+        // The old copy shape still deduplicates: `44444444` opens with a line
+        // that still declares ancestor `33333333`, whose transcript is right
+        // there, so that copy is dropped rather than emitted a second time.
+        assert_eq!(
+            resumed.events.len(),
+            1,
+            "an ancestor-declaring copy is dropped while the ancestor is on disk"
+        );
+        // Identity is still the FILE's, never the replay's: each transcript's
+        // events belong to the session its filename names.
+        for (res, want) in [
+            (&ancestor, "33333333-3333-3333-3333-333333333333"),
+            (&resumed, "44444444-4444-4444-4444-444444444444"),
+            (&continued, "55555555-5555-5555-5555-555555555555"),
+        ] {
+            assert!(
+                !res.events.is_empty() && res.events.iter().all(|e| e.session_id == want),
+                "every event belongs to the session its transcript names ({want})"
+            );
+        }
+    }
+
     // 3b. Claude Desktop — the SAME Claude Code format, discovered under the
     //     desktop app's data dir and stamped with the host's agent label.
     {

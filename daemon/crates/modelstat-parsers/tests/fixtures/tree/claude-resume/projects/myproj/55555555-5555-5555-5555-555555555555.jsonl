@@ -1,0 +1,3 @@
+{"type":"user","uuid":"anc-u1","sessionId":"55555555-5555-5555-5555-555555555555","timestamp":"2026-06-01T09:00:00.000Z","cwd":"/Users/dev/projects/myrepo","message":{"role":"user","content":"original"}}
+{"type":"user","uuid":"copy-u1","sessionId":"55555555-5555-5555-5555-555555555555","timestamp":"2026-06-01T11:00:00.000Z","cwd":"/Users/dev/projects/myrepo","message":{"role":"user","content":"new work in resumed session"}}
+{"type":"user","uuid":"cont-u1","sessionId":"55555555-5555-5555-5555-555555555555","timestamp":"2026-06-01T13:00:00.000Z","cwd":"/Users/dev/projects/myrepo","message":{"role":"user","content":"work that only this continuation did"}}
