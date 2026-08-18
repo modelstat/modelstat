@@ -122,6 +122,80 @@ fn file_name(path: &str) -> String {
     path.rsplit(SEPARATORS).next().unwrap_or(path).to_string()
 }
 
+/// The field names codex states a record's own id under, NARROWEST FIRST.
+///
+/// One vocabulary, applied to every record type rather than a table of
+/// type→field: a record type codex ships tomorrow that names itself with a
+/// `call_id` is keyed correctly with no change here. Narrowest first because
+/// the wider ids name a CONTAINER — `turn_id` covers a whole turn — and the
+/// tighter the id, the less work the ordinal has to do.
+const STATED_ID_FIELDS: [&str; 5] = ["id", "call_id", "client_id", "event_id", "turn_id"];
+
+/// The id a codex record states about ITSELF, or `None` when it states none.
+///
+/// `internal_chat_message_metadata_passthrough.turn_id` is checked last and
+/// separately because it is the one id codex nests: it is the only name
+/// `response_item`/`agent_message` gives 77% of its records (7,040 of 9,192 on
+/// one real machine carry no `id` at all), so without it the majority of a
+/// multi-agent run's traffic has nothing to key on.
+fn stated_record_id(payload: &Value) -> Option<&str> {
+    for field in STATED_ID_FIELDS {
+        if let Some(v) = payload
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(v);
+        }
+    }
+    payload
+        .get("internal_chat_message_metadata_passthrough")
+        .and_then(|m| m.get("turn_id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Resolve one record's replay-stable identity, counting it against the
+/// records this FILE has already shown under the same `(stated id, type)`.
+///
+/// Call EXACTLY ONCE per record, and only from an arm whose records the corpus
+/// proves safe to collapse: it advances the ordinal, so a second call would
+/// number the same record twice.
+fn record_identity(
+    payload: Option<&Value>,
+    payload_type: &str,
+    seen: &mut HashMap<(String, String), u64>,
+) -> Option<(String, String, u64)> {
+    let stated = payload.and_then(stated_record_id)?;
+    let slot = seen
+        .entry((stated.to_string(), payload_type.to_string()))
+        .or_insert(0);
+    let ordinal = *slot;
+    *slot += 1;
+    Some((stated.to_string(), payload_type.to_string(), ordinal))
+}
+
+/// The key one record ships under: its own stated identity where it has one,
+/// its position in the file where it does not.
+///
+/// The fallback is not a lesser answer, it is the honest one — codex writes
+/// `{"type":"context_compacted"}` and nothing else, so 40,101 such records on
+/// one machine state literally no fact to key on.
+fn record_source<'a>(
+    identity: &'a Option<(String, String, u64)>,
+    file: &'a str,
+    byte_offset: u64,
+) -> EventSource<'a> {
+    match identity {
+        Some((stated_id, record_type, ordinal)) => EventSource::CodexRecord {
+            stated_id,
+            record_type,
+            ordinal: *ordinal,
+        },
+        None => EventSource::File { file, byte_offset },
+    }
+}
+
 fn is_tool_call_payload(pt: &str) -> bool {
     matches!(
         pt,
@@ -537,6 +611,12 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
     // `total_token_usage` from the previous `token_count` line, to catch codex
     // restating one round trip's counters twice in a row.
     let mut prev_cumulative: Option<[u64; 4]> = None;
+    // How many records this file has already shown under each `(stated id,
+    // payload type)` — the ordinal half of `EventSource::CodexRecord`. Per
+    // FILE, never reset: a fork replays the ancestor's records from the start,
+    // so counting from the start of each file is what makes the copy land on
+    // the same ordinal as the original.
+    let mut stated_ordinals: HashMap<(String, String), u64> = HashMap::new();
 
     while let Some((line, offset)) = lines.next_line()? {
         raw_lines += 1;
@@ -777,16 +857,18 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                         let (content_excerpt, content_bytes) = message_text(&content_block_text(
                             p.get("content").unwrap_or(&Value::Null),
                         ));
+                        // Keyed on the turn codex names in the passthrough
+                        // envelope plus this message's place in that turn:
+                        // 9,192 records on one real machine are 6,083 messages,
+                        // the other 3,109 being fork replays of them.
+                        let identity = record_identity(payload, pt, &mut stated_ordinals);
                         sink.push(RawEvent {
                             seq: Some(raw_lines),
                             started_at: None,
                             first_token_at: None,
                             source_event_id: source_event_id(
                                 &ctx.device_id,
-                                &EventSource::File {
-                                    file: &ctx.source_file,
-                                    byte_offset: offset,
-                                },
+                                &record_source(&identity, &ctx.source_file, offset),
                             ),
                             ts,
                             kind: "agent_message".to_string(),
@@ -832,6 +914,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
             // Anything else under `response_item` is a payload type nothing here
             // models.
             skips.drop_record(&ctx.source_file, &format!("response_item/{pt}"));
+            let identity = record_identity(payload, pt, &mut stated_ordinals);
             match (
                 session_id.clone(),
                 line_ts.clone().or_else(|| last_ts.clone()),
@@ -842,10 +925,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                         kind: pt,
                         source_event_id: source_event_id(
                             &ctx.device_id,
-                            &EventSource::File {
-                                file: &ctx.source_file,
-                                byte_offset: offset,
-                            },
+                            &record_source(&identity, &ctx.source_file, offset),
                         ),
                         agent: "codex_cli",
                         provider: "openai",
@@ -1053,6 +1133,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                     .and_then(Value::as_i64)
                     .and_then(iso_from_epoch_ms)
                     .unwrap_or_else(|| ts.clone());
+                let identity = record_identity(payload, ptype, &mut stated_ordinals);
                 match (session_id.clone(), agent_path) {
                     (Some(sid), Some(actor)) => {
                         record_actor(
@@ -1075,17 +1156,21 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                             seq: Some(raw_lines),
                             started_at: None,
                             first_token_at: None,
-                            // Keyed positionally: codex gives the record an
-                            // `event_id`, but it is the id of the CALL that
-                            // spawned the agent and repeats across every
-                            // lifecycle line of that agent — collapsing a
-                            // `started` and an `interrupted` into one event.
+                            // Keyed on the `event_id` codex states plus this
+                            // record's place under it. The id alone names the
+                            // CALL that spawned the agent and repeats across
+                            // every lifecycle line of that agent, which would
+                            // collapse a `started` and an `interrupted` into
+                            // one event — the ordinal is what separates them,
+                            // and a replay copies those lines in order, so it
+                            // holds across files. The corpus decides it: on one
+                            // real machine 437,195 such records are 5,498
+                            // lifecycle events and 431,697 fork replays of
+                            // them, and no key value covers two records that
+                            // differ in any field, `occurred_at_ms` included.
                             source_event_id: source_event_id(
                                 &ctx.device_id,
-                                &EventSource::File {
-                                    file: &ctx.source_file,
-                                    byte_offset: offset,
-                                },
+                                &record_source(&identity, &ctx.source_file, offset),
                             ),
                             ts: occurred,
                             kind: stated_kind.to_string(),
@@ -1145,16 +1230,18 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                     }
                     saw_user_prompt = true;
                 }
+                // `client_id` is the uuid the client minted for THIS
+                // submission, so two identical prompts typed twice stay two
+                // events while the same prompt replayed into 480 fork files
+                // stays one: 6,491 records on one real machine are 136 prompts.
+                let identity = record_identity(payload, ptype, &mut stated_ordinals);
                 sink.push(RawEvent {
                     seq: Some(raw_lines),
                     started_at: None,
                     first_token_at: None,
                     source_event_id: source_event_id(
                         &ctx.device_id,
-                        &EventSource::File {
-                            file: &ctx.source_file,
-                            byte_offset: offset,
-                        },
+                        &record_source(&identity, &ctx.source_file, offset),
                     ),
                     ts,
                     kind: "user_message".to_string(),
@@ -1529,6 +1616,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
             // An `event_msg` payload type nothing here models. `ts` is already
             // resolved above, so the only question left is the session.
             skips.drop_record(&ctx.source_file, &format!("event_msg/{ptype}"));
+            let identity = record_identity(payload, ptype, &mut stated_ordinals);
             match session_id.clone() {
                 Some(sid) => {
                     sink.push(unknown_record_event(UnknownRecord {
@@ -1536,10 +1624,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                         kind: ptype,
                         source_event_id: source_event_id(
                             &ctx.device_id,
-                            &EventSource::File {
-                                file: &ctx.source_file,
-                                byte_offset: offset,
-                            },
+                            &record_source(&identity, &ctx.source_file, offset),
                         ),
                         agent: "codex_cli",
                         provider: "openai",
@@ -2136,6 +2221,200 @@ mod tests {
         for p in [&own, &fork] {
             let _ = std::fs::remove_dir_all(std::path::Path::new(p).parent().unwrap());
         }
+    }
+
+    /// Every record the replay-stable key covers, proven the way the corpus
+    /// proves it: the SAME logical record read out of two rollout files must
+    /// carry one event id, and two DIFFERENT records must never share one.
+    ///
+    /// Fictional fixtures throughout — the shapes are real, the values are not.
+    #[test]
+    fn a_replayed_record_keeps_the_original_s_event_id() {
+        let meta = json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } });
+        let ctx_line = json!({ "timestamp": "2026-08-05T11:58:58.000Z", "type": "turn_context",
+                "payload": { "cwd": "/Users/dev/Projects/acme", "model": "gpt-5-codex" } });
+        // One record of each arm the key now covers. `ts` is a parameter
+        // because codex REWRITES it on a replay — the whole point of the key.
+        let records = |ts: &str| {
+            vec![
+                // arm: event_msg/user_message — keyed on `client_id`.
+                line(
+                    ts,
+                    "user_message",
+                    json!({
+                        "client_id": "9cfd32c4-108b-44b0-9d02-d5a1b6102e3c",
+                        "message": "ship the parser fix"
+                    }),
+                ),
+                // arm: event_msg/sub_agent_activity — keyed on `event_id`.
+                line(
+                    ts,
+                    "sub_agent_activity",
+                    json!({
+                        "event_id": "call_Kd8sPq1", "agent_thread_id": "019fd1ca-aaaa",
+                        "agent_path": "/root/reviewer", "occurred_at_ms": 1785000000000u64,
+                        "kind": "started"
+                    }),
+                ),
+                // arm: unmodelled event_msg/<type> — keyed on `turn_id`.
+                line(
+                    ts,
+                    "task_started",
+                    json!({
+                        "turn_id": "019fd1ca-9834-7e21-b5ff-ea94b6a5d7cc",
+                        "started_at": 1785000000u64, "model_context_window": 258400
+                    }),
+                ),
+                // arm: response_item/agent_message — keyed on the turn id codex
+                // nests in the passthrough envelope, which 77% of these records
+                // carry INSTEAD of an `id`.
+                json!({ "timestamp": ts, "type": "response_item", "payload": {
+                    "type": "agent_message", "author": "/root/reviewer",
+                    "recipient": "/root",
+                    "content": [{ "type": "input_text", "text": "looks good" }],
+                    "internal_chat_message_metadata_passthrough": {
+                        "turn_id": "019fd1ca-be59-7de1-988b-f4b9c5e23da2" } } }),
+                // arm: unmodelled response_item/<type> — keyed on `id`.
+                json!({ "timestamp": ts, "type": "response_item", "payload": {
+                    "type": "tool_search_call", "id": "tsc_0bd06568",
+                    "call_id": "call_n5sjjUw", "status": "completed",
+                    "arguments": { "query": "node_repl js" } } }),
+            ]
+        };
+        let mut own = vec![meta.clone(), ctx_line.clone()];
+        own.extend(records("2026-08-05T11:59:01.000Z"));
+        let own = rollout(&own);
+        // A fork: its own filename, an extra line ahead of the replay so every
+        // byte offset moves, and codex's rewritten timestamps.
+        let mut fork = vec![
+            meta.clone(),
+            ctx_line.clone(),
+            line(
+                "2026-08-05T12:41:17.000Z",
+                "user_message",
+                json!({ "client_id": "aaaaaaaa-1111-2222-3333-444444444444",
+                        "message": "carry on" }),
+            ),
+        ];
+        fork.extend(records("2026-08-05T12:41:18.204Z"));
+        let fork = rollout_named(
+            "rollout-2026-08-05T14-41-18-019fd2ff-0000-7af2-9332-a6db0bfc4d25.jsonl",
+            &fork,
+        );
+        let ids = |p: &str| {
+            parse_codex_rollout(&ParserContext::new("dev_1", p))
+                .unwrap()
+                .events
+                .iter()
+                .map(|e| (e.kind.clone(), e.source_event_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        let own_ids = ids(&own);
+        let fork_ids = ids(&fork);
+        for kind in [
+            "user_message",
+            "started",
+            "task_started",
+            "agent_message",
+            "tool_search_call",
+        ] {
+            let a = own_ids
+                .iter()
+                .find(|(k, _)| k == kind)
+                .unwrap_or_else(|| panic!("{kind}: the record ships at all"));
+            // The fork holds its OWN new prompt too, so this asks whether the
+            // replayed record landed on the original's id — not merely whether
+            // the first record of that kind matches.
+            assert!(
+                fork_ids.iter().any(|(k, id)| k == kind && *id == a.1),
+                "{kind}: one record read from two rollouts is ONE event \
+                 (own {:?} not among fork {:?})",
+                a.1,
+                fork_ids
+                    .iter()
+                    .filter(|(k, _)| k == kind)
+                    .map(|x| &x.1)
+                    .collect::<Vec<_>>()
+            );
+        }
+        // The fork's OWN new prompt is its own event — collapsing a replay must
+        // not collapse the work the fork actually did.
+        assert_eq!(
+            fork_ids.iter().filter(|(k, _)| k == "user_message").count(),
+            2,
+            "the replayed prompt and the fork's new prompt are two events"
+        );
+        for p in [&own, &fork] {
+            let _ = std::fs::remove_dir_all(std::path::Path::new(p).parent().unwrap());
+        }
+    }
+
+    /// An id names a CONTAINER, not a record: one turn carries many messages.
+    /// The ordinal is what keeps them apart, and a replay preserves it.
+    #[test]
+    fn records_sharing_one_stated_id_stay_separate_events() {
+        let msg = |text: &str| {
+            json!({ "timestamp": "2026-08-05T11:59:01.000Z", "type": "response_item",
+                "payload": { "type": "agent_message", "author": "/root/a",
+                    "recipient": "/root",
+                    "content": [{ "type": "input_text", "text": text }],
+                    "internal_chat_message_metadata_passthrough": {
+                        "turn_id": "019fd1ca-be59-7de1-988b-f4b9c5e23da2" } } })
+        };
+        let p = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            msg("first"),
+            msg("second"),
+            // Same turn, and a record type that states the SAME uuid — the
+            // record type is in the key for exactly this.
+            line(
+                "2026-08-05T11:59:03.000Z",
+                "task_started",
+                json!({ "turn_id": "019fd1ca-be59-7de1-988b-f4b9c5e23da2",
+                        "started_at": 1785000000u64 }),
+            ),
+        ]);
+        let out = parse_codex_rollout(&ParserContext::new("dev_1", &p)).unwrap();
+        let ids: Vec<&str> = out
+            .events
+            .iter()
+            .map(|e| e.source_event_id.as_str())
+            .collect();
+        let unique: std::collections::BTreeSet<&&str> = ids.iter().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "three records sharing one turn id are three events: {ids:?}"
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&p).parent().unwrap());
+    }
+
+    /// A record that states NO id keeps its position. Codex writes
+    /// `{"type":"context_compacted"}` and nothing else, so there is no fact to
+    /// key on and pretending otherwise would fuse unrelated compactions.
+    #[test]
+    fn a_record_stating_no_id_stays_positional() {
+        let p = rollout(&[
+            json!({ "timestamp": "2026-08-05T11:58:57.508Z", "type": "session_meta",
+                    "payload": { "id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25" } }),
+            line("2026-08-05T11:59:01.000Z", "context_compacted", json!({})),
+            line("2026-08-05T11:59:09.000Z", "context_compacted", json!({})),
+        ]);
+        let out = parse_codex_rollout(&ParserContext::new("dev_1", &p)).unwrap();
+        let ids: Vec<&str> = out
+            .events
+            .iter()
+            .filter(|e| e.kind == "context_compacted")
+            .map(|e| e.source_event_id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 2, "both compactions ship");
+        assert_ne!(
+            ids[0], ids[1],
+            "identical payloads at different offsets stay two events"
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&p).parent().unwrap());
     }
 
     #[test]

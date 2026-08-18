@@ -3,7 +3,7 @@
   "sourceFile": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
   "events": [
     {
-      "source_event_id": "evt_2owq0qzhz2o1c",
+      "source_event_id": "evt_3sx8v1p6wk3nz",
       "seq": 2,
       "ts": "2026-08-05T11:58:57.508Z",
       "kind": "task_started",
@@ -45,7 +45,7 @@
       "source_byte_offset": 750
     },
     {
-      "source_event_id": "evt_36pa237q88q6n",
+      "source_event_id": "evt_37d098efdsk65",
       "seq": 9,
       "ts": "2026-08-05T11:58:59.076Z",
       "kind": "user_message",
@@ -94,7 +94,7 @@
       "content_excerpt": "I’ll inspect `uploader.js` and summarize its behavior in one sentence.",
       "content_bytes": 70,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 11537
+      "source_byte_offset": 11590
     },
     {
       "source_event_id": "evt_10tuaeq1kb166",
@@ -124,10 +124,10 @@
       "content_excerpt": "`uploader.js` exports an `upload` function that POSTs its input to the `/widgets` endpoint.",
       "content_bytes": 91,
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 13504
+      "source_byte_offset": 13557
     },
     {
-      "source_event_id": "evt_14p55gfv0hli",
+      "source_event_id": "evt_xv1om61a3uiv",
       "seq": 20,
       "ts": "2026-08-05T11:59:04.063Z",
       "kind": "task_complete",
@@ -144,10 +144,10 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 14353
+      "source_byte_offset": 14406
     },
     {
-      "source_event_id": "evt_14p55gfv0kxr",
+      "source_event_id": "evt_14p55gfv0l32",
       "seq": 21,
       "ts": "2026-08-05T11:59:05.100Z",
       "kind": "turn_aborted",
@@ -164,14 +164,14 @@
       "tool_calls": {},
       "files_touched": [],
       "source_file": "/tmp/modelstat-fixtures/codex/rollout-2026-08-05T13-58-57-019fd1ca-816d-7af2-9332-a6db0bfc4d25.jsonl",
-      "source_byte_offset": 14729
+      "source_byte_offset": 14782
     }
   ],
   "toolCalls": [
     {
       "external_call_id": "call_mqV5UTEptgHbhQ0ivRwonitC",
       "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
-      "source_event_id": "evt_14p55gfv3l6g",
+      "source_event_id": "evt_14p55gfv3lfd",
       "agent": "codex_cli",
       "server": "builtin",
       "name": "exec",
@@ -203,7 +203,7 @@
     {
       "external_call_id": "exec-01234567-0123-4012-8012-0123456789ab",
       "session_id": "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
-      "source_event_id": "evt_14p55gfv24jc",
+      "source_event_id": "evt_14p55gfv21qz",
       "agent": "codex_cli",
       "server": "mcp:acme_docs",
       "name": "search",

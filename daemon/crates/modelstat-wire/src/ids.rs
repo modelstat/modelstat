@@ -89,6 +89,42 @@ pub enum EventSource<'a> {
         /// `total_token_usage`, in the order upstream declares it.
         cumulative: [u64; 4],
     },
+    /// Position-independent key for a codex record that states an id of its
+    /// OWN: `codexrec::<statedId>::<recordType>::<ordinal>`.
+    ///
+    /// The same problem [`CodexTurn`](EventSource::CodexTurn) solves for a
+    /// round trip, for the records that carry no token counter. A fork rollout
+    /// replays its ancestor's history verbatim and codex REWRITES the copied
+    /// timestamps, so neither the byte offset nor the instant survives a copy —
+    /// but the id codex wrote INTO the payload does, byte for byte.
+    ///
+    /// Three parts, because an id alone is not a record:
+    ///   · `stated_id` — what codex named the record with. The FIELD differs by
+    ///     record type (`call_id`, `client_id`, `event_id`, `turn_id`, `id`,
+    ///     or `turn_id` inside the passthrough envelope) and the resolver
+    ///     tries them narrowest-first; which name it came from is not part of
+    ///     the identity.
+    ///   · `record_type` — the payload's own `type`. Several record types share
+    ///     one id: a turn's `task_started` and `task_complete` both state the
+    ///     turn's uuid, and a tool search's call and output share one
+    ///     `call_id`, so the id alone would fuse a pair of real events into
+    ///     one.
+    ///   · `ordinal` — how many records with that same `(stated_id, type)` the
+    ///     file already held. Ids name a CONTAINER, not a record: one turn
+    ///     holds up to 157 inter-agent messages, one sub-agent's `event_id`
+    ///     holds its whole lifecycle. A replay copies those records in order,
+    ///     so their position WITHIN the id is stable even though their position
+    ///     in the file is not.
+    ///
+    /// Deliberately NOT content-keyed. Codex rewrites a record between copies —
+    /// an observed `turn_aborted` appears once with `completed_at`/`duration_ms`
+    /// and once without — so a content hash in the key would split one event in
+    /// two, which is the bug this shape exists to prevent.
+    CodexRecord {
+        stated_id: &'a str,
+        record_type: &'a str,
+        ordinal: u64,
+    },
 }
 
 /// Deterministic dedupe key for a single parsed event: `evt_<base36(djb2-64)>`
@@ -108,6 +144,11 @@ pub fn source_event_id(device_id: &str, source: &EventSource) -> String {
             conversation_id,
             cumulative: [i, c, o, r],
         } => format!("codex::{conversation_id}::{i}:{c}:{o}:{r}"),
+        EventSource::CodexRecord {
+            stated_id,
+            record_type,
+            ordinal,
+        } => format!("codexrec::{stated_id}::{record_type}::{ordinal}"),
     };
     format!("evt_{}", djb2_base36(&format!("{device_id}::{key}")))
 }
@@ -166,6 +207,56 @@ mod tests {
             },
         );
         assert_eq!(id, "evt_irnlblnsf9gx");
+    }
+
+    #[test]
+    fn codex_record_shape_is_stable() {
+        let id = source_event_id(
+            "dev_1",
+            &EventSource::CodexRecord {
+                stated_id: "019f4b1c-c297-7dc1-be1d-f86e5564c231",
+                record_type: "agent_message",
+                ordinal: 3,
+            },
+        );
+        // Position-independent: the same three parts hash the same from any
+        // file, which is what makes a replayed copy collapse onto its original.
+        assert_eq!(
+            id,
+            source_event_id(
+                "dev_1",
+                &EventSource::CodexRecord {
+                    stated_id: "019f4b1c-c297-7dc1-be1d-f86e5564c231",
+                    record_type: "agent_message",
+                    ordinal: 3,
+                },
+            )
+        );
+        // The record TYPE is part of the identity: a turn's start and its
+        // completion state the same uuid and are two events.
+        assert_ne!(
+            id,
+            source_event_id(
+                "dev_1",
+                &EventSource::CodexRecord {
+                    stated_id: "019f4b1c-c297-7dc1-be1d-f86e5564c231",
+                    record_type: "task_started",
+                    ordinal: 3,
+                },
+            )
+        );
+        // As is the ordinal: one turn holds many messages.
+        assert_ne!(
+            id,
+            source_event_id(
+                "dev_1",
+                &EventSource::CodexRecord {
+                    stated_id: "019f4b1c-c297-7dc1-be1d-f86e5564c231",
+                    record_type: "agent_message",
+                    ordinal: 4,
+                },
+            )
+        );
     }
 
     #[test]
