@@ -1,4 +1,4 @@
-//! Source Discovery Engine — a port of `packages/parsers/src/discovery/index.ts`.
+//! Source Discovery Engine.
 //!
 //! Runs every strategy and returns a merged list of detected installations +
 //! identities. Deterministic, idempotent — safe on a cron (feature §7.2). The

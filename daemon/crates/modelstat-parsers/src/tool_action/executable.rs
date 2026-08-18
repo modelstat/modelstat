@@ -1,5 +1,6 @@
-//! Deterministic `executable` normalization for a shell command (`shell.v3`) —
-//! a byte-for-byte port of `packages/parsers/src/tool-action/executable.ts`.
+//! Deterministic `executable` normalization for a shell command (`shell.v3`).
+//! Pinned by the frozen vectors in
+//! `modelstat-wire/tests/golden/shell_executable.json` (`tests/golden_tooling.rs`).
 //!
 //! Finds the *leading meaningful program*: split the command into statements
 //! (quote-aware), and for each statement peel the noise (cd/wrappers/env

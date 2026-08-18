@@ -1,5 +1,4 @@
-//! On-device per-script content summaries — a port of
-//! `apps/daemon/src/enrich-scripts.ts::enrichToolCallScripts` + `defaultRoots`.
+//! On-device per-script content summaries.
 //!
 //! A tool command often runs script/bash FILES (`./deploy.sh`, `scripts/migrate.py`).
 //! `command_redacted` says the file was run, not what it DOES. This pass reads

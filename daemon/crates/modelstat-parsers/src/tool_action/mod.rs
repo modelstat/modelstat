@@ -1,5 +1,4 @@
-//! On-device, deterministic structural extraction for one tool call — a port of
-//! `packages/parsers/src/tool-action/index.ts`.
+//! On-device, deterministic structural extraction for one tool call.
 //!
 //! Produces ONLY the cheap, generic facts + the compliance-redacted command; the
 //! semantic fields (`action`/`object`/`keywords`/`abstract`/`qualifiers`) are

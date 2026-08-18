@@ -1,5 +1,5 @@
 //! Detect the script/bash files a command references and resolve each to a real
-//! on-disk path — a port of `packages/parsers/src/tool-action/scripts.ts`.
+//! on-disk path.
 //!
 //! Detection is pure-string; resolution takes an injectable `exists` so it is
 //! testable and runtime-agnostic. A command can reference several scripts; they

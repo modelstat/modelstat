@@ -1,5 +1,5 @@
-//! Device identity store — `~/.modelstat/identity.json`. Byte-for-byte port of
-//! the TS `apps/daemon/src/identity.ts` (feature §4). Holds the long-lived bearer
+//! Device identity store — `~/.modelstat/identity.json` (feature §4). The
+//! on-disk format is frozen. Holds the long-lived bearer
 //! (`ds_live_…`), so it is written atomically with `0600` perms; a fresh install
 //! reuses it to resume an enrollment instead of minting a duplicate device row.
 

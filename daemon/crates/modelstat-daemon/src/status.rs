@@ -1,7 +1,6 @@
 //! The daemon's live status reporter — the mutable phase/progress/stats state
 //! that feeds BOTH the heartbeat POST body and the `last-status.json` mirror the
-//! tray + `modelstat statusline` read. Port of the `status` object + `snapshotBody`
-//! + `writeLocalStatus` in `apps/daemon/src/daemon.ts`.
+//! tray + `modelstat statusline` read.
 //!
 //! `Status` is the pure state + snapshot serialization (unit-tested here);
 //! daemon-main wraps it in an `Arc<Mutex<..>>`, drives the mutators from the scan

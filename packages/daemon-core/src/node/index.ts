@@ -5,10 +5,7 @@
  * implementations (file-backed queue store, pino logger, Ollama
  * adapters) while keeping the same contracts as the browser side.
  */
-// Back-compat alias — callers that imported SqliteQueueStore still
-// work without a rename. Scheduled for removal once apps/daemon
-// ships a release using FileQueueStore directly.
-export { FileQueueStore, FileQueueStore as SqliteQueueStore } from "./file-queue-store.js";
+export { FileQueueStore } from "./file-queue-store.js";
 export {
   DEFAULT_LLAMA_MODEL_URL,
   defaultLlamaConfig,

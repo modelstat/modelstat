@@ -1,6 +1,6 @@
-//! The SDK-ingest request logic — a port of the `parseBatch` / `enqueue` /
-//! `drainLocalQueue` core of `apps/daemon/src/receiver.ts` (the axum HTTP layer
-//! that calls these lands next). Browser/SDK adapters POST batches to the
+//! The SDK-ingest request logic — batch parse, durable enqueue, and local-queue
+//! drain (the axum HTTP layer that calls these lives in `server.rs`).
+//! Browser/SDK adapters POST batches to the
 //! loopback; we validate, enqueue durably (idempotent), and — on the daemon's
 //! tick — drain: build batches, strip the raw excerpt, upload, mark sent.
 

@@ -1,6 +1,5 @@
 //! Session-log parsers (claude-code / codex / pi / cursor), discovery,
-//! tool-action/shell.v3, tool-hash, references, and git helpers — the M2 port of
-//! `packages/parsers` + the `@modelstat/core` reference miner
+//! tool-action/shell.v3, tool-hash, references, and git helpers
 //! (see core/specs/daemon/plan.md §5, feature §7).
 //!
 //! Every parser is a byte-for-byte port: given the same canonical input paths it

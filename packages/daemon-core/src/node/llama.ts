@@ -16,7 +16,7 @@
  * dependency in the agent CLI. Imports are dynamic so a daemon that
  * doesn't have the package installed (e.g. the bundled service when
  * node_modules isn't beside the bundle) silently falls through to the
- * next adapter in the chain — see apps/daemon/src/pipeline.ts.
+ * next adapter in the chain.
  */
 
 import { existsSync, rmSync, writeFileSync } from "node:fs";

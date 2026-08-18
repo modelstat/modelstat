@@ -1,5 +1,4 @@
-//! Scan-job discovery — a port of `apps/daemon/src/scan.ts`'s `discoverJobs` +
-//! `orderJobsNewestFirst`. Walks the known transcript roots and yields one
+//! Scan-job discovery. Walks the known transcript roots and yields one
 //! [`ScanJob`] per `.jsonl`, newest-first so a session you just finished uploads
 //! within seconds instead of behind a backlog.
 //!

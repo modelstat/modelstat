@@ -1,6 +1,6 @@
 //! The IngestClient upload matrix (feature §17.1/§17.2, plan §5 M4) — the
 //! never-drop batch shipper's decision logic. Ported from the TS
-//! `@modelstat/daemon-core/http` `IngestClient` + `apps/daemon/src/api.ts`.
+//! `@modelstat/daemon-core/http` `IngestClient`.
 //!
 //! The retry matrix is the whole point (feature §21.2): a batch COMMITS only on
 //! a 2xx; 401/403 triggers one machine-stable reauth then retries; and

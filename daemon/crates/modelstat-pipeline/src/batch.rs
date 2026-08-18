@@ -1,8 +1,7 @@
 //! Batch-assembly primitives — the pure pieces the scan loop (M4 Part 3)
-//! composes into an `IngestBatch`. Ports `core/ids.ts::batchId`,
-//! `daemon-core/queue::attachSegmentIds`, and
-//! `apps/daemon/src/pipeline.ts::prepareCloudRawEvents` (+ its
-//! `enrichToolCallRedaction`).
+//! composes into an `IngestBatch`. Ports `core/ids.ts::batchId` and
+//! `daemon-core/queue::attachSegmentIds`; cloud raw-event preparation and
+//! tool-call redaction enrichment are owned here.
 //!
 //! Kept here (not in the daemon) because they're pure + testable and operate on
 //! pipeline/parsers outputs: the ULID batch id, tool-call → segment attribution,

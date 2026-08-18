@@ -1,5 +1,4 @@
-//! Local processing-pipeline version — a port of
-//! `apps/daemon/src/processing-version.ts`.
+//! Local processing-pipeline version.
 //!
 //! The markers that let a new daemon build force a re-scan of previously
 //! uploaded sessions. File cursors track "uploaded up to byte N", so a normal

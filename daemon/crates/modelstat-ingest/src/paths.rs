@@ -1,5 +1,4 @@
-//! The daemon's single home directory — a byte-for-byte port of the TS
-//! `apps/daemon/src/paths.ts` (feature §19/§20).
+//! The daemon's single home directory (feature §19/§20). The layout is frozen.
 //!
 //! Default `~/.modelstat`; `MODELSTAT_HOME` (trimmed, non-empty) relocates
 //! EVERYTHING at once — one function, one location, identical on every platform,

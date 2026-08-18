@@ -1,5 +1,5 @@
-//! Deterministic id derivation — a byte-for-byte port of the TypeScript
-//! `@modelstat/core/ids` + `@modelstat/parsers/tool-hash` id helpers.
+//! Deterministic id derivation — byte-identical to the TypeScript
+//! `@modelstat/core/ids` helpers.
 //!
 //! These derivations are a WIRE CONTRACT: the server dedupes on
 //! `(scope_id, source_event_id)` and upserts segments by `segment_id`, so any
@@ -130,8 +130,8 @@ pub fn segment_id(
 }
 
 /// Deterministic fallback `external_call_id` when a source line carries no id:
-/// `tc_<base36(djb2-64)>` of `<sourceEventId>|<callIndex>`. Port of TS
-/// `fallbackCallId` (`@modelstat/parsers/tool-hash`); same djb2-64 family.
+/// `tc_<base36(djb2-64)>` of `<sourceEventId>|<callIndex>`. Byte-identical to TS
+/// `fallbackCallId` (`@modelstat/core/ids`); same djb2-64 family.
 pub fn tc_fallback_id(source_event_id: &str, call_index: u64) -> String {
     format!(
         "tc_{}",

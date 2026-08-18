@@ -1,5 +1,4 @@
-//! The daemon's mutable config/identity context — the TS `apps/daemon/src/
-//! config.ts` `state` object, as an explicit struct.
+//! The daemon's mutable config/identity context, as an explicit struct.
 //!
 //! **Parity note (structural):** the TS keeps this as a module-level singleton
 //! with a cached identity + module-level recover backoff. Rust models it as an

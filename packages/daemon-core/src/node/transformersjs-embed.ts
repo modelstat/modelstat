@@ -76,7 +76,7 @@ async function loadPipeline(model: string): Promise<FeatureExtractor | null> {
         // Indirect import via a string variable so TypeScript doesn't
         // try to resolve @huggingface/transformers at typecheck time
         // — it's an optional peer dep that consumers install
-        // themselves (e.g. apps/daemon pulls it in because the
+        // themselves (the extension pulls it in because the
         // privacy-filter adapter also needs it). Matches the pattern
         // used in src/redact/privacy-filter.ts.
         const tjs = (await importModule("@huggingface/transformers")) as unknown as {

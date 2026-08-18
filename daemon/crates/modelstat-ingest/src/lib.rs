@@ -19,8 +19,9 @@
 //! - [`timezone`] — the device's IANA zone + current UTC offset, read off the
 //!   OS. The one working-day fact that is lost the moment a batch ships UTC.
 //!
-//! Everything is a byte-for-byte port of the TS `apps/daemon/src/*` sources so
-//! existing devices never re-enroll (feature §4, §21.9). See daemon/PARITY.md.
+//! The on-disk formats and id derivations are frozen from the retired
+//! TypeScript daemon so existing devices never re-enroll (feature §4, §21.9).
+//! See daemon/PARITY.md.
 
 pub mod accounts;
 mod atomic;

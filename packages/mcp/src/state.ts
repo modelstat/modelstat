@@ -42,8 +42,8 @@ export type State = {
 const PROD_API = "https://modelstat.ai";
 const LEGACY_LOCALHOST = "http://localhost:3010";
 
-/** The daemon's single home dir — mirrors apps/daemon/src/paths.ts
- * `modelstatHome()` (MODELSTAT_HOME override, else ~/.modelstat) so the MCP
+/** The daemon's single home dir — mirrors the daemon's own
+ * home resolution (MODELSTAT_HOME override, else ~/.modelstat) so the MCP
  * reads/writes the same place the daemon does. */
 export function modelstatHome(): string {
   const override = process.env.MODELSTAT_HOME?.trim();

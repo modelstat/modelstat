@@ -57,8 +57,6 @@ This is the **public source** for everything that runs on your machine:
 - **[macOS menu-bar tray](apps/tray-mac/)** — native Swift status-bar app.
 - **[`@modelstat/sdk`](sdks/node/)** — the backend SDK: capture the LLM calls your own services make, redacted + compacted client-side before they leave the box.
 
-(The retired TypeScript daemon and npm packages — `apps/daemon/`, `packages/` — are still in-tree for history, but they are no longer shipped; the installer serves the Rust daemon.)
-
 **Why it's open.** The code that reads your files should be auditable. The hosted service that aggregates your team's metadata is closed-source; everything that runs on your laptop is right here — read it, fork it, build your own binaries, or pin a commit and install from source. See [LICENSE](LICENSE).
 
 ---

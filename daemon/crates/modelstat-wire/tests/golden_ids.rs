@@ -1,6 +1,13 @@
-//! Golden parity — §4.1 (ids), §4.2 (paramShape), and the enum arrays, against
-//! the TS-generated fixtures. A failure here means the Rust derivation drifted
-//! from the TypeScript source of truth (a wire-contract break).
+//! Golden parity — §4.1 (ids), §4.2 (paramShape), and the enum arrays.
+//!
+//! `ids.json`, `param_shape.json` and `enums.json` are generated from the LIVE
+//! TypeScript (`packages/core`, shipped by the extension and the MCP server), so
+//! a failure there means the two implementations drifted — a wire-contract break.
+//!
+//! `device.json` is different: its TypeScript implementation lived in the
+//! retired daemon and is deleted, so those vectors are a FROZEN contract that
+//! nothing regenerates. A failure there means the Rust derivation moved, which
+//! would re-enroll every existing device.
 
 use modelstat_wire::device::{
     device_uuid_from_machine_key, intended_device_uuid, machine_key_hash,
@@ -78,7 +85,7 @@ fn tc_fallback_id_matches_ts() {
 }
 
 #[test]
-fn device_derivations_match_ts() {
+fn device_derivations_match_frozen_vectors() {
     let j = golden("device.json");
     for case in j["machine_key_hash"].as_array().unwrap() {
         let got = machine_key_hash(case["raw"].as_str().unwrap());

@@ -1,5 +1,4 @@
-//! Boot-time runaway-log rotation — a port of `apps/daemon/src/daemon.ts`'s
-//! `rotateRunawayLogs`.
+//! Boot-time runaway-log rotation.
 //!
 //! Whoever supervises the daemon — launchd writing `StandardOutPath` /
 //! `StandardErrorPath`, or the tray holding its own O_APPEND handle on the same

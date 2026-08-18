@@ -1,4 +1,4 @@
-//! Per-session insights cache — a port of `apps/daemon/src/insights.ts`.
+//! Per-session insights cache.
 //!
 //! After a session scan the daemon asks the server for that session's rolled-up
 //! insights (tokens, $ assigned, taxonomy nodes, status) via the unified MCP

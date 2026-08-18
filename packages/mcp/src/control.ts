@@ -1,7 +1,7 @@
 /**
  * Kick a running local daemon to force-scan the current session, via the
- * loopback control endpoint the daemon serves (apps/daemon/src/receiver.ts:
- * `POST 127.0.0.1:<port>/v1/control/scan`). Used by the `session_insights`
+ * loopback control endpoint the daemon serves
+ * (`POST 127.0.0.1:<port>/v1/control/scan`). Used by the `session_insights`
  * eager flow: scan the just-finished session locally FIRST, then forward the
  * tool call to the server so it returns fresh numbers.
  *

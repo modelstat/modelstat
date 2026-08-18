@@ -1,5 +1,4 @@
-//! On-device per-session file-change capture — a port of
-//! `packages/parsers/src/git-files.ts`. The raw signal behind the token
+//! On-device per-session file-change capture. The raw signal behind the token
 //! re-spend heatmap: lines added/deleted per file across the commits in a
 //! session's window (git only, no forge API).
 //!

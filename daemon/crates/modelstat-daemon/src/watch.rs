@@ -1,6 +1,5 @@
 //! Watch-mode directory resolution — the cross-platform set of AI-tool data dirs
-//! the daemon's filesystem watcher subscribes to. A port of
-//! `apps/daemon/src/watch.ts::resolveWatchDirs`.
+//! the daemon's filesystem watcher subscribes to.
 //!
 //! This module owns the pure dir list + the `.jsonl` filter the watcher shares.
 //! The `notify`-based watch LOOP itself is assembled in daemon-main (where the

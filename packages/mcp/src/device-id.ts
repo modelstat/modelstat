@@ -13,7 +13,7 @@
  * first time it is needed — BEFORE any claim succeeds — so even a timed-out,
  * never-claimed registration reuses the same id on the next attempt.
  *
- * This is the MCP analogue of apps/daemon/src/machine-key.ts. We keep it
+ * This is the MCP analogue of the daemon's machine key. We keep it
  * home-dir-stable (a persisted random id) rather than hardware-derived: the
  * MCP's bearer already lives under ~/.modelstat, so this id is no more fragile
  * than the auth it anchors, and it stays a SEPARATE id from the daemon's by

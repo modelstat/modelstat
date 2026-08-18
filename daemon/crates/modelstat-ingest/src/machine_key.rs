@@ -1,5 +1,5 @@
-//! Stable per-machine key + fingerprint — the impure half of the TS
-//! `apps/daemon/src/machine-key.ts` (feature §4). The PURE derivations
+//! Stable per-machine key + fingerprint — the impure half (feature §4). The
+//! PURE derivations
 //! (`machine_key_hash`, `device_uuid_from_machine_key`, `intended_device_uuid`)
 //! already live in `modelstat-wire`; this module adds the OS/hardware probes,
 //! the persisted fallback key, the env reads, and `build_fingerprint`.

@@ -1,5 +1,4 @@
-//! Batch flush — the composition at the heart of `apps/daemon/src/scan.ts`'s
-//! `flushBatch`, lifted out of the scan I/O so it's pure + testable with a fake
+//! Batch flush — lifted out of the scan I/O so it's pure + testable with a fake
 //! engine. Given a buffer of git-corrected events + tool-call drafts, it produces
 //! the `IngestBatch`(es) to ship — or holds.
 //!

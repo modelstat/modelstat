@@ -10,8 +10,8 @@
  * Same prompt contracts as every other runtime (see ../pipeline/*),
  * so the abstract you get from a remote `gpt-4o-mini` reads like the
  * one the bundled Qwen produces. The factories mirror the llama ones:
- *   - summarize     : REQUIRED, throws on failure (the resilient wrapper
- *                     in apps/daemon degrades to the extractive fallback)
+ *   - summarize     : REQUIRED, throws on failure (the daemon's resilient
+ *                     wrapper degrades to the extractive fallback)
  *   - cognize/entitle/extractLinks/scriptSummarize : best-effort → null
  *
  * PRIVACY — this is an explicit egress. Unlike the local path, the
@@ -43,7 +43,7 @@ import type { Entitler } from "../pipeline/title.js";
  * endpoint. The remote path is an explicit egress, so raw prompt content
  * (conversation excerpts, script file bodies) must pass an on-device NER
  * pass first — the local path skips this because nothing leaves the box.
- * Supplied by the daemon (apps/daemon/src/pipeline.ts); when omitted the
+ * Supplied by the daemon's pipeline; when omitted the
  * content is sent as-is (used by the wire-level tests).
  */
 export type PreSendRedactor = (text: string) => Promise<string>;
@@ -332,7 +332,7 @@ export function openaiChat(cfg: OpenAICompatConfig, preSend?: PreSendRedactor): 
 /**
  * Summariser adapter — REQUIRED output, drop-in for `llamaSummarize`.
  * Throws on transport failure or empty output so the resilient wrapper in
- * apps/daemon can degrade to the extractive fallback. `preSend` is the
+ * the daemon can degrade to the extractive fallback. `preSend` is the
  * remote path's egress guard: the prompt (which embeds the sampled
  * conversation excerpts) is NER/PII-scrubbed on-device before it is
  * POSTed — the local llama path needs no equivalent because the prompt

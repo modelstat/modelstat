@@ -1,5 +1,4 @@
-//! On-device verified-outcome detection — a port of
-//! `packages/parsers/src/git-outcome.ts`. Given a PR the session referenced and
+//! On-device verified-outcome detection. Given a PR the session referenced and
 //! the local repo on disk, determine whether it merged (and when) and whether it
 //! was later reverted — git-only, no GitHub token.
 //!

@@ -1,7 +1,7 @@
 //! Daemon-main runtime wiring — the closures + scan wrappers + the top-level
 //! `run` loop that compose every M4 primitive into the live collector process.
 //!
-//! This file grows the daemon-main port (apps/daemon/src/daemon.ts). It starts
+//! This file grows the daemon-main composition. It starts
 //! with the two remaining scan-loop closures whose construction needs concrete
 //! types (`correct_events` owns a real `GitResolver`; `extract_links` is concrete
 //! over `SummarizerClient` so its boxed future is `Send` — a generic engine

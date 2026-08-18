@@ -1,9 +1,15 @@
-# Parity decisions — Rust rewrite vs the TypeScript daemon
+# Parity decisions — the Rust daemon vs the retired TypeScript daemon
 
-The rewrite must stay byte-for-byte compatible with the shipping TS daemon on
-ids, device identity, wire schemas, and the redaction floor (session task rules;
-feature §21, plan §4). This file records the non-obvious decisions a reviewer
-would otherwise have to reverse-engineer. Add a row here (and, for intentional
+The rewrite had to stay byte-for-byte compatible on ids, device identity, wire
+schemas, and the redaction floor (session task rules; feature §21, plan §4).
+That port is complete and the TypeScript daemon is deleted, so the rows below
+are now the RECORD of why the Rust behaves as it does — every one of them is a
+frozen commitment, not a diff against a live sibling. Devices, SDKs and the
+server all still depend on these choices; change one only with a migration.
+
+The surviving TypeScript is `packages/core` + `packages/daemon-core` (shipped by
+the Chrome extension and the MCP server), and it is still held byte-identical to
+`modelstat-wire` by the golden fixtures. Add a row here (and, for intentional
 divergences, a line in feature §23) rather than leaving a silent choice.
 
 ## Faithful ports (behavior identical, implementation adapted)
@@ -92,9 +98,10 @@ divergences, a line in feature §23) rather than leaving a silent choice.
 
 ## What is NOT yet ported (by milestone, not omission)
 
-M0 is contracts only. `shell.v3` executable extraction and `normalizeToolName`
-have committed golden fixtures (`shell_executable.json`, `tool_name.json`) but
-their Rust impls land in **M2** (`modelstat-parsers`); the file-format / CLI /
+Everything is ported. `shell.v3` executable extraction and `normalizeToolName`
+landed in **M2** (`modelstat-parsers`) and their committed fixtures
+(`shell_executable.json`, `tool_name.json`) are asserted by
+`modelstat-parsers/tests/golden_tooling.rs`; the file-format / CLI /
 summarizer-protocol snapshots are consumed in **M1/M4/M5/M6**. See plan §5.
 
 **M1 (`modelstat-ingest` + `modelstat-cli`) ports:** paths/home, machine-key

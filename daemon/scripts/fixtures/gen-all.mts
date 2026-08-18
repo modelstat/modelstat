@@ -1,5 +1,5 @@
 /**
- * Regenerate every golden fixture from the TypeScript source of truth.
+ * Regenerate the golden fixtures that the LIVE TypeScript owns.
  *
  *   pnpm -C daemon fixtures            # or: npx tsx daemon/scripts/fixtures/gen-all.mts
  *
@@ -13,10 +13,14 @@ import { generator as wire } from "./gen-wire.mts";
 import { generator as misc } from "./gen-misc.mts";
 import type { Generator } from "./lib.mts";
 
-// Parser goldens are Rust-generated since SPEC 0005 (the Rust parsers
-// deliberately supersede the retired TS port): see the REGEN_GOLDENS test in
-// daemon/crates/modelstat-parsers/tests/golden_parsers.rs. This generator
-// covers the families that still have dual implementations.
+// This generator covers only the families that still have a live TypeScript
+// implementation (`packages/core`, `packages/daemon-core` — both shipped by the
+// Chrome extension and the MCP server). Two families are owned elsewhere:
+//   * parser goldens are Rust-generated since SPEC 0005 (the Rust parsers
+//     deliberately supersede the retired TS port) — see the REGEN_GOLDENS test
+//     in daemon/crates/modelstat-parsers/tests/golden_parsers.rs;
+//   * device.json / shell_executable.json / tool_name.json are FROZEN vectors
+//     whose TS side is deleted — see the header of gen-ids-tooling.mts.
 const GENERATORS: Generator[] = [idsTooling, redaction, wire, misc];
 
 async function main(): Promise<void> {

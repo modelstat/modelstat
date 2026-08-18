@@ -1,6 +1,5 @@
 //! Claude Code `settings.json` integration (§14) — installs/removes the
-//! `modelstat statusline` entry so it renders at the bottom of every turn. A port
-//! of `apps/daemon/src/claude-settings.ts`.
+//! `modelstat statusline` entry so it renders at the bottom of every turn.
 //!
 //! Idempotent + reversible: writing twice is a no-op once ours is in place; a
 //! pre-existing FOREIGN statusLine is stashed under `_modelstatPrevStatusLine`
