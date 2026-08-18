@@ -3,7 +3,7 @@
   "sourceFile": "/tmp/modelstat-fixtures/claude-desktop/ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0.jsonl",
   "events": [
     {
-      "source_event_id": "evt_3449x6555i3hp",
+      "source_event_id": "evt_3g7v33rxr04os",
       "seq": 3,
       "ts": "2026-06-01T12:20:19.103Z",
       "kind": "user_message",
@@ -25,7 +25,7 @@
       "source_byte_offset": 350
     },
     {
-      "source_event_id": "evt_1k0ynv5al2gc2",
+      "source_event_id": "evt_18f1sv0s5vemr",
       "seq": 4,
       "ts": "2026-06-01T12:20:19.102Z",
       "kind": "attachment",
@@ -45,7 +45,7 @@
       "source_byte_offset": 1008
     },
     {
-      "source_event_id": "evt_1k0ynv5al5jvj",
+      "source_event_id": "evt_36e9lxc79hiav",
       "seq": 5,
       "ts": "2026-06-01T12:20:19.102Z",
       "kind": "attachment",
@@ -65,7 +65,7 @@
       "source_byte_offset": 5357
     },
     {
-      "source_event_id": "evt_qxpi62hkyzgv",
+      "source_event_id": "evt_3iw4haew3le9q",
       "seq": 7,
       "ts": "2026-06-01T12:20:21.321Z",
       "kind": "assistant_message",
@@ -96,7 +96,7 @@
       "source_byte_offset": 10522
     },
     {
-      "source_event_id": "evt_qxpi62hkxeh6",
+      "source_event_id": "evt_yi3jos6d28lc",
       "seq": 8,
       "ts": "2026-06-01T12:20:21.837Z",
       "kind": "assistant_message",
@@ -129,7 +129,7 @@
       "source_byte_offset": 12345
     },
     {
-      "source_event_id": "evt_qxpi62hkzpdz",
+      "source_event_id": "evt_3jxxiswg2incg",
       "seq": 9,
       "ts": "2026-06-01T12:20:22.338Z",
       "kind": "assistant_message",
@@ -162,7 +162,7 @@
       "source_byte_offset": 13790
     },
     {
-      "source_event_id": "evt_qxpi62hl455a",
+      "source_event_id": "evt_14n9fhd2j6eog",
       "seq": 10,
       "ts": "2026-06-01T12:20:22.343Z",
       "kind": "user_message",
@@ -182,7 +182,7 @@
       "source_byte_offset": 15357
     },
     {
-      "source_event_id": "evt_qxpi62hl0cx2",
+      "source_event_id": "evt_16q5exisv0cjl",
       "seq": 11,
       "ts": "2026-06-01T12:20:24.662Z",
       "kind": "assistant_message",
@@ -215,7 +215,7 @@
       "source_byte_offset": 16497
     },
     {
-      "source_event_id": "evt_qxpi62hksrac",
+      "source_event_id": "evt_r68p0rrg51sl",
       "seq": 12,
       "ts": "2026-06-01T12:20:24.670Z",
       "kind": "user_message",
@@ -235,7 +235,7 @@
       "source_byte_offset": 18053
     },
     {
-      "source_event_id": "evt_qxpi62hkv411",
+      "source_event_id": "evt_2bqzi2kbjt6ls",
       "seq": 13,
       "ts": "2026-06-01T12:20:24.954Z",
       "kind": "assistant_message",
@@ -268,7 +268,7 @@
       "source_byte_offset": 19402
     },
     {
-      "source_event_id": "evt_qxpi62hivzu5",
+      "source_event_id": "evt_3mrpripkgiucw",
       "seq": 14,
       "ts": "2026-06-01T12:20:24.958Z",
       "kind": "user_message",
@@ -288,7 +288,7 @@
       "source_byte_offset": 20958
     },
     {
-      "source_event_id": "evt_qxpi62hixo5r",
+      "source_event_id": "evt_1kcdq3027v3sg",
       "seq": 15,
       "ts": "2026-06-01T12:20:27.509Z",
       "kind": "assistant_message",
@@ -321,7 +321,7 @@
       "source_byte_offset": 22307
     },
     {
-      "source_event_id": "evt_qxpi62hiy8lf",
+      "source_event_id": "evt_2b55yjt7e2mco",
       "seq": 16,
       "ts": "2026-06-01T12:20:27.685Z",
       "kind": "user_message",
@@ -341,7 +341,7 @@
       "source_byte_offset": 23898
     },
     {
-      "source_event_id": "evt_qxpi62hjnmkp",
+      "source_event_id": "evt_2bvgb88sr04z3",
       "seq": 17,
       "ts": "2026-06-01T12:20:27.730Z",
       "kind": "assistant_message",
@@ -374,7 +374,7 @@
       "source_byte_offset": 33938
     },
     {
-      "source_event_id": "evt_qxpi62hjp9ka",
+      "source_event_id": "evt_eagq57ui3k3m",
       "seq": 18,
       "ts": "2026-06-01T12:20:27.832Z",
       "kind": "user_message",
@@ -394,7 +394,7 @@
       "source_byte_offset": 35546
     },
     {
-      "source_event_id": "evt_qxpi62hn5ap9",
+      "source_event_id": "evt_30f8iv549j6dp",
       "seq": 21,
       "ts": "2026-06-01T12:20:32.179Z",
       "kind": "assistant_message",
@@ -425,7 +425,7 @@
       "source_byte_offset": 41407
     },
     {
-      "source_event_id": "evt_qxpi62hn3nxr",
+      "source_event_id": "evt_23ur1l75xu0tx",
       "seq": 22,
       "ts": "2026-06-01T12:20:33.464Z",
       "kind": "assistant_message",
@@ -458,7 +458,7 @@
       "source_byte_offset": 43829
     },
     {
-      "source_event_id": "evt_qxpi62hn2edo",
+      "source_event_id": "evt_eyu9dn15f5gl",
       "seq": 23,
       "ts": "2026-06-01T12:20:33.607Z",
       "kind": "user_message",
@@ -478,7 +478,7 @@
       "source_byte_offset": 45457
     },
     {
-      "source_event_id": "evt_qxpi62hmzuwy",
+      "source_event_id": "evt_1vc430h6n6qum",
       "seq": 24,
       "ts": "2026-06-01T12:20:36.538Z",
       "kind": "assistant_message",
@@ -509,7 +509,7 @@
       "source_byte_offset": 46821
     },
     {
-      "source_event_id": "evt_qxpi62hmyppj",
+      "source_event_id": "evt_1majtsph3hiyl",
       "seq": 25,
       "ts": "2026-06-01T12:20:39.311Z",
       "kind": "assistant_message",
@@ -542,7 +542,7 @@
       "source_byte_offset": 48918
     },
     {
-      "source_event_id": "evt_qxpi62hnunbc",
+      "source_event_id": "evt_25n1tz9j97xox",
       "seq": 31,
       "ts": "2026-06-01T12:29:02.943Z",
       "kind": "user_message",
@@ -564,7 +564,7 @@
       "source_byte_offset": 51755
     },
     {
-      "source_event_id": "evt_qxpi62hnqyhu",
+      "source_event_id": "evt_1bsvvl9uzs8um",
       "seq": 32,
       "ts": "2026-06-01T12:29:02.942Z",
       "kind": "attachment",
@@ -584,7 +584,7 @@
       "source_byte_offset": 52439
     },
     {
-      "source_event_id": "evt_qxpi62hnq8fj",
+      "source_event_id": "evt_epi7pd39iyi",
       "seq": 33,
       "ts": "2026-06-01T12:29:02.942Z",
       "kind": "attachment",
@@ -604,7 +604,7 @@
       "source_byte_offset": 57024
     },
     {
-      "source_event_id": "evt_qxpi62hnmc1u",
+      "source_event_id": "evt_3pwi5rbhe4buk",
       "seq": 34,
       "ts": "2026-06-01T12:29:09.959Z",
       "kind": "assistant_message",
@@ -635,7 +635,7 @@
       "source_byte_offset": 58466
     },
     {
-      "source_event_id": "evt_qxpi62hlqfq9",
+      "source_event_id": "evt_i896ufu69zxw",
       "seq": 35,
       "ts": "2026-06-01T12:29:12.946Z",
       "kind": "assistant_message",
@@ -672,7 +672,7 @@
     {
       "external_call_id": "toolu_01AhjGHAXYayDC7FFcRjBkMM",
       "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
-      "source_event_id": "evt_qxpi62hkzpdz",
+      "source_event_id": "evt_3jxxiswg2incg",
       "agent": "claude_desktop",
       "server": "builtin",
       "name": "ToolSearch",
@@ -704,7 +704,7 @@
     {
       "external_call_id": "toolu_01XwduuuwKCJATU56kceznfy",
       "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
-      "source_event_id": "evt_qxpi62hl0cx2",
+      "source_event_id": "evt_16q5exisv0cjl",
       "agent": "claude_desktop",
       "server": "mcp:mcp-registry",
       "name": "search_mcp_registry",
@@ -736,7 +736,7 @@
     {
       "external_call_id": "toolu_01XwmkMg1RsvER8DxGqQ27oz",
       "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
-      "source_event_id": "evt_qxpi62hkv411",
+      "source_event_id": "evt_2bqzi2kbjt6ls",
       "agent": "claude_desktop",
       "server": "mcp:mcp-registry",
       "name": "search_mcp_registry",
@@ -768,7 +768,7 @@
     {
       "external_call_id": "toolu_01CTvyVJGdz8jNTWPWkx6est",
       "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
-      "source_event_id": "evt_qxpi62hixo5r",
+      "source_event_id": "evt_1kcdq3027v3sg",
       "agent": "claude_desktop",
       "server": "mcp:mcp-registry",
       "name": "search_mcp_registry",
@@ -800,7 +800,7 @@
     {
       "external_call_id": "toolu_012EmiPAg45quhhAAHFtp65V",
       "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
-      "source_event_id": "evt_qxpi62hjnmkp",
+      "source_event_id": "evt_2bvgb88sr04z3",
       "agent": "claude_desktop",
       "server": "mcp:mcp-registry",
       "name": "search_mcp_registry",
@@ -832,7 +832,7 @@
     {
       "external_call_id": "toolu_012z45wob9HPGhZzPy3XF6ay",
       "session_id": "ac0e34b8-76ab-4d62-bd0c-c67ed97bf5c0",
-      "source_event_id": "evt_qxpi62hn3nxr",
+      "source_event_id": "evt_23ur1l75xu0tx",
       "agent": "claude_desktop",
       "server": "mcp:mcp-registry",
       "name": "suggest_connectors",

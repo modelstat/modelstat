@@ -3,7 +3,7 @@
   "sourceFile": "/tmp/modelstat-fixtures/claude/11111111-1111-1111-1111-111111111111.jsonl",
   "events": [
     {
-      "source_event_id": "evt_3fl5gtwmt0y0i",
+      "source_event_id": "evt_1j8a39p9atvpx",
       "seq": 1,
       "ts": "2026-06-01T10:00:00.000Z",
       "kind": "user_message",
@@ -25,7 +25,7 @@
       "source_byte_offset": 0
     },
     {
-      "source_event_id": "evt_174aoeacah3q0",
+      "source_event_id": "evt_1j8a39p9atw01",
       "seq": 2,
       "ts": "2026-06-01T10:00:05.000Z",
       "kind": "assistant_message",
@@ -55,7 +55,7 @@
       "source_byte_offset": 219
     },
     {
-      "source_event_id": "evt_174aoeacah71z",
+      "source_event_id": "evt_1j8a39p9atvpy",
       "seq": 3,
       "ts": "2026-06-01T10:00:00.000Z",
       "kind": "user_message",
@@ -79,7 +79,7 @@
     {
       "external_call_id": "toolu_1",
       "session_id": "11111111-1111-1111-1111-111111111111",
-      "source_event_id": "evt_174aoeacah3q0",
+      "source_event_id": "evt_1j8a39p9atw01",
       "agent": "claude_code",
       "server": "builtin",
       "name": "Bash",

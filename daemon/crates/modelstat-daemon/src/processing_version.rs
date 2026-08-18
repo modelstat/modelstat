@@ -272,10 +272,34 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       history to the sessions that actually did the work: the events the old
 ///       binding landed are the server's to tombstone. Only codex's files
 ///       re-read.
+/// claude_code v26 — a transcript record is identified by its own `uuid`.
+///       `--resume`/`--continue` writes a new transcript that opens with copies
+///       of the ancestor's records, and the parser recognised a copy by the one
+///       thing it used to state: a `sessionId` that disagreed with the filename.
+///       Current Claude Code REWRITES that field to the new file's own uuid, so
+///       a copy is byte-identical to its original except for the single field
+///       the rule read — and the rule stopped firing. Keyed on
+///       `(file, byte offset)`, every replayed record then minted a fresh id:
+///       on one real machine 14,865 of 413,066 emitted records were the same
+///       line read out of two transcripts, across 32 files, each of them
+///       counted twice — 3.6% of the corpus, and concentrated in whichever
+///       sessions the user resumed most, which are the long ones. The `uuid`
+///       survives every copy shape byte for byte (verified: the full record
+///       diff between a copy and its original is that one field), so it is the
+///       key now, and a record that states no uuid still falls back to its
+///       position. It also collects a second shape the positional key could
+///       never see: 15 transcripts on that machine re-append a record they
+///       already hold — same uuid, same `requestId`, same `message.id`, same
+///       counters — 9,553 lines whose tokens were billed twice. The ancestor probe stays for the OLD shape alone, deciding
+///       only whether a copy that still declares its ancestor is worth
+///       emitting. Session identity is untouched — a transcript's records
+///       belong to the session its filename names, as codex v28 established. A
+///       re-scan is what re-keys the history; the events the old key landed are
+///       the server's to tombstone. Only claude_code's files re-read.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
     ("capture", LEGACY_WORLD_VERSION + 4),
     ("redaction", LEGACY_WORLD_VERSION),
-    ("claude_code", LEGACY_WORLD_VERSION + 2),
+    ("claude_code", LEGACY_WORLD_VERSION + 3),
     ("codex", LEGACY_WORLD_VERSION + 5),
     ("cursor", LEGACY_WORLD_VERSION),
     ("pi", LEGACY_WORLD_VERSION),
