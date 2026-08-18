@@ -370,6 +370,16 @@ impl Status {
         self.stats.insert(key.to_string(), json!(next));
         next
     }
+    /// The re-scan a pipeline-version bump mandated, or `None` when none is
+    /// owed. REMOVED rather than zeroed when it finishes: a row that survives
+    /// its own completion reads as work still running, and this line exists
+    /// precisely so a reader can tell a re-scan from an idle daemon.
+    pub fn set_rescan(&mut self, line: Option<String>) {
+        match line {
+            Some(l) => self.stats.insert("pipeline".to_string(), json!(l)),
+            None => self.stats.remove("pipeline"),
+        };
+    }
     pub fn set_stat(&mut self, key: &str, value: Value) {
         self.stats.insert(key.to_string(), value);
     }
@@ -781,5 +791,43 @@ mod tests {
         assert_eq!(body["run"]["events"], json!(1000));
         assert_eq!(body["run"]["segments"], json!(7));
         assert!(body["run"]["since_ms"].as_i64().unwrap() > 0);
+    }
+
+    /// `modelstat status` must be able to say WHY the daemon is re-reading the
+    /// corpus. Before this line the only evidence was a bare "scanning", next
+    /// to a supervisor log that said "nothing to do" — a reader could not tell
+    /// a forced re-scan from an idle daemon, which is how a parser fix shipped
+    /// to every device and silently never applied to the data it was written
+    /// to repair.
+    #[test]
+    fn a_rescan_states_itself_and_then_stops_stating_itself() {
+        let mut s = Status::default();
+        assert!(
+            !s.stats.contains_key("pipeline"),
+            "silent when none is owed"
+        );
+
+        s.set_rescan(Some(
+            "re-scanning for claude_code v25→v26, 3,398 files left".into(),
+        ));
+        assert_eq!(
+            s.stats["pipeline"],
+            json!("re-scanning for claude_code v25→v26, 3,398 files left")
+        );
+        // …and it reaches every reader: the tray mirror and the heartbeat share
+        // this body.
+        let body = s.snapshot_body(Some("dev_1"), "1.31.3", "m1");
+        assert_eq!(
+            body["stats"]["pipeline"],
+            json!("re-scanning for claude_code v25→v26, 3,398 files left")
+        );
+
+        // Finished ⇒ the row GOES. A stale "0 files left" would read as work
+        // still running, which is the confusion this line exists to end.
+        s.set_rescan(None);
+        assert!(!s.stats.contains_key("pipeline"));
+        assert!(s.snapshot_body(None, "1.31.3", "m1")["stats"]
+            .get("pipeline")
+            .is_none());
     }
 }

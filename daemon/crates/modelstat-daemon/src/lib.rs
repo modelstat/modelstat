@@ -48,8 +48,8 @@ pub use lock::{
     read_daemon_lock, remove_lock_if_owned, AcquireOpts, AcquireResult, LockMeta, OwnershipCheck,
 };
 pub use processing_version::{
-    reconcile_processing_aspects, ProcessingState, VersionReconcile, ASPECT_VERSIONS,
-    LEGACY_WORLD_VERSION,
+    reconcile_processing_aspects, rescan_line, rescans_in_progress, settle_processing_rescans,
+    ProcessingState, RescanProgress, VersionReconcile, ASPECT_VERSIONS, LEGACY_WORLD_VERSION,
 };
 pub use single_flight::CoalescingRunner;
 

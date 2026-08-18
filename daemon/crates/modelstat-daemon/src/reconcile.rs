@@ -207,6 +207,37 @@ where
     }
     // GC: drop cache + cursor entries for files that no longer exist, so on-disk
     // state tracks the CURRENT file set rather than everything ever seen.
+    //
+    // ── INVARIANT: absence is LOCAL. It never travels. ──────────────────────
+    // This is the one place in the daemon that learns a file it used to see is
+    // gone, so it is the one place tempted to tell somebody. It must not.
+    //
+    // The local transcript is the SOURCE; the server is the DURABLE RECORD.
+    // Agents prune their own history (Claude Code trims `~/.claude/projects`,
+    // codex rollouts get cleaned up), disks are reimaged, worktrees are thrown
+    // away — none of that is a statement that the work did not happen. A
+    // session that reached the server stays there until a PERSON deletes it.
+    //
+    // So the two calls below are the complete allowed response to a vanished
+    // file: forget our own bookkeeping about it. Do NOT grow this into a
+    // deletion, a tombstone, a retirement, or a "files I no longer have" list
+    // on any request. Note what the daemon can even say: it holds no HTTP
+    // DELETE anywhere, and `IngestBatch` has no field that can express
+    // "this is gone" — the property is structural today, and the cost of
+    // giving that up is 116 sessions and 29.5% of measured work, which is what
+    // the last supersession bug took (core#701, and see
+    // `flush::ScanGeneration::claims`).
+    //
+    // The knock-on effects are already the safe direction, deliberately:
+    //   * a pruned cursor makes the file re-ship if it ever returns, never
+    //     un-ship (the server upserts by `source_event_id`);
+    //   * a dropped cache entry LOWERS `local_events`, so the in-sync test
+    //     below is less likely to re-ship, not more — the server's fuller
+    //     copy simply wins;
+    //   * a forced re-scan (a pipeline-aspect bump) that no longer finds the
+    //     file counts it as no work left rather than work outstanding, so it
+    //     cannot pin a re-scan open forever
+    //     (`processing_version::rescans_in_progress`).
     cache.retain(|p, _| present.contains(p));
     store.set_reconcile_cache(cache.clone());
     store.prune_cursors(&present);

@@ -11,6 +11,34 @@
 //! re-reads the world (a re-scan REPLACES segments/messages by id in place —
 //! no duplicates, no orphans). The single-integer v1–v23 history below is the
 //! era when every bump claimed the world; see [`LEGACY_WORLD_VERSION`].
+//!
+//! # A bump is owed, then honoured — never assumed
+//!
+//! The stored version does NOT move when the cursors are wiped. It moves in
+//! [`settle_processing_rescans`], once a scan has actually re-read every file
+//! the bump invalidated; until then the aspect carries a marker in
+//! `processingRescans` naming the version it is working toward. So
+//! `processingAspects.claude_code == 26` means "every claude_code file has been
+//! read by v26 code", not "a v26 binary booted once".
+//!
+//! That distinction is the whole point. A re-scan of a real corpus spans
+//! thousands of files and many sweeps, and the daemon auto-updates, is killed,
+//! and is restarted throughout. Stamping the new version at wipe time marks the
+//! repair done before a single file has been re-read, so anything that
+//! interrupts the pass leaves a device claiming a fix it never applied — and
+//! nothing ever revisits it, because the next boot sees stored == compiled and
+//! skips. Two states, told apart in writing:
+//!
+//!   * stored < compiled, no marker  → the bump has not started. Wipe.
+//!   * stored < compiled, marker set → it is under way. RESUME; do not wipe
+//!     again, or the cursors the interrupted pass earned are thrown away and
+//!     the corpus restarts from the top on every boot.
+//!
+//! Both states are reported: [`rescans_in_progress`] counts what is left and
+//! [`rescan_line`] renders it for `modelstat status` and the tray. A skip and
+//! a re-scan in progress must never look the same from outside.
+
+use std::collections::BTreeMap;
 
 use modelstat_ingest::RuntimeState;
 
@@ -308,6 +336,17 @@ pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
 /// The aspects that invalidate every parser's files when bumped.
 const CROSS_PARSER_ASPECTS: [&str; 2] = ["capture", "redaction"];
 
+/// Does `aspect`'s re-scan claim a file whose parser reports `file_aspect`?
+///
+/// THE aspect→files mapping, in one place because two callers must agree on it
+/// exactly: the cursor wipe that starts a re-scan, and the count that decides
+/// the re-scan has finished. If the wipe claimed a file the count did not, the
+/// aspect would settle with that file still unread — the silent under-repair
+/// the whole mechanism exists to prevent.
+fn aspect_owns(aspect: &str, file_aspect: &str) -> bool {
+    CROSS_PARSER_ASPECTS.contains(&aspect) || aspect == file_aspect
+}
+
 impl crate::discover_jobs::ParserKind {
     /// The processing aspect this parser's files re-scan under. Exhaustive on
     /// purpose: adding a parser without an [`ASPECT_VERSIONS`] entry fails the
@@ -332,6 +371,15 @@ pub trait ProcessingState {
     fn clear_legacy_processing_version(&mut self);
     /// Drop every cursor `keep` rejects. `keep(path) == true` retains.
     fn retain_cursors(&mut self, keep: &mut dyn FnMut(&str) -> bool);
+    /// The version an in-flight re-scan is working toward, if one is.
+    fn rescan_target(&self, aspect: &str) -> Option<i64>;
+    fn set_rescan_target(&mut self, aspect: &str, v: i64);
+    fn clear_rescan_target(&mut self, aspect: &str);
+    /// Does this path hold a cursor? A wiped cursor IS the unit of outstanding
+    /// re-scan work — the scan re-reads exactly the files that lack one — so
+    /// "has a cursor again" is what finishing means, with no second ledger to
+    /// drift out of step with the first.
+    fn has_cursor(&self, path: &str) -> bool;
 }
 
 impl ProcessingState for RuntimeState {
@@ -349,6 +397,18 @@ impl ProcessingState for RuntimeState {
     }
     fn retain_cursors(&mut self, keep: &mut dyn FnMut(&str) -> bool) {
         self.cursor.retain(|path, _| keep(path));
+    }
+    fn rescan_target(&self, aspect: &str) -> Option<i64> {
+        self.processing_rescans.get(aspect).copied()
+    }
+    fn set_rescan_target(&mut self, aspect: &str, v: i64) {
+        self.processing_rescans.insert(aspect.to_string(), v);
+    }
+    fn clear_rescan_target(&mut self, aspect: &str) {
+        self.processing_rescans.remove(aspect);
+    }
+    fn has_cursor(&self, path: &str) -> bool {
+        self.cursor.contains_key(path)
     }
 }
 
@@ -421,6 +481,23 @@ pub fn reconcile_processing_aspects<S: ProcessingState>(
     for (aspect, compiled) in ASPECT_VERSIONS {
         let stored = state.aspect_version(aspect).unwrap_or(1);
         if stored >= *compiled {
+            // Nothing owed. Drop a marker a `reset` (or a downgrade) left
+            // behind, so no surface advertises a re-scan that cannot happen.
+            if state.rescan_target(aspect).is_some_and(|t| t <= stored) {
+                state.clear_rescan_target(aspect);
+                out.changed = true;
+            }
+            continue;
+        }
+        // Already re-scanning toward exactly this version. Wiping again would
+        // throw away the cursors the interrupted pass EARNED and restart the
+        // corpus from the top on every boot — a re-scan that never converges
+        // looks exactly like a daemon stuck in a loop. Resume instead: the
+        // files still missing a cursor are precisely the ones still owed.
+        if state.rescan_target(aspect) == Some(*compiled) {
+            out.notes.push(format!(
+                "aspect {aspect} v{stored} → v{compiled}: re-scan already under way — resuming"
+            ));
             continue;
         }
         let mut wiped = 0usize;
@@ -444,13 +521,118 @@ pub fn reconcile_processing_aspects<S: ProcessingState>(
                 }
             });
         }
-        state.set_aspect_version(aspect, *compiled);
+        // The stored version deliberately does NOT move here. It advances in
+        // [`settle_processing_rescans`], once a scan has actually re-read every
+        // file this bump invalidated. Stamping it now would mark the repair done
+        // before a single file had been re-read, and a daemon killed mid-pass —
+        // or simply auto-updated again, which is how this code path is usually
+        // reached — would never revisit the remainder.
+        state.set_rescan_target(aspect, *compiled);
         out.notes.push(format!(
-            "aspect {aspect} v{stored} → v{compiled}: {wiped} cursor(s) wiped for re-processing"
+            "aspect {aspect} v{stored} → v{compiled}: {wiped} cursor(s) wiped — re-scan started"
         ));
         out.changed = true;
     }
     out
+}
+
+/// A re-scan a version bump mandated and the scan has not finished yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RescanProgress {
+    pub aspect: &'static str,
+    /// The STORED version — still the old one until the re-scan drains.
+    pub from: i64,
+    /// The compiled version the re-scan is working toward.
+    pub to: i64,
+    /// Discovered files this aspect owns that are still missing a cursor.
+    pub files_left: usize,
+}
+
+impl std::fmt::Display for RescanProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "re-scanning for {} v{}→v{}, ",
+            self.aspect, self.from, self.to
+        )?;
+        match self.files_left {
+            1 => f.write_str("last file"),
+            n => write!(f, "{} files left", crate::runtime::thousands(n as u64)),
+        }
+    }
+}
+
+/// Every re-scan still owed work, with how much of it is left.
+///
+/// `discovered` is path → aspect from the CURRENT discovery pass. A cursor path
+/// discovery no longer claims is absent from it ON PURPOSE: a transcript deleted
+/// since the wipe can never be re-read, so counting it would pin the re-scan
+/// open forever and re-wipe the corpus on every boot. The local file is the
+/// source and may vanish; nothing here treats its absence as anything but "no
+/// work to do" — the retention invariant is stated in full at the GC seam in
+/// [`crate::reconcile`].
+pub fn rescans_in_progress<S: ProcessingState>(
+    state: &S,
+    discovered: &BTreeMap<String, &'static str>,
+) -> Vec<RescanProgress> {
+    ASPECT_VERSIONS
+        .iter()
+        .filter_map(|(aspect, _)| {
+            let to = state.rescan_target(aspect)?;
+            Some(RescanProgress {
+                aspect,
+                from: state.aspect_version(aspect).unwrap_or(1),
+                to,
+                files_left: discovered
+                    .iter()
+                    .filter(|(path, fa)| aspect_owns(aspect, fa) && !state.has_cursor(path))
+                    .count(),
+            })
+        })
+        .collect()
+}
+
+/// Advance every aspect whose re-scan has ACTUALLY finished. The stored version
+/// moves here and nowhere else, so "the state file says v26" means "every file
+/// v26 invalidated has been read by v26 code" rather than "a v26 binary booted
+/// once". Call it when a scan sweep has drained — that is the only moment the
+/// daemon knows nothing is still queued.
+pub fn settle_processing_rescans<S: ProcessingState>(
+    state: &mut S,
+    discovered: &BTreeMap<String, &'static str>,
+) -> VersionReconcile {
+    let mut out = VersionReconcile::default();
+    for p in rescans_in_progress(state, discovered) {
+        if p.files_left > 0 {
+            continue;
+        }
+        state.set_aspect_version(p.aspect, p.to);
+        state.clear_rescan_target(p.aspect);
+        out.notes.push(format!(
+            "aspect {} v{} → v{}: re-scan complete",
+            p.aspect, p.from, p.to
+        ));
+        out.changed = true;
+    }
+    out
+}
+
+/// The one line the status surfaces give a re-scan, or `None` when none is owed.
+///
+/// `None` rather than a "0 files left" row: a surface that keeps rendering a
+/// finished re-scan is the same failure as a daemon that logs "nothing to do"
+/// while three thousand files wait — a reader cannot tell a no-op from work.
+pub fn rescan_line(pending: &[RescanProgress]) -> Option<String> {
+    if pending.is_empty() {
+        return None;
+    }
+    Some(
+        pending
+            .iter()
+            .map(RescanProgress::to_string)
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 #[cfg(test)]
@@ -462,6 +644,7 @@ mod tests {
     struct FakeState {
         legacy: Option<i64>,
         aspects: BTreeMap<String, i64>,
+        rescans: BTreeMap<String, i64>,
         cursors: Vec<String>,
     }
     impl ProcessingState for FakeState {
@@ -479,6 +662,18 @@ mod tests {
         }
         fn retain_cursors(&mut self, keep: &mut dyn FnMut(&str) -> bool) {
             self.cursors.retain(|p| keep(p));
+        }
+        fn rescan_target(&self, aspect: &str) -> Option<i64> {
+            self.rescans.get(aspect).copied()
+        }
+        fn set_rescan_target(&mut self, aspect: &str, v: i64) {
+            self.rescans.insert(aspect.into(), v);
+        }
+        fn clear_rescan_target(&mut self, aspect: &str) {
+            self.rescans.remove(aspect);
+        }
+        fn has_cursor(&self, path: &str) -> bool {
+            self.cursors.iter().any(|p| p == path)
         }
     }
 
@@ -500,8 +695,19 @@ mod tests {
                 .iter()
                 .map(|(a, v)| (a.to_string(), *v))
                 .collect(),
+            rescans: BTreeMap::new(),
             cursors: cursors.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// What discovery would report for these paths, by the same rule
+    /// [`lookup`] uses. Unclaimed paths are simply absent — discovery never
+    /// reports a file it cannot see.
+    fn discovered(paths: &[&str]) -> BTreeMap<String, &'static str> {
+        paths
+            .iter()
+            .filter_map(|p| lookup(p).map(|a| ((*p).to_string(), a)))
+            .collect()
     }
 
     /// Path → aspect for the tests: "/codex/…" is codex's, "/cc/…" is
@@ -533,6 +739,7 @@ mod tests {
         let mut s = FakeState {
             legacy: Some(LEGACY_WORLD_VERSION),
             aspects: BTreeMap::new(),
+            rescans: BTreeMap::new(),
             cursors: vec!["/cc/a".into(), "/codex/b".into()],
         };
         let r = reconcile_processing_aspects(&mut s, &lookup);
@@ -554,6 +761,7 @@ mod tests {
         let mut s = FakeState {
             legacy: Some(9),
             aspects: BTreeMap::new(),
+            rescans: BTreeMap::new(),
             cursors: vec!["/cc/a".into()],
         };
         let r = reconcile_processing_aspects(&mut s, &lookup);
@@ -577,7 +785,151 @@ mod tests {
             "codex's file re-reads, the unclaimed file re-reads conservatively, \
              claude_code's file keeps its cursor"
         );
+        assert_eq!(
+            s.aspects["codex"],
+            compiled("codex") - 1,
+            "the stored version stays PUT until the re-scan actually runs"
+        );
+        assert_eq!(
+            s.rescans["codex"],
+            compiled("codex"),
+            "…and is owed, in writing"
+        );
+    }
+
+    #[test]
+    fn a_bump_is_not_marked_done_until_the_rescan_finishes() {
+        let mut s = state_with(&["/codex/b"]);
+        s.aspects.insert("codex".into(), compiled("codex") - 1);
+        reconcile_processing_aspects(&mut s, &lookup);
+
+        // The wipe happened; the file is owed a read and the surfaces say so.
+        let disc = discovered(&["/codex/b"]);
+        let pending = rescans_in_progress(&s, &disc);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].aspect, "codex");
+        assert_eq!(pending[0].files_left, 1);
+        assert_eq!(
+            rescan_line(&pending).as_deref(),
+            Some(&*format!(
+                "re-scanning for codex v{}→v{}, last file",
+                compiled("codex") - 1,
+                compiled("codex")
+            )),
+        );
+
+        // Settling now would be a lie — nothing has been re-read.
+        let r = settle_processing_rescans(&mut s, &disc);
+        assert!(!r.changed);
+        assert_eq!(s.aspects["codex"], compiled("codex") - 1);
+
+        // The scan re-reads it, which is exactly "the cursor came back".
+        s.cursors.push("/codex/b".into());
+        let r = settle_processing_rescans(&mut s, &disc);
+        assert!(r.changed);
         assert_eq!(s.aspects["codex"], compiled("codex"));
+        assert!(s.rescans.is_empty());
+        assert_eq!(rescan_line(&rescans_in_progress(&s, &disc)), None);
+    }
+
+    #[test]
+    fn an_interrupted_rescan_resumes_rather_than_restarting() {
+        let mut s = state_with(&["/codex/a", "/codex/b"]);
+        s.aspects.insert("codex".into(), compiled("codex") - 1);
+        reconcile_processing_aspects(&mut s, &lookup);
+        assert!(s.cursors.is_empty(), "both codex files were wiped");
+
+        // The daemon re-read one file, then died (or auto-updated again).
+        s.cursors.push("/codex/a".into());
+
+        // Next boot: the stored version is still behind, so the reconcile runs
+        // again — and must NOT wipe the work the interrupted pass earned.
+        let r = reconcile_processing_aspects(&mut s, &lookup);
+        assert_eq!(
+            s.cursors,
+            vec!["/codex/a".to_string()],
+            "a resumed re-scan keeps the cursors it already earned"
+        );
+        assert!(
+            r.notes.iter().any(|n| n.contains("resuming")),
+            "{:?}",
+            r.notes
+        );
+        assert_eq!(
+            rescans_in_progress(&s, &discovered(&["/codex/a", "/codex/b"]))[0].files_left,
+            1,
+            "one file still owed, not two"
+        );
+    }
+
+    #[test]
+    fn a_parser_bump_leaves_the_other_parsers_alone() {
+        let mut s = state_with(&["/cc/a", "/codex/b"]);
+        s.aspects.insert("codex".into(), compiled("codex") - 1);
+        reconcile_processing_aspects(&mut s, &lookup);
+        let disc = discovered(&["/cc/a", "/codex/b"]);
+        let pending = rescans_in_progress(&s, &disc);
+        assert_eq!(
+            pending.len(),
+            1,
+            "a codex bump owes nothing for claude_code"
+        );
+        assert_eq!(pending[0].aspect, "codex");
+        assert_eq!(
+            pending[0].files_left, 1,
+            "and counts only codex's file, though claude_code's was never wiped"
+        );
+    }
+
+    #[test]
+    fn a_cross_parser_rescan_counts_every_parsers_files() {
+        let mut s = state_with(&["/cc/a", "/codex/b"]);
+        s.aspects.insert("capture".into(), compiled("capture") - 1);
+        reconcile_processing_aspects(&mut s, &lookup);
+        let disc = discovered(&["/cc/a", "/codex/b"]);
+        let pending = rescans_in_progress(&s, &disc);
+        assert_eq!(pending[0].files_left, 2, "capture owns the world");
+        assert!(rescan_line(&pending).unwrap().contains("2 files left"));
+    }
+
+    /// The retention invariant, at the seam that would be tempted to break it:
+    /// a transcript deleted between scans is simply not discovered. It must not
+    /// hold its aspect's re-scan open — which would re-wipe and re-read the
+    /// whole corpus on every boot, forever — and it must not be mistaken for
+    /// outstanding work. Absence means "nothing to read", never "something to
+    /// undo": the server keeps that session either way.
+    #[test]
+    fn a_transcript_deleted_between_scans_never_pins_a_rescan_open() {
+        let mut s = state_with(&["/codex/kept", "/codex/deleted"]);
+        s.aspects.insert("codex".into(), compiled("codex") - 1);
+        reconcile_processing_aspects(&mut s, &lookup);
+
+        // The user's tool pruned `/codex/deleted`; discovery no longer sees it.
+        let disc = discovered(&["/codex/kept"]);
+        s.cursors.push("/codex/kept".into());
+
+        let r = settle_processing_rescans(&mut s, &disc);
+        assert!(
+            r.changed,
+            "the re-scan is complete — a file that no longer exists cannot be re-read"
+        );
+        assert_eq!(s.aspects["codex"], compiled("codex"));
+        assert!(rescans_in_progress(&s, &disc).is_empty());
+    }
+
+    #[test]
+    fn a_stale_rescan_marker_is_dropped_rather_than_advertised() {
+        // What `modelstat reset` (or a downgrade) leaves behind: the stored
+        // version is already current, so the marker names work nobody owes.
+        let mut s = state_with(&["/codex/b"]);
+        s.rescans.insert("codex".into(), compiled("codex"));
+        let r = reconcile_processing_aspects(&mut s, &lookup);
+        assert!(r.changed);
+        assert!(s.rescans.is_empty());
+        assert_eq!(
+            rescan_line(&rescans_in_progress(&s, &discovered(&["/codex/b"]))),
+            None
+        );
     }
 
     #[test]
@@ -603,6 +955,7 @@ mod tests {
         let mut s = FakeState {
             legacy: None,
             aspects: BTreeMap::new(),
+            rescans: BTreeMap::new(),
             cursors: vec!["/cc/a".into()],
         };
         let r = reconcile_processing_aspects(&mut s, &lookup);

@@ -232,12 +232,28 @@ pub async fn run(config: Arc<Config>, force: bool) -> ExitCode {
             .collect();
         let mut state = daemon.state.lock().await;
         let pv = reconcile_processing_aspects(&mut *state, &|p| kind_of.get(p).copied());
-        if pv.changed {
-            for note in &pv.notes {
-                modelstat_log::log_info!("pipeline reconcile: {note}");
-            }
-            let _ = save_state(&state);
+        // Logged whether or not anything CHANGED: "re-scan already under way" is
+        // the line that explains why this boot is about to re-read thousands of
+        // files, and by design it changes nothing.
+        for note in &pv.notes {
+            modelstat_log::log_info!("pipeline reconcile: {note}");
         }
+        if pv.changed {
+            if let Err(e) = save_state(&state) {
+                // Loud: a lost write means the next boot wipes and re-reads the
+                // same corpus again, which presents as a daemon stuck scanning.
+                modelstat_log::log_warn!("couldn't persist the pipeline reconcile: {e}");
+            }
+        }
+        // State what is OWED before the first sweep starts, so `modelstat status`
+        // answers "why is it scanning?" on its own rather than sending a reader
+        // to a log line that has scrolled past.
+        let pending = crate::processing_version::rescans_in_progress(&*state, &kind_of);
+        drop(state);
+        for p in &pending {
+            modelstat_log::log_info!("pipeline reconcile: {p}");
+        }
+        daemon.with_status(|s| s.set_rescan(crate::processing_version::rescan_line(&pending)));
     }
 
     // ── The racing-daemon convergence recheck (feature §21.7) ───────────────
