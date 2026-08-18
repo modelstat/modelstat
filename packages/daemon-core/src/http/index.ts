@@ -2,7 +2,7 @@
  * Shared ingest HTTP client + retry matrix.
  *
  * Replaces:
- *   - CLI's `uploadBatch()` in apps/daemon/src/api.ts (throws on any non-2xx)
+ *   - the daemon's batch upload (throws on any non-2xx)
  *   - Extension's inline fetch in apps/extension/src/background/ingest-queue.ts
  *
  * Both daemons now call `IngestClient.upload(batch)` with identical

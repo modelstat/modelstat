@@ -138,6 +138,28 @@ export function segmentId(
 }
 
 /**
+ * Deterministic fallback `external_call_id` for a tool call whose source line
+ * carries no id of its own: `tc_<djb2-base36>` of `${eventId}|${callIndex}`.
+ *
+ * Same djb2-64 family as sourceEventId/segmentId above — a tool call is keyed
+ * by the event that carried it plus its ordinal within that event, so the id is
+ * stable across re-parses and the server's upserts stay idempotent.
+ *
+ * CROSS-REPO CONTRACT: `modelstat_wire::ids::tc_fallback_id` reproduces this
+ * bit-for-bit; the golden vectors in `daemon/crates/modelstat-wire/tests/golden/
+ * ids.json` (`tc_fallback_id`) pin it.
+ */
+export function fallbackCallId(eventId: string, callIndex: number): string {
+  const s = `${eventId}|${callIndex}`;
+  let h = 5381n;
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 33n) ^ BigInt(s.charCodeAt(i));
+    h &= 0xffffffffffffffffn;
+  }
+  return `tc_${h.toString(36)}`;
+}
+
+/**
  * Deterministic, value-masked "shape" of a command's arguments — the tier-1
  * skeleton that may ride the wire. Generic and privacy-first: it keeps
  * STRUCTURE (flags) and masks every value to `§`, so no raw value can leak.

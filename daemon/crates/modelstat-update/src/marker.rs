@@ -1,8 +1,7 @@
 //! The self-update in-progress marker (feature §13):
 //! `~/.modelstat/upgrade-in-progress.json` `{pid, workerPid, at, target}`, TTL
 //! **5 min**, cleared early when the worker pid dies. It stops a supervisor
-//! respawn from stacking a second concurrent update mid-swap. Byte-parity port
-//! of `apps/daemon/src/update.ts` (marker half).
+//! respawn from stacking a second concurrent update mid-swap.
 
 use std::path::PathBuf;
 

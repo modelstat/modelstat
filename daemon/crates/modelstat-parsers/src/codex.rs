@@ -1,5 +1,4 @@
-//! Codex CLI rollout parser — a byte-for-byte port of
-//! `packages/parsers/src/codex/index.ts`.
+//! Codex CLI rollout parser.
 //!
 //! Tool calls come from `response_item` payloads and become drafts (never
 //! events); the aggregate identity→count map attaches to the next emitted

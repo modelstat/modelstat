@@ -1,5 +1,5 @@
-//! Self-healing reconcile — bidirectional anti-entropy (a port of
-//! `apps/daemon/src/reconcile.ts`, spec `specs/self-healing-ingest.md`).
+//! Self-healing reconcile — bidirectional anti-entropy (spec
+//! `specs/self-healing-ingest.md`).
 //!
 //! The server is authoritative for what's ingested; the local cursor is only a
 //! fast-path that goes stale when the server loses data. So we reconcile against

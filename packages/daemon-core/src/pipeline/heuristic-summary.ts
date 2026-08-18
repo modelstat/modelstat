@@ -11,7 +11,7 @@
  * produces output, so the daemon never stalls. It IS clearly lower quality than
  * the Qwen summariser, so the daemon runs it in a flagged "degraded" mode and
  * re-summarises these segments at model quality once the LLM is available again
- * (see the self-heal in apps/daemon/src/daemon.ts).
+ * (see the daemon's self-heal loop).
  *
  * Crucially it does NOT emit the metadata-only placeholder ("100 turns on
  * claude_code") the LLM path guards against: it leads with real extracted prose

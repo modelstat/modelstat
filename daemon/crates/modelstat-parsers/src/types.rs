@@ -1,4 +1,4 @@
-//! Shared parser types — a faithful port of `packages/parsers/src/types.ts`.
+//! Shared parser types.
 //!
 //! Parsers emit [`wire::RawEvent`]s and [`ToolCallDraft`]s only; session-level
 //! summarisation is the daemon pipeline's job (M3), which keeps parsers cheap

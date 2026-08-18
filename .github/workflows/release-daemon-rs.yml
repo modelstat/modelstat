@@ -6,10 +6,10 @@ name: release-daemon-rs
 # a GitHub Release. The installer + the binary self-updater consume exactly these
 # assets.
 #
-# This is THE daemon release — the retired npm line published from `apps/daemon`
-# is gone (its publisher deleted, the package `private: true`), so nothing else
-# in this repo can take `releases/latest` from the `daemon-*` tags the installer
-# and the self-updater read.
+# This is THE daemon release — the retired npm line is gone (its publisher and
+# its source tree both deleted), so nothing else in this repo can take
+# `releases/latest` from the `daemon-*` tags the installer and the self-updater
+# read.
 #
 # ZERO-TOUCH. Merging ANY commit that touches `daemon/` ships it end-to-end —
 # no version to type, no tag to push, no promote step. The version comes from the

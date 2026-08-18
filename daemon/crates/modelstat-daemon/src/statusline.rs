@@ -1,5 +1,4 @@
-//! `modelstat statusline` — Feature 1's always-on surface (§14). A port of
-//! `apps/daemon/src/statusline.ts`.
+//! `modelstat statusline` — Feature 1's always-on surface (§14).
 //!
 //! Claude Code runs this on every prompt render, piping a JSON status object to
 //! stdin; we print ONE compact line: a dim `modelstat` marker, the live token

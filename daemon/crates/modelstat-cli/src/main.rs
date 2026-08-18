@@ -3,8 +3,8 @@
 //! M1 (plan §5) wires the identity/device commands: `self-register` (with the
 //! prod/CI register guard), `await-claim`, `token`, and `paths`. The rest of the
 //! surface (connect, start, mcp, statusline, status/jobs/mode/sync/…) lands
-//! across M4–M6. Command behaviour, flags, outputs, and exit codes are preserved
-//! from the TS `apps/daemon/src/cli.ts` unless feature §5/§23 says otherwise.
+//! across M4–M6. Command behaviour, flags, outputs, and exit codes follow
+//! feature §5/§23.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;

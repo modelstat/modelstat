@@ -1,8 +1,22 @@
 /**
- * Golden fixtures — §4.1 (ids) and §4.2 (paramShape / shell.v3 executable /
- * normalizeToolName), generated from the TS implementations.
+ * Golden fixtures — §4.1 (ids), §4.2 (paramShape) and the enum arrays,
+ * generated from the TypeScript implementations that are still LIVE
+ * (`packages/core`, which the Chrome extension and the MCP server ship).
+ *
+ * Three fixture families in this directory are deliberately NOT generated here:
+ *
+ *   - `device.json` — the §4 machine-key hash + deterministic device UUID. Their
+ *     TS implementation lived in the retired TypeScript daemon and is deleted,
+ *     so the committed vectors are now a FROZEN contract: `modelstat-wire`'s
+ *     `golden_ids.rs` asserts the Rust derivations against them and nothing
+ *     regenerates them. Frozen is the point — a value that can be rewritten by
+ *     the implementation it is meant to pin is not a gate.
+ *   - `shell_executable.json`, `tool_name.json` — `extractExecutable` /
+ *     `normalizeToolName` / `splitObservedToolName` are Rust-only now
+ *     (`modelstat-parsers`). Same deal: frozen vectors, asserted by
+ *     `modelstat-parsers`' `golden_tooling.rs`.
+ *   - `parsers/*.json` — Rust-generated since SPEC 0005 (see gen-all.mts).
  */
-import { createHash } from "node:crypto";
 import {
   AGENTS,
   CLASSIFICATION_CONFIDENCE,
@@ -14,20 +28,13 @@ import {
   PROVIDERS,
   TOOL_CALL_STATUSES,
 } from "../../../packages/core/src/enums.js";
-import { paramShape, segmentId, sourceEventId } from "../../../packages/core/src/ids.js";
-import { deviceUuidFromMachineKey } from "../../../apps/daemon/src/machine-key.js";
-import { extractExecutable } from "../../../packages/parsers/src/tool-action/executable.js";
 import {
   fallbackCallId,
-  normalizeToolName,
-  splitObservedToolName,
-} from "../../../packages/parsers/src/tool-hash/index.js";
+  paramShape,
+  segmentId,
+  sourceEventId,
+} from "../../../packages/core/src/ids.js";
 import { type Generator, writeGolden } from "./lib.mts";
-
-/** The frozen machine-key salt (feature §4/§18). Not exported from
- * machine-key.ts, so replicated here verbatim; the Rust MACHINE_KEY_SALT const
- * carries the identical literal. */
-const MACHINE_KEY_SALT = "modelstat.device.machine-key.v1";
 
 function idsFixtures(): void {
   // --- source_event_id (all three shapes; device partitions the key space) ---
@@ -78,23 +85,6 @@ function idsFixtures(): void {
   }));
 
   writeGolden("ids.json", { source_event_id, legacy_equivalence, segment_id, tc_fallback_id });
-
-  // --- device: machine-key hash + deterministic UUIDv5 (feature §4) ---
-  const machine_key_hash = ["abc", "IOPlatform-UUID-1234", ""].map((raw) => ({
-    raw,
-    expected: createHash("sha256").update(`${MACHINE_KEY_SALT}:${raw}`).digest("hex"),
-  }));
-  // 64-char synthetic keys. The third is a clearly-fake, gitleaks-allowlisted
-  // value (a sha256-shaped literal trips the generic-api-key entropy rule).
-  const deviceKeys = ["0".repeat(64), "a".repeat(64), `examplefake${"0123456789".repeat(5)}abc`];
-  const device_uuid = deviceKeys.map((key) => ({ key, expected: deviceUuidFromMachineKey(key) }));
-  // Salted path (intendedDeviceUuid appends `:<salt>` before deriving).
-  const device_uuid_salted = [
-    { machine_key: "a".repeat(64), salt: "ci-2" },
-    { machine_key: "a".repeat(64), salt: "tenant-b" },
-  ].map((c) => ({ ...c, expected: deviceUuidFromMachineKey(`${c.machine_key}:${c.salt}`) }));
-
-  writeGolden("device.json", { machine_key_hash, device_uuid, device_uuid_salted });
 }
 
 function toolingFixtures(): void {
@@ -113,48 +103,6 @@ function toolingFixtures(): void {
     "--label=café --emoji=😀 plain",
   ];
   writeGolden("param_shape.json", paramInputs.map((input) => ({ input, expected: paramShape(input) })));
-
-  // --- shell.v3 executable extraction ---
-  const shellInputs = [
-    "kubectl rollout restart deploy/payments-api -n prod",
-    "cd x && git push",
-    "./deploy.sh --now",
-    "sudo systemctl restart nginx",
-    "FOO=bar realcmd --flag",
-    "WT=$(ssh host uptime) && echo $WT",
-    "ls -la",
-    "echo hello world",
-    "cd ~",
-    "# just a comment",
-    'CK="sk_live_examplefake0123456789" node index.js', // synthetic (gitleaks-allowlisted markers)
-    "for i in 1 2 3; do curl https://x; done",
-    "pnpm -C packages/core test",
-  ];
-  writeGolden(
-    "shell_executable.json",
-    shellInputs.map((command) => ({ command, expected: extractExecutable(command) })),
-  );
-
-  // --- normalizeToolName + splitObservedToolName ---
-  const normalizeInputs = [
-    "  Bash  ",
-    "café", // NFD → NFC é
-    "subscribe_a1b2c3d4e5f6",
-    "job-550e8400-e29b-41d4-a716-446655440000",
-    "create_pr",
-    "x".repeat(300),
-  ];
-  const splitInputs = [
-    "mcp__github__create_pr",
-    "mcp__brave-search__web_search",
-    "mcp__my_server__tool",
-    "Bash",
-    "WebSearch",
-  ];
-  writeGolden("tool_name.json", {
-    normalize: normalizeInputs.map((input) => ({ input, expected: normalizeToolName(input) })),
-    split: splitInputs.map((input) => ({ input, ...splitObservedToolName(input) })),
-  });
 }
 
 function enumsFixture(): void {

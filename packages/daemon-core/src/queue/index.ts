@@ -26,9 +26,9 @@ export const INGEST_BATCH_MAX_TOOL_CALLS = 20_000;
 
 /** A tool call before segment attribution — ToolCallWire minus
  * `segment_id`, which is only knowable once segments are built.
- * Structurally identical to ToolCallDraft in @modelstat/parsers
- * (defined there for parser output); duplicated as an Omit here so
- * daemon-core doesn't grow a dependency on the parsers package. */
+ * Structurally identical to the `ToolCallDraft` the parsers emit
+ * (`modelstat-parsers::types` in the Rust daemon); expressed as an Omit
+ * here so daemon-core stays free of any parser dependency. */
 export type ToolCallDraft = Omit<ToolCallWire, "segment_id">;
 
 export interface QueueItem {

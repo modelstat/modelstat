@@ -1,5 +1,5 @@
-//! Authenticated device-API client — port of TS `apps/daemon/src/api.ts`
-//! (feature §17.1). One client owns register, devices/me, recovery, the shared
+//! Authenticated device-API client (feature §17.1).
+//! One client owns register, devices/me, recovery, the shared
 //! device-request matrix, and heartbeat, so the auth + 401-recover + 5xx-backoff
 //! behaviour is identical for every device call.
 //!
@@ -446,7 +446,7 @@ impl DeviceApi {
     /// with jittered backoff (`Retry-After` honored as a floor). A non-commit
     /// returns [`UploadResult::Hold`] — the scan loop leaves the file's cursor
     /// un-advanced and re-sends the SAME batch next cycle, so good data is never
-    /// dropped. Port of TS `IngestClient.upload` + `apps/daemon/src/api.ts::uploadBatch`.
+    /// dropped. Ports the TS `IngestClient.upload` decision matrix.
     pub async fn upload_batch(&self, batch: &IngestBatch, raw: bool) -> UploadResult {
         let path = if raw { "/v1/ingest/raw" } else { "/v1/ingest" };
         let url = format!("{}{}", self.config.api_url().trim_end_matches('/'), path);

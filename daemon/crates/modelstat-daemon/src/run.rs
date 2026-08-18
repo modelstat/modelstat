@@ -1,5 +1,5 @@
-//! The daemon-main event loop — a port of `apps/daemon/src/daemon.ts`'s
-//! `runDaemon`. Composes every M4 primitive into the live collector process:
+//! The daemon-main event loop.
+//! Composes every M4 primitive into the live collector process:
 //! singleton lock, heartbeat (discovery-fold), preflight, loopback receiver + SDK
 //! drain, processing-version reconcile, the single-flight scan runner, the
 //! filesystem watcher + 5-min backstop, the self-healing backfill reconcile, the

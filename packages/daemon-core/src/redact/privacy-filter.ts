@@ -24,8 +24,8 @@
  *   • Browser: "webgpu" (Transformers.js auto-falls-back to "wasm")
  *   • Node:    "cpu"    (onnxruntime-node)
  *
- * IMPORTANT: this is an OPTIONAL adapter. The consuming package (apps/daemon)
- * declares `@huggingface/transformers` and stages it beside the bundle; we use a
+ * IMPORTANT: this is an OPTIONAL adapter. The consuming package declares
+ * `@huggingface/transformers` and stages it beside the bundle; we use a
  * runtime dynamic import so missing the dep doesn't break the build for
  * consumers that don't care.
  */

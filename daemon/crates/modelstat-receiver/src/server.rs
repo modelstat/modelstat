@@ -1,6 +1,6 @@
-//! The loopback ingest server — a port of the axum-equivalent HTTP layer of
-//! `apps/daemon/src/receiver.ts` (`startLocalIngestReceiver` + `handle` +
-//! `handleControlScan` + `createControlRunner` + `isAllowedTranscriptFile`).
+//! The loopback ingest server — the axum HTTP layer: listener, request handler,
+//! control-scan dispatch, the serializing control runner, and the
+//! transcript-path allowlist.
 //!
 //! Binds `127.0.0.1:4319` (best-effort — a busy port disables the SDK path with
 //! a warning, never crashes the daemon's file-scan duty). Routes:

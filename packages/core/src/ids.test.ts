@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { paramShape, sourceEventId } from "./ids.js";
+import { fallbackCallId, paramShape, sourceEventId } from "./ids.js";
 
 // The server dedupes on (scope_id, source_event_id), so the derivation is a
 // wire contract: if these golden values change, every previously-uploaded
@@ -44,4 +44,14 @@ test("paramShape keeps flags, masks every value (cross-repo golden vectors)", ()
   assert.equal(paramShape("status"), "§");
   assert.equal(paramShape(""), "");
   assert.equal(paramShape("   "), "");
+});
+
+// tc_ ids are the tool-call dedupe key for every source line that carries no
+// id of its own, so the derivation is a wire contract exactly like evt_ above.
+test("fallbackCallId: deterministic tc_ id, varies with both inputs", () => {
+  const a = fallbackCallId("evt_abc", 0);
+  assert.equal(a, fallbackCallId("evt_abc", 0), "same inputs -> same id");
+  assert.ok(a.startsWith("tc_"));
+  assert.notEqual(a, fallbackCallId("evt_abc", 1), "call index partitions");
+  assert.notEqual(a, fallbackCallId("evt_def", 0), "event id partitions");
 });

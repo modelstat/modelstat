@@ -2,8 +2,8 @@
 //! contract on the Rust side: deterministic ids, machine key + device UUID,
 //! canonical enums, serde schemas, frozen byte caps, and the UTF-8 clamp layer.
 //!
-//! Everything here is a byte-for-byte port of the TypeScript
-//! (`@modelstat/core` + `@modelstat/parsers` id/hash helpers) that must stay
+//! Everything here is byte-identical to the TypeScript
+//! `@modelstat/core` id/hash helpers and must stay
 //! identical so existing devices, SDKs, the tray, and the server notice nothing
 //! but a version bump (plan D12/D16). The golden vectors under `tests/golden/`
 //! are generated from the TS and pin every value; the TS↔Rust parity test

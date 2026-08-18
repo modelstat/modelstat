@@ -1,5 +1,5 @@
-//! Per-install runtime state — `~/.modelstat/state.json`. Port of the TS
-//! `apps/daemon/src/runtime-state.ts` (feature §19). Non-secret bookkeeping:
+//! Per-install runtime state — `~/.modelstat/state.json` (feature §19). The
+//! on-disk format is frozen. Non-secret bookkeeping:
 //! file cursors, the API-URL override, counters, the processing-version marker,
 //! degrade/reconcile/reship state, and the summarizer mode + self-hosted URL.
 //!

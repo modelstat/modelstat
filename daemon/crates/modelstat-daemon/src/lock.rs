@@ -1,4 +1,4 @@
-//! Daemon singleton lock — a port of `apps/daemon/src/lock.ts`.
+//! Daemon singleton lock.
 //!
 //! Prevents a second `modelstat start` (or a tray-launched second instance) from
 //! running in parallel: two daemons would double-POST /v1/ingest, clobber the

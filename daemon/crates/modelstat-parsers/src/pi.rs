@@ -1,5 +1,4 @@
-//! pi harness JSONL parser — a byte-for-byte port of
-//! `packages/parsers/src/pi/index.ts`.
+//! pi harness JSONL parser.
 //!
 //! Tool activity lives in assistant `toolCall` content blocks, paired to their
 //! `toolResult` line by `toolCallId`. pi's own per-token cost is ignored — the

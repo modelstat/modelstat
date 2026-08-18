@@ -1,5 +1,4 @@
-//! Authoritative git-remote enrichment — a port of
-//! `apps/daemon/src/git-enrich.ts`. Run over a batch of parsed events BEFORE
+//! Authoritative git-remote enrichment. Run over a batch of parsed events BEFORE
 //! segmentation so the project identity keys on the REAL repository, not the
 //! parser's `guessRepoSlugFromPath` heuristic (which mistakes a repo-internal
 //! `…/src/app/x` subtree for a repo).

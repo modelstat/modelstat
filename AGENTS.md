@@ -17,9 +17,10 @@ Nobody uses this service yet — there's no data or behaviour to preserve. Every
 The modelstat **daemon** — everything that runs on a user's machine and feeds
 the server: the native Rust daemon in `daemon/` (what `install.sh` installs and
 what ships), the macOS tray app (`apps/tray-mac`), the MCP server
-(`packages/mcp`), and the standalone SDKs (`sdks/*`). The TypeScript daemon
-(`apps/daemon`, `packages/daemon-core`, …) is the RETIRED line, kept only as the
-port source — never publish it. The server (ingest/pipeline/dashboard,
+(`packages/mcp`), and the standalone SDKs (`sdks/*`). The TypeScript daemon is retired and its tree is deleted; `packages/daemon-core`
+and `packages/core` remain because the Chrome extension and the MCP server ship
+them — never publish a package named `modelstat` from this repo.
+ The server (ingest/pipeline/dashboard,
 modelstat.ai) is a separate private service (closed-source) and is out of scope
 for this repo.
 
@@ -80,7 +81,7 @@ Things to know:
 
 - `prices/*.yaml` are deliberate placeholders, not real prices. Don't
   "fix" them and don't write tests that assert specific dollar amounts.
-- Parsers (`packages/parsers`) emit raw events only and keep transcript
+- Parsers (`daemon/crates/modelstat-parsers`) emit raw events only and keep transcript
   data verbatim — e.g. the `<synthetic>` pseudo-model Claude Code records
   for local error/notice messages is passed through as-is (the server
   decides what to hide; the daemon never drops data). The one exception:
@@ -125,8 +126,9 @@ Things to know:
   `status --json`), and the macOS tray's **Summariser** submenu (one-click
   cloud/local switch; self-hosted needs a URL+model, so it points at the CLI).
   Redaction (regex floor + on-device NER/PII) runs client-side in EVERY mode;
-  only the summarisation LOCATION differs — see `resolveProvider` in
-  `apps/daemon/src/pipeline.ts`:
+  only the summarisation LOCATION differs — see `Config::summarizer_mode` in
+  `daemon/crates/modelstat-ingest/src/config.rs` and the engine selection in
+  `daemon/crates/modelstat-daemon/src/engine.rs`:
   - `local` — the bundled Qwen GGUF via `node-llama-cpp`, staged by
     `installNativeRuntime`/`_setup-runtime`. The **only** mode that
     downloads/stages the ~2.7 GB model (`installNativeRuntime` stages
@@ -228,11 +230,10 @@ registry. To cut one: bump the version in the manifest and merge. A brand-new
 package needs a one-time Trusted Publisher set up on the registry's website
 before the OIDC flow works.
 
-**The retired npm daemon.** `apps/daemon` (the TypeScript daemon, npm name
-`modelstat`) is superseded by the Rust one and is `private: true`. Its
-auto-publisher is deleted. Keep it that way: it publishes under the same name
-and from the same repo as the Rust release, so one publish out of that tree
-takes `releases/latest` and breaks installs. `@modelstat/mcp` in `packages/mcp`
+**The retired npm daemon.** The TypeScript daemon (npm name `modelstat`) is
+superseded by the Rust one; its tree and its auto-publisher are both deleted.
+Keep it that way: anything published under that name out of this repo takes
+`releases/latest` and breaks installs. `@modelstat/mcp` in `packages/mcp`
 stays publishable — `npx @modelstat/mcp` is the MCP runner.
 
 ### Observing a release

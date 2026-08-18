@@ -41,7 +41,7 @@ pnpm --filter @modelstat/sdk build      # Node SDK
 Point the daemon at a local / self-hosted API:
 
 ```bash
-DAEMON_API_URL=http://localhost:3010 node apps/daemon/dist/cli.cjs connect
+DAEMON_API_URL=http://localhost:3010 cargo run -p modelstat-cli -- connect
 ```
 
 ## What kinds of contributions we'd love
@@ -51,21 +51,23 @@ DAEMON_API_URL=http://localhost:3010 node apps/daemon/dist/cli.cjs connect
 Adding support for a new AI coding tool (say, a newly-launched CLI) is
 the highest-impact thing you can contribute.
 
-Where: [`packages/parsers/src/`](packages/parsers/src/)
+Where: [`daemon/crates/modelstat-parsers/src/`](daemon/crates/modelstat-parsers/src/)
 
 Shape: each parser is a module that reads the tool's local artifacts
-(JSONL, SQLite, log file) and emits canonical `RawEvent[]` per the
-schema in `@modelstat/core`. Existing parsers for Claude Code, Codex,
-and Cursor are good reference material.
+(JSONL, SQLite, log file) and emits canonical `RawEvent`s per the
+schema in `modelstat-wire`. Existing parsers for Claude Code, Codex,
+pi, and Cursor are good reference material.
 
 Workflow:
 
 1. Open an issue describing the tool + where it stores its data
    (`~/.xxx/...`, a SQLite DB, etc.) so we can align on the canonical
    event shape.
-2. Add detection logic in [`packages/parsers/src/discovery/`](packages/parsers/src/discovery/).
-3. Add the parser module + tests.
-4. Add the tool slug to the enum in `packages/core/src/enums.ts`.
+2. Add detection logic in [`daemon/crates/modelstat-parsers/src/discovery.rs`](daemon/crates/modelstat-parsers/src/discovery.rs).
+3. Add the parser module + tests (plus a golden fixture — see
+   `daemon/crates/modelstat-parsers/tests/golden_parsers.rs`).
+4. Add the tool slug to the enums in `daemon/crates/modelstat-wire/src/enums.rs`
+   AND `packages/core/src/enums.ts` — the golden `enums.json` pins them equal.
 5. Open a PR with a 30-line sample of the tool's raw log format.
 
 ### 2. Redaction patterns

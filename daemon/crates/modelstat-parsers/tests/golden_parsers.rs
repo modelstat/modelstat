@@ -1,8 +1,12 @@
 //! Parser golden parity — §4.4. Reconstructs the exact `/tmp/modelstat-fixtures`
-//! tree the TS generator (`daemon/scripts/fixtures/gen-parsers.mts`) wrote, runs
-//! the Rust parsers against the SAME canonical paths, and asserts byte-for-byte
-//! equal RawEvent / ToolCallDraft output against the frozen goldens in
-//! `modelstat-wire/tests/golden/parsers/`.
+//! tree from the committed inputs, runs the Rust parsers against those canonical
+//! paths, and asserts byte-for-byte equal RawEvent / ToolCallDraft output against
+//! the goldens in `modelstat-wire/tests/golden/parsers/`.
+//!
+//! These goldens are REGENERATED from the Rust (`REGEN_GOLDENS=1 … regen`): since
+//! SPEC 0005 the Rust parsers deliberately supersede the retired TS port, so TS
+//! is not their oracle. Reproducibility is the gate — CI regenerates and runs
+//! `git diff --exit-code`.
 //!
 //! The fixed base path is load-bearing: `source_file` and the path-derived
 //! `source_event_id`s are stable only when the inputs live at

@@ -1,5 +1,4 @@
-//! Coalescing single-flight runner — a port of
-//! `apps/daemon/src/single-flight.ts`.
+//! Coalescing single-flight runner.
 //!
 //! Wraps an async task so **at most one invocation runs at a time** and
 //! overlapping requests collapse into a single follow-up run rather than

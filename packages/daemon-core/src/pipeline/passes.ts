@@ -83,7 +83,7 @@ export const SUMMARY_OUTPUT_MAX_CHARS = 240;
  * Summariser pass — REQUIRED output. Runs one completion over the
  * pre-built prompt and returns a ≤240-char abstract. Throws when the
  * model yields nothing (e.g. it spent the whole budget on `<think>`, or
- * the chat template is wrong) so the resilient wrapper in apps/daemon can
+ * the chat template is wrong) so the daemon's resilient wrapper can
  * degrade to the extractive fallback. The caller's `maxTokens` estimate
  * is ignored in favour of {@link SUMMARY_MAX_TOKENS}.
  */

@@ -1,5 +1,9 @@
-//! Machine key + deterministic device UUID — a byte-for-byte port of the TS
-//! `apps/daemon/src/machine-key.ts` derivations (feature §4).
+//! Machine key + deterministic device UUID (feature §4).
+//!
+//! The TypeScript implementation these were ported from is deleted, so the
+//! committed vectors in `tests/golden/device.json` are a FROZEN contract rather
+//! than a regenerated parity fixture — `tests/golden_ids.rs` asserts against
+//! them and nothing rewrites them.
 //!
 //! Only the PURE derivations live here (they are wire/id contract): the raw
 //! hardware-id probes (`ioreg`, `/etc/machine-id`, registry, fallback file) and

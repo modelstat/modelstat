@@ -18,7 +18,7 @@ import { deviceIdentity } from "./device-id.js";
 import { persistMcpAuth, type State } from "./state.js";
 
 /** Response from the ONE register door, `POST /v1/tokens`. Mirrors the daemon's
- * contract (apps/daemon/src/api.ts SelfRegisterResponse). `claim_code` /
+ * contract (`SelfRegisterResponse`). `claim_code` /
  * `claim_url` are null once the device is already claimed (a re-registered,
  * known machine) — the server returns no fresh claim handle for it. */
 interface SelfRegisterResponse {
@@ -48,7 +48,7 @@ interface DeviceMeResponse {
 
 /** Every device-endpoint payload is wrapped in `{ data: … }`. Unwrap it,
  * tolerating a bare body (older server / test stub) so we never crash. Mirrors
- * apps/daemon/src/api.ts `unwrapData`. */
+ * the daemon's `unwrap_data`. */
 function unwrapData<T>(body: unknown): T {
   if (body && typeof body === "object" && "data" in (body as Record<string, unknown>)) {
     return (body as { data: T }).data;

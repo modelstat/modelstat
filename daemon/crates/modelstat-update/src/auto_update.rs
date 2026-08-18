@@ -5,9 +5,9 @@
 //! toggle written by a separate `modelstat autoupdate` process; this file is
 //! *only read* by the daemon and *only written* by the CLI, so the two never race.
 //!
-//! Byte-parity port of `apps/daemon/src/update.ts` (prefs half). The self-update
-//! MECHANISM is npm-free here (binary self-replace — [`crate::perform`]); only the
-//! preference shape + env-pin semantics are preserved.
+//! The preference shape + env-pin semantics are frozen from the retired npm
+//! daemon; the self-update MECHANISM is npm-free here (binary self-replace —
+//! [`crate::perform`]).
 
 use std::path::PathBuf;
 

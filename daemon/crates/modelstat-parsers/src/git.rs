@@ -1,4 +1,4 @@
-//! Git context helpers — a port of `packages/parsers/src/git.ts`.
+//! Git context helpers.
 //!
 //! This module covers the pure, deterministic helpers the parsers use at parse
 //! time: the path→slug heuristic and the worktree-collapsing repo-root walk. The

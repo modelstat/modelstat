@@ -1,5 +1,5 @@
-//! The tray's adopt / spawn / replace decision (§15) — a port of
-//! `apps/daemon/src/supervise.ts`. `modelstat _daemon-health` prints this JSON;
+//! The tray's adopt / spawn / replace decision (§15).
+//! `modelstat _daemon-health` prints this JSON;
 //! the Swift tray stays a thin "run command, switch on decision".
 //!
 //!   - **adopt** — a live daemon owns the lock and is heartbeating (or is a

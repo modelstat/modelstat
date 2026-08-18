@@ -8,8 +8,8 @@ name: release-sdks
 #
 # This is the repo's ONLY publisher to a package registry. The daemon ships as
 # native binaries from release-daemon-rs.yml (GitHub Releases, `daemon-*` tags);
-# the npm daemon publisher it replaced is deleted, and the retired TS tree in
-# `apps/daemon` is `private: true` so nothing can put it back on npm. Keeping the
+# the npm daemon publisher it replaced is deleted, along with the retired TS
+# daemon tree, so nothing can put it back on npm. Keeping the
 # two workflows separate means an SDK release can't disturb a daemon release and
 # vice-versa.
 #

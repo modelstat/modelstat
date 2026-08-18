@@ -1,5 +1,7 @@
-//! Shared tool_call hashing + identity helpers — a byte-for-byte port of
-//! `packages/parsers/src/tool-hash/index.ts`.
+//! Shared tool_call hashing + identity helpers.
+//!
+//! `normalize_tool_name` + `split_observed_tool_name` are pinned by the frozen
+//! vectors in `modelstat-wire/tests/golden/tool_name.json` (`tests/golden_tooling.rs`).
 //!
 //! PRIVACY: these helpers exist so raw tool arguments/results never leave the
 //! device. Only one-way sha256 digests and byte lengths are derived here; the

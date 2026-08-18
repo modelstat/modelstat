@@ -1,5 +1,4 @@
-//! Claude Code JSONL parser — a byte-for-byte port of
-//! `packages/parsers/src/claude-code/index.ts`.
+//! Claude Code JSONL parser.
 //!
 //! Resume-copy dedupe (the module's core subtlety): `claude --resume` writes a
 //! NEW `<new-uuid>.jsonl` beginning with byte-identical copies of the ancestor

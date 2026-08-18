@@ -1,7 +1,5 @@
 //! Shared CLI helpers (feature §5): the per-OS browser opener, interactive
-//! stdin prompts, the `last-status.json` reader, and small URL helpers. Ported
-//! from `apps/daemon/src/cli.ts` (`tryOpenBrowser`, `textPrompt`,
-//! `readLocalStatus`).
+//! stdin prompts, the `last-status.json` reader, and small URL helpers.
 
 use std::io::{BufRead, IsTerminal, Write};
 
