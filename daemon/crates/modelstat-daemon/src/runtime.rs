@@ -36,9 +36,7 @@ use crate::engine::{
     Swappable,
 };
 use crate::insights::{refresh_session_insights, SessionInsightsFetcher};
-use crate::scan::{
-    run_scan_over_jobs, CursorStore, RunScanOptions, ScanObserver, ScanTallies, MAX_FILES_PER_SCAN,
-};
+use crate::scan::{run_scan_over_jobs, CursorStore, RunScanOptions, ScanObserver, ScanTallies};
 use crate::status::{Phase, Status};
 
 /// The scan loop's `correct_events` seam, backed by a real cwd-cached
@@ -656,30 +654,22 @@ async fn execute_scan(daemon: &Daemon, ordered: Vec<ScanJob>, opts: RunScanOptio
     tallies
 }
 
-/// The incremental scan (cap 12, newest-first): the single-flight runner's task.
-/// Drains a cold-start backlog over quick successive cap-12 passes *within one
-/// coalesced run* (memory stays near one batch), rather than stacking concurrent
-/// scans. A hold (engine/summariser down) stops the run loudly — the next trigger
-/// (watcher / 5-min backstop) retries from exactly where it held. Port of
-/// `runScanCycle` + its `morePending` re-trigger, inlined as a bounded loop.
+/// Incremental scan, newest-first. Unchanged files are skipped and are not
+/// counted as leftover work. A hold (engine/summariser down) stops the run
+/// loudly — the next trigger (watcher / 5-min backstop) retries from exactly
+/// where it held.
 pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
     daemon.with_status(|s| {
         s.set_phase(Phase::Scanning, format!("Scanning local JSONL ({reason})"));
         s.set_progress(0, 0);
-        // One run spans every cap-12 pass of this cycle, so the clock and the
-        // counters start here rather than inside `execute_scan` — a backlog
-        // draining over fifty passes is one sweep to the person watching it.
         s.start_run();
     });
     let opts = RunScanOptions {
-        max_files: Some(MAX_FILES_PER_SCAN),
+        max_files: None,
         force_read_all: false,
     };
-    loop {
-        let jobs = order_jobs_newest_first(discover_jobs());
-        if jobs.is_empty() {
-            break;
-        }
+    let jobs = order_jobs_newest_first(discover_jobs());
+    if !jobs.is_empty() {
         let t = execute_scan(&daemon, jobs, opts).await;
         if t.held {
             // No-degrade: the engine/summariser is down. Report it loudly and
@@ -694,13 +684,6 @@ pub async fn run_scan_cycle(daemon: Arc<Daemon>, reason: String) {
             });
             return;
         }
-        if !t.more_pending {
-            break;
-        }
-        // Backlog still draining — yield briefly so the receiver/heartbeat aren't
-        // starved, then take the next newest cap-12 batch.
-        daemon.with_status(|s| s.set_phase(Phase::Processing, "Catching up on history…"));
-        tokio::time::sleep(Duration::from_millis(250)).await;
     }
     // The backlog drained — the ONE moment this daemon knows nothing is queued,
     // and therefore the only honest place to declare a version bump's re-scan

@@ -475,14 +475,31 @@ where
         handle: tokio::task::JoinHandle<std::io::Result<ParseResult>>,
     }
 
-    let total = ordered.len();
+    // Unchanged files are not work. Counting them in `total` made the tray
+    // say "4,175 session files left" on every pass, even when only a handful
+    // of live transcripts actually needed a parse.
+    let mut work = Vec::new();
+    for job in ordered {
+        let cur = cursors.get_cursor(&job.path);
+        let cs = checksum(&job.path);
+        if !opts.force_read_all {
+            if let (Some(cs), Some(cur)) = (cs.as_ref(), cur.as_ref()) {
+                if cur.size == cs.size && cur.tail_hash == cs.tail_hash {
+                    tallies.files_unchanged += 1;
+                    continue;
+                }
+            }
+        }
+        work.push(job);
+    }
+    let total = work.len();
     // Consumed, not iterated by reference: holding a `&ScanJob` (and the slice
     // iterator behind it) across the awaits below makes this future's `Send`-ness
     // depend on a specific lifetime, and the daemon boxes it into a `Send` task —
     // which fails to compile as "implementation of `Send` is not general enough"
     // once the flush inside also holds borrowed futures. Owning each job sidesteps
     // the whole question.
-    let mut jobs = ordered.into_iter().enumerate();
+    let mut jobs = work.into_iter().enumerate();
     // The parse pipeline: files started, oldest first. The front is the file
     // being consumed; the ones behind it are parsing ahead so a flush's network
     // wait and the next files' parse work overlap. Consumption order IS job
@@ -495,7 +512,7 @@ where
     let mut started_changed = 0usize;
 
     loop {
-        // Fill the pipeline: examine jobs in order (skipping unchanged files)
+        // Fill the pipeline: examine jobs in order
         // and start parses until enough files are in flight or the per-cycle
         // cap says no more.
         while in_flight.len() < PIPELINE_FILES
@@ -505,17 +522,6 @@ where
             observer.on_file(&job.path, i, total);
             let cur = cursors.get_cursor(&job.path);
             let cs = checksum(&job.path);
-            // Incremental scans skip a file whose size + tail are unchanged since the
-            // last upload (NOT mtime — a touch that didn't change bytes re-uses the
-            // cursor). force_read_all bypasses this so a targeted session re-uploads.
-            if !opts.force_read_all {
-                if let (Some(cs), Some(cur)) = (cs.as_ref(), cur.as_ref()) {
-                    if cur.size == cs.size && cur.tail_hash == cs.tail_hash {
-                        tallies.files_unchanged += 1;
-                        continue;
-                    }
-                }
-            }
             started_changed += 1;
             // Everything below this byte offset already landed on a CONFIRMED upload,
             // so this scan parses it but does not re-send it. Without the floor a live
