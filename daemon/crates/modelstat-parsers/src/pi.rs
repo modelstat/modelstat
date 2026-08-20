@@ -85,9 +85,8 @@ fn pi_token_usage(usage: &Value) -> (Option<TokenUsage>, BTreeMap<String, u64>) 
             output,
             cache_creation,
             cache_read,
-            // pi records no separate reasoning counter; 0 is the true value here,
-            // not a default for something it stated and we failed to read.
-            reasoning: 0,
+            // omp writes reasoningTokens; older pi omits it. Absent is 0, not a miss.
+            reasoning: field("reasoningTokens").unwrap_or(0),
         }),
         BTreeMap::new(),
     )
@@ -235,7 +234,12 @@ fn parse_inner(
             if let Some(pv) = obj.get("provider").and_then(Value::as_str) {
                 last_provider = Some(pv.to_string());
             }
-            if let Some(mi) = obj.get("modelId").and_then(Value::as_str) {
+            // Older pi writes `modelId`. omp writes `model` (`xai-oauth/grok-4.6`).
+            if let Some(mi) = obj
+                .get("modelId")
+                .or_else(|| obj.get("model"))
+                .and_then(Value::as_str)
+            {
                 last_model = Some(mi.to_string());
             }
             continue;
@@ -543,4 +547,62 @@ fn parse_inner(
         },
         skips,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ParserContext;
+    use std::io::Write;
+
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_session(name: &str, lines: &[&str]) -> (std::path::PathBuf, TempDirGuard) {
+        let dir = std::env::temp_dir().join(format!(
+            "modelstat-pi-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+        (path, TempDirGuard(dir))
+    }
+
+    #[test]
+    fn omp_model_change_and_reasoning_tokens() {
+        let sid = "01a01aab-0b4a-7000-a51c-8308b2980527";
+        let name = format!("2026-08-19T15-36-52-299Z_{sid}.jsonl");
+        let (path, _guard) = write_session(
+            &name,
+            &[
+                r#"{"type":"session","version":3,"id":"01a01aab-0b4a-7000-a51c-8308b2980527","timestamp":"2026-08-19T15:36:52.299Z","cwd":"/Users/dev/projects/acme"}"#,
+                r#"{"type":"model_change","id":"b6f3c6e1","parentId":null,"timestamp":"2026-08-19T15:37:41.714Z","model":"xai-oauth/grok-4.6"}"#,
+                r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-08-19T15:38:34.634Z","message":{"role":"user","content":[{"type":"text","text":"ok?"}],"timestamp":1787153914593}}"#,
+                r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-19T15:38:40.738Z","message":{"role":"assistant","content":[{"type":"text","text":"Yes."}],"provider":"xai-oauth","model":"grok-4.6","usage":{"input":74120,"output":75,"cacheRead":128,"cacheWrite":0,"reasoningTokens":61}}}"#,
+            ],
+        );
+        let r = parse_pi_session(&ParserContext::new("dev_1", path.to_string_lossy())).unwrap();
+        assert_eq!(r.events.len(), 2);
+        assert_eq!(r.events[0].model.as_deref(), Some("xai-oauth/grok-4.6"));
+        let asst = &r.events[1];
+        assert_eq!(asst.provider, "xai-oauth");
+        assert_eq!(asst.model.as_deref(), Some("grok-4.6"));
+        let tokens = asst.tokens.as_ref().expect("assistant usage");
+        assert_eq!(tokens.input, 74120);
+        assert_eq!(tokens.output, 75);
+        assert_eq!(tokens.cache_read, 128);
+        assert_eq!(tokens.reasoning, 61);
+    }
 }
