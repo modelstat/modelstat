@@ -33,8 +33,11 @@ one that commits to the least beyond them — it is the most likely to survive
 unseen tools, schemas, and formats. (Bennett, AGI-23,
 [arXiv:2301.12987](https://arxiv.org/abs/2301.12987): a hypothesis generalises
 in proportion to its *extension* — how much it stays correct for — not its
-brevity; provably, shorter is neither necessary nor sufficient, and a compact
-rule can be maximally overcommitted.)
+brevity. The theorem is stronger than a preference: maximising weakness is
+NECESSARY AND SUFFICIENT to maximise the probability a hypothesis generalises,
+shortness is neither, and in the paper's experiments the weakest generalised at
+1.1–5× the rate of the shortest. A compact rule can be maximally
+overcommitted.)
 
 This repo already runs on it — keep new code on the same line:
 
