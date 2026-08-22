@@ -4,7 +4,7 @@ import { Config, LlmCall, withMetadata, capMetadata } from "../index.js";
 import { buildBatch, type SeqRef } from "../capture.js";
 
 const cfg = (): Config =>
-  new Config("msk_test", "raw_sdk_openai").withDeviceId("dev_test");
+  new Config("msk_test", "raw_sdk_openai", "test-app").withDeviceId("dev_test");
 
 test("no metadata anywhere → key omitted on the wire", () => {
   const seq: SeqRef = { value: 0 };

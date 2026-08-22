@@ -57,7 +57,7 @@ ms.shutdown().await; // flush what's buffered on the way out
 ```ts
 import { Client, Config, LlmCall } from "@modelstat/sdk";
 
-const cfg = new Config("msk_live_…", "raw_sdk_openai")
+const cfg = new Config("msk_live_…", "raw_sdk_openai", "checkout-api")
   .withRemote("https://api.modelstat.ai", /* raw */ true);
 const ms = new Client(cfg);
 
@@ -77,7 +77,7 @@ await ms.shutdown(); // flush what's buffered on the way out
 ```python
 from modelstat import Client, Config, LlmCall, TokenUsage
 
-cfg = Config("msk_live_…", "raw_sdk_openai").with_remote("https://api.modelstat.ai", raw=True)
+cfg = Config("msk_live_…", "raw_sdk_openai", "checkout-api").with_remote("https://api.modelstat.ai", raw=True)
 ms = Client(cfg)
 
 # …after your real LLM call returns…
@@ -103,7 +103,7 @@ Attach free-form `string → string` tags to attribute spend — by `feature`, `
 import modelstat
 from modelstat import Config, LlmCall
 
-cfg = Config("msk_live_…", "raw_sdk_openai")
+cfg = Config("msk_live_…", "raw_sdk_openai", "checkout-api")
 cfg.metadata = {"environment": "prod"}                 # 1. Config defaults
 
 with modelstat.metadata({"customer_id": "cus_42"}):    # 2. ambient (contextvars)
@@ -114,7 +114,7 @@ with modelstat.metadata({"customer_id": "cus_42"}):    # 2. ambient (contextvars
 // TypeScript — three layers
 import { Config, LlmCall, withMetadata } from "@modelstat/sdk";
 
-const cfg = new Config("msk_live_…", "raw_sdk_openai");
+const cfg = new Config("msk_live_…", "raw_sdk_openai", "checkout-api");
 cfg.metadata = { environment: "prod" };                 // 1. Config defaults
 
 await withMetadata({ customer_id: "cus_42" }, async () => {   // 2. ambient (AsyncLocalStorage)
@@ -155,7 +155,7 @@ from openai import OpenAI
 import modelstat
 from modelstat import Client, Config
 
-ms = Client(Config("msk_live_…", "raw_sdk_openai"))
+ms = Client(Config("msk_live_…", "raw_sdk_openai", "checkout-api"))
 client = modelstat.wrap(OpenAI(), recorder=ms, metadata={"feature": "search"})
 resp = client.chat.completions.create(
     model="gpt-x", messages=[{"role": "user", "content": "hello"}]
@@ -167,7 +167,7 @@ resp = client.chat.completions.create(
 import OpenAI from "openai";
 import { Client, Config, wrap } from "@modelstat/sdk";
 
-const ms = new Client(new Config("msk_live_…", "raw_sdk_openai"));
+const ms = new Client(new Config("msk_live_…", "raw_sdk_openai", "checkout-api"));
 const openai = wrap(new OpenAI(), { client: ms, metadata: { feature: "search" } });
 const resp = await openai.chat.completions.create({
   model: "gpt-x",

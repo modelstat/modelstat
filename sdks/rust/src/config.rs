@@ -66,8 +66,10 @@ pub struct Config {
     /// name your usage appears under in the dashboard: the server registers a
     /// real device per (org, app) and a real provider account per (provider,
     /// app) from it, so SDK traffic is attributed at ingest like any other —
-    /// no shared placeholder entities. Defaults to the running binary's name;
-    /// set it explicitly when several services share one binary name.
+    /// no shared placeholder entities. **Required**: the server rejects a batch
+    /// that does not carry it (`app_required`), and there is deliberately no
+    /// default — a name guessed from the process would silently merge two
+    /// services that share a binary, and you would never find out.
     pub app: String,
     /// Stable device/service identifier (`dev_…`). Should be stable per host so
     /// dedupe keys are stable across restarts. Leave the default: the server
@@ -112,10 +114,35 @@ pub struct Config {
 impl Config {
     /// A config with sane defaults: local-daemon mode, floor redaction, a 4096-
     /// slot buffer, a 2s flush interval, and 256-record batches.
+    ///
+    /// # Panics
+    ///
+    /// If `app` is empty or blank. `app` names the service you are
+    /// instrumenting and the server rejects a batch without it
+    /// (`app_required`), so this is a contract violation, not a runtime
+    /// condition — it panics at construction, where the backtrace points at
+    /// the caller, rather than surfacing later from a background worker.
+    ///
+    /// `app` used to default to the running binary's name (falling back to the
+    /// literal `"sdk-app"`). That is exactly the kind of guess this SDK must
+    /// not make: two services sharing one binary name silently merged into one
+    /// device and one account, and nothing told you.
     #[must_use]
-    pub fn new(ingest_key: impl Into<String>, agent: impl Into<String>) -> Self {
+    pub fn new(
+        ingest_key: impl Into<String>,
+        agent: impl Into<String>,
+        app: impl Into<String>,
+    ) -> Self {
+        let app = app.into();
+        let app = app.trim();
+        assert!(
+            !app.is_empty(),
+            "modelstat: Config::new requires a non-empty `app` — the name of the service you \
+             are instrumenting (e.g. Config::new(key, agent, \"checkout-api\")). It becomes \
+             this integration's device and account name in the dashboard."
+        );
         Self {
-            app: default_app_name(),
+            app: app.to_string(),
             device_id: "dev_sdk".into(),
             agent: agent.into(),
             client_version: concat!("rust-sdk/", env!("CARGO_PKG_VERSION")).into(),
@@ -130,15 +157,6 @@ impl Config {
             auto_taxonomy: false,
             metadata: BTreeMap::new(),
         }
-    }
-
-    /// Name the integration this SDK instance instruments — the app your usage
-    /// appears under in the dashboard (see [`Config::app`]). Returns `self`
-    /// for chaining.
-    #[must_use]
-    pub fn with_app(mut self, app: impl Into<String>) -> Self {
-        self.app = app.into();
-        self
     }
 
     /// Add a constant attribution tag applied to every call (overwriting any
@@ -176,14 +194,21 @@ impl Config {
     }
 }
 
-/// The running binary's file name — the [`Config::app`] default. An app name
-/// is required for the server to register the integration's own real entities,
-/// and the binary name is the one always-available honest answer; `sdk-app`
-/// only when even that can't be read (unusual embedders).
-fn default_app_name() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "sdk-app".to_string())
+#[cfg(test)]
+mod app_required_tests {
+    use super::Config;
+
+    #[test]
+    fn a_named_app_is_trimmed_and_kept() {
+        let cfg = Config::new("msk", "raw_sdk_openai", "  checkout-api  ");
+        assert_eq!(cfg.app, "checkout-api");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty `app`")]
+    fn an_empty_app_is_a_contract_violation() {
+        // The server rejects an unnamed batch (`app_required`). Panicking here
+        // is the same rule one step earlier, where the caller is on the stack.
+        let _ = Config::new("msk", "raw_sdk_openai", "   ");
+    }
 }

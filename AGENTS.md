@@ -61,6 +61,41 @@ mishandle, and what in today's data forces that commitment?* If nothing forces
 it, weaken the design — usually by deleting structure (a pass-through, a
 shape-probe, a string) rather than adding speculative abstraction.
 
+## Never fail silently, never degrade silently — HARD RULE
+
+Code either **works**, or **fails loudly with a clear, specific reason**. There
+is no third option. A silent degrade is worse than a crash: nothing alerts,
+nothing is counted, and the wrong answer looks exactly like the right one.
+
+Banned outright:
+
+- **A fallback that invents a value to replace an honest "I don't know."**
+  `dominant.unwrap_or_else(|| "unknown".into())` is the canonical bug: the code
+  computes a correct `None` and throws it away one line later, so a magic string
+  lands in the same column as real values and every reader downstream has to
+  guess which is which. Absence must stay absence all the way through. (This is
+  also why a parser writes what it OBSERVED and never a stand-in — the daemon
+  never drops data, and it never invents any either.)
+- **A `continue` / early-out that drops a record with no log and no counter.**
+- **A `catch` / `match` arm that discards an error and carries on.**
+- **A default standing in for a missing REQUIRED input.** Reject it instead.
+- **Partial success reported as success.**
+
+Required instead:
+
+- **Reject at the door**, with an error naming what was missing and what to send.
+  Half a key is not a key. The door is the one place that knows without guessing,
+  so the guard goes there — not in each caller.
+- **Count every skip, and surface the count in the operation's own result** — not
+  only in a log line. A run that found nothing and a run that could never have
+  found anything must read differently.
+- **Say which gate closed.** "Skipped 7 records: no timestamp" is actionable;
+  "skipped 7" is not. The `SkipLedger` in the parsers exists for exactly this.
+
+Review test for any fallback you write: *what does a reader learn when this
+fires?* If the answer is "nothing", it is a silent degrade — turn it into a loud
+failure or a counted, surfaced skip.
+
 ## Naming: daemon, not agent/companion
 
 Our local long-running process is the **daemon** (what `curl -fsSL https://modelstat.ai/install.sh | sh` installs; the native `modelstat` binary built from `daemon/`). Never call it "agent" or "companion".

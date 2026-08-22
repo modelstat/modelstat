@@ -214,13 +214,35 @@ export interface ToolCallWire {
 }
 
 /**
- * The full ingest payload. The SDK only ever emits `events` (+ `tool_calls`);
- * segmentation, summarization, titles, and session-installs are produced
- * downstream by the daemon or server.
+ * The account a session belongs to, named on the wire — the same
+ * `session_installs` layer daemons ship. Naming it here is what makes SDK usage
+ * attribute AT INGEST to a real per-app account, instead of falling through to
+ * a server-side placeholder named after an internal scope id.
+ */
+export interface SessionInstall {
+  /**
+   * The provider-side account reference. For an SDK integration this is the
+   * app's name (`Config.app`) — the API key's usage IS the app's.
+   */
+  provider_account_id: string;
+  /** The provider the account belongs to (the other half of the lookup key). */
+  provider: string;
+}
+
+/**
+ * The full ingest payload. The SDK emits `events` (+ `tool_calls`) and names the
+ * app + each session's account; segmentation, summarization and titles are
+ * produced downstream by the daemon or server.
  */
 export interface IngestBatch {
   batch_id: string;
   device_id: string;
+  /**
+   * The integration's own name (`Config.app`). REQUIRED: the server derives
+   * this batch's real device identity from (org, app) — one registered device
+   * per integration, named after the app — and rejects a batch without it.
+   */
+  app: string;
   /**
    * This SDK build's version string (≤40 chars). Ships as the wire
    * `daemon_version` field — the server's name for the producing client's
@@ -232,6 +254,8 @@ export interface IngestBatch {
   events: RawEvent[];
   /** Omitted entirely when empty (never send `tool_calls: []`). */
   tool_calls?: ToolCallWire[];
+  /** session_id → the account that produced it. Omitted when empty. */
+  session_installs?: Record<string, SessionInstall>;
   /**
    * Per-batch taxonomy auto-detection toggle. Omitted/`null` = server default
    * (taxonomy auto/on); `false` = skip taxonomy auto-detection for this batch;

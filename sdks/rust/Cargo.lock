@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "modelstat"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",

@@ -286,9 +286,19 @@ def build_batch(
     events: List[RawEvent] = []
     tool_calls: List[ToolCallWire] = []
     source_ids: List[str] = []
+    # session_id -> the account that produced it. For an SDK integration the
+    # account IS the app: the key's usage is this service's usage, so naming it
+    # here attributes the session at ingest instead of leaving it to a
+    # server-side guess.
+    session_installs: Dict[str, wire.SessionInstall] = {}
 
     for call in calls:
         seq += 1
+        if call.provider and call.session_id:
+            session_installs[call.session_id] = wire.SessionInstall(
+                provider_account_id=cfg.app,
+                provider=call.provider,
+            )
         event, tcs = _event_from_call(cfg, call, seq)
         source_ids.append(event.source_event_id)
         tool_calls.extend(tcs)
@@ -297,9 +307,11 @@ def build_batch(
     batch = IngestBatch(
         batch_id=wire.batch_id(source_ids),
         device_id=cfg.device_id,
+        app=cfg.app,
         daemon_version=cfg.client_version,
         events=events,
         tool_calls=tool_calls,
+        session_installs=session_installs,
         # Always send an explicit value reflecting the config so backend usage is
         # off-by-default but users can opt in.
         auto_taxonomy=cfg.auto_taxonomy,

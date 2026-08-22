@@ -54,7 +54,7 @@ Local-daemon mode is the **default** — supply your org ingest key and a source
 ```rust
 use modelstat::{Client, Config};
 
-let cfg = Config::new("msk_live_…", "raw_sdk_openai"); // defaults to the local daemon
+let cfg = Config::new("msk_live_…", "raw_sdk_openai", "checkout-api"); // defaults to the local daemon
 let ms = Client::new(cfg);
 ```
 
@@ -63,7 +63,7 @@ Changed the daemon's port? Set the mode explicitly (`mode` is a public field):
 ```rust
 use modelstat::Mode;
 
-let mut cfg = Config::new("msk_live_…", "raw_sdk_openai");
+let mut cfg = Config::new("msk_live_…", "raw_sdk_openai", "checkout-api");
 cfg.mode = Mode::LocalDaemon { url: "http://127.0.0.1:4319/v1/ingest".into() };
 ```
 
@@ -94,7 +94,7 @@ Attach free-form `string → string` tags to attribute spend — by `feature`, `
 use modelstat::{Config, LlmCall};
 
 // Constant tags on every call:
-let cfg = Config::new("msk_live_…", "raw_sdk_openai")
+let cfg = Config::new("msk_live_…", "raw_sdk_openai", "checkout-api")
     .with_metadata("environment", "prod")
     .with_metadata("service", "checkout");
 
@@ -110,6 +110,9 @@ Caps are enforced in-process before anything ships: at most **16** entries (exce
 
 > **No ambient layer in Rust.** The TypeScript and Python SDKs add a middle "ambient context" tier (`withMetadata` / `with modelstat.metadata(...)`) built on task-locals; the Rust equivalent (task-locals) is awkward and easy to misuse across `.await` points, so the Rust SDK intentionally ships only the two layers above (`Config` defaults + per-call). Set a per-call tag where you'd otherwise reach for ambient context.
 
+
+**`app` is required.** It names the service you are instrumenting (`"checkout-api"`, `"billing-worker"`). The server registers a real device per (org, app) and a real account per (provider, app) from it, so your usage shows up under that name — and it rejects a batch that does not carry one (`app_required`). There is no default: a name guessed from the process would silently merge two services that share a binary.
+
 ## Modes
 
 | Mode | Where summarization runs | What leaves your machine | Use when |
@@ -119,7 +122,7 @@ Caps are enforced in-process before anything ships: at most **16** entries (exce
 
 ```rust
 // Remote (no local daemon / no local model):
-let cfg = Config::new("msk_live_…", "raw_sdk_openai")
+let cfg = Config::new("msk_live_…", "raw_sdk_openai", "checkout-api")
     .with_remote("https://api.modelstat.ai", /* raw */ true);
 ```
 
@@ -128,7 +131,7 @@ let cfg = Config::new("msk_live_…", "raw_sdk_openai")
 modelstat can auto-detect a work-type *taxonomy* over your sessions, but that's tuned for interactive coding sessions — backend LLM usage usually isn't. So for the SDKs taxonomy is **off by default**: every batch ships an explicit `auto_taxonomy: false`. Opt in by setting the config flag:
 
 ```rust
-let mut cfg = Config::new("msk_live_…", "raw_sdk_openai");
+let mut cfg = Config::new("msk_live_…", "raw_sdk_openai", "checkout-api");
 cfg.auto_taxonomy = true; // force server-side taxonomy auto-detection on
 ```
 

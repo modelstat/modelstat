@@ -23,7 +23,7 @@ Example
     from modelstat import Client, Config, LlmCall, TokenUsage
 
     # Org-scoped ingest key binds traffic to your account; remote mode here.
-    cfg = Config("msk_live_...", "raw_sdk_openai").with_remote(
+    cfg = Config("msk_live_...", "raw_sdk_openai", "checkout-api").with_remote(
         "https://api.modelstat.ai", raw=True
     )
 

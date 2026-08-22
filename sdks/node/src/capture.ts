@@ -24,6 +24,7 @@ import {
   type GitContext,
   type IngestBatch,
   type RawEvent,
+  type SessionInstall,
   type TokenUsage,
   type ToolCallStatus,
   type ToolCallWire,
@@ -363,8 +364,20 @@ export function buildBatch(
   const toolCalls: ToolCallWire[] = [];
   const sourceIds: string[] = [];
 
+  // session_id → the account that produced it. For an SDK integration the
+  // account IS the app: the key's usage is this service's usage, so naming it
+  // here attributes the session at ingest instead of leaving it to a
+  // server-side guess.
+  const sessionInstalls: Record<string, SessionInstall> = {};
+
   for (const call of calls) {
     seqRef.value += 1;
+    if (call.provider !== "" && call.sessionId !== "") {
+      sessionInstalls[call.sessionId] = {
+        provider_account_id: cfg.app,
+        provider: call.provider,
+      };
+    }
     const [event, tcs] = eventFromCall(cfg, call, seqRef.value);
     sourceIds.push(event.source_event_id);
     for (const tc of tcs) {
@@ -376,12 +389,16 @@ export function buildBatch(
   const batch: IngestBatch = {
     batch_id: batchId(sourceIds),
     device_id: cfg.deviceId,
+    app: cfg.app,
     daemon_version: cfg.version,
     events,
   };
   // Omit `tool_calls` entirely when empty (additive wire contract).
   if (toolCalls.length > 0) {
     batch.tool_calls = toolCalls;
+  }
+  if (Object.keys(sessionInstalls).length > 0) {
+    batch.session_installs = sessionInstalls;
   }
   // Always send an explicit value reflecting the config so backend usage is
   // off-by-default but users can opt in. `setIfPresent` keeps the wire key

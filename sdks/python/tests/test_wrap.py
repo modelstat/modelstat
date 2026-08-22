@@ -13,7 +13,7 @@ from modelstat import Client, Config, FakeTransport
 
 
 def cfg(agent: str = "raw_sdk_openai") -> Config:
-    return Config("msk_test", agent).with_device_id("dev_test")
+    return Config("msk_test", agent, "test-app").with_device_id("dev_test")
 
 
 # ---- fake provider clients --------------------------------------------------

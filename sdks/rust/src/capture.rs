@@ -370,7 +370,7 @@ mod tests {
     use crate::config::Config;
 
     fn cfg() -> Config {
-        Config::new("msk_test", "raw_sdk_openai").with_device_id("dev_test")
+        Config::new("msk_test", "raw_sdk_openai", "test-app").with_device_id("dev_test")
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn raw_mode_sends_full_untruncated_turns_still_floor_redacted() {
-        let cfg = Config::new("msk", "raw_sdk_openai")
+        let cfg = Config::new("msk", "raw_sdk_openai", "test-app")
             .with_device_id("dev_test")
             .with_remote("https://api.modelstat.ai", true);
         let mut seq = 0;

@@ -51,8 +51,24 @@ export type RedactionPolicy = "floor" | "none";
  */
 export class Config {
   /**
-   * Stable device/service identifier (`dev_…`). Should be stable per host so
-   * dedupe keys are stable across restarts.
+   * The integration's own name — which app/service this SDK instance
+   * instruments (e.g. `checkout-api`, `billing-worker`). **Required**, and the
+   * server rejects a batch that does not carry it (`app_required`).
+   *
+   * This is the name your usage appears under in the dashboard: the server
+   * registers a real device per (org, app) and a real account per
+   * (provider, app) from it, so SDK traffic is attributed at ingest like any
+   * other. There is deliberately no default — a name guessed from the process
+   * would silently merge two services that share a binary, and you would never
+   * find out.
+   */
+  app: string;
+
+  /**
+   * Stable device/service identifier (`dev_…`). Leave the default: on an org
+   * ingest key the server derives the real device identity from
+   * (org, {@link app}) and ignores this. It matters only for advanced setups
+   * shipping under a pre-registered device secret.
    */
   deviceId = "dev_sdk";
 
@@ -116,10 +132,22 @@ export class Config {
    *
    * @param ingestKey Bearer credential (`msk_…` org key or a device secret).
    * @param agent The AI-tool label shipped as the wire `agent` field.
+   * @param app This service's own name — see {@link app}. Required.
+   * @throws If `app` is empty or blank. Failing here, at startup, is the whole
+   * point: the alternative is a process that ships happily for a week and whose
+   * usage turns out to be filed under a shared placeholder nobody can claim.
    */
-  constructor(ingestKey: string, agent: string) {
+  constructor(ingestKey: string, agent: string, app: string) {
+    if (app === undefined || app === null || app.trim() === "") {
+      throw new Error(
+        "modelstat: Config requires a non-empty `app` — the name of the service " +
+          'you are instrumenting (e.g. new Config(key, agent, "checkout-api")). ' +
+          "It becomes this integration's device and account name in the dashboard.",
+      );
+    }
     this.ingestKey = ingestKey;
     this.agent = agent;
+    this.app = app.trim();
   }
 
   /**
