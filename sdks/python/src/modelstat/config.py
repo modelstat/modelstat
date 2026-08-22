@@ -89,8 +89,21 @@ class Config:
     # used (e.g. ``raw_sdk_openai``, ``raw_sdk_anthropic``, ``raw_sdk_generic``).
     # Ships as the wire ``agent`` field.
     agent: str
-    # Stable device/service identifier (``dev_...``). Should be stable per host
-    # so dedupe keys are stable across restarts.
+    # The integration's own name -- which app/service this SDK instance
+    # instruments (e.g. ``checkout-api``, ``billing-worker``). **Required**, and
+    # the server rejects a batch that does not carry it (``app_required``).
+    #
+    # This is the name your usage appears under in the dashboard: the server
+    # registers a real device per (org, app) and a real account per
+    # (provider, app) from it, so SDK traffic is attributed at ingest like any
+    # other. There is deliberately no default -- a name guessed from the process
+    # would silently merge two services that share a binary, and you would never
+    # find out.
+    app: str
+    # Stable device/service identifier (``dev_...``). Leave the default: on an
+    # org ingest key the server derives the real device identity from
+    # (org, ``app``) and ignores this. It matters only for advanced setups
+    # shipping under a pre-registered device secret.
     device_id: str = "dev_sdk"
     # This client build's version (<=40 chars). Ships as the wire
     # ``daemon_version`` field -- the *producer's* version (daemon or SDK), not
@@ -122,6 +135,17 @@ class Config:
     metadata: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # Fail at construction, not at the first flush. The server rejects an
+        # unnamed batch (``app_required``); raising here is the same rule one
+        # step earlier, where the message can name the fix and the traceback
+        # points at the caller instead of a background worker.
+        self.app = (self.app or "").strip()
+        if not self.app:
+            raise ValueError(
+                "modelstat: Config requires a non-empty `app` -- the name of the "
+                'service you are instrumenting (e.g. Config(key, agent, "checkout-api"). '
+                "It becomes this integration's device and account name in the dashboard."
+            )
         # The wire field is constrained to 1..=40 chars; keep the SDK honest so
         # a long custom version can't trip an HTTP 400 at the server.
         if len(self.client_version) > 40:

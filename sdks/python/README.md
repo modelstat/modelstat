@@ -58,7 +58,7 @@ Local-daemon mode is the **default** — supply your org ingest key and an agent
 ```python
 from modelstat import Client, Config
 
-cfg = Config("msk_live_…", "raw_sdk_openai")  # defaults to the local daemon
+cfg = Config("msk_live_…", "raw_sdk_openai", "checkout-api")  # defaults to the local daemon
 ms = Client(cfg)
 ```
 
@@ -67,7 +67,7 @@ Changed the daemon's port? Set the mode explicitly:
 ```python
 from modelstat import Config, Mode
 
-cfg = Config("msk_live_…", "raw_sdk_openai")
+cfg = Config("msk_live_…", "raw_sdk_openai", "checkout-api")
 cfg.mode = Mode.local_daemon("http://127.0.0.1:4319/v1/ingest")
 ```
 
@@ -78,7 +78,7 @@ After each real LLM call returns, hand the SDK what it already has. `record()` i
 ```python
 from modelstat import Client, Config, LlmCall, TokenUsage
 
-cfg = Config("msk_live_…", "raw_sdk_openai")
+cfg = Config("msk_live_…", "raw_sdk_openai", "checkout-api")
 
 with Client(cfg) as ms:                                  # shutdown() flushes on exit
     ms.record(
@@ -105,7 +105,7 @@ from openai import OpenAI
 import modelstat
 from modelstat import Client, Config
 
-ms = Client(Config("msk_live_…", "raw_sdk_openai"))
+ms = Client(Config("msk_live_…", "raw_sdk_openai", "checkout-api"))
 client = modelstat.wrap(OpenAI(), recorder=ms, metadata={"feature": "search"})
 
 # …unchanged usage; this is auto-recorded (provider, model, tokens, text)…
@@ -125,7 +125,7 @@ import modelstat
 from modelstat import Config, LlmCall
 
 # 1. Config defaults — on every call.
-cfg = Config("msk_live_…", "raw_sdk_openai")
+cfg = Config("msk_live_…", "raw_sdk_openai", "checkout-api")
 cfg.metadata = {"environment": "prod", "service": "checkout"}
 
 # 2. Ambient layer — scoped to a `with` block (auto-resets on exit/exception).
@@ -137,6 +137,9 @@ with modelstat.metadata({"customer_id": "cus_42"}):
 
 `modelstat.metadata(...)` uses `contextvars`, so any `record()` (or `wrap()` call) inside the block — including across `await`s under asyncio — picks up the ambient tags; nested blocks merge. Caps are enforced in-process before send: at most **16** entries (excess keys dropped deterministically in sorted-key order), keys truncated to **64** chars, values to **256**. The merged map ships as the event's `metadata` field, omitted entirely when empty.
 
+
+**`app` is required.** It names the service you are instrumenting (`"checkout-api"`, `"billing-worker"`). The server registers a real device per (org, app) and a real account per (provider, app) from it, so your usage shows up under that name — and it rejects a batch that does not carry one (`app_required`). There is no default: a name guessed from the process would silently merge two services that share a binary.
+
 ## Modes
 
 | Mode | Where summarization runs | What leaves your machine | Use when |
@@ -146,7 +149,7 @@ with modelstat.metadata({"customer_id": "cus_42"}):
 
 ```python
 # Remote (no local daemon / no local model):
-cfg = Config("msk_live_…", "raw_sdk_openai").with_remote(
+cfg = Config("msk_live_…", "raw_sdk_openai", "checkout-api").with_remote(
     "https://api.modelstat.ai", raw=True
 )
 ```
@@ -156,7 +159,7 @@ cfg = Config("msk_live_…", "raw_sdk_openai").with_remote(
 modelstat can auto-detect a work-type *taxonomy* over your sessions, but that's tuned for interactive coding sessions — backend LLM usage usually isn't. So for the SDK taxonomy is **off by default**: every batch ships an explicit `auto_taxonomy: false`. Opt in with the config flag:
 
 ```python
-cfg = Config("msk_live_…", "raw_sdk_openai")
+cfg = Config("msk_live_…", "raw_sdk_openai", "checkout-api")
 cfg.auto_taxonomy = True  # force server-side taxonomy auto-detection on
 ```
 

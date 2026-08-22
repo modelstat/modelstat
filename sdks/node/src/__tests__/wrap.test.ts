@@ -3,7 +3,7 @@ import test from "node:test";
 import { Client, Config, FakeTransport, wrap } from "../index.js";
 
 const cfg = (agent = "raw_sdk_openai"): Config =>
-  new Config("msk_test", agent).withDeviceId("dev_test");
+  new Config("msk_test", agent, "test-app").withDeviceId("dev_test");
 
 // ---- fake provider clients (OpenAI- and Anthropic-shaped) -------------------
 

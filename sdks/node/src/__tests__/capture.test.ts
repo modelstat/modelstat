@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Config, LlmCall } from "../index.js";
 import { buildBatch, type SeqRef } from "../capture.js";
+import { CLIENT_VERSION, PKG_VERSION } from "../version.js";
 
 // `Config` / `LlmCall` are the public API (re-exported from the package root);
 // the internal `buildBatch` / `SeqRef` live in capture.js and are imported from
 // there to exercise the batching path directly.
 
 const cfg = (): Config =>
-  new Config("msk_test", "raw_sdk_openai").withDeviceId("dev_test");
+  new Config("msk_test", "raw_sdk_openai", "test-app").withDeviceId("dev_test");
 
 test("buildBatch redacts the excerpt and caps its length", () => {
   const seq: SeqRef = { value: 0 };
@@ -30,7 +32,7 @@ test("buildBatch redacts the excerpt and caps its length", () => {
   assert.ok(ev.source_event_id.startsWith("evt_"));
   assert.ok(batch.batch_id.startsWith("batch_"));
   // daemon_version is the producer version key (NOT client_version).
-  assert.equal(batch.daemon_version, "node-sdk/0.0.4");
+  assert.equal(batch.daemon_version, CLIENT_VERSION);
   assert.ok(batch.daemon_version.length <= 40);
 });
 
@@ -153,7 +155,7 @@ test("command_families cap at 3 and omit when empty", () => {
 
 test("raw mode sends full untruncated turns, still floor-redacted", () => {
   const seq: SeqRef = { value: 0 };
-  const remoteCfg = new Config("msk", "raw_sdk_openai")
+  const remoteCfg = new Config("msk", "raw_sdk_openai", "test-app")
     .withDeviceId("dev_test")
     .withRemote("https://api.modelstat.ai", true);
   const long = "word ".repeat(200); // > 320 chars
@@ -204,4 +206,38 @@ test("the call states the instants it saw and omits the one it did not", () => {
   // No stream, no first chunk to time — the key is omitted, never null.
   assert.ok(!("first_token_at" in a));
   assert.equal(b.first_token_at, "2026-06-19T00:00:00.140Z");
+});
+
+test("Config demands a name for the service it instruments", () => {
+  // The server rejects an unnamed batch (`app_required`); failing here is the
+  // same rule enforced one step earlier, where the message can name the fix.
+  for (const bad of ["", "   "]) {
+    assert.throws(
+      () => new Config("msk", "raw_sdk_openai", bad),
+      /non-empty `app`/,
+      `app ${JSON.stringify(bad)} must be rejected`,
+    );
+  }
+  assert.equal(new Config("msk", "raw_sdk_openai", "  checkout-api  ").app, "checkout-api");
+});
+
+test("every batch names its app and its sessions' account", () => {
+  const named = new Config("msk", "raw_sdk_openai", "checkout-api").withDeviceId("dev_test");
+  const call = new LlmCall("openai", "sess-1").model("gpt-5.6-sol");
+  const batch = buildBatch(named, [call], { value: 0 });
+
+  assert.equal(batch.app, "checkout-api", "the server derives the device from (org, app)");
+  assert.deepEqual(batch.session_installs, {
+    "sess-1": { provider_account_id: "checkout-api", provider: "openai" },
+  });
+});
+
+test("the baked-in version matches package.json", async () => {
+  // These drifted once (package.json 0.0.7, PKG_VERSION 0.0.4), so every batch
+  // reported a version the package had not been for three releases. Nothing
+  // failed — it just lied, which is the whole reason this assertion exists.
+  const pkg = JSON.parse(
+    await readFile(new URL("../../package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(PKG_VERSION, pkg.version);
 });

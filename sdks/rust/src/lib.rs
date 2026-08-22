@@ -24,7 +24,7 @@
 //! use modelstat::{Client, Config, LlmCall, TokenUsage};
 //!
 //! // Org-scoped ingest key binds traffic to your account; remote mode here.
-//! let cfg = Config::new("msk_live_…", "raw_sdk_openai")
+//! let cfg = Config::new("msk_live_…", "raw_sdk_openai", "checkout-api")
 //!     .with_remote("https://api.modelstat.ai", /* raw */ true);
 //! let ms = Client::new(cfg);
 //!
@@ -129,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_then_flush_delivers_a_redacted_batch() {
-        let cfg = Config::new("msk_test", "raw_sdk_openai").with_device_id("dev_test");
+        let cfg = Config::new("msk_test", "raw_sdk_openai", "test-app").with_device_id("dev_test");
         let fake = Arc::new(FakeTransport::new());
         let ms = Client::with_transport(cfg, fake.clone());
 
@@ -159,7 +159,7 @@ mod tests {
     #[tokio::test]
     async fn overflow_drops_newest_and_counts_without_blocking() {
         // Tiny buffer, and never flush, so the buffer fills.
-        let mut cfg = Config::new("msk", "raw_sdk_generic").with_device_id("dev_test");
+        let mut cfg = Config::new("msk", "raw_sdk_generic", "test-app").with_device_id("dev_test");
         cfg.buffer_capacity = 2;
         cfg.flush_interval = std::time::Duration::from_secs(3600);
         let fake = Arc::new(FakeTransport::new());

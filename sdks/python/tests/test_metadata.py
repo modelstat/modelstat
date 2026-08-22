@@ -13,7 +13,7 @@ from modelstat.wire import cap_metadata
 
 
 def cfg() -> Config:
-    return Config("msk_test", "raw_sdk_openai").with_device_id("dev_test")
+    return Config("msk_test", "raw_sdk_openai", "test-app").with_device_id("dev_test")
 
 
 class TestMetadataPrecedence(unittest.TestCase):

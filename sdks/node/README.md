@@ -40,7 +40,7 @@ Local-daemon mode is the **default** — supply your org ingest key and an agent
 import { Client, Config, LlmCall } from "@modelstat/sdk";
 
 // `msk_…` org ingest key + the AI-tool label this service integrates with.
-const cfg = new Config("msk_live_…", "raw_sdk_openai"); // defaults to the local daemon
+const cfg = new Config("msk_live_…", "raw_sdk_openai", "checkout-api"); // defaults to the local daemon
 const ms = new Client(cfg);
 
 // ... after each real LLM call returns, hand the SDK what it already has ...
@@ -57,7 +57,7 @@ await ms.shutdown(); // flush what's buffered on the way out
 The daemon listens on `http://127.0.0.1:4319` by default. Changed the port? Set the mode explicitly:
 
 ```ts
-const cfg = new Config("msk_live_…", "raw_sdk_openai");
+const cfg = new Config("msk_live_…", "raw_sdk_openai", "checkout-api");
 cfg.mode = { kind: "local_daemon", url: "http://127.0.0.1:4319/v1/ingest" };
 ```
 
@@ -68,7 +68,7 @@ cfg.mode = { kind: "local_daemon", url: "http://127.0.0.1:4319/v1/ingest" };
 For serverless or anywhere you cannot run a local model, ship directly to the modelstat server:
 
 ```ts
-const cfg = new Config("msk_live_…", "raw_sdk_openai")
+const cfg = new Config("msk_live_…", "raw_sdk_openai", "checkout-api")
   .withRemote("https://api.modelstat.ai", /* raw */ true);
 const ms = new Client(cfg);
 ```
@@ -87,7 +87,7 @@ Don't want to hand-build an `LlmCall`? Wrap your `openai` or `@anthropic-ai/sdk`
 import OpenAI from "openai";
 import { Client, Config, wrap } from "@modelstat/sdk";
 
-const ms = new Client(new Config("msk_live_…", "raw_sdk_openai"));
+const ms = new Client(new Config("msk_live_…", "raw_sdk_openai", "checkout-api"));
 const openai = wrap(new OpenAI(), { client: ms, metadata: { feature: "search" } });
 
 // …unchanged usage; this is auto-recorded (provider, model, tokens, text)…
@@ -107,7 +107,7 @@ Attach free-form `string → string` tags to attribute spend — by `feature`, `
 import { Config, LlmCall, withMetadata } from "@modelstat/sdk";
 
 // 1. Config defaults — on every call.
-const cfg = new Config("msk_live_…", "raw_sdk_openai");
+const cfg = new Config("msk_live_…", "raw_sdk_openai", "checkout-api");
 cfg.metadata = { environment: "prod", service: "checkout" };
 
 // 2. Ambient layer — scoped to an async region (auto-resets on exit/throw).
@@ -141,7 +141,7 @@ ms.record(call);
 modelstat can auto-detect a work-type *taxonomy* over your sessions, but that's tuned for interactive coding sessions — backend LLM usage usually isn't. So for the SDK taxonomy is **off by default**: every batch ships an explicit `auto_taxonomy: false`. Opt in with the config flag:
 
 ```ts
-const cfg = new Config("msk_live_…", "raw_sdk_openai");
+const cfg = new Config("msk_live_…", "raw_sdk_openai", "checkout-api");
 cfg.autoTaxonomy = true; // force server-side taxonomy auto-detection on
 ```
 
@@ -162,7 +162,8 @@ Source-event and batch ids are derived with **blake3** (via `@noble/hashes`), ex
 
 ## API surface
 
-- `new Config(ingestKey, agent)` — `.withRemote(baseUrl, raw)`, `.withDeviceId(id)`; public fields `mode`, `redaction`, `bufferCapacity`, `flushIntervalMs`, `flushMaxBatch`, `deviceId`, `version`, `autoTaxonomy` (default `false`), `metadata` (default `{}`).
+- **`app` is required.** It names the service you are instrumenting (`"checkout-api"`, `"billing-worker"`). The server registers a real device per (org, app) and a real account per (provider, app) from it, so your usage shows up under that name — and it rejects a batch that does not carry one (`app_required`). There is no default: a name guessed from the process would silently merge two services that share a binary.
+- `new Config(ingestKey, agent, app)` — `.withRemote(baseUrl, raw)`, `.withDeviceId(id)`; public fields `mode`, `redaction`, `bufferCapacity`, `flushIntervalMs`, `flushMaxBatch`, `deviceId`, `version`, `autoTaxonomy` (default `false`), `metadata` (default `{}`).
 - `new LlmCall(provider, sessionId)` — fluent `.model(m)`, `.tokens({…})`, `.text(prompt, completion)`, `.metadata({…})`; public fields `kind`, `startedAt`, `firstTokenAt`, `durationMs`, `cwd`, `git`, `toolCalls`, `metadataTags`. `startedAt` ships as the wire `started_at`; set `firstTokenAt` from a streaming loop's first chunk and it ships as `first_token_at` (omitted otherwise — a call that returns in one piece has no first chunk to time).
 - `new Client(cfg)` / `Client.withTransport(cfg, transport)` — `record(call)`, `await flush()`, `await shutdown()`, `dropped()`.
 - `wrap(providerClient, { client, metadata?, sessionId? })` — auto-record an `openai` / `@anthropic-ai/sdk` client (returns a transparent proxy).

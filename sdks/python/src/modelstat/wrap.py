@@ -21,7 +21,7 @@ Example
     import modelstat
     from modelstat import Client, Config
 
-    ms = Client(Config("msk_live_...", "raw_sdk_openai"))
+    ms = Client(Config("msk_live_...", "raw_sdk_openai", "checkout-api"))
     client = modelstat.wrap(OpenAI(), recorder=ms, metadata={"feature": "search"})
 
     # ... unchanged usage; auto-recorded ...

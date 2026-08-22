@@ -330,22 +330,50 @@ class ToolCallWire:
 
 
 @dataclass
+class SessionInstall:
+    """The account a session belongs to, named on the wire.
+
+    The same ``session_installs`` layer daemons ship. Naming it here is what
+    makes SDK usage attribute AT INGEST to a real per-app account, instead of
+    falling through to a server-side placeholder named after a scope id.
+    """
+
+    # The provider-side account reference. For an SDK integration this is the
+    # app's name (``Config.app``) -- the API key's usage IS the app's.
+    provider_account_id: str
+    # The provider the account belongs to (the other half of the lookup key).
+    provider: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "provider_account_id": self.provider_account_id,
+            "provider": self.provider,
+        }
+
+
+@dataclass
 class IngestBatch:
     """The full ingest payload.
 
-    The SDK only ever emits ``events`` (+ ``tool_calls``); segmentation,
-    summarization, titles, and session-installs are produced downstream by the
-    daemon or server.
+    The SDK emits ``events`` (+ ``tool_calls``) and names the app + each
+    session's account; segmentation, summarization and titles are produced
+    downstream by the daemon or server.
     """
 
     batch_id: str
     device_id: str
+    # The integration's own name (``Config.app``). REQUIRED: the server derives
+    # this batch's real device identity from (org, app) -- one registered device
+    # per integration, named after the app -- and rejects a batch without it.
+    app: str
     # This SDK build's version string (<=40 chars). Ships as the wire
     # ``daemon_version`` field -- the server's name for the producing client's
     # version; an SDK is just another producer of the ingest contract.
     daemon_version: str
     events: List[RawEvent] = field(default_factory=list)
     tool_calls: List[ToolCallWire] = field(default_factory=list)
+    # session_id -> the account that produced it. Omitted when empty.
+    session_installs: Dict[str, SessionInstall] = field(default_factory=dict)
     # Per-batch taxonomy auto-detection toggle. ``None`` = server default
     # (taxonomy auto/on); ``False`` = skip taxonomy auto-detection for this
     # batch; ``True`` = force it on. SDK/backend integrations default this to
@@ -357,12 +385,17 @@ class IngestBatch:
         out: Dict[str, Any] = {
             "batch_id": self.batch_id,
             "device_id": self.device_id,
+            "app": self.app,
             "daemon_version": self.daemon_version,
             "events": [e.to_dict() for e in self.events],
         }
         # Omit ``tool_calls`` entirely when empty (do NOT send an empty list).
         if self.tool_calls:
             out["tool_calls"] = [t.to_dict() for t in self.tool_calls]
+        if self.session_installs:
+            out["session_installs"] = {
+                sid: si.to_dict() for sid, si in self.session_installs.items()
+            }
         # Optional key -- omit when None (never emit null).
         if self.auto_taxonomy is not None:
             out["auto_taxonomy"] = self.auto_taxonomy

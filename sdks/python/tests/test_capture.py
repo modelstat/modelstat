@@ -14,7 +14,7 @@ from modelstat.wire import ToolCallStatus
 
 
 def cfg() -> Config:
-    return Config("msk_test", "raw_sdk_openai").with_device_id("dev_test")
+    return Config("msk_test", "raw_sdk_openai", "test-app").with_device_id("dev_test")
 
 
 class TestBuildBatch(unittest.TestCase):
@@ -133,7 +133,7 @@ class TestBuildBatch(unittest.TestCase):
         self,
     ) -> None:
         rcfg = (
-            Config("msk", "raw_sdk_openai")
+            Config("msk", "raw_sdk_openai", "test-app")
             .with_device_id("dev_test")
             .with_remote("https://api.modelstat.ai", raw=True)
         )
@@ -191,3 +191,28 @@ class TestBuildBatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAppIsRequired(unittest.TestCase):
+    def test_config_demands_a_name_for_the_service_it_instruments(self):
+        """The server rejects an unnamed batch (``app_required``); raising here
+        is the same rule one step earlier, where the message names the fix."""
+        for bad in ("", "   "):
+            with self.assertRaises(ValueError) as ctx:
+                Config("msk", "raw_sdk_openai", bad)
+            self.assertIn("non-empty `app`", str(ctx.exception))
+        self.assertEqual(
+            Config("msk", "raw_sdk_openai", "  checkout-api  ").app, "checkout-api"
+        )
+
+    def test_every_batch_names_its_app_and_its_sessions_account(self):
+        cfg = Config("msk", "raw_sdk_openai", "checkout-api").with_device_id("dev_test")
+        call = LlmCall("openai", "sess-1", model="gpt-5.6-sol")
+        batch, _ = build_batch(cfg, [call], 0)
+        d = batch.to_dict()
+
+        self.assertEqual(d["app"], "checkout-api")
+        self.assertEqual(
+            d["session_installs"],
+            {"sess-1": {"provider_account_id": "checkout-api", "provider": "openai"}},
+        )

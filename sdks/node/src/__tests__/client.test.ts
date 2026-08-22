@@ -10,7 +10,7 @@ import {
 } from "../index.js";
 
 test("record then flush delivers a redacted batch", async () => {
-  const cfg = new Config("msk_test", "raw_sdk_openai").withDeviceId("dev_test");
+  const cfg = new Config("msk_test", "raw_sdk_openai", "test-app").withDeviceId("dev_test");
   const fake = new FakeTransport();
   const ms = Client.withTransport(cfg, fake);
 
@@ -38,7 +38,7 @@ test("record then flush delivers a redacted batch", async () => {
 
 test("overflow drops the newest and counts without blocking", async () => {
   // Tiny buffer, and never flush, so the buffer fills.
-  const cfg = new Config("msk", "raw_sdk_generic").withDeviceId("dev_test");
+  const cfg = new Config("msk", "raw_sdk_generic", "test-app").withDeviceId("dev_test");
   cfg.bufferCapacity = 2;
   cfg.flushIntervalMs = 3_600_000; // effectively never
   const fake = new FakeTransport();
@@ -54,7 +54,7 @@ test("overflow drops the newest and counts without blocking", async () => {
 });
 
 test("a full batch flushes eagerly without an explicit flush", async () => {
-  const cfg = new Config("msk", "raw_sdk_openai").withDeviceId("dev_test");
+  const cfg = new Config("msk", "raw_sdk_openai", "test-app").withDeviceId("dev_test");
   cfg.flushMaxBatch = 3;
   cfg.flushIntervalMs = 3_600_000; // rely on the size trigger, not the timer
   const fake = new FakeTransport();
@@ -78,7 +78,7 @@ test("a full batch flushes eagerly without an explicit flush", async () => {
 });
 
 test("the periodic timer flushes buffered calls", async () => {
-  const cfg = new Config("msk", "raw_sdk_openai").withDeviceId("dev_test");
+  const cfg = new Config("msk", "raw_sdk_openai", "test-app").withDeviceId("dev_test");
   cfg.flushIntervalMs = 20; // fast tick for the test
   const fake = new FakeTransport();
   const ms = Client.withTransport(cfg, fake);
@@ -92,7 +92,7 @@ test("the periodic timer flushes buffered calls", async () => {
 });
 
 test("flush on an empty buffer is a no-op (no batch sent)", async () => {
-  const cfg = new Config("msk", "raw_sdk_openai");
+  const cfg = new Config("msk", "raw_sdk_openai", "test-app");
   const fake = new FakeTransport();
   const ms = Client.withTransport(cfg, fake);
   await ms.flush();
@@ -102,16 +102,16 @@ test("flush on an empty buffer is a no-op (no batch sent)", async () => {
 
 test("endpoint resolution per mode", () => {
   // Default: local daemon loopback.
-  const local = new Config("k", "a");
+  const local = new Config("k", "a", "test-app");
   assert.equal(endpoint(local.mode), "http://127.0.0.1:4319/v1/ingest");
 
   // Remote, non-raw: /v1/ingest with a trimmed trailing slash.
-  const remote = new Config("k", "a").withRemote("https://api.modelstat.ai/", false);
+  const remote = new Config("k", "a", "test-app").withRemote("https://api.modelstat.ai/", false);
   assert.equal(endpoint(remote.mode), "https://api.modelstat.ai/v1/ingest");
   assert.equal(remote.sendsFullTurns(), false);
 
   // Remote, raw: /v1/ingest/raw.
-  const raw = new Config("k", "a").withRemote("https://api.modelstat.ai", true);
+  const raw = new Config("k", "a", "test-app").withRemote("https://api.modelstat.ai", true);
   assert.equal(endpoint(raw.mode), "https://api.modelstat.ai/v1/ingest/raw");
   assert.equal(raw.sendsFullTurns(), true);
 });
@@ -130,7 +130,7 @@ test("worker retries once on transient failure then succeeds", async () => {
       return Promise.resolve();
     },
   };
-  const cfg = new Config("msk", "raw_sdk_openai");
+  const cfg = new Config("msk", "raw_sdk_openai", "test-app");
   const ms = Client.withTransport(cfg, flaky);
   ms.record(new LlmCall("openai", "sess_1"));
   await ms.flush(); // includes the 250ms retry backoff

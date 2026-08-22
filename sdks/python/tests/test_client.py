@@ -11,7 +11,7 @@ from modelstat import Client, Config, FakeTransport, LlmCall, TokenUsage
 
 class TestClient(unittest.TestCase):
     def test_record_then_flush_delivers_a_redacted_batch(self) -> None:
-        cfg = Config("msk_test", "raw_sdk_openai").with_device_id("dev_test")
+        cfg = Config("msk_test", "raw_sdk_openai", "test-app").with_device_id("dev_test")
         fake = FakeTransport()
         ms = Client.with_transport(cfg, fake)
 
@@ -35,7 +35,7 @@ class TestClient(unittest.TestCase):
         ms.shutdown()
 
     def test_flushed_batch_is_a_wire_dict_with_required_keys(self) -> None:
-        cfg = Config("msk_test", "raw_sdk_anthropic").with_device_id("dev_x")
+        cfg = Config("msk_test", "raw_sdk_anthropic", "test-app").with_device_id("dev_x")
         fake = FakeTransport()
         ms = Client.with_transport(cfg, fake)
         ms.record(LlmCall("anthropic", "sess_1").text("hello", "world"))
@@ -59,7 +59,7 @@ class TestClient(unittest.TestCase):
 
     def test_overflow_drops_newest_and_counts_without_blocking(self) -> None:
         # Tiny buffer, and a long flush interval, so the buffer fills.
-        cfg = Config("msk", "raw_sdk_generic").with_device_id("dev_test")
+        cfg = Config("msk", "raw_sdk_generic", "test-app").with_device_id("dev_test")
         cfg.buffer_capacity = 2
         cfg.flush_interval = 3600.0
         fake = FakeTransport()
@@ -73,7 +73,7 @@ class TestClient(unittest.TestCase):
         ms.shutdown()
 
     def test_context_manager_flushes_on_exit(self) -> None:
-        cfg = Config("msk_test", "raw_sdk_openai")
+        cfg = Config("msk_test", "raw_sdk_openai", "test-app")
         fake = FakeTransport()
         with Client.with_transport(cfg, fake) as ms:
             ms.record(LlmCall("openai", "sess_1").text("hi", "there"))
@@ -81,7 +81,7 @@ class TestClient(unittest.TestCase):
         self.assertEqual(len(fake.batches()), 1)
 
     def test_interval_flush_fires_without_explicit_flush(self) -> None:
-        cfg = Config("msk_test", "raw_sdk_openai")
+        cfg = Config("msk_test", "raw_sdk_openai", "test-app")
         cfg.flush_interval = 0.05
         fake = FakeTransport()
         ms = Client.with_transport(cfg, fake)
