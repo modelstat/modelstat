@@ -1751,6 +1751,7 @@ mod tests {
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: Vec::new(),
+            tool_paths: Vec::new(),
             content_excerpt: None,
             content_bytes: None,
             reasoning_excerpt: None,

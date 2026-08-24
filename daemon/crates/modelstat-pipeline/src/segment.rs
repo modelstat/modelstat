@@ -452,6 +452,7 @@ mod tests {
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: vec!["a".into(), "b".into()],
+            tool_paths: Vec::new(),
             content_excerpt: Some("secret content".into()),
             references: None,
             source_file: None,

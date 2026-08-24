@@ -204,6 +204,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             duration_ms: None,
             tool_calls: std::collections::BTreeMap::new(),
             files_touched: Vec::new(),
+            tool_paths: Vec::new(),
             content_excerpt: Some(cleaned),
             content_bytes: Some(content_bytes),
             reasoning_excerpt: None,

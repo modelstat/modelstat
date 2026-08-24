@@ -522,6 +522,11 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
 
             let mut aggregate: std::collections::BTreeMap<String, u64> =
                 std::collections::BTreeMap::new();
+            // Every path this turn's calls named. Claude Code is normally
+            // launched from inside the checkout, so its `cwd` usually answers
+            // already (1,131 of 1,147 sessions) — but a run started one
+            // directory up answers nothing, and these paths still do.
+            let mut tool_paths: Vec<String> = Vec::new();
             if let Value::Array(blocks) = &content {
                 let mut call_index: u64 = 0;
                 for block in blocks {
@@ -539,6 +544,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                         continue;
                     }
                     let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    RawEvent::collect_tool_paths(&input, &mut tool_paths);
                     let draft = build_tool_call_draft(
                         observed,
                         block.get("id"),
@@ -598,6 +604,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                 duration_ms: None,
                 tool_calls: aggregate,
                 files_touched: Vec::new(),
+                tool_paths,
                 content_excerpt: excerpt,
                 content_bytes,
                 reasoning_excerpt,
@@ -708,6 +715,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                 duration_ms,
                 tool_calls: std::collections::BTreeMap::new(),
                 files_touched: Vec::new(),
+                tool_paths: Vec::new(),
                 content_excerpt: excerpt,
                 content_bytes,
                 reasoning_excerpt: None,
