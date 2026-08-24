@@ -24,7 +24,6 @@
 //! branch-ticket detection want it); only the repo identity is corrected.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use modelstat_wire::{GitContext, RawEvent, SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_REPO_ROOT_DIR};
 
@@ -149,28 +148,52 @@ fn push_unique(dirs: &mut Vec<String>, dir: String) {
     }
 }
 
+/// Both separators, on every platform — the same rule the codex parser states
+/// for the paths it reads. A transcript can be written on one machine and read
+/// on another, so the source's spelling of a separator is not the host's.
+const SEPARATORS: [char; 2] = ['/', '\\'];
+
+/// Does `path` name a location from the filesystem ROOT, by SHAPE?
+///
+/// `Path::is_absolute` answers for the HOST, and that is the wrong question
+/// here: on Windows it is false for `/Users/dev/app` — a perfectly absolute
+/// path written by the macOS machine whose transcript this is. Asking the host
+/// would splice that onto the session's cwd and resolve a directory nobody
+/// visited.
+fn states_root(path: &str) -> bool {
+    path.starts_with(SEPARATORS)
+        // A drive prefix (`C:\src`, `c:/src`) — the one absolute shape that
+        // does not open with a separator.
+        || matches!(path.as_bytes(), [d, b':', rest @ ..]
+            if d.is_ascii_alphabetic() && rest.first().is_some_and(|c| SEPARATORS.contains(&(*c as char))))
+}
+
 /// The directory a named path sits in.
 ///
 /// A path the source stated RELATIVE (`core/rust/main.rs`) names a directory
-/// only against the session's own cwd, so it is joined against it.
-/// `Path::join` lets an ABSOLUTE argument replace the base outright, which is
-/// exactly the rule wanted here and is why both spellings take one expression.
+/// only against the session's own cwd, so it is joined against it. One that
+/// states the root already names one and is taken as it stands.
+///
+/// String work rather than [`Path`], for the reason [`SEPARATORS`] gives: the
+/// join has to produce the same directory whichever machine wrote the
+/// transcript and whichever one reads it.
 fn candidate_dir(path: &str, cwd: Option<&str>) -> Option<String> {
-    let parent = Path::new(path.trim()).parent()?;
-    if parent.as_os_str().is_empty() {
+    let path = path.trim();
+    let (parent, _) = path.rsplit_once(SEPARATORS)?;
+    if parent.is_empty() {
         // A bare filename names its own cwd, which is already the last
-        // candidate — offering it again would just spend budget twice.
+        // candidate — offering it again would just spend budget twice. So does
+        // a root-anchored name (`/main.rs`), whose parent is the root itself.
         return None;
     }
-    match cwd {
-        Some(cwd) => Some(Path::new(cwd).join(parent).to_string_lossy().into_owned()),
-        // With no cwd an absolute path still names a directory; a relative one
-        // names nothing this process may guess at. Anchoring it to the DAEMON's
-        // own working directory would name a directory the session never
-        // visited, which is worse than admitting there is no answer.
-        None if parent.is_absolute() => Some(parent.to_string_lossy().into_owned()),
-        None => None,
+    if states_root(path) {
+        return Some(parent.to_string());
     }
+    // A relative path with NO cwd names nothing this process may guess at.
+    // Anchoring it to the DAEMON's own working directory would name a directory
+    // the session never visited, which is worse than admitting there is no
+    // answer — so absent cwd stays absent here.
+    cwd.map(|cwd| format!("{}/{parent}", cwd.trim_end_matches(SEPARATORS)))
 }
 
 /// The repo identity of one directory, or None when no `.git` is reachable from
@@ -402,6 +425,45 @@ mod tests {
         )];
         let out = resolve_authoritative_git(&events, git_of(DOCUMENTS), root_fn(DOCUMENTS));
         assert_eq!(slug_of(&out[0]), Some("modelstat/core"));
+    }
+
+    /// THE HOST IS NOT THE AUTHOR. A transcript is read on whatever machine
+    /// happens to run the daemon, so every shape below has to name the same
+    /// directory on every platform. `Path` cannot do this job: it answers
+    /// `is_absolute` for the host (false for `/Users/dev/app` on Windows, which
+    /// would splice a macOS path onto the cwd) and joins with the host's
+    /// separator (so the resolver would be handed two spellings of one
+    /// directory and cache-miss on both).
+    #[test]
+    fn a_stated_path_names_one_directory_whoever_reads_it() {
+        let cwd = Some("/Users/dev/Documents");
+        for (path, want) in [
+            // Root-stated, either spelling: taken as it stands, cwd ignored.
+            ("/Users/dev/other/main.rs", Some("/Users/dev/other")),
+            ("\\Users\\dev\\other\\main.rs", Some("\\Users\\dev\\other")),
+            ("C:\\src\\app\\main.rs", Some("C:\\src\\app")),
+            ("c:/src/app/main.rs", Some("c:/src/app")),
+            // Relative, either spelling: joined against the cwd.
+            ("core/rust/main.rs", Some("/Users/dev/Documents/core/rust")),
+            (
+                "core\\rust\\main.rs",
+                Some("/Users/dev/Documents/core\\rust"),
+            ),
+            // A bare name, and a root-anchored one, add no directory the cwd
+            // does not already offer.
+            ("main.rs", None),
+            ("/main.rs", None),
+        ] {
+            assert_eq!(candidate_dir(path, cwd).as_deref(), want, "{path}");
+        }
+        // A relative path with no cwd has nothing to be relative TO, and the
+        // daemon's own working directory is not an answer.
+        assert_eq!(candidate_dir("core/rust/main.rs", None), None);
+        // Root-stated still answers without a cwd.
+        assert_eq!(
+            candidate_dir("/Users/dev/other/main.rs", None).as_deref(),
+            Some("/Users/dev/other")
+        );
     }
 
     /// The no-regression claim, stated as an invariant rather than a snapshot:
