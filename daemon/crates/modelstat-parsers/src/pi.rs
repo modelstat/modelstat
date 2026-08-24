@@ -327,6 +327,11 @@ fn parse_inner(
             let refs = detect_event_references(&collect_ref_text(&content));
 
             let mut aggregate: BTreeMap<String, u64> = BTreeMap::new();
+            // Every path this turn's calls named — a pi session is routinely
+            // launched from a directory that HOLDS repos rather than being one,
+            // and then its `cwd` states no repo at all (0 of 327 sessions did).
+            // These are the only facts that can.
+            let mut tool_paths: Vec<String> = Vec::new();
             if let Value::Array(blocks) = &content {
                 let mut call_index: u64 = 0;
                 for block in blocks {
@@ -346,6 +351,7 @@ fn parse_inner(
                     let (server, name) = split_observed_tool_name(observed);
                     let input = block.get("arguments").cloned().unwrap_or(Value::Null);
                     let hashes = hash_args(&input);
+                    RawEvent::collect_tool_paths(&input, &mut tool_paths);
                     let raw_id = block.get("id").and_then(Value::as_str);
                     let external_call_id = match raw_id {
                         Some(s) if !s.trim().is_empty() => slice_utf16(s.trim(), 120),
@@ -427,6 +433,7 @@ fn parse_inner(
                 duration_ms: None,
                 tool_calls: aggregate,
                 files_touched: Vec::new(),
+                tool_paths,
                 content_excerpt: excerpt,
                 content_bytes,
                 reasoning_excerpt: None,
@@ -525,6 +532,7 @@ fn parse_inner(
             duration_ms: None,
             tool_calls: BTreeMap::new(),
             files_touched: Vec::new(),
+            tool_paths: Vec::new(),
             content_excerpt: excerpt,
             content_bytes,
             reasoning_excerpt: None,

@@ -361,8 +361,34 @@ pub const LEGACY_WORLD_VERSION: i64 = 23;
 ///       key needs evidence this corpus does not give.
 ///       A re-scan is what re-keys the history; the events the old key already
 ///       landed are the server's to tombstone. Only codex's files re-read.
+/// capture v28 — a session's repository is a fact about the FILES it touched,
+///       not about where the agent happened to be started. Placement routes on
+///       the segment `projects` hint, that hint takes only a VERIFIED slug
+///       (`git_remote` or `repo_root_dir`), and the daemon derived the slug by
+///       resolving `cwd` and nothing else — so an agent launched from a
+///       directory that HOLDS checkouts rather than being one stated no repo at
+///       all, on every session, forever. Measured over all time: `pi` stated a
+///       repo on 0 of 327 sessions, `cursor` on 0 of 202, Claude Desktop on 0
+///       of 51, against `claude_code`'s 1,131 of 1,147 — the one agent normally
+///       launched from inside the checkout. Downstream that is not a missing
+///       label but a wrong home: 306 of one user's 317 sessions fell through to
+///       their router's personal workspace instead of the org that owns the
+///       code they were editing. Events now carry the paths their tool calls
+///       named — local-only, shed at the wire door beside `cwd`, because an
+///       absolute path is a home directory — and resolution tries the parent
+///       directory of each of them, most specific first, before falling back to
+///       `cwd`. CROSS-PARSER: claude_code, codex and pi all produce the paths,
+///       and every parser's events are re-filed by the corrected identity, so
+///       the CAPTURE aspect carries it rather than any parser aspect. A FLEET
+///       RE-SCAN is required and is the whole point — `git.slug_source` is the
+///       documented re-ship trigger (`consumer/src/backfill_segment_hints.rs`
+///       re-ships a session when it changes), and re-reading the local logs is
+///       the only thing that can re-file a session already uploaded: the server
+///       cannot derive a repo from data that never named one. Cursor is not a
+///       producer here — it parses no tool calls, so it has no paths to offer
+///       and its sessions still wait on a source of their own.
 pub const ASPECT_VERSIONS: &[(&str, i64)] = &[
-    ("capture", LEGACY_WORLD_VERSION + 4),
+    ("capture", LEGACY_WORLD_VERSION + 5),
     ("redaction", LEGACY_WORLD_VERSION),
     ("claude_code", LEGACY_WORLD_VERSION + 3),
     ("codex", LEGACY_WORLD_VERSION + 6),

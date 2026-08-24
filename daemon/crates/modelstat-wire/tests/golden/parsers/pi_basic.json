@@ -55,6 +55,9 @@
         "read_file": 1
       },
       "files_touched": [],
+      "tool_paths": [
+        "src/x.ts"
+      ],
       "content_excerpt": "Let me look.",
       "content_bytes": 12,
       "source_file": "/tmp/modelstat-fixtures/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl",

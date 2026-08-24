@@ -766,6 +766,7 @@ mod tests {
             duration_ms: None,
             tool_calls: Default::default(),
             files_touched: vec![],
+            tool_paths: Vec::new(),
             content_excerpt: content.map(str::to_string),
             references: None,
             source_file: None,

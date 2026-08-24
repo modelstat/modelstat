@@ -219,6 +219,31 @@ pub struct RawEvent {
     pub tool_calls: BTreeMap<String, u64>,
     #[serde(default)]
     pub files_touched: Vec<String>,
+    /// The filesystem paths this event's tool calls NAMED, verbatim as the
+    /// source stated them — absolute where the agent wrote them absolute,
+    /// cwd-relative where it wrote them relative. Local-only, exactly as
+    /// [`Self::cwd`] is: [`Self::clamp`] clears it at the wire door.
+    ///
+    /// It exists because a session's REPO is a fact about the files the work
+    /// touched, and [`Self::cwd`] is the least specific way to ask. An agent
+    /// launched from a directory that HOLDS many checkouts but is not itself a
+    /// checkout has a cwd that resolves to no repo at all, and so states no
+    /// repo — forever, on every session, however much of a repo it edited.
+    /// Measured over all time: `pi` stated a repo on 0 of 327 sessions,
+    /// `cursor` on 0 of 202, Claude Desktop on 0 of 51, while `claude_code`
+    /// — the one agent normally launched from inside the checkout — stated one
+    /// on 1,131 of 1,147. The paths are what tell those sessions apart, and
+    /// only THIS machine can resolve them: by the time a batch is on the
+    /// network the disk they name is unreachable.
+    ///
+    /// Not [`Self::files_touched`], which answers the same question for the
+    /// WIRE and is therefore made repo-relative or reduced to a bare filename
+    /// at parse time — no redactor walks a `Vec<String>`, so that sanitising is
+    /// the only thing keeping a home directory off the network. It is also what
+    /// destroys the directories git resolution needs, so the two cannot be one
+    /// field: this one keeps the whole path and never leaves the machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_excerpt: Option<String>,
     /// Chars of the cleaned message text BEFORE paste-elision/truncation
@@ -292,17 +317,22 @@ impl RawEvent {
 
     /// Forget where a file lived on the machine that produced it.
     ///
-    /// Two fields carried an absolute path the whole way to the server, past a
-    /// floor that redacts exactly that shape out of every piece of TEXT: a
-    /// command mentioning `/Users/<name>/…` shipped scrubbed while the `cwd`
-    /// beside it shipped whole, and a Claude transcript's own directory name
-    /// spells the project path out in full. What the server actually does with
-    /// them decides what may stay, and both answers were read off its source:
+    /// Three fields hold an absolute path on the way out, past a floor that
+    /// redacts exactly that shape out of every piece of TEXT: a command
+    /// mentioning `/Users/<name>/…` shipped scrubbed while the `cwd` beside it
+    /// shipped whole, and a Claude transcript's own directory name spells the
+    /// project path out in full. What the server actually does with them
+    /// decides what may stay, and every answer was read off its source:
     ///
     ///   * `cwd` — NOTHING. No column stores it, and the single matcher that
     ///     names it is set by nothing. Every real reader is on THIS machine
     ///     (git resolution, session metadata, the tray's label) and has long
     ///     since run by the time a batch reaches this method.
+    ///   * `tool_paths` — NOTHING, for the `cwd` reason and then some: it IS
+    ///     the cwd question asked of the files a turn named, its one reader
+    ///     (git resolution) runs on this machine in the same scan that parsed
+    ///     the event, and no wire schema anywhere has ever been told the field
+    ///     exists.
     ///   * `source_file` — only its FILE NAME. The one consumer splits on the
     ///     separators and keeps the last component, to recognise a transcript
     ///     named after the session it holds. Every directory above that name
@@ -320,6 +350,7 @@ impl RawEvent {
     /// somebody adds a parser.
     fn shed_local_paths(&mut self) {
         self.cwd = None;
+        self.tool_paths.clear();
         if let Some(path) = self.source_file.as_deref() {
             // `rsplit` over both separators: a transcript written on Windows
             // names itself with `\`, and the server splits on both too.
@@ -327,6 +358,59 @@ impl RawEvent {
             self.source_file = Some(name);
         }
     }
+
+    /// Collect into `out` — deduped, first-seen order — the filesystem paths
+    /// ONE tool call's arguments name. The admission rule for
+    /// [`Self::tool_paths`], written once because every parser that reads tool
+    /// arguments needs the same answer and a rule each parser re-derives is a
+    /// rule that drifts.
+    ///
+    /// Every string leaf of the argument object is considered, at any depth and
+    /// under any key. Keying on argument NAMES (`file_path`, `path`,
+    /// `notebook_path`, …) would be a claim about one harness's current tool
+    /// schema, and the next tool to call its argument `target` would state no
+    /// repo again — the very failure this field exists to end. What a path
+    /// actually needs in order to name a directory is a separator, so that is
+    /// the test, minus the two shapes that carry one while naming no local
+    /// file: a URL, and a whole command line.
+    ///
+    /// Accumulating rather than returning, so a turn's several calls dedupe
+    /// against each other without every caller repeating the bookkeeping.
+    pub fn collect_tool_paths(args: &Value, out: &mut Vec<String>) {
+        match args {
+            Value::String(s) => {
+                let path = s.trim();
+                if is_tool_path(path) && !out.iter().any(|p| p == path) {
+                    out.push(path.to_string());
+                }
+            }
+            Value::Array(items) => {
+                for v in items {
+                    Self::collect_tool_paths(v, out);
+                }
+            }
+            Value::Object(map) => {
+                for v in map.values() {
+                    Self::collect_tool_paths(v, out);
+                }
+            }
+            // A number, bool or null names no file.
+            _ => {}
+        }
+    }
+}
+
+/// Does `s` read as ONE path to something on this filesystem?
+///
+/// A separator is what makes a path able to name a directory at all, so it is
+/// the requirement; `std::path::is_separator` asks the question for the machine
+/// the log was written on, which is the only machine that will ever resolve it
+/// (Windows counts `\`, POSIX does not). The two exclusions are the shapes that
+/// carry a separator and still name no local file: a URL
+/// (`https://host/org/repo`) and a command line (`git -C sub/dir status`),
+/// which is several tokens rather than one path.
+fn is_tool_path(s: &str) -> bool {
+    !s.contains("://") && !s.contains(char::is_whitespace) && s.chars().any(std::path::is_separator)
 }
 
 /// A daemon-emitted taxonomy tag hint.
@@ -905,6 +989,9 @@ mod tests {
             duration_ms: None,
             tool_calls: BTreeMap::new(),
             files_touched: vec![],
+            // A path a tool call named, in the shape git resolution needs it:
+            // whole, absolute, and therefore a home directory.
+            tool_paths: vec![format!("{cwd}/src/main.rs")],
             content_excerpt: None,
             content_bytes: None,
             reasoning_excerpt: None,
@@ -935,6 +1022,11 @@ mod tests {
             let mut ev = local_event(cwd, file);
             ev.clamp();
             assert_eq!(ev.cwd, None, "cwd must not reach the wire");
+            assert_eq!(
+                ev.tool_paths,
+                Vec::<String>::new(),
+                "tool_paths must not reach the wire"
+            );
             assert_eq!(ev.source_file.as_deref(), Some(want));
         }
     }
@@ -1021,6 +1113,7 @@ mod tests {
             duration_ms: None,
             tool_calls: BTreeMap::new(),
             files_touched: vec![],
+            tool_paths: vec![],
             content_excerpt: None,
             content_bytes: None,
             reasoning_excerpt: None,
@@ -1041,6 +1134,36 @@ mod tests {
         // default → materialized
         assert!(v.get("tool_calls").unwrap().is_object());
         assert!(v.get("files_touched").unwrap().is_array());
+        // local-only → omitted once shed, and omitted when it was never set
+        assert!(v.get("tool_paths").is_none());
+    }
+
+    /// The admission rule for `tool_paths`, over the shapes tool arguments
+    /// actually take. Sorted before comparing because sibling-key order is not
+    /// part of the claim; dedupe and the exclusions are.
+    #[test]
+    fn tool_paths_are_the_separator_bearing_argument_strings() {
+        let mut got = Vec::new();
+        RawEvent::collect_tool_paths(
+            &serde_json::json!({
+                "file_path": "/Users/dev/Projects/acme/src/main.rs",
+                "edits": [{ "target": "core/rust/lib.rs" }, { "target": "core/rust/lib.rs" }],
+                "pattern": "TODO",
+                "command": "cargo test -p acme/core",
+                "docs": "https://example.test/acme/core",
+                "limit": 20,
+            }),
+            &mut got,
+        );
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "/Users/dev/Projects/acme/src/main.rs".to_string(),
+                "core/rust/lib.rs".to_string(),
+            ],
+            "every depth and key, deduped — and no command line, URL or bare word"
+        );
     }
 
     #[test]

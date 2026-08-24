@@ -608,6 +608,11 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
     let mut agent_reasoning: Vec<String> = Vec::new();
     let mut open_calls: HashMap<String, usize> = HashMap::new();
     let mut pending_aggregate: BTreeMap<String, u64> = BTreeMap::new();
+    // The paths this round trip's calls named, buffered onto the usage-bearing
+    // `token_count` event exactly as `pending_aggregate` is — codex reports a
+    // call and its cost on separate lines, and one event holding both is what
+    // every other parser produces.
+    let mut pending_tool_paths: Vec<String> = Vec::new();
     // `total_token_usage` from the previous `token_count` line, to catch codex
     // restating one round trip's counters twice in a row.
     let mut prev_cumulative: Option<[u64; 4]> = None;
@@ -669,6 +674,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                         session_id = conversation_id.clone();
                     }
                     pending_aggregate.clear();
+                    pending_tool_paths.clear();
                     open_calls.clear();
                     // Each conversation runs its own cumulative counter, so the
                     // previous region's last value says nothing about this one.
@@ -732,6 +738,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                     },
                 );
                 let hashes = hash_args(&extracted.input);
+                RawEvent::collect_tool_paths(&extracted.input, &mut pending_tool_paths);
                 let external_call_id = slice_utf16(
                     &extracted
                         .call_id
@@ -887,6 +894,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                             duration_ms: None,
                             tool_calls: BTreeMap::new(),
                             files_touched: Vec::new(),
+                            tool_paths: Vec::new(),
                             content_excerpt,
                             content_bytes,
                             reasoning_excerpt: None,
@@ -1056,6 +1064,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                     duration_ms: None,
                     tool_calls: std::mem::take(&mut pending_aggregate),
                     files_touched: Vec::new(),
+                    tool_paths: std::mem::take(&mut pending_tool_paths),
                     content_excerpt,
                     content_bytes,
                     reasoning_excerpt,
@@ -1189,6 +1198,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                             duration_ms: None,
                             tool_calls: BTreeMap::new(),
                             files_touched: Vec::new(),
+                            tool_paths: Vec::new(),
                             // A lifecycle record says nothing; it happens.
                             content_excerpt: None,
                             content_bytes: None,
@@ -1260,6 +1270,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                     duration_ms: None,
                     tool_calls: BTreeMap::new(),
                     files_touched: Vec::new(),
+                    tool_paths: Vec::new(),
                     content_excerpt,
                     content_bytes,
                     reasoning_excerpt: None,
@@ -1328,6 +1339,15 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                             duration_ms: record_duration_ms(&obj),
                             tool_calls: BTreeMap::new(),
                             files_touched: safe_files_touched(&changed, cwd.as_deref()),
+                            // The SAME keys, unsanitised, for the resolution
+                            // that runs before this event leaves the machine.
+                            // `files_touched` above is the wire's copy and is
+                            // relativised or reduced to a bare name, which is
+                            // exactly what a git lookup cannot use. Nothing to
+                            // sift here — codex STATED these are the files it
+                            // changed, and `changes` is an object, so its keys
+                            // are already unique.
+                            tool_paths: changed.iter().map(|p| p.trim().to_string()).collect(),
                             content_excerpt: None,
                             content_bytes: None,
                             reasoning_excerpt: None,
@@ -1415,6 +1435,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                     },
                 );
                 let hashes = hash_args(&input);
+                RawEvent::collect_tool_paths(&input, &mut pending_tool_paths);
                 let external_call_id = slice_utf16(
                     &call_id
                         .clone()
@@ -1542,6 +1563,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                             duration_ms: None,
                             tool_calls: BTreeMap::new(),
                             files_touched: Vec::new(),
+                            tool_paths: Vec::new(),
                             content_excerpt,
                             content_bytes,
                             reasoning_excerpt: None,
@@ -1598,6 +1620,7 @@ fn parse_inner(ctx: &ParserContext, sink: &mut Sink) -> std::io::Result<ParsedEx
                             duration_ms: record_duration_ms(&obj),
                             tool_calls: BTreeMap::new(),
                             files_touched: Vec::new(),
+                            tool_paths: Vec::new(),
                             content_excerpt: None,
                             content_bytes: None,
                             reasoning_excerpt: None,
