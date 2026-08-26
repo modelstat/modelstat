@@ -73,6 +73,16 @@ pub const MCP_SERVER_NAME_MAX: usize = 116;
 
 // --- IngestBatch ----------------------------------------------------------
 pub const DAEMON_VERSION_MAX: usize = 40;
+/// Highest `processing_version` the server can store — the width of its
+/// `events.producer_version` column.
+///
+/// The one cap here that is NOT a length, and the one the daemon must never
+/// reach by clamping. A generation folded onto this ceiling ties with every
+/// other generation folded onto it, on exactly the `ReplacingMergeTree` version
+/// that stating a generation exists to break — so the server REFUSES a batch
+/// above it rather than truncating, and the daemon proves at compile time that
+/// its own number fits (`modelstat_ingest::processing`).
+pub const PROCESSING_VERSION_MAX: u32 = u16::MAX as u32;
 pub const EVENTS_COUNT_MAX: usize = 10_000;
 pub const SEGMENTS_COUNT_MAX: usize = 2_000;
 pub const TOOL_CALLS_COUNT_MAX: usize = 20_000;

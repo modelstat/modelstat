@@ -9,7 +9,6 @@ use std::time::Duration;
 use modelstat_daemon::lock::{
     daemon_lock_path, is_process_alive, read_daemon_lock, terminate_process, terminate_process_hard,
 };
-use modelstat_daemon::processing_version::ASPECT_VERSIONS;
 use modelstat_daemon::runtime::{scan_session, Daemon};
 use modelstat_daemon::supervise::{daemon_health, SuperviseDecision};
 use modelstat_ingest::state::{load_state, save_state};
@@ -25,8 +24,8 @@ use std::process::ExitCode;
 pub fn cmd_reset() -> ExitCode {
     let mut state = load_state();
     state.cursor.clear();
-    for (aspect, v) in ASPECT_VERSIONS {
-        state.processing_aspects.insert((*aspect).to_string(), *v);
+    for (aspect, v) in modelstat_ingest::processing::aspect_versions() {
+        state.processing_aspects.insert(aspect.to_string(), v);
     }
     // Every cursor just went, so the next scan re-reads the world regardless of
     // any aspect's outstanding mandate. Clearing the markers keeps the status

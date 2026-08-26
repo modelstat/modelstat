@@ -24,6 +24,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use modelstat_ingest::processing::PROCESSING_VERSION;
 use modelstat_ingest::upload_gate::{MIN_CONCURRENCY, START_CONCURRENCY, WINS_TO_GROW};
 use modelstat_ingest::{save_identity, Config, DeviceApi, DeviceIdentity, UploadResult};
 use modelstat_wire::IngestBatch;
@@ -118,6 +119,9 @@ fn sample_batch() -> IngestBatch {
         redactor_mode: None,
         repo_anchors: None,
         segment_generations: None,
+        // Stamped by every producer; carried here so the wire assertions
+        // below see what a real batch looks like.
+        processing_version: Some(PROCESSING_VERSION),
     }
 }
 
@@ -172,15 +176,34 @@ async fn upload_batch_commits_and_routes() {
             json!(expected_mode),
             "summarizer_mode stamped on every batch"
         );
+        // The producer's generation, on the wire as a bare integer inside what
+        // the server can store. Absent would read as "a daemon too old to say"
+        // and null would be a value no server promised to tolerate — so the
+        // assertion is on the NUMBER, not merely on the key being there.
+        let stated = s.last_body.as_ref().unwrap()["processing_version"]
+            .as_u64()
+            .expect("processing_version rides as a number");
+        assert_eq!(stated, u64::from(PROCESSING_VERSION));
+        assert!(stated <= u64::from(modelstat_wire::caps::PROCESSING_VERSION_MAX));
     }
 
     // ── 2. raw = true → /v1/ingest/raw ──────────────────────────────────────
     let _ = api.upload_batch(&batch, true).await;
-    assert_eq!(
-        script.lock().unwrap().last_path,
-        "/v1/ingest/raw",
-        "raw path routes to /v1/ingest/raw"
-    );
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(
+            s.last_path, "/v1/ingest/raw",
+            "raw path routes to /v1/ingest/raw"
+        );
+        // The RAW door carries it too. Cloud batches ship no segments of their
+        // own, but their events were parsed and redacted on this box, and the
+        // server stores the generation against them.
+        assert_eq!(
+            s.last_body.as_ref().unwrap()["processing_version"].as_u64(),
+            Some(u64::from(PROCESSING_VERSION)),
+            "the raw door states the generation as well"
+        );
+    }
 
     // ── 3. 429 reaches the gate: shrink now, grow back on sustained commits ──
     // Uploads are concurrent, so how many may be in flight has to come from the

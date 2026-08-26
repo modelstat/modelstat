@@ -173,6 +173,7 @@ where
 mod tests {
     use super::*;
     use crate::testing::AnsweringRedactor;
+    use modelstat_ingest::processing::PROCESSING_VERSION;
     use modelstat_ingest::IngestResponse;
     use modelstat_pipeline::NoEmbedder;
     use modelstat_sumclient::{CompleteRequest, SumError};
@@ -301,6 +302,7 @@ mod tests {
                 tz_offset_minutes: None,
                 redactor_mode: None,
                 segment_generations: None,
+                processing_version: Some(PROCESSING_VERSION),
                 repo_anchors: None,
             },
             raw: true,
