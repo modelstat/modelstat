@@ -797,6 +797,31 @@ pub struct IngestBatch {
     /// resumed at a cursor, so only this side can say what a batch restates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_generations: Option<BTreeMap<String, SegmentGeneration>>,
+    /// The daemon's `PROCESSING_VERSION` — the generation of the LOCAL
+    /// processing that cut this batch's [`Self::segments`] and
+    /// [`Self::session_titles`] (`modelstat_ingest::processing`).
+    ///
+    /// An abstract has two possible producers on two different version axes: a
+    /// daemon summarising on-device, and the server's summarise stage in cloud
+    /// mode. Without this the server had to INFER the daemon's generation from
+    /// what a segment happens to state, which tells exactly two generations
+    /// apart and no more — so two re-ships from different daemon builds both
+    /// read as "the current one", tie on the server's row version, and the
+    /// survivor is decided by merge order rather than by the data. Stating the
+    /// number is what breaks that tie.
+    ///
+    /// Stamped where the batch is BUILT, never at upload: a batch can wait in
+    /// the spool across an auto-update, and the generation that belongs to it is
+    /// the one that produced its segments — the same reason [`Self::tz`] is
+    /// stamped at build.
+    ///
+    /// `Option` because the SHAPE has to carry the pre-field reading: absent
+    /// means "a daemon too old to state one", which the server answers by
+    /// falling back to its inference, and that is a different claim from
+    /// generation zero. This daemon always states it — a produced batch carrying
+    /// `None` is a bug, and its producers are tested for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing_version: Option<u32>,
 }
 
 /// One session's claim about the segments in this batch (core#701).
@@ -1080,6 +1105,7 @@ mod tests {
             redactor_mode: None,
             repo_anchors: None,
             segment_generations: None,
+            processing_version: None,
         };
         batch.clamp();
         let json = serde_json::to_string(&batch).unwrap();
@@ -1277,6 +1303,7 @@ mod tests {
             redactor_mode: None,
             repo_anchors: Some(vec![repo; 12]), // > 10
             segment_generations: None,
+            processing_version: None,
         };
         batch.clamp();
         assert!(batch.tz.as_ref().unwrap().len() <= caps::TIMEZONE_MAX);

@@ -31,6 +31,7 @@ pub mod identity;
 pub mod ingest;
 pub mod machine_key;
 pub mod paths;
+pub mod processing;
 pub mod redactor_client;
 pub mod remote_config;
 pub mod state;
@@ -51,6 +52,10 @@ pub use ingest::{
 };
 pub use machine_key::{build_fingerprint, intended_device_uuid, machine_key_source};
 pub use paths::{home_path, logs_dir, modelstat_home};
+pub use processing::{
+    aspect_version, aspect_versions, replay_owed, Semantics, ASPECT_DERIVATIONS,
+    LEGACY_WORLD_VERSION, PROCESSING_VERSION,
+};
 pub use state::{state_path, RuntimeState};
 pub use timezone::{device_timezone, device_tz_offset_minutes, device_utc_offset_minutes};
 

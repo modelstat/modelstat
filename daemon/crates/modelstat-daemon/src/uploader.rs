@@ -338,6 +338,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use modelstat_ingest::processing::PROCESSING_VERSION;
     use modelstat_wire::{RawEvent, TokenUsage};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -396,6 +397,7 @@ mod tests {
             redactor_mode: None,
             repo_anchors: None,
             segment_generations: None,
+            processing_version: Some(PROCESSING_VERSION),
         }
     }
 

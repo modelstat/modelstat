@@ -57,6 +57,14 @@ jobs:
       - name: cargo test (all crates, all targets)
         run: cargo test --workspace --all-targets --locked
 
+      # `--all-targets` does NOT include doctests, so the step above never ran
+      # one. That matters now: the proof that a pipeline bump cannot be declared
+      # without stating its Semantics is a `compile_fail` doctest — a test whose
+      # whole assertion is that some code does NOT build, which no ordinary test
+      # can make. Un-run, it would rot silently.
+      - name: cargo test (doctests)
+        run: cargo test --workspace --doc --locked
+
       # The REDACTOR is behind `--features onnx`, so the default build above never
       # compiles it — a break there would surface only at release, on the one job
       # that gates a version going out. Built and unit-tested here instead. The

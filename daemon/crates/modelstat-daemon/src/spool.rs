@@ -370,6 +370,7 @@ fn write_durably(path: &Path, body: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use modelstat_ingest::processing::PROCESSING_VERSION;
     use modelstat_wire::{RawEvent, TokenUsage};
 
     fn tmp_dir(tag: &str) -> PathBuf {
@@ -429,6 +430,7 @@ mod tests {
             redactor_mode: None,
             repo_anchors: None,
             segment_generations: None,
+            processing_version: Some(PROCESSING_VERSION),
         }
     }
 

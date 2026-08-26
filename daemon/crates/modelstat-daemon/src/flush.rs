@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use modelstat_ingest::accounts::{session_installs_for, Accounts};
+use modelstat_ingest::processing::PROCESSING_VERSION;
 use modelstat_ingest::{device_timezone, device_tz_offset_minutes};
 use modelstat_parsers::{
     detect_references, DetectedRefs, GitEnrichment, SessionActors, ToolCallDraft,
@@ -399,6 +400,12 @@ where
                         segment_generations: cloud_claims
                             .get(&sid)
                             .map(|g| BTreeMap::from([(sid.clone(), g.clone())])),
+                        // The generation of local processing that cut these
+                        // events. Cloud summarises server-side, so this batch
+                        // carries no segments of its own — but the events it
+                        // does carry were parsed and redacted HERE, and the
+                        // server stores the number against them.
+                        processing_version: Some(PROCESSING_VERSION),
                     },
                     raw: true,
                     segment_count: 0,
@@ -524,6 +531,11 @@ where
         redactor_mode: None,
         repo_anchors: None,
         segment_generations,
+        // Which generation of the local pipeline cut the segments and titles
+        // above. Stamped at BUILD, like the zone: this batch can sit in the
+        // spool across an auto-update, and the generation that belongs to it is
+        // the one that produced it, not whichever build finally uploads it.
+        processing_version: Some(PROCESSING_VERSION),
     };
     FlushOutcome::Ready(vec![PreparedBatch {
         batch,
@@ -991,8 +1003,14 @@ mod tests {
     /// them. Asserted against the OS probes rather than a literal, so the test
     /// holds in any CI zone — and where the OS states no zone, the batch says
     /// None too, never a guess.
+    /// The facts a batch can only be given where it is BUILT: the zone the
+    /// machine was in, and the generation of the pipeline that cut it. Both
+    /// paths state both — the local one because it produces the segments, the
+    /// cloud one because its events were still parsed and redacted here — and
+    /// stamping either at upload instead would label a batch that waited out a
+    /// zone change or an auto-update with facts that were never its own.
     #[tokio::test]
-    async fn every_flush_path_states_the_devices_zone() {
+    async fn every_flush_path_states_what_only_this_device_can_say() {
         for mode in ["cloud", "local"] {
             let resilient = ResilientSummarizer::with_cooldown(
                 Fake {
@@ -1035,6 +1053,11 @@ mod tests {
                 batch.tz_offset_minutes,
                 device_tz_offset_minutes(),
                 "{mode}: the batch must state the offset the OS is in force under"
+            );
+            assert_eq!(
+                batch.processing_version,
+                Some(PROCESSING_VERSION),
+                "{mode}: the batch must state the generation that produced it"
             );
         }
     }

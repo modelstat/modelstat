@@ -11,7 +11,6 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;

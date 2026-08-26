@@ -134,6 +134,42 @@ fn ingest_batch_accepts_and_roundtrips() {
     assert_eq!(anchors[0].anchors[0].pr_number, 421);
     assert_eq!(anchors[0].anchors[0].span_ms, Some(259_200_000));
     assert_eq!(anchors[0].anchors[0].commit_count, Some(7));
+    // This fixture predates `processing_version`, and that is exactly what it
+    // pins: the batch a daemon too old to state a generation sends. The server
+    // reads ABSENT as "ask the artefact instead" and falls back to the
+    // inference it made before the field existed — a different claim from
+    // generation zero, which is why the field is optional rather than defaulted.
+    assert!(
+        batch.processing_version.is_none(),
+        "the pre-field wire must keep parsing, and must not materialize a zero"
+    );
+}
+
+/// The other side of the same contract: a batch that DOES state its generation.
+/// Not a fixture, deliberately — a golden fixture pins a FOREIGN producer's
+/// bytes, and this daemon is the only producer of this field.
+#[test]
+fn a_stated_generation_rides_as_a_bare_number_and_absent_is_never_null() {
+    let mut batch: IngestBatch = roundtrip("ingest_batch.json");
+
+    batch.processing_version = Some(37);
+    let v: serde_json::Value = serde_json::to_value(&batch).unwrap();
+    assert_eq!(v["processing_version"], serde_json::json!(37));
+    assert!(
+        v["processing_version"].as_u64().unwrap()
+            <= u64::from(modelstat_wire::caps::PROCESSING_VERSION_MAX),
+        "the server REFUSES a batch above the ceiling rather than clamping it"
+    );
+
+    // Round-trips as itself rather than collapsing into the absent reading.
+    let back: IngestBatch = serde_json::from_value(v).unwrap();
+    assert_eq!(back.processing_version, Some(37));
+
+    // Absent is OMITTED, never `null`: the two mean different things to the
+    // server, and a null is a shape no version of it promised to tolerate.
+    batch.processing_version = None;
+    let v: serde_json::Value = serde_json::to_value(&batch).unwrap();
+    assert!(v.get("processing_version").is_none());
 }
 
 #[test]

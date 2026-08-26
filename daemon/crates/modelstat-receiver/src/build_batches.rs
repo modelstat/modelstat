@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use modelstat_ingest::accounts::{session_installs_for, Accounts};
+use modelstat_ingest::processing::PROCESSING_VERSION;
 use modelstat_ingest::{device_timezone, device_tz_offset_minutes};
 use modelstat_parsers::{GitEnrichment, ToolCallDraft};
 use modelstat_pipeline::{attach_segment_ids, batch_id, build_session_metadata};
@@ -254,6 +255,10 @@ async fn finalise<'g, 'o: 'g, P: PipelineRunner>(
         // append by construction (core#701).
         segment_generations: None,
         repo_anchors: None,
+        // The SDK path runs the same local pipeline over turns posted to the
+        // loopback door, so its segments carry the same generation the
+        // file-scan path's do.
+        processing_version: Some(PROCESSING_VERSION),
     })
 }
 
@@ -471,6 +476,14 @@ mod tests {
                 assert_eq!(b[0].events.len(), 2);
                 assert_eq!(b[0].device_id, "dev1");
                 assert!(!b[0].segments.is_empty());
+                // The SDK door produces segments locally, so it states which
+                // generation of the pipeline cut them. Absent would tell the
+                // server this came from a daemon too old to know.
+                assert_eq!(
+                    b[0].processing_version,
+                    Some(PROCESSING_VERSION),
+                    "every batch this builder ships states its generation"
+                );
             }
             DrainBatches::Held => panic!("healthy pipeline must not hold"),
         }
