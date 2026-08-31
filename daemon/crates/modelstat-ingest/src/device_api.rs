@@ -59,6 +59,9 @@ pub struct DeviceMeResponse {
     pub claim_url: Option<String>,
     #[serde(default)]
     pub user_id: Option<String>,
+    /// The claimer's email — who this device belongs to, in words.
+    #[serde(default)]
+    pub user_email: Option<String>,
 }
 
 /// Heartbeat response (`POST /v1/devices/{id}/heartbeat`). `daemon_release` (the

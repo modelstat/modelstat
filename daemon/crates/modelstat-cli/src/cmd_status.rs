@@ -146,7 +146,7 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
     let local = honest_local(read_local_status(), health.owner_alive);
     let fp = build_fingerprint(config.version());
 
-    let user_email = config.identity().and_then(|i| i.user_email);
+    let mut user_email = config.identity().and_then(|i| i.user_email);
     let mut claimed = user_email.is_some();
     let mut claim_url = config.claim_url();
     let mut claim_code = config.claim_code();
@@ -175,6 +175,16 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
                 }
                 if me.claim_code.is_some() {
                     claim_code = me.claim_code.clone();
+                }
+                // WHO claimed it: the server's answer wins, and a fresh answer
+                // is cached into the identity file so an offline `status`
+                // still names the user instead of "(unknown)".
+                if me.user_email.is_some() && me.user_email != user_email {
+                    user_email = me.user_email.clone();
+                    if let Some(mut id) = config.identity() {
+                        id.user_email = me.user_email;
+                        let _ = modelstat_ingest::save_identity(&id);
+                    }
                 }
             }
         }

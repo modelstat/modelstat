@@ -650,9 +650,20 @@ async fn cmd_await_claim(api: &DeviceApi) -> ExitCode {
             Ok(me) => {
                 if me.status == "claimed" {
                     println!(
-                        "✓ claimed by user_id={}",
-                        me.user_id.as_deref().unwrap_or("null")
+                        "✓ claimed by {}",
+                        me.user_email
+                            .as_deref()
+                            .or(me.user_id.as_deref())
+                            .unwrap_or("null")
                     );
+                    // Cache WHO into the identity file, so `status` names the
+                    // user from then on — online or off.
+                    if me.user_email.is_some() {
+                        if let Some(mut id) = config.identity() {
+                            id.user_email = me.user_email;
+                            let _ = modelstat_ingest::save_identity(&id);
+                        }
+                    }
                     return ExitCode::SUCCESS;
                 }
                 print!(".");
