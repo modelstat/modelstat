@@ -39,6 +39,15 @@ fn main() -> ExitCode {
         Some("serve") => rt.block_on(serve()),
         Some("setup") => rt.block_on(setup(&args[1..])),
         Some("status") => rt.block_on(status()),
+        // Compile-time truth, no config and no server needed: what inference
+        // backend this binary carries ("metal" / "cpu" — or "unavailable" for
+        // a build without one). `modelstat mode local` probes this before
+        // arming the engine service, so a backend-less build is refused
+        // instead of held against forever.
+        Some("backend") => {
+            println!("{}", make_backend(&models_dir(&home_dir())).backend_name());
+            ExitCode::SUCCESS
+        }
         Some("stop") => cmd_stop(&args[1..]),
         Some("uninstall") => cmd_uninstall(&args[1..]),
         Some("upgrade") => rt.block_on(cmd_upgrade()),
@@ -61,7 +70,10 @@ fn usage() {
     eprintln!("usage: modelstat-summarizer <serve|setup|status|stop|uninstall|upgrade|--version>");
     eprintln!("  serve      run the protocol-v1 inference server");
     eprintln!("  setup      configure summarizer.json + download the model + install the service");
-    eprintln!("  status     show config + probe the running engine");
+    eprintln!(
+        "  status     show config + probe the running engine
+  backend    print this build's inference backend (metal / cpu / unavailable)"
+    );
     eprintln!("  stop       stop the engine service (keeps it installed)");
     eprintln!("  uninstall  stop + remove the engine service (keeps model files)");
     eprintln!("  upgrade    self-update to the latest published release (§13)");

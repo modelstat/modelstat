@@ -58,7 +58,12 @@ const NO_BACKEND: &str = "no inference backend is compiled into this engine buil
 
 impl Backend for UnavailableBackend {
     fn backend_name(&self) -> &'static str {
-        "cpu"
+        // The honest name, on every surface that asks (`/healthz`, `status`,
+        // the `backend` subcommand). This used to say "cpu", which let a
+        // build that can never infer probe as a healthy CPU engine — the
+        // collector held every flush against it for days before anyone could
+        // tell why (observed 2026-08-31).
+        "unavailable"
     }
     fn load(&mut self, _model_path: &Path, _context: u32) -> Result<(), String> {
         Err(NO_BACKEND.to_string())

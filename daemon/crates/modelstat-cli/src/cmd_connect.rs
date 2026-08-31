@@ -28,6 +28,11 @@ pub struct ConnectOpts {
     pub fresh: bool,
     pub yes: bool,
     pub mode: Option<String>,
+    /// `--redactor <local|cloud|self-hosted>` — where the layer-2 PII model
+    /// runs. Prompted interactively when absent; cloud is the default.
+    pub redactor: Option<String>,
+    /// `--redactor-url <URL>` — the self-hosted redactor endpoint.
+    pub redactor_url: Option<String>,
     pub url: Option<String>,
     pub system: bool,
 }
@@ -40,6 +45,8 @@ pub fn parse_connect_opts(args: &[String]) -> ConnectOpts {
         fresh: has("--fresh"),
         yes: has("--yes") || has("-y"),
         mode: flag_value(args, "--mode"),
+        redactor: flag_value(args, "--redactor"),
+        redactor_url: flag_value(args, "--redactor-url"),
         url: flag_value(args, "--url"),
         system: has("--system"),
     }
@@ -258,18 +265,48 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     }
     emit(j, "summarizer_mode", Value::Object(mode_fields));
 
+    // ── 3b. Redactor mode — same shape as the summariser choice ─────────
+    // Asked on EVERY interactive run (the installer re-runs land here), cloud
+    // by default; an explicit `--redactor` wins; non-interactive keeps the
+    // stored choice (cloud on a fresh install), which is always serviceable.
+    step(
+        j,
+        "Choosing where the PII model runs (the secret floor always stays on-device)",
+    );
+    let redactor_mode = match crate::cmd_redactor::resolve_and_persist_redactor(
+        &config,
+        opts.redactor.as_deref(),
+        opts.redactor_url.as_deref(),
+        interactive_mode,
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            warn_line(j, &format!("redactor selection failed: {e}"));
+            eprintln!("modelstat: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    emit(j, "redactor_mode", json!({ "mode": redactor_mode }));
+
     // ── 4. Model + engine setup (local engine BEFORE the daemon, §5.4) ──
     let mut model_ready = false;
+    let mut local_not_ready: Option<String> = None;
     if mode == "local" {
-        step(j, "Preparing local summariser (downloads on first run)");
+        step(
+            j,
+            "Preparing local summariser (downloads + VERIFIES before done)",
+        );
         // Drive the engine's model download + install the engine service so the
-        // daemon's first preflight finds it up.
-        crate::cmd_mode::pre_download_engine_model();
+        // daemon's first preflight finds it up — then VERIFY: local mode is
+        // only "ready" when the engine is observed answering. A dependency
+        // that failed to install is said out loud and fails the install, never
+        // reported as done (the first local-mode user held 114h against an
+        // engine that could never answer, and nothing had said so).
+        let downloaded = crate::cmd_mode::pre_download_engine_model();
         match install_service(Component::Summarizer, scope) {
             Ok(svc) => {
-                model_ready = true;
-                ok_line(j, "local summariser engine installed");
-                emit(j, "summariser_model_ready", json!({}));
                 emit(
                     j,
                     "summarizer_service_installed",
@@ -279,18 +316,31 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
             Err(e) => {
                 warn_line(
                     j,
-                    &format!("couldn't install the local engine ({e}) — it lazy-loads later"),
-                );
-                emit(
-                    j,
-                    "summariser_model_failed",
-                    json!({ "error": e.to_string() }),
+                    &format!("couldn't install the local engine service ({e})"),
                 );
                 emit(
                     j,
                     "summarizer_service_failed",
                     json!({ "error": e.to_string() }),
                 );
+            }
+        }
+        match crate::cmd_mode::verify_local_engine_ready().await {
+            Ok(proof) => {
+                model_ready = true;
+                ok_line(j, &format!("local summariser VERIFIED ready — {proof}"));
+                if !downloaded {
+                    warn_line(
+                        j,
+                        "the model download reported an error but the engine answers — it re-downloads on demand",
+                    );
+                }
+                emit(j, "summariser_model_ready", json!({ "proof": proof }));
+            }
+            Err(e) => {
+                warn_line(j, &format!("local summariser is NOT ready: {e}"));
+                emit(j, "summariser_model_failed", json!({ "error": e }));
+                local_not_ready = Some(e);
             }
         }
     } else {
@@ -307,14 +357,18 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
             "Preparing the on-device redactor (downloads the ~900 MB PII model)",
         );
         if modelstat_daemon::engine::ensure_redactor_model().await {
-            ok_line(j, "on-device redactor ready");
+            ok_line(j, "on-device redactor VERIFIED ready (model on disk)");
             emit(j, "redactor_model_ready", json!({}));
         } else {
             warn_line(
                 j,
-                "redactor model not ready — the daemon keeps retrying in the background",
+                "on-device redactor is NOT ready — the PII model did not download",
             );
             emit(j, "redactor_model_not_ready", json!({}));
+            local_not_ready.get_or_insert_with(|| {
+                "the on-device redactor model did not download — uploads hold until it does                  (retry: `modelstat redactor local`, or switch: `modelstat redactor cloud`)"
+                    .to_string()
+            });
         }
     } else {
         emit(
@@ -504,6 +558,16 @@ pub async fn cmd_connect(api: &DeviceApi, opts: ConnectOpts) -> ExitCode {
     // Service-install failure in human mode → foreground fallback is the daemon's
     // job (`modelstat start`); connect itself has finished onboarding.
     let _ = service_ok;
+    // A LOCAL choice whose dependency did not verify is not "done and ready":
+    // the device is paired and the modes are saved, but work will HOLD — say
+    // exactly why, name the retry, and exit non-zero so scripts see it too.
+    if let Some(why) = local_not_ready {
+        eprintln!(
+            "
+modelstat: setup finished WITH A PROBLEM — {why}"
+        );
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
 

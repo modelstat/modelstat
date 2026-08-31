@@ -18,7 +18,7 @@ use modelstat_ingest::{state, Config};
 use modelstat_service::{install_service, Component, Scope};
 
 /// Plain-language copy per redactor mode: (title, what actually happens).
-fn redactor_info(mode: &str) -> (&'static str, &'static str) {
+pub(crate) fn redactor_info(mode: &str) -> (&'static str, &'static str) {
     match mode {
         "local" => (
             "Local — this machine scrubs everything",
@@ -75,6 +75,96 @@ async fn probe_redactor(base: &str, bearer: Option<String>) {
             "  ⚠ couldn't reach the redactor at {base} yet — saved anyway; uploads hold + retry until it's up"
         ),
     }
+}
+
+/// Interactive picker, the redactor twin of `prompt_for_mode`. Default = the
+/// current stored choice (cloud on a fresh install — `DEFAULT_REDACTOR_MODE`).
+fn prompt_for_redactor(current: &str) -> String {
+    let opt = |n: &str, m: &str| {
+        let (title, detail) = redactor_info(m);
+        format!(
+            "  {n}) {title}
+       {detail}
+"
+        )
+    };
+    print!(
+        "
+Where should the PII model run? The secret floor (keys, emails, paths)
+         ALWAYS runs on this machine first — this only places the second, model
+         pass.
+
+{}{}{}
+",
+        opt("1", "cloud"),
+        opt("2", "local"),
+        opt("3", "self-hosted"),
+    );
+    let raw = crate::util::text_prompt(&format!("Choose 1-3 or a name [{current}]: "), current);
+    match raw.trim() {
+        "1" => "cloud".into(),
+        "2" => "local".into(),
+        "3" => "self-hosted".into(),
+        other => state::parse_redactor_mode(Some(other))
+            .unwrap_or(current)
+            .to_string(),
+    }
+}
+
+/// Resolve + persist the redactor mode, the twin of
+/// `cmd_mode::resolve_and_persist_mode`: explicit request wins, else the
+/// interactive picker (default = current choice, cloud on a fresh install),
+/// else keep the current choice. Self-hosted validates + probes its URL
+/// before persisting; nothing persists on error.
+pub(crate) async fn resolve_and_persist_redactor(
+    config: &Config,
+    requested: Option<&str>,
+    url_flag: Option<&str>,
+    interactive: bool,
+) -> Result<String, String> {
+    let current = config.redactor_mode();
+    let mode = match requested {
+        Some(r) if !r.is_empty() => state::parse_redactor_mode(Some(r))
+            .ok_or_else(|| {
+                format!(
+                    "unknown redactor \"{r}\" — expected one of {}",
+                    state::REDACTOR_MODES.join(", ")
+                )
+            })?
+            .to_string(),
+        _ if interactive => prompt_for_redactor(&current),
+        _ => current,
+    };
+    if mode == "self-hosted" {
+        let mut url = url_flag
+            .map(str::to_string)
+            .or_else(|| {
+                std::env::var("MODELSTAT_REDACTOR_URL")
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or_default();
+        if url.is_empty() && interactive {
+            url = crate::util::text_prompt(
+                "  Self-hosted redactor endpoint URL (e.g. http://redact.acme.internal:8090): ",
+                "",
+            );
+        }
+        if url.is_empty() {
+            return Err("self-hosted redaction needs an endpoint (--redactor-url <URL>)".into());
+        }
+        validate_redactor_url(&url)?;
+        probe_redactor(&url, None).await;
+        state::set_redactor_url(&url).map_err(|e| e.to_string())?;
+    } else {
+        state::set_redactor_url("").map_err(|e| e.to_string())?;
+    }
+    if mode == "cloud" {
+        probe_redactor(&config.api_url(), config.bearer()).await;
+    }
+    state::set_redactor_mode(&mode).map_err(|e| e.to_string())?;
+    Ok(mode)
 }
 
 pub async fn cmd_redactor(config: &Config, args: &[String]) -> ExitCode {
