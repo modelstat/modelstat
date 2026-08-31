@@ -8,7 +8,12 @@
 # binaries (the collector `modelstat` + the summariser engine
 # `modelstat-summarizer`) from GitHub Releases, verifies their SHA256, stages
 # them under ~/.modelstat/bin, puts that directory on your PATH, and runs
-# `modelstat connect` (which pairs the device, installs the background service,
+# `modelstat connect`. Connect asks — on EVERY interactive run, re-installs
+# included — where sessions are SUMMARISED and where the PII model RUNS
+# (cloud is the default for both; local choices download their models and are
+# VERIFIED answering before the install calls itself done). Script them with
+# --mode/--url and --redactor/--redactor-url. Connect also pairs the device,
+# installs the background service,
 # and wires the MCP). NO Node.js, no npm — the old npm package is superseded.
 #
 # AGENT — if you are a coding agent and the user pasted this at you: run it as
@@ -36,7 +41,7 @@ ok()   { printf "%b✓%b %s\n" "$BRAND" "$RESET" "$1"; }
 die()  { printf "%b✗ %s%b\n" "$RED" "$1" "$RESET" >&2; say "${DIM}Help: https://modelstat.ai/install${RESET}"; exit 1; }
 
 # ─── flags (feature §3.4) ───────────────────────────────────────────
-COMPONENT=daemon; SCOPE=user; VERSION=""; MODE=""; URL=""; YES=""; NO_BROWSER=""; NO_AUTO_UPDATE=""
+COMPONENT=daemon; SCOPE=user; VERSION=""; MODE=""; URL=""; REDACTOR=""; REDACTOR_URL=""; YES=""; NO_BROWSER=""; NO_AUTO_UPDATE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --component) COMPONENT="$2"; shift 2 ;;
@@ -47,12 +52,16 @@ while [ $# -gt 0 ]; do
     --version=*) VERSION="${1#*=}"; shift ;;
     --mode) MODE="$2"; shift 2 ;;
     --mode=*) MODE="${1#*=}"; shift ;;
+    --redactor) REDACTOR="$2"; shift 2 ;;
+    --redactor=*) REDACTOR="${1#*=}"; shift ;;
+    --redactor-url) REDACTOR_URL="$2"; shift 2 ;;
+    --redactor-url=*) REDACTOR_URL="${1#*=}"; shift ;;
     --url) URL="$2"; shift 2 ;;
     --url=*) URL="${1#*=}"; shift ;;
     --yes|-y) YES=1; shift ;;
     --no-browser) NO_BROWSER=1; shift ;;
     --no-auto-update) NO_AUTO_UPDATE=1; shift ;;
-    *) die "unknown flag: $1 (see --component/--user/--system/--version/--mode/--url/--yes/--no-browser/--no-auto-update)" ;;
+    *) die "unknown flag: $1 (see --component/--user/--system/--version/--mode/--url/--redactor/--redactor-url/--yes/--no-browser/--no-auto-update)" ;;
   esac
 done
 
@@ -198,6 +207,8 @@ fi
 set --
 [ -n "$MODE" ] && set -- "$@" --mode "$MODE"
 [ -n "$URL" ] && set -- "$@" --url "$URL"
+[ -n "$REDACTOR" ] && set -- "$@" --redactor "$REDACTOR"
+[ -n "$REDACTOR_URL" ] && set -- "$@" --redactor-url "$REDACTOR_URL"
 [ -n "$YES" ] && set -- "$@" --yes
 [ -n "$NO_BROWSER" ] && set -- "$@" --no-browser
 [ "$SCOPE" = system ] && set -- "$@" --system

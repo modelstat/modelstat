@@ -198,14 +198,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, target: aarch64-apple-darwin, ext: tar.gz, mac: true }
-          - { os: macos-14, target: x86_64-apple-darwin, ext: tar.gz, mac: true }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, ext: tar.gz }
+          # `llama: true` compiles the native llama.cpp backend into the engine
+          # (cmake ships on these runners; Metal on macOS, CPU on linux). Without
+          # it the engine is built around UnavailableBackend and LOCAL SUMMARISER
+          # MODE CAN NEVER WORK — every release before 2026-08-31 shipped exactly
+          # that, and the first local-mode user held 114h against it. Windows
+          # stays off until the msvc/arm64 cross build of llama.cpp is proven;
+          # `modelstat mode local` refuses honestly there (the backend probe).
+          - { os: macos-14, target: aarch64-apple-darwin, ext: tar.gz, mac: true, llama: true }
+          - { os: macos-14, target: x86_64-apple-darwin, ext: tar.gz, mac: true, llama: true }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, ext: tar.gz, llama: true }
           # `g++-…` as well as `gcc-…`: ONNX Runtime is C++, and linking it needs
           # the cross libstdc++ DEV package. `gcc-aarch64-linux-gnu` pulls in
           # `libstdc++6-arm64-cross` — the runtime — which is not the same thing and
           # left the linker with `cannot find -lstdc++`.
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, ext: tar.gz, linker: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu" }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, ext: tar.gz, linker: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu", llama: true }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: zip }
           - { os: windows-latest, target: aarch64-pc-windows-msvc, ext: zip }
     runs-on: ${{ matrix.os }}
@@ -315,10 +322,19 @@ jobs:
           # ship. Both are CPU-only; the collector still links NO llama.cpp (plan D4).
           cargo build --release --locked --target ${{ matrix.target }} \
             -p modelstat-cli --features candle,onnx
-          # Summariser engine built separately — it has no `candle` feature; its
-          # llama.cpp backend is its own, env-gated switch.
-          cargo build --release --locked --target ${{ matrix.target }} \
-            -p modelstat-summarizer
+          # Summariser engine built separately — the collector never links
+          # llama.cpp (plan D4); the engine carries it via `--features llama`
+          # where the matrix says the target builds it. llama.cpp is built by
+          # cmake, which reads these CC/CXX vars for the linux-arm64 cross.
+          if [ "${{ matrix.llama }}" = "true" ]; then
+            export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+            export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+            cargo build --release --locked --target ${{ matrix.target }} \
+              -p modelstat-summarizer --features llama
+          else
+            cargo build --release --locked --target ${{ matrix.target }} \
+              -p modelstat-summarizer
+          fi
 
       # The macOS archives ship the prebuilt Swift tray (D15). Universal build so
       # both mac archives carry the same .app.

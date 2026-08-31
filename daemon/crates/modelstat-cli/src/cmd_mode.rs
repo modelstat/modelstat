@@ -100,6 +100,20 @@ pub(crate) async fn resolve_and_persist_mode(
         _ => config.summarizer_mode(),
     };
 
+    if mode == "local" {
+        // Refuse a mode this build can NEVER serve, before persisting it. The
+        // engine's `backend` subcommand is compile-time truth; "unavailable"
+        // means no inference backend is compiled in, and arming the service
+        // anyway would hold every flush forever (observed: 114h on one box,
+        // 2026-08-31). An old engine binary that lacks the subcommand answers
+        // nothing and is allowed through — it predates the probe.
+        if local_backend_report().as_deref() == Some("unavailable") {
+            return Err(
+                "this engine build has no local inference backend — use `modelstat mode cloud`,                  or `modelstat mode self-hosted --url <URL>` for an org engine"
+                    .into(),
+            );
+        }
+    }
     if mode == "self-hosted" {
         // URL: flag → MODELSTAT_SUMMARIZER_URL env → interactive prompt.
         let mut url = url_flag
@@ -153,14 +167,27 @@ async fn probe_self_hosted(url: &str) {
 /// model files on disk. Best-effort — a service hiccup is a warning, not a stall.
 async fn reconcile_local_engine(mode: &str) {
     if mode == "local" {
-        // Pre-warm the Qwen model with progress via the engine's own setup
-        // (best-effort; the engine also lazy-downloads on first serve, §11), then
-        // arm the loopback engine service.
-        pre_download_engine_model();
+        // Pre-warm the Qwen model with progress via the engine's own setup,
+        // arm the loopback engine service — and then VERIFY, because "armed"
+        // is not "ready": local mode is only done when the engine is observed
+        // answering (`verify_local_engine_ready`).
+        let downloaded = pre_download_engine_model();
         match install_service(Component::Summarizer, Scope::User) {
             Ok(_) => println!("✓ local summariser engine service armed"),
             Err(e) => eprintln!(
                 "  couldn't arm the local engine service ({e}) — run `modelstat` to retry"
+            ),
+        }
+        match verify_local_engine_ready().await {
+            Ok(proof) => {
+                println!("✓ local summariser VERIFIED ready — {proof}");
+                if !downloaded {
+                    println!("  (the model download reported an error but the engine answers — it re-downloads on demand)");
+                }
+            }
+            Err(e) => eprintln!(
+                "  ✗ local summariser is NOT ready: {e}
+                     work will hold until it is — retry with `modelstat mode local`,                  or switch: `modelstat mode cloud`"
             ),
         }
     } else {
@@ -174,14 +201,91 @@ async fn reconcile_local_engine(mode: &str) {
 /// (which writes `summarizer.json` + downloads the model). Best-effort: a missing
 /// engine binary just means the service lazy-downloads on first use (§11). Shared
 /// with `connect` (step 4).
-pub(crate) fn pre_download_engine_model() {
+pub(crate) fn pre_download_engine_model() -> bool {
     let engine = engine_binary_path();
-    println!("preparing local summariser model (downloads on first use)…");
+    println!("preparing local summariser model (~2.7 GB, downloads once)…");
     // `--loopback`: config + model only, no prompts, no service — the collector
-    // arms the loopback engine service itself (§10.3 "driven inline").
-    let _ = std::process::Command::new(engine)
+    // arms the loopback engine service itself (§10.3 "driven inline"). The
+    // exit status is REPORTED, not swallowed: a failed download used to print
+    // nothing and the mode still claimed ready while every flush held.
+    match std::process::Command::new(engine)
         .args(["setup", "--loopback"])
-        .status();
+        .status()
+    {
+        Ok(st) if st.success() => true,
+        Ok(st) => {
+            eprintln!("  ⚠ engine setup exited with {st} — the model may be missing");
+            false
+        }
+        Err(e) => {
+            eprintln!("  ⚠ couldn't run the engine setup ({e})");
+            false
+        }
+    }
+}
+
+/// End-state verification for LOCAL summariser mode — nothing is called ready
+/// until it is OBSERVED ready: the binary carries an inference backend, and
+/// the armed service answers `/healthz` on the loopback port. Polls up to
+/// ~30s for the service to come up. `Ok` carries a one-line proof for the
+/// caller to print; `Err` names exactly what is not ready.
+pub(crate) async fn verify_local_engine_ready() -> Result<String, String> {
+    if local_backend_report().as_deref() == Some("unavailable") {
+        return Err("the engine build has no inference backend".into());
+    }
+    let url = format!(
+        "http://127.0.0.1:{}",
+        modelstat_daemon::engine::engine_port()
+    );
+    let client = modelstat_sumclient::SummarizerClient::new(url.clone());
+    let mut last = String::from("no answer yet");
+    for _ in 0..15 {
+        match client.healthz().await {
+            Ok(h) if h.backend == "unavailable" => {
+                return Err(format!(
+                    "the engine at {url} runs a build with no inference backend"
+                ));
+            }
+            Ok(h) if h.protocol != 1 => {
+                return Err(format!(
+                    "the engine at {url} speaks protocol {} (this collector expects 1)",
+                    h.protocol
+                ));
+            }
+            Ok(h) => {
+                let model = if h.model_loaded {
+                    "model loaded"
+                } else {
+                    "model loads on first request"
+                };
+                return Ok(format!(
+                    "engine answering on {url} (backend {}, {model})",
+                    h.backend
+                ));
+            }
+            Err(e) => last = e.to_string(),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    Err(format!(
+        "the engine service is not answering on {url} after 30s ({last})"
+    ))
+}
+
+/// The engine binary's compile-time backend report (`modelstat-summarizer
+/// backend`): `Some("metal" | "cpu" | "unavailable")`, or `None` when the
+/// binary is missing or predates the subcommand — both allowed through, only
+/// a stated "unavailable" refuses local mode.
+pub(crate) fn local_backend_report() -> Option<String> {
+    let out = std::process::Command::new(engine_binary_path())
+        .arg("backend")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 /// The engine binary next to this collector (install layout), else on PATH.
