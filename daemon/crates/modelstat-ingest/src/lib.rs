@@ -42,7 +42,8 @@ pub mod upload_gate;
 // Flat re-exports for the common (CLI + daemon) surface.
 pub use config::{Config, FreshIdentity};
 pub use device_api::{
-    DeviceApi, DeviceMeError, DeviceMeResponse, HeartbeatResponse, SelfRegisterResponse,
+    DeviceApi, DeviceMeError, DeviceMeResponse, HeartbeatResponse, ProcessingPaused,
+    SelfRegisterResponse,
 };
 pub use identity::{
     backup_identity, has_identity_file, identity_path, load_identity, save_identity, DeviceIdentity,

@@ -148,6 +148,7 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
 
     let mut user_email = config.identity().and_then(|i| i.user_email);
     let mut claimed = user_email.is_some();
+    let mut paused: Option<modelstat_ingest::ProcessingPaused> = None;
     let mut claim_url = config.claim_url();
     let mut claim_code = config.claim_code();
     // The daemon phase is local truth (see the module docs): a live lock owner's
@@ -182,10 +183,13 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
                 if me.user_email.is_some() && me.user_email != user_email {
                     user_email = me.user_email.clone();
                     if let Some(mut id) = config.identity() {
-                        id.user_email = me.user_email;
+                        id.user_email = me.user_email.clone();
                         let _ = modelstat_ingest::save_identity(&id);
                     }
                 }
+                // The server's capacity verdict: a paused scope must never
+                // read as healthy while its uploads silently queue.
+                paused = me.processing_paused;
             }
         }
     }
@@ -221,6 +225,12 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
             "claim_code": claim_code,
             "local": local,
             "daemon": daemon_obj,
+            "processing_paused": paused.as_ref().map(|p| json!({
+                "reason": p.reason,
+                "why": p.why,
+                "fix": p.fix,
+                "queued_batches": p.queued_batches,
+            })),
             "service": { "running": svc.running, "hint": svc.hint },
             "pairing": pairing,
             "auto_update": { "enabled": auto_update_enabled(), "pinned_by_env": auto_update_pinned_by_env() },
@@ -262,6 +272,17 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
             format_age(age_in_seconds(&lock.started_at))
         ),
         _ => println!("daemon:  not running"),
+    }
+    // The server's capacity verdict, loud: a paused scope queues everything
+    // it uploads, and status must say so instead of looking healthy.
+    if let Some(p) = &paused {
+        println!(
+            "processing: PAUSED — {} ({} batch{} waiting) — {}",
+            p.why,
+            p.queued_batches,
+            if p.queued_batches == 1 { "" } else { "es" },
+            p.fix
+        );
     }
     println!("logs:    {}", logs_dir().display());
     println!("state:   {}", state_path().display());
