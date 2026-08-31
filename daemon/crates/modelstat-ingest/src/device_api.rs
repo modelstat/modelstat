@@ -62,6 +62,23 @@ pub struct DeviceMeResponse {
     /// The claimer's email — who this device belongs to, in words.
     #[serde(default)]
     pub user_email: Option<String>,
+    /// Set when the server's billing capacity gate is holding this scope's
+    /// processing: `{reason, why, fix, queued_batches}`. `None` = running.
+    #[serde(default)]
+    pub processing_paused: Option<ProcessingPaused>,
+}
+
+/// The server's word on a capacity pause (`device_me.processing_paused`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProcessingPaused {
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub why: String,
+    #[serde(default)]
+    pub fix: String,
+    #[serde(default)]
+    pub queued_batches: i64,
 }
 
 /// Heartbeat response (`POST /v1/devices/{id}/heartbeat`). `daemon_release` (the
