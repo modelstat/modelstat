@@ -150,6 +150,19 @@ Things to know:
   `git`/`git_guess` repo-ref split) never takes an unmarked slug on faith. The
   one exception is evidence: a context carrying a real `remote_url` is verified
   even without the marker, because no guess path has ever written one.
+- **A repo is only ever reached through `cwd`.** `resolve_authoritative_git`
+  probes the folder an event states and reads `remote.origin.url` off it; an
+  event with no `cwd` is never probed, so it can never carry a repository. Most
+  parsers read the cwd off each transcript LINE, but Cursor's store is one
+  global key/value DB that names no folder — so its events shipped `cwd: None`
+  for the parser's whole life and no Cursor session ever reached the server with
+  a repository, on any device, ever. `cursor_workspace` closes that by
+  reading Cursor's OWN workspace index (`workspaceStorage/<hash>/`:
+  `workspace.json` names the folder, its `state.vscdb` names the conversations
+  that folder holds) — never a directory name, a path shape, or a word of any
+  message. A conversation two folders both claim gets NO folder rather than a
+  guessed one, and every read reports what it could not decide so a store this
+  build can no longer parse never passes for a machine with nothing in it.
 - **The device's time zone** is stated by `modelstat-ingest::timezone`: the IANA
   NAME plus the current UTC offset ride the heartbeat, and the offset alone is
   stamped on every `IngestBatch` **at build time** (not at upload — a spooled

@@ -549,3 +549,106 @@ mod tests {
         );
     }
 }
+
+/// The whole chain for a Cursor session, over a REAL checkout and the REAL
+/// resolver — the only test that can catch either half breaking.
+///
+/// Cursor's chat store names no folder, so until `cursor_workspace` read the
+/// editor's own workspace index every Cursor event arrived here with `cwd:
+/// None`, this pass had nothing to key on, and no Cursor session ever reached
+/// the server carrying a repository. The two
+/// halves only pay off together, so they are asserted together.
+#[cfg(test)]
+mod cursor_chain_tests {
+    use modelstat_parsers::parse_cursor_tracking_db;
+    use modelstat_parsers::types::ParserContext;
+    use modelstat_wire::SLUG_SOURCE_GIT_REMOTE;
+    use rusqlite::{params, Connection};
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn a_cursor_conversation_reaches_the_repository_its_folder_points_at() {
+        let root =
+            std::env::temp_dir().join(format!("modelstat-cursor-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A real checkout with a real configured remote.
+        let checkout = root.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&checkout)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        };
+        // Skip cleanly if git isn't available on this runner.
+        if git(&["init", "-q"]).map(|s| !s.success()).unwrap_or(true) {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let _ = git(&["config", "remote.origin.url", "git@github.com:acme/api.git"]);
+
+        // A Cursor install whose workspace index puts one conversation in it.
+        let user = root.join("User");
+        std::fs::create_dir_all(user.join("globalStorage")).unwrap();
+        let store = user.join("globalStorage/state.vscdb");
+        let c = Connection::open(&store).unwrap();
+        c.execute(
+            "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO cursorDiskKV VALUES (?,?)",
+            params![
+                "bubbleId:comp-1:b1",
+                r#"{"type":1,"text":"ship the retry","createdAt":"2026-08-20T10:00:00.000Z"}"#
+            ],
+        )
+        .unwrap();
+        drop(c);
+
+        let ws = user.join("workspaceStorage/w0");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            ws.join("workspace.json"),
+            format!(r#"{{"folder": "file://{}"}}"#, checkout.to_string_lossy()),
+        )
+        .unwrap();
+        let c = Connection::open(ws.join("state.vscdb")).unwrap();
+        c.execute(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            params![
+                "composer.composerData",
+                r#"{"allComposers":[{"composerId":"comp-1"}]}"#
+            ],
+        )
+        .unwrap();
+        drop(c);
+
+        let parsed = parse_cursor_tracking_db(&ParserContext::new(
+            "dev-1",
+            store.to_string_lossy().as_ref(),
+        ))
+        .unwrap();
+        assert_eq!(parsed.events.len(), 1);
+
+        let out = crate::runtime::make_correct_events()(parsed.events);
+        let g = out[0].git.as_ref().expect("the folder was probed");
+        assert_eq!(g.remote_slug.as_deref(), Some("acme/api"));
+        assert_eq!(g.remote_host.as_deref(), Some("github.com"));
+        // `git_remote` is the ONLY provenance the server accepts as naming a
+        // repository, so this is the assertion that says the session will land
+        // with one.
+        assert_eq!(g.slug_source.as_deref(), Some(SLUG_SOURCE_GIT_REMOTE));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

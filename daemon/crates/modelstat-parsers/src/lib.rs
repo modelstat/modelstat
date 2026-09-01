@@ -27,6 +27,7 @@ pub mod git_outcome;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor;
+pub mod cursor_workspace;
 pub mod pi;
 
 pub mod discovery;
@@ -53,6 +54,7 @@ pub use claude_code::{
 };
 pub use codex::{parse_codex_rollout, parse_codex_rollout_streaming};
 pub use cursor::parse_cursor_tracking_db;
+pub use cursor_workspace::{WorkspaceFolders, WorkspaceScan};
 pub use pi::{parse_pi_session, parse_pi_session_streaming};
 
 pub use discovery::{
