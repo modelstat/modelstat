@@ -3,11 +3,17 @@
 //! Cursor's chat store is ONE global key/value DB and it names no folder: a
 //! bubble record carries its text, its ids and its timestamp, and nothing about
 //! where the work happened. So [`crate::cursor`] shipped `cwd: None` on every
-//! event from the day it was written — and `cwd` is the ONE input
-//! `resolve_authoritative_git` needs. With no cwd it never runs, no folder is
-//! ever probed for its remote, and no Cursor session has ever reached the server
-//! carrying a repository — not one, on any device, for the parser's whole
-//! life.
+//! event from the day it was written.
+//!
+//! `resolve_authoritative_git` takes its candidate directories from two places,
+//! most specific first: the parent of every path the turn's tool calls named
+//! (`RawEvent::tool_paths`), then `cwd`. Cursor supplies NEITHER — its bubbles
+//! carry no tool data, so `tool_paths` is empty too. It is the only source with
+//! both hands empty, which is why the 2026-08-24 change that made the repo a
+//! fact about the files a turn touched moved every other agent and left this
+//! one exactly where it was: no candidate, no probe, and no Cursor session
+//! reaching the server with a repository — not one, on any device, for the
+//! parser's whole life.
 //!
 //! Cursor does record the folder, one level up from the chat store. Every folder
 //! the editor opens gets a `workspaceStorage/<hash>/` directory holding

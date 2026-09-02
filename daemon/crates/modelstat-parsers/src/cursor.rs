@@ -665,8 +665,9 @@ mod since_floor_tests {
 }
 
 /// The parser end of `crate::cursor_workspace`: a Cursor event now STATES the
-/// folder its conversation was held in, which is the one input the daemon's
-/// authoritative-git pass needs before it will probe anything for a remote.
+/// folder its conversation was held in — the only candidate directory this
+/// source can offer the daemon's authoritative-git pass, which otherwise
+/// prefers the paths a turn's tool calls named and gets none from a bubble.
 #[cfg(test)]
 mod folder_tests {
     use super::*;
