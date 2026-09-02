@@ -46,6 +46,26 @@ pub struct DetectedIdentity {
 pub struct DiscoveryOutput {
     pub installations: Vec<DetectedInstallation>,
     pub identities: Vec<DetectedIdentity>,
+    /// The handles other systems know the machine's PERSON by — see
+    /// [`DetectedHandle`].
+    pub handles: Vec<DetectedHandle>,
+}
+
+/// A handle the machine's person is known by elsewhere: a GitHub login the
+/// gh CLI is signed in with, the email and name git commits as. A handle is a
+/// fact about the PERSON who paired this device (the server folds it onto
+/// their profile), never about a session — which is why it travels beside the
+/// identities and not inside a transcript. `provider` is an open slug (`github`,
+/// a GitHub Enterprise host, `email`, …), whatever the record names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectedHandle {
+    pub provider: String,
+    pub handle: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub detection_source: String,
 }
 
 struct SourceSpec {
@@ -437,7 +457,166 @@ pub fn discover(options: &DiscoveryOptions) -> DiscoveryOutput {
     DiscoveryOutput {
         installations: dedupe_installs(installations),
         identities: dedupe_identities(identities),
+        handles: discover_handles(),
     }
+}
+
+/// The handle probes alone — what the machine's person is called elsewhere.
+///
+/// Read on the install clock, not the identity clock: a GitHub login or a git
+/// identity changes about as often as the tools do, and each reading spawns
+/// `git` twice. Best-effort: a machine without gh or git simply reports none.
+#[must_use]
+pub fn discover_handles() -> Vec<DetectedHandle> {
+    let home = home_dir().unwrap_or_default();
+    let mut out = probe_gh_handles(&home);
+    out.extend(probe_git_handles());
+    dedupe_handles(out)
+}
+
+/// The gh CLI's signed-in logins, from its `hosts.yml` — never its tokens.
+///
+/// The file is `$GH_CONFIG_DIR/hosts.yml`, else `$XDG_CONFIG_HOME/gh/hosts.yml`,
+/// else `~/.config/gh/hosts.yml` (`%APPDATA%\GitHub CLI\hosts.yml` on Windows).
+fn probe_gh_handles(home: &str) -> Vec<DetectedHandle> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(dir) = std::env::var("GH_CONFIG_DIR") {
+        if !dir.is_empty() {
+            candidates.push(format!("{dir}/hosts.yml"));
+        }
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            candidates.push(format!("{xdg}/gh/hosts.yml"));
+        }
+    }
+    if !home.is_empty() {
+        candidates.push(format!("{home}/.config/gh/hosts.yml"));
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        if !appdata.is_empty() {
+            candidates.push(format!("{appdata}/GitHub CLI/hosts.yml"));
+        }
+    }
+    for path in candidates {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let found = handles_from_gh_hosts(&raw);
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    Vec::new()
+}
+
+/// The logins a gh `hosts.yml` names, one handle per host. `github.com` is the
+/// provider `github`; any other host (GitHub Enterprise) is its own provider,
+/// named as the file names it. Only the login travels: the `oauth_token` beside
+/// it is never read into anything.
+fn handles_from_gh_hosts(raw: &str) -> Vec<DetectedHandle> {
+    let Ok(doc) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(hosts) = doc.as_mapping() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (host, entry) in hosts {
+        let Some(host) = host.as_str().map(str::trim).filter(|h| !h.is_empty()) else {
+            continue;
+        };
+        let provider = if host.eq_ignore_ascii_case("github.com") {
+            "github".to_string()
+        } else {
+            host.to_lowercase()
+        };
+        // The active login, else every login the file remembers.
+        let mut logins: Vec<String> = Vec::new();
+        if let Some(user) = entry.get("user").and_then(|v| v.as_str()) {
+            logins.push(user.to_string());
+        }
+        if let Some(users) = entry.get("users").and_then(|v| v.as_mapping()) {
+            for (login, _) in users {
+                if let Some(l) = login.as_str() {
+                    logins.push(l.to_string());
+                }
+            }
+        }
+        for login in logins {
+            let login = login.trim();
+            if login.is_empty() {
+                continue;
+            }
+            out.push(DetectedHandle {
+                provider: provider.clone(),
+                handle: login.to_string(),
+                display_name: None,
+                email: None,
+                detection_source: "gh_cli_hosts".into(),
+            });
+        }
+    }
+    out
+}
+
+/// The identity git commits as on this machine: `user.email` (the handle) and
+/// `user.name`, read through `git config --global` so includes and conditional
+/// includes resolve as git resolves them.
+fn probe_git_handles() -> Vec<DetectedHandle> {
+    let read = |key: &str| {
+        run_command(
+            "git",
+            &["config", "--global", "--get", key],
+            None,
+            Duration::from_secs(3),
+        )
+    };
+    git_identity_handles(read("user.email"), read("user.name"))
+}
+
+/// A git identity as a handle: the email, lower-cased and trimmed, with the
+/// name beside it. No email, no handle — a name alone names nobody.
+fn git_identity_handles(email: Option<String>, name: Option<String>) -> Vec<DetectedHandle> {
+    let email = email
+        .map(|e| e.trim().to_lowercase())
+        .filter(|e| !e.is_empty() && e.contains('@'));
+    let Some(email) = email else {
+        return Vec::new();
+    };
+    let display_name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    vec![DetectedHandle {
+        provider: "email".into(),
+        handle: email.clone(),
+        display_name,
+        email: Some(email),
+        detection_source: "git_config".into(),
+    }]
+}
+
+/// Same handle seen by several probes: keep the first, fill the gaps.
+fn dedupe_handles(list: Vec<DetectedHandle>) -> Vec<DetectedHandle> {
+    let mut order: Vec<String> = Vec::new();
+    let mut seen: HashMap<String, DetectedHandle> = HashMap::new();
+    for h in list {
+        let k = format!("{}|{}", h.provider, h.handle.to_lowercase());
+        match seen.entry(k.clone()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                order.push(k);
+                slot.insert(h);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let prev = slot.get_mut();
+                if prev.display_name.is_none() {
+                    prev.display_name = h.display_name;
+                }
+                if prev.email.is_none() {
+                    prev.email = h.email;
+                }
+            }
+        }
+    }
+    order.into_iter().filter_map(|k| seen.remove(&k)).collect()
 }
 
 /// The identity probes alone — which accounts are logged in on this device.
@@ -2052,5 +2231,72 @@ mod provider_key_tests {
         let home = write_cfg("this: [is not: valid yaml\n");
         assert!(probe_provider_key_identities(&home).is_empty());
         std::fs::remove_dir_all(&home).ok();
+    }
+    #[test]
+    fn gh_hosts_yield_the_active_login_and_the_remembered_ones_never_a_token() {
+        let raw = "github.com:\n    user: aramalipoor\n    oauth_token: gho_SECRET_SHOULD_NEVER_TRAVEL\n    git_protocol: https\n    users:\n        aramalipoor:\n            oauth_token: gho_SECRET\n        other-login:\n            oauth_token: gho_SECRET2\nghe.acme.com:\n    user: acme-aram\n";
+        let out = dedupe_handles(handles_from_gh_hosts(raw));
+        let pairs: Vec<(String, String)> = out
+            .iter()
+            .map(|h| (h.provider.clone(), h.handle.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("github".to_string(), "aramalipoor".to_string()),
+                ("github".to_string(), "other-login".to_string()),
+                ("ghe.acme.com".to_string(), "acme-aram".to_string()),
+            ]
+        );
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(
+            !serialized.contains("gho_"),
+            "a token never leaves the file"
+        );
+        assert!(out.iter().all(|h| h.detection_source == "gh_cli_hosts"));
+    }
+
+    #[test]
+    fn gh_hosts_that_are_not_yaml_or_name_nobody_yield_nothing() {
+        assert!(handles_from_gh_hosts("not: [valid").is_empty());
+        assert!(handles_from_gh_hosts("github.com:\n    git_protocol: https\n").is_empty());
+    }
+
+    #[test]
+    fn git_identity_is_the_email_lowercased_with_the_name_beside_it() {
+        let out = git_identity_handles(
+            Some("  Aram.Alipoor@Example.com\n".into()),
+            Some("Aram Alipoor\n".into()),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].provider, "email");
+        assert_eq!(out[0].handle, "aram.alipoor@example.com");
+        assert_eq!(out[0].email.as_deref(), Some("aram.alipoor@example.com"));
+        assert_eq!(out[0].display_name.as_deref(), Some("Aram Alipoor"));
+        assert!(git_identity_handles(None, Some("Nobody".into())).is_empty());
+        assert!(git_identity_handles(Some("not-an-email".into()), None).is_empty());
+    }
+
+    #[test]
+    fn dedupe_handles_keeps_first_and_fills_gaps() {
+        let a = DetectedHandle {
+            provider: "email".into(),
+            handle: "a@x.com".into(),
+            display_name: None,
+            email: Some("a@x.com".into()),
+            detection_source: "git_config".into(),
+        };
+        let b = DetectedHandle {
+            provider: "email".into(),
+            handle: "A@x.com".into(),
+            display_name: Some("A".into()),
+            email: None,
+            detection_source: "other".into(),
+        };
+        let out = dedupe_handles(vec![a, b]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].handle, "a@x.com");
+        assert_eq!(out[0].display_name.as_deref(), Some("A"));
+        assert_eq!(out[0].detection_source, "git_config");
     }
 }

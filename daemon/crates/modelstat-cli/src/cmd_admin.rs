@@ -220,10 +220,22 @@ pub fn cmd_discover() -> ExitCode {
     use modelstat_parsers::discovery::{discover, DiscoveryOptions};
     let out = discover(&DiscoveryOptions::default());
     println!(
-        "→ {} installations, {} identities",
+        "→ {} installations, {} identities, {} handles",
         out.installations.len(),
-        out.identities.len()
+        out.identities.len(),
+        out.handles.len()
     );
+    // The handles are what the server folds onto THIS device's person — worth
+    // seeing before they travel: a login is a name, never a secret.
+    for h in &out.handles {
+        match &h.display_name {
+            Some(name) => println!(
+                "  {} {} ({name}) via {}",
+                h.provider, h.handle, h.detection_source
+            ),
+            None => println!("  {} {} via {}", h.provider, h.handle, h.detection_source),
+        }
+    }
     println!("(the running daemon reports this to the server on its next heartbeat — `modelstat discover` is read-only)");
     ExitCode::SUCCESS
 }
