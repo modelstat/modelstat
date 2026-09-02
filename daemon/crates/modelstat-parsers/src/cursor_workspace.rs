@@ -35,6 +35,25 @@
 //! no index. That silence is how Cursor's `ai_code_hashes` table sat dead for
 //! weeks, so [`WorkspaceScan`] separates the two and [`WorkspaceFolders::report`]
 //! says which one fired.
+//!
+//! ── The grain this can reach, and no finer ──
+//!
+//! One folder per CONVERSATION, stamped on every event of it. A conversation
+//! that genuinely worked across two repositories will therefore be attributed
+//! entirely to one, and the task's `repo_ids` array — which exists precisely
+//! because a task does touch more than one checkout — will hold a single entry
+//! for it.
+//!
+//! That is Cursor's limit, not a choice made here. Its index records the folder
+//! a WINDOW was opened on, and a conversation lives in one window; nothing in
+//! the store says where an individual message went. Checked against a real
+//! store: `relevantFiles`, `recentlyViewedFiles`, `attachedFolders` and
+//! `gitDiffs` are empty on every one of its 11,761 bubbles, so there is no
+//! finer signal to read even best-effort.
+//!
+//! The transcript parsers have no such ceiling — Claude Code and Codex state a
+//! cwd per LINE, so their arrays fill honestly. A Cursor session's does not, and
+//! a reader comparing the two should know which is which.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

@@ -163,6 +163,12 @@ Things to know:
   message. A conversation two folders both claim gets NO folder rather than a
   guessed one, and every read reports what it could not decide so a store this
   build can no longer parse never passes for a machine with nothing in it.
+  The grain is one folder per CONVERSATION, not per message: Cursor's index
+  records the folder a window was opened on, and nothing in its store says where
+  an individual message went (the per-bubble file/folder fields are empty on
+  every bubble of a real store). A Cursor session that spanned two repositories
+  is therefore attributed to one, unlike the transcript parsers, which state a
+  cwd per line and fill `repo_ids` honestly.
 - **The device's time zone** is stated by `modelstat-ingest::timezone`: the IANA
   NAME plus the current UTC offset ride the heartbeat, and the offset alone is
   stamped on every `IngestBatch` **at build time** (not at upload — a spooled
