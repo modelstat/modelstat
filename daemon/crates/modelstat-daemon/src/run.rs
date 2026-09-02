@@ -23,7 +23,8 @@ use modelstat_ingest::accounts;
 use modelstat_ingest::state::save_state;
 use modelstat_ingest::{home_path, Config};
 use modelstat_parsers::discovery::{
-    discover, discover_identities, DetectedInstallation, DiscoveryOptions, DiscoveryOutput,
+    discover, discover_identities, DetectedHandle, DetectedInstallation, DiscoveryOptions,
+    DiscoveryOutput,
 };
 use modelstat_receiver::{
     drain_local_queue, start_local_ingest_receiver, ControlScanHandler, ControlTarget, QueueStore,
@@ -478,6 +479,9 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
     // The most recent install reading, re-attached by the beats that take none
     // of their own.
     let mut installations: Vec<DetectedInstallation> = Vec::new();
+    // The person's handles (gh login, git identity), read on the install
+    // clock for the same reason and re-attached the same way.
+    let mut handles: Vec<DetectedHandle> = Vec::new();
     loop {
         let backstop_due = last_attached.elapsed() >= DISCOVERY_BACKSTOP;
         let installs_due = last_installs.elapsed() >= DISCOVERY_BACKSTOP;
@@ -488,7 +492,7 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
         let probe = tokio::task::spawn_blocking(move || {
             if installs_due {
                 let d = discover(&DiscoveryOptions::default());
-                (d.identities, Some(d.installations))
+                (d.identities, Some((d.installations, d.handles)))
             } else {
                 (discover_identities(), None)
             }
@@ -497,8 +501,9 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
         .ok();
 
         let attach = probe.and_then(|(identities, probed_installs)| {
-            if let Some(probed) = probed_installs {
+            if let Some((probed, probed_handles)) = probed_installs {
                 installations = probed;
+                handles = probed_handles;
                 last_installs = Instant::now();
             }
             // Remember which account is logged in, for the scan to name on each
@@ -524,7 +529,8 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
                 s.set_stat("installations_detected", json!(installations.len()));
                 s.set_stat("identities_detected", json!(identities.len()));
             });
-            let key = serde_json::to_string(&(&installations, &identities)).unwrap_or_default();
+            let key =
+                serde_json::to_string(&(&installations, &identities, &handles)).unwrap_or_default();
             let changed = last_snapshot.as_deref() != Some(key.as_str());
             if changed || backstop_due {
                 last_snapshot = Some(key);
@@ -532,6 +538,7 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
                 Some(DiscoveryOutput {
                     installations: installations.clone(),
                     identities,
+                    handles: handles.clone(),
                 })
             } else {
                 None
@@ -563,6 +570,10 @@ async fn post_heartbeat_now(daemon: &Daemon, discovery: Option<DiscoveryOutput>)
         obj.insert(
             "identities".into(),
             serde_json::to_value(&d.identities).unwrap_or(Value::Null),
+        );
+        obj.insert(
+            "handles".into(),
+            serde_json::to_value(&d.handles).unwrap_or(Value::Null),
         );
     }
     if let Some(resp) = daemon.api.post_heartbeat(&daemon.device_id, &wire).await {

@@ -47,6 +47,12 @@ This repo already runs on it — keep new code on the same line:
 - **Discovery probes by artefact shape** (a directory that *looks like* agent
   data), never by app-name or install-path allowlists — new and relocated
   tools are found without a release.
+- **Discovery also reports the machine's PERSON handles** — the gh CLI's
+  signed-in logins (`hosts.yml`, never its tokens) and the global git identity
+  (email + name) — as `handles` beside `identities` on the discovery heartbeat
+  (`modelstat discover` shows them). A handle is a fact about whoever paired
+  the device; the server folds it onto their person profile. `provider` is an
+  open slug (`github`, a GitHub Enterprise host, `email`, …), never an enum.
 - **No allowlists for open-ended sets found in the data** (model names, tool
   names, metadata categories) — pass strings through; bounded rosters exist
   only where code must exist per case (e.g. the parser set).
