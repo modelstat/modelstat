@@ -566,6 +566,38 @@ mod cursor_chain_tests {
     use rusqlite::{params, Connection};
     use std::process::{Command, Stdio};
 
+    /// The `file://` URI an editor writes for a local path.
+    ///
+    /// Not `format!("file://{path}")`: a POSIX path already opens with the
+    /// slash that separates authority from path, and a Windows one
+    /// (`C:\\src\\api`) carries neither that slash nor forward separators. Pasting
+    /// the raw path produced `file://C:\\src\\api` — no local path at all — so
+    /// this test asserted the whole chain on every platform but Windows, where
+    /// it failed for a reason that was never in the parser.
+    fn file_uri(path: &std::path::Path) -> String {
+        let p = path.to_string_lossy().replace('\\', "/");
+        if p.starts_with('/') {
+            format!("file://{p}")
+        } else {
+            format!("file:///{p}")
+        }
+    }
+
+    /// Proves [`file_uri`] on BOTH path shapes from any host, so the Windows
+    /// arm is verified here rather than only on a Windows runner.
+    #[test]
+    fn a_local_path_becomes_a_uri_that_reads_back_as_the_same_path() {
+        use modelstat_parsers::cursor_workspace::path_from_file_uri;
+        for raw in ["C:\\src\\api", "/src/api"] {
+            let uri = file_uri(std::path::Path::new(raw));
+            assert_eq!(
+                path_from_file_uri(&uri).as_deref(),
+                Some(raw.replace('\\', "/").as_str()),
+                "round trip for {raw:?} via {uri:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_cursor_conversation_reaches_the_repository_its_folder_points_at() {
         let root =
@@ -614,7 +646,7 @@ mod cursor_chain_tests {
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(
             ws.join("workspace.json"),
-            format!(r#"{{"folder": "file://{}"}}"#, checkout.to_string_lossy()),
+            format!(r#"{{"folder": "{}"}}"#, file_uri(&checkout)),
         )
         .unwrap();
         let c = Connection::open(ws.join("state.vscdb")).unwrap();

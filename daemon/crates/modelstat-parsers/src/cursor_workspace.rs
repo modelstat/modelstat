@@ -287,7 +287,11 @@ fn conversations_of(store: &Path) -> Option<Vec<String>> {
 ///
 /// `None` for anything that is not a local path: another scheme, or a non-empty
 /// authority (`file://server/share`, a network location with no local form).
-fn path_from_file_uri(uri: &str) -> Option<String> {
+///
+/// Public so the daemon's end-to-end test can build a URI and assert it reads
+/// back as the path it was built from — the Windows arm of that round trip is
+/// the one a macOS or Linux run would otherwise never exercise.
+pub fn path_from_file_uri(uri: &str) -> Option<String> {
     let path = percent_decode(uri.strip_prefix("file://")?.strip_prefix('/')?)?;
     // A Windows URI carries its drive in the first segment
     // (`file:///c%3A/Users/…` → `c:/Users/…`) and is already absolute. A POSIX
@@ -527,6 +531,11 @@ mod tests {
         assert_eq!(
             path_from_file_uri("file:///c%3A/Users/me/api").as_deref(),
             Some("c:/Users/me/api")
+        );
+        // The colon unencoded, which editors also write.
+        assert_eq!(
+            path_from_file_uri("file:///C:/Users/me/api").as_deref(),
+            Some("C:/Users/me/api")
         );
         assert_eq!(
             path_from_file_uri("file:///src/api").as_deref(),
