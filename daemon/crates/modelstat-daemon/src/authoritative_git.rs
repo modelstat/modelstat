@@ -27,21 +27,26 @@ use std::collections::HashMap;
 
 use modelstat_wire::{GitContext, RawEvent, SLUG_SOURCE_GIT_REMOTE, SLUG_SOURCE_REPO_ROOT_DIR};
 
-/// How many DISTINCT candidate directories one batch may resolve.
+/// How many DISTINCT repositories one batch may resolve through `git`.
 ///
-/// Every unseen directory is a `.git` walk, and one that lands in a repo is two
-/// `git` subprocesses on top. A batch runs to `BATCH_MAX_EVENTS` events and each
-/// of them may name files in a subtree of its own, so an unbounded candidate set
-/// turns a single scan sweep into thousands of processes — and `run_git` carries
-/// a timeout precisely because git must never hold up a scan.
+/// Every unseen directory is a `.git` walk (filesystem stats — cheap), and a
+/// walk that lands in a repo is two `git` subprocesses on top — the expensive
+/// part, and what this bounds. A batch runs to `BATCH_MAX_EVENTS` events and
+/// each of them may name files in a subtree of its own, so an unbounded set
+/// turns a single scan sweep into thousands of processes — and `run_git`
+/// carries a timeout precisely because git must never hold up a scan.
 ///
-/// ponytail: a flat count of DIRECTORIES, not a budget per repository. 64 is far
-/// more than a real session needs (of 162 linked sessions measured, 140 touched
-/// exactly one repo owner), and a batch that spends it still answers every
-/// remaining event from what it already resolved. The upgrade, if a session ever
-/// legitimately needs more, is to key the budget on the resolved ROOT so N
-/// subdirectories of one checkout cost one slot instead of N.
-const MAX_CANDIDATE_DIRS: usize = 64;
+/// Keyed on the resolved ROOT, never on the directory: N subdirectories of
+/// one checkout cost one slot. It was a flat count of directories until the
+/// v29 re-scan showed what that does to a real batch — a re-scan batches many
+/// sessions, every file's parent is its own directory, and 64 of those are
+/// gone a few sessions in; every event after that in the batch resolved
+/// nothing, whole sessions included (17 sessions that name a checkout on
+/// disk shipped with no repo, on one machine, in one re-scan). Of 162 linked
+/// sessions measured, 140 touched exactly one repo owner, so 64 roots is far
+/// more than a batch needs, and a batch that spends it still answers every
+/// remaining event from what it already resolved.
+const MAX_CANDIDATE_ROOTS: usize = 64;
 
 /// The corrected repo identity for a directory (slug always present).
 struct RepoIdentity {
@@ -77,29 +82,49 @@ pub fn resolve_authoritative_git(
     // Establishing that a directory sits in no repo costs the same walk as
     // establishing that it does, and a batch names the same handful of
     // directories once per turn; without the miss entries every event would
-    // re-walk every dead end the batch has already ruled out.
-    let mut resolved: HashMap<String, Option<RepoIdentity>> = HashMap::new();
+    // re-walk every dead end the batch has already ruled out. The value is the
+    // ROOT the directory sits under, and the identity lives once per root.
+    let mut dir_root: HashMap<String, Option<String>> = HashMap::new();
+    let mut roots: HashMap<String, Option<RepoIdentity>> = HashMap::new();
     let mut out: Vec<RawEvent> = Vec::with_capacity(events.len());
 
     for e in events {
         let mut winner: Option<String> = None;
-        for dir in candidate_dirs(e) {
-            if !resolved.contains_key(&dir) {
-                if resolved.len() >= MAX_CANDIDATE_DIRS {
-                    // Budget spent: answer from what is already known and
-                    // resolve nothing new for the rest of the batch.
-                    continue;
+        for dir in candidate_paths(e) {
+            if !dir_root.contains_key(&dir) {
+                // The walk is filesystem stats — always affordable. A directory
+                // with no `.git` above it is a miss, remembered as one.
+                let root = resolve_root(&dir);
+                if let Some(root) = &root {
+                    if !roots.contains_key(root) {
+                        if roots.len() >= MAX_CANDIDATE_ROOTS {
+                            // Budget spent: answer from what is already known
+                            // and ask git about nothing new for the rest of
+                            // the batch. The directory stays unmemoised so a
+                            // later batch, with a fresh budget, can still
+                            // resolve it.
+                            continue;
+                        }
+                        let id = resolve_identity(root, &mut resolve_git);
+                        roots.insert(root.clone(), id);
+                    }
                 }
-                let id = resolve_identity(&dir, &mut resolve_git, &resolve_root);
-                resolved.insert(dir.clone(), id);
+                dir_root.insert(dir.clone(), root);
             }
-            if resolved.get(&dir).is_some_and(Option::is_some) {
+            let known = dir_root
+                .get(&dir)
+                .and_then(Option::as_ref)
+                .and_then(|r| roots.get(r))
+                .is_some_and(Option::is_some);
+            if known {
                 winner = Some(dir);
                 break;
             }
         }
         let Some(id) = winner
-            .and_then(|d| resolved.get(&d))
+            .and_then(|d| dir_root.get(&d))
+            .and_then(Option::as_ref)
+            .and_then(|r| roots.get(r))
             .and_then(Option::as_ref)
         else {
             // No candidate reached a `.git` — leave the event exactly as parsed.
@@ -125,21 +150,25 @@ pub fn resolve_authoritative_git(
     out
 }
 
-/// The directories that could hold this event's repository, MOST SPECIFIC
-/// FIRST: the parent of each path the turn's tool calls named, in the order the
-/// calls named them, then `cwd`.
-fn candidate_dirs(e: &RawEvent) -> Vec<String> {
+/// The locations that could hold this event's repository, MOST SPECIFIC
+/// FIRST: each path the turn's tool calls named, in the order the calls named
+/// them, then `cwd`. The PATH, not its parent: the walk up to `.git` starts
+/// wherever it is pointed, so a file resolves exactly as its directory would,
+/// and a directory that IS a checkout root resolves too — under the parent
+/// rule, a turn that only named `~/Documents/goldsky-infra` walked up from
+/// `~/Documents` and found nothing.
+fn candidate_paths(e: &RawEvent) -> Vec<String> {
     let cwd = e.cwd.as_deref().filter(|c| !c.is_empty());
-    let mut dirs: Vec<String> = Vec::new();
+    let mut paths: Vec<String> = Vec::new();
     for path in &e.tool_paths {
-        if let Some(dir) = candidate_dir(path, cwd) {
-            push_unique(&mut dirs, dir);
+        if let Some(p) = candidate_path(path, cwd) {
+            push_unique(&mut paths, p);
         }
     }
     if let Some(cwd) = cwd {
-        push_unique(&mut dirs, cwd.to_string());
+        push_unique(&mut paths, cwd.to_string());
     }
-    dirs
+    paths
 }
 
 fn push_unique(dirs: &mut Vec<String>, dir: String) {
@@ -168,9 +197,9 @@ fn states_root(path: &str) -> bool {
             if d.is_ascii_alphabetic() && rest.first().is_some_and(|c| SEPARATORS.contains(&(*c as char))))
 }
 
-/// The directory a named path sits in.
+/// A named path, as one location on this filesystem.
 ///
-/// A path the source stated RELATIVE (`core/rust/main.rs`) names a directory
+/// A path the source stated RELATIVE (`core/rust/main.rs`) names a location
 /// only against the session's own cwd, so it is joined against it. One that
 /// states the root already names one and is taken as it stands. One that
 /// opens with `~/` names it from the HOME directory: agents write paths the
@@ -181,32 +210,31 @@ fn states_root(path: &str) -> bool {
 /// wrote them, so the host's home is the transcript's home.
 ///
 /// String work rather than [`Path`], for the reason [`SEPARATORS`] gives: the
-/// join has to produce the same directory whichever machine wrote the
+/// join has to produce the same location whichever machine wrote the
 /// transcript and whichever one reads it.
-fn candidate_dir(path: &str, cwd: Option<&str>) -> Option<String> {
+fn candidate_path(path: &str, cwd: Option<&str>) -> Option<String> {
     let path = path.trim();
     if let Some(rest) = path.strip_prefix('~').filter(|r| r.starts_with(SEPARATORS)) {
         // `~/x` — this user's home. `~other/x` is somebody else's and is left
         // to the relative arm below, which names nothing real either way.
         let home = home_dir()?;
-        let (parent, _) = rest.rsplit_once(SEPARATORS)?;
-        return Some(format!("{}{parent}", home.trim_end_matches(SEPARATORS)));
+        return Some(format!("{}{rest}", home.trim_end_matches(SEPARATORS)));
     }
     let (parent, _) = path.rsplit_once(SEPARATORS)?;
     if parent.is_empty() {
-        // A bare filename names its own cwd, which is already the last
-        // candidate — offering it again would just spend budget twice. So does
-        // a root-anchored name (`/main.rs`), whose parent is the root itself.
+        // A bare filename sits in its own cwd, which is already the last
+        // candidate — offering it again would just spend a walk twice. So does
+        // a root-anchored name (`/main.rs`), which sits in the root itself.
         return None;
     }
     if states_root(path) {
-        return Some(parent.to_string());
+        return Some(path.to_string());
     }
     // A relative path with NO cwd names nothing this process may guess at.
-    // Anchoring it to the DAEMON's own working directory would name a directory
+    // Anchoring it to the DAEMON's own working directory would name a location
     // the session never visited, which is worse than admitting there is no
     // answer — so absent cwd stays absent here.
-    cwd.map(|cwd| format!("{}/{parent}", cwd.trim_end_matches(SEPARATORS)))
+    cwd.map(|cwd| format!("{}/{path}", cwd.trim_end_matches(SEPARATORS)))
 }
 
 /// The reading machine's home directory, as the shell would expand `~`.
@@ -222,15 +250,14 @@ fn home_dir() -> Option<String> {
         .filter(|h| !h.is_empty())
 }
 
-/// The repo identity of one directory, or None when no `.git` is reachable from
-/// it. The two verified tiers and nothing else: a configured remote, else the
-/// repo-root directory name.
+/// The repo identity of one repository ROOT (a directory `resolve_root`
+/// answered — it holds a `.git`). The two verified tiers and nothing else: a
+/// configured remote, else the root directory's name.
 fn resolve_identity(
-    dir: &str,
+    root: &str,
     resolve_git: &mut impl FnMut(&str) -> Option<GitContext>,
-    resolve_root: &impl Fn(&str) -> Option<String>,
 ) -> Option<RepoIdentity> {
-    let g = resolve_git(dir);
+    let g = resolve_git(root);
     let slug = g
         .as_ref()
         .and_then(|x| x.remote_slug.clone())
@@ -247,8 +274,7 @@ fn resolve_identity(
         });
     }
     // No remote → key on the repo-root directory NAME (bare, never a subpath).
-    let branch_fallback = g.and_then(|x| x.branch);
-    let name = resolve_root(dir).map(|r| basename(&r)).unwrap_or_default();
+    let name = basename(root);
     if name.is_empty() {
         return None;
     }
@@ -256,7 +282,7 @@ fn resolve_identity(
         remote_url: None,
         remote_host: None,
         remote_slug: name,
-        branch: branch_fallback,
+        branch: g.and_then(|x| x.branch),
         slug_source: SLUG_SOURCE_REPO_ROOT_DIR,
     })
 }
@@ -461,34 +487,40 @@ mod tests {
     /// separator (so the resolver would be handed two spellings of one
     /// directory and cache-miss on both).
     #[test]
-    fn a_stated_path_names_one_directory_whoever_reads_it() {
+    fn a_stated_path_names_one_location_whoever_reads_it() {
         let cwd = Some("/Users/dev/Documents");
         for (path, want) in [
             // Root-stated, either spelling: taken as it stands, cwd ignored.
-            ("/Users/dev/other/main.rs", Some("/Users/dev/other")),
-            ("\\Users\\dev\\other\\main.rs", Some("\\Users\\dev\\other")),
-            ("C:\\src\\app\\main.rs", Some("C:\\src\\app")),
-            ("c:/src/app/main.rs", Some("c:/src/app")),
+            ("/Users/dev/other/main.rs", Some("/Users/dev/other/main.rs")),
+            (
+                "\\Users\\dev\\other\\main.rs",
+                Some("\\Users\\dev\\other\\main.rs"),
+            ),
+            ("C:\\src\\app\\main.rs", Some("C:\\src\\app\\main.rs")),
+            ("c:/src/app/main.rs", Some("c:/src/app/main.rs")),
             // Relative, either spelling: joined against the cwd.
-            ("core/rust/main.rs", Some("/Users/dev/Documents/core/rust")),
+            (
+                "core/rust/main.rs",
+                Some("/Users/dev/Documents/core/rust/main.rs"),
+            ),
             (
                 "core\\rust\\main.rs",
-                Some("/Users/dev/Documents/core\\rust"),
+                Some("/Users/dev/Documents/core\\rust\\main.rs"),
             ),
             // A bare name, and a root-anchored one, add no directory the cwd
             // does not already offer.
             ("main.rs", None),
             ("/main.rs", None),
         ] {
-            assert_eq!(candidate_dir(path, cwd).as_deref(), want, "{path}");
+            assert_eq!(candidate_path(path, cwd).as_deref(), want, "{path}");
         }
         // A relative path with no cwd has nothing to be relative TO, and the
         // daemon's own working directory is not an answer.
-        assert_eq!(candidate_dir("core/rust/main.rs", None), None);
+        assert_eq!(candidate_path("core/rust/main.rs", None), None);
         // Root-stated still answers without a cwd.
         assert_eq!(
-            candidate_dir("/Users/dev/other/main.rs", None).as_deref(),
-            Some("/Users/dev/other")
+            candidate_path("/Users/dev/other/main.rs", None).as_deref(),
+            Some("/Users/dev/other/main.rs")
         );
     }
 
@@ -505,26 +537,34 @@ mod tests {
             for (path, want) in [
                 (
                     "~/Documents/edge-api/src/main.rs",
-                    Some("/Users/dev/Documents/edge-api/src"),
+                    Some("/Users/dev/Documents/edge-api/src/main.rs"),
                 ),
-                ("~/Documents/edge-api", Some("/Users/dev/Documents")),
+                // A directory that IS the checkout — named as itself, so the
+                // walk starts inside it rather than one level above.
+                (
+                    "~/Documents/edge-api",
+                    Some("/Users/dev/Documents/edge-api"),
+                ),
                 // Windows spelling of the same statement.
-                ("~\\src\\app\\main.rs", Some("/Users/dev\\src\\app")),
+                (
+                    "~\\src\\app\\main.rs",
+                    Some("/Users/dev\\src\\app\\main.rs"),
+                ),
                 // Somebody ELSE's home is not this user's, and stays the
                 // relative shape it always was — joined on the cwd.
                 (
                     "~alice/repo/main.rs",
-                    Some("/Users/dev/Documents/~alice/repo"),
+                    Some("/Users/dev/Documents/~alice/repo/main.rs"),
                 ),
                 // A bare `~` names no file.
                 ("~", None),
             ] {
-                assert_eq!(candidate_dir(path, cwd).as_deref(), want, "{path}");
+                assert_eq!(candidate_path(path, cwd).as_deref(), want, "{path}");
             }
             // Home is home whether or not the session states a cwd.
             assert_eq!(
-                candidate_dir("~/Documents/edge-api/src/main.rs", None).as_deref(),
-                Some("/Users/dev/Documents/edge-api/src")
+                candidate_path("~/Documents/edge-api/src/main.rs", None).as_deref(),
+                Some("/Users/dev/Documents/edge-api/src/main.rs")
             );
         }
         std::env::remove_var("MODELSTAT_HOME_FOR_TESTS");
@@ -583,16 +623,17 @@ mod tests {
     }
 
     /// `run_git` must never hold up a scan, so the number of DISTINCT
-    /// directories a batch resolves is bounded — and a directory already ruled
-    /// out is never walked twice.
+    /// repositories a batch asks git about is bounded — and a root already
+    /// asked is never asked twice.
     #[test]
-    fn distinct_resolutions_per_batch_are_bounded() {
-        let events: Vec<RawEvent> = (0..(MAX_CANDIDATE_DIRS * 3))
+    fn distinct_git_resolutions_per_batch_are_bounded() {
+        // Every event names its own checkout, so every one is a new root.
+        let events: Vec<RawEvent> = (0..(MAX_CANDIDATE_ROOTS * 3))
             .map(|i| {
                 ev_paths(
                     Some("/Users/dev/Documents"),
                     None,
-                    &[&format!("dir{i}/a.rs"), &format!("dir{i}/b.rs")],
+                    &[&format!("repo{i}/src/a.rs"), &format!("repo{i}/src/b.rs")],
                 )
             })
             .collect();
@@ -603,13 +644,61 @@ mod tests {
                 asked.borrow_mut().insert(dir.to_string());
                 None
             },
-            |_| None,
+            |dir| {
+                // Every `/Users/dev/Documents/repoN/…` is a checkout at repoN.
+                let rest = dir.strip_prefix("/Users/dev/Documents/")?;
+                let repo = rest.split('/').next()?;
+                Some(format!("/Users/dev/Documents/{repo}"))
+            },
         );
         assert_eq!(out.len(), events.len());
         assert!(
-            asked.borrow().len() <= MAX_CANDIDATE_DIRS,
-            "resolved {} distinct directories, ceiling is {MAX_CANDIDATE_DIRS}",
+            asked.borrow().len() <= MAX_CANDIDATE_ROOTS,
+            "asked git about {} distinct roots, ceiling is {MAX_CANDIDATE_ROOTS}",
             asked.borrow().len()
+        );
+    }
+
+    /// THE FAILURE the root-keyed budget ends: a batch that names hundreds of
+    /// distinct subdirectories of a few checkouts must resolve EVERY event and
+    /// ask git once per checkout — not spend the budget on directories and go
+    /// blind for the rest of the batch. This is what a re-scan batch looks
+    /// like: many sessions, every file's parent its own directory.
+    #[test]
+    fn many_subdirectories_of_one_checkout_cost_one_slot() {
+        let per_repo = MAX_CANDIDATE_ROOTS * 2;
+        let mut events: Vec<RawEvent> = Vec::new();
+        for repo in ["core", "edge"] {
+            for i in 0..per_repo {
+                events.push(ev_paths(
+                    Some("/Users/dev/Documents"),
+                    None,
+                    &[&format!("{repo}/src/m{i}/lib.rs")],
+                ));
+            }
+        }
+        let world: World = &[
+            ("/Users/dev/Documents/core", Some("acme/core")),
+            ("/Users/dev/Documents/edge", Some("acme/edge")),
+        ];
+        let asked = std::cell::RefCell::new(std::collections::BTreeSet::new());
+        let git = git_of(world);
+        let out = resolve_authoritative_git(
+            &events,
+            |dir| {
+                asked.borrow_mut().insert(dir.to_string());
+                git(dir)
+            },
+            root_fn(world),
+        );
+        // Every event resolved — the last one as surely as the first.
+        let (core, edge) = out.split_at(per_repo);
+        assert!(core.iter().all(|e| slug_of(e) == Some("acme/core")));
+        assert!(edge.iter().all(|e| slug_of(e) == Some("acme/edge")));
+        // And git was asked exactly once per checkout, at its root.
+        assert_eq!(
+            asked.borrow().iter().cloned().collect::<Vec<_>>(),
+            ["/Users/dev/Documents/core", "/Users/dev/Documents/edge"]
         );
     }
 }

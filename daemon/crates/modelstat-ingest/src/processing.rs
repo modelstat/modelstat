@@ -237,6 +237,19 @@ const CAPTURE: &[Semantics] = &[
     //       Cross-parser for the same reason v28 was, and a re-read is again the
     //       only thing that can re-file a session already uploaded.
     Semantics::Semantic,
+    // v30 — the resolution budget counts REPOSITORIES, not directories, and a
+    //       named path is the candidate itself rather than its parent. The v29
+    //       re-scan on the machine it was measured on still shipped 17 sessions
+    //       that name a checkout on disk with no repo: a re-scan batches many
+    //       sessions, every file's parent was its own budget slot, 64 were gone
+    //       a few sessions in, and every event after that resolved nothing.
+    //       Replayed as one batch over that machine's 278 pi sessions: 34
+    //       resolved under the directory budget, 178 under the root budget
+    //       (the other 100 name no path inside any checkout). A turn that only
+    //       named a checkout's root directory walked up from its PARENT and
+    //       found nothing; it now walks from the path. Cross-parser, and a
+    //       re-read is again the only way a shipped session gains the repo.
+    Semantics::Semantic,
 ];
 
 /// `redaction` — the other cross-parser aspect: a bump re-reads EVERY parser's
