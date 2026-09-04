@@ -172,13 +172,26 @@ fn states_root(path: &str) -> bool {
 ///
 /// A path the source stated RELATIVE (`core/rust/main.rs`) names a directory
 /// only against the session's own cwd, so it is joined against it. One that
-/// states the root already names one and is taken as it stands.
+/// states the root already names one and is taken as it stands. One that
+/// opens with `~/` names it from the HOME directory: agents write paths the
+/// way people type them, and `~/Documents/edge-api/src/main.rs` joined onto
+/// the cwd named `<cwd>/~/Documents/…`, a directory nobody has, so a whole
+/// session of work under `~/…` resolved to no repo (observed: 207 tool-path
+/// events, 0 resolved). This daemon reads transcripts on the machine that
+/// wrote them, so the host's home is the transcript's home.
 ///
 /// String work rather than [`Path`], for the reason [`SEPARATORS`] gives: the
 /// join has to produce the same directory whichever machine wrote the
 /// transcript and whichever one reads it.
 fn candidate_dir(path: &str, cwd: Option<&str>) -> Option<String> {
     let path = path.trim();
+    if let Some(rest) = path.strip_prefix('~').filter(|r| r.starts_with(SEPARATORS)) {
+        // `~/x` — this user's home. `~other/x` is somebody else's and is left
+        // to the relative arm below, which names nothing real either way.
+        let home = home_dir()?;
+        let (parent, _) = rest.rsplit_once(SEPARATORS)?;
+        return Some(format!("{}{parent}", home.trim_end_matches(SEPARATORS)));
+    }
     let (parent, _) = path.rsplit_once(SEPARATORS)?;
     if parent.is_empty() {
         // A bare filename names its own cwd, which is already the last
@@ -194,6 +207,19 @@ fn candidate_dir(path: &str, cwd: Option<&str>) -> Option<String> {
     // the session never visited, which is worse than admitting there is no
     // answer — so absent cwd stays absent here.
     cwd.map(|cwd| format!("{}/{parent}", cwd.trim_end_matches(SEPARATORS)))
+}
+
+/// The reading machine's home directory, as the shell would expand `~`.
+/// Overridable in tests through `MODELSTAT_HOME_FOR_TESTS` so a fixture can
+/// stand in for the home without touching the real one.
+fn home_dir() -> Option<String> {
+    if let Ok(h) = std::env::var("MODELSTAT_HOME_FOR_TESTS") {
+        return Some(h);
+    }
+    std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .filter(|h| !h.is_empty())
 }
 
 /// The repo identity of one directory, or None when no `.git` is reachable from
@@ -464,6 +490,44 @@ mod tests {
             candidate_dir("/Users/dev/other/main.rs", None).as_deref(),
             Some("/Users/dev/other")
         );
+    }
+
+    /// `~/…` names the home directory, the way the shell reads it — NOT a
+    /// directory called `~` under the cwd. Before this, a session whose every
+    /// tool call spelled its paths `~/Documents/<repo>/…` (the way people type
+    /// them, and the way an agent echoing them writes them) resolved no repo
+    /// at all, and was routed as if it had touched nothing.
+    #[test]
+    fn a_tilde_path_names_the_home_directory() {
+        std::env::set_var("MODELSTAT_HOME_FOR_TESTS", "/Users/dev");
+        {
+            let cwd = Some("/Users/dev/Documents");
+            for (path, want) in [
+                (
+                    "~/Documents/edge-api/src/main.rs",
+                    Some("/Users/dev/Documents/edge-api/src"),
+                ),
+                ("~/Documents/edge-api", Some("/Users/dev/Documents")),
+                // Windows spelling of the same statement.
+                ("~\\src\\app\\main.rs", Some("/Users/dev\\src\\app")),
+                // Somebody ELSE's home is not this user's, and stays the
+                // relative shape it always was — joined on the cwd.
+                (
+                    "~alice/repo/main.rs",
+                    Some("/Users/dev/Documents/~alice/repo"),
+                ),
+                // A bare `~` names no file.
+                ("~", None),
+            ] {
+                assert_eq!(candidate_dir(path, cwd).as_deref(), want, "{path}");
+            }
+            // Home is home whether or not the session states a cwd.
+            assert_eq!(
+                candidate_dir("~/Documents/edge-api/src/main.rs", None).as_deref(),
+                Some("/Users/dev/Documents/edge-api/src")
+            );
+        }
+        std::env::remove_var("MODELSTAT_HOME_FOR_TESTS");
     }
 
     /// The no-regression claim, stated as an invariant rather than a snapshot:

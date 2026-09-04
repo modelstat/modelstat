@@ -224,6 +224,19 @@ const CAPTURE: &[Semantics] = &[
     //       producer here — it parses no tool calls, so it has no paths to offer
     //       and its sessions still wait on a source of their own.
     Semantics::Semantic,
+    // v29 — `~/…` tool paths name the home directory. The generation above
+    //       resolved a repo from the parent of every path a tool call named,
+    //       and that fixed nothing for the user it was measured on: the agent
+    //       spells its paths the way the person typed them, `~/Documents/<repo>/…`,
+    //       and `~` is neither root-stated nor a real relative segment, so the
+    //       join produced `<cwd>/~/Documents/<repo>` — a directory nobody has.
+    //       Measured on that user's sessions after the v28 re-scan: 207 tool-path
+    //       events, 0 resolved; 79 of 80 sessions in a fortnight still in the
+    //       personal workspace. `~/` now expands to the reading machine's home
+    //       (the daemon reads transcripts on the machine that wrote them).
+    //       Cross-parser for the same reason v28 was, and a re-read is again the
+    //       only thing that can re-file a session already uploaded.
+    Semantics::Semantic,
 ];
 
 /// `redaction` — the other cross-parser aspect: a bump re-reads EVERY parser's
