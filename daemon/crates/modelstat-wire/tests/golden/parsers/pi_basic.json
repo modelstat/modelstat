@@ -3,7 +3,7 @@
   "sourceFile": "/tmp/modelstat-fixtures/pi/2026-06-26T23-53-00-262Z_019f0659-dc65-7969-af42-5dc1ced6232a.jsonl",
   "events": [
     {
-      "source_event_id": "evt_zqd4n169mhou",
+      "source_event_id": "evt_3d6ttg2wggp4r",
       "seq": 3,
       "ts": "2026-06-26T23:53:39.971Z",
       "kind": "user_message",
@@ -25,7 +25,7 @@
       "source_byte_offset": 300
     },
     {
-      "source_event_id": "evt_zqd4n169mcng",
+      "source_event_id": "evt_3d6tujvrmgc7c",
       "seq": 4,
       "ts": "2026-06-26T23:53:44.372Z",
       "kind": "assistant_message",
@@ -68,7 +68,7 @@
     {
       "external_call_id": "tc_pi_1",
       "session_id": "019f0659-dc65-7969-af42-5dc1ced6232a",
-      "source_event_id": "evt_zqd4n169mcng",
+      "source_event_id": "evt_3d6tujvrmgc7c",
       "agent": "pi",
       "server": "builtin",
       "name": "read_file",

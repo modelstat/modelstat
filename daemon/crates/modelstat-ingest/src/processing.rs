@@ -425,7 +425,22 @@ const CODEX: &[Semantics] = &[
 const CURSOR: &[Semantics] = &[];
 
 /// `pi` — a parser-scoped aspect: a bump re-reads only pi's transcripts.
-const PI: &[Semantics] = &[];
+const PI: &[Semantics] = &[
+    // v24 — a record's identity is the id it states, not where it sat. Every
+    // pi `message` / `model_change` line carries an `id` (an 8-hex node id in
+    // the session's tree) and the parser keyed all of them by byte offset. pi
+    // rewrites a transcript in place — a compaction, a re-titled header — and
+    // every offset below the edit moves, so the same call shipped again under
+    // a fresh `fs::` key and the server's `(scope, session, source_event_id)`
+    // dedupe could not see it: 31,227 pi events landed twice on prod by
+    // 2026-09-04. The key is now `rec::<session>::<id>` — session-scoped,
+    // because the ids repeat across sessions — and a line stating no `id`
+    // keeps its position. Semantic: the same bytes now produce different ids,
+    // so history must be re-read; the re-shipped rows collide with their old
+    // positional twins on the server, which retires the pair hourly
+    // (core#1366).
+    Semantics::Semantic,
+];
 
 /// Per-ASPECT pipeline generations — several exact claims instead of one
 /// maximal one. Each aspect lists what it has declared SINCE

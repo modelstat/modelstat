@@ -65,6 +65,26 @@ pub enum EventSource<'a> {
     /// Position-independent key for transcript lines whose identity is the uuid
     /// embedded in the line (Claude Code resume-copy dedupe): `uuid::<lineUuid>`.
     LineUuid { line_uuid: &'a str },
+    /// Position-independent key for a record that states its own id INSIDE
+    /// a conversation whose ids are not globally unique:
+    /// `rec::<session>::<recordId>`.
+    ///
+    /// pi writes its transcript as a tree — every `message` and `model_change`
+    /// line carries an `id` and a `parentId` — but the ids are 8-hex node ids,
+    /// unique within one session's tree and nowhere else, so
+    /// [`LineUuid`](EventSource::LineUuid) (a bare id, hashed with the device
+    /// alone) would fuse two real records from two sessions into one row. The
+    /// session is the namespace the id was minted in, so it is part of the key.
+    ///
+    /// Why not the byte offset: pi rewrites a transcript in place (a compaction,
+    /// a re-titled session header), which shifts every offset below the edit,
+    /// and the same call then ships again under a fresh `fs::` key. Measured on
+    /// the server 2026-09-04: 31,227 pi events landed twice that way. The id
+    /// survives a rewrite byte for byte; the offset does not.
+    SessionRecord {
+        session_id: &'a str,
+        record_id: &'a str,
+    },
     /// Position-independent key for a codex round trip:
     /// `codex::<conversation>::<input>:<cached>:<output>:<reasoning>`, the
     /// conversation's CUMULATIVE counter at that turn.
@@ -132,6 +152,10 @@ pub fn source_event_id(device_id: &str, source: &EventSource) -> String {
     let key = match source {
         EventSource::File { file, byte_offset } => format!("fs::{file}::{byte_offset}"),
         EventSource::LineUuid { line_uuid } => format!("uuid::{line_uuid}"),
+        EventSource::SessionRecord {
+            session_id,
+            record_id,
+        } => format!("rec::{session_id}::{record_id}"),
         EventSource::Web {
             host,
             conversation_id,
@@ -206,6 +230,38 @@ mod tests {
             },
         );
         assert_eq!(id, "evt_irnlblnsf9gx");
+    }
+
+    #[test]
+    fn session_record_shape_is_session_scoped_and_position_free() {
+        let a = source_event_id(
+            "dev_1",
+            &EventSource::SessionRecord {
+                session_id: "019f0659-dc65-7969-af42-5dc1ced6232a",
+                record_id: "229ad794",
+            },
+        );
+        // The same 8-hex node id in ANOTHER session is another record.
+        let b = source_event_id(
+            "dev_1",
+            &EventSource::SessionRecord {
+                session_id: "01a01aab-0b4a-7000-a51c-8308b2980527",
+                record_id: "229ad794",
+            },
+        );
+        assert_ne!(a, b, "the session is part of the identity");
+        // And nothing about where the line sat is: the key is the pair alone.
+        assert_eq!(
+            a,
+            source_event_id(
+                "dev_1",
+                &EventSource::SessionRecord {
+                    session_id: "019f0659-dc65-7969-af42-5dc1ced6232a",
+                    record_id: "229ad794",
+                },
+            )
+        );
+        assert!(a.starts_with("evt_"));
     }
 
     #[test]
