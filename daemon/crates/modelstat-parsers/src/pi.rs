@@ -174,6 +174,35 @@ pub fn parse_pi_session_streaming(
     })
 }
 
+/// The dedupe key for one pi record: the `id` it states, namespaced by its
+/// session — a rewrite above the line moves its byte offset and nothing else,
+/// and the same call must not ship twice. A record that states no `id` has
+/// only its position to be named by, exactly as a Claude Code line without a
+/// `uuid` does.
+fn record_event_id(
+    ctx: &ParserContext,
+    obj: &Value,
+    session_id: Option<&str>,
+    offset: u64,
+) -> String {
+    match (obj.get("id").and_then(Value::as_str), session_id) {
+        (Some(record_id), Some(session_id)) if !record_id.is_empty() => source_event_id(
+            &ctx.device_id,
+            &EventSource::SessionRecord {
+                session_id,
+                record_id,
+            },
+        ),
+        _ => source_event_id(
+            &ctx.device_id,
+            &EventSource::File {
+                file: &ctx.source_file,
+                byte_offset: offset,
+            },
+        ),
+    }
+}
+
 fn parse_inner(
     ctx: &ParserContext,
     sink: &mut Sink,
@@ -257,13 +286,7 @@ fn parse_inner(
                     sink.push(unknown_record_event(UnknownRecord {
                         seq: Some(raw_lines),
                         kind,
-                        source_event_id: source_event_id(
-                            &ctx.device_id,
-                            &EventSource::File {
-                                file: &ctx.source_file,
-                                byte_offset: offset,
-                            },
-                        ),
+                        source_event_id: record_event_id(ctx, &obj, Some(&sid), offset),
                         agent: "pi",
                         provider: &provider_of(last_provider.as_deref()),
                         session_id: sid,
@@ -312,13 +335,7 @@ fn parse_inner(
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .or_else(|| last_model.clone());
-            let event_id = source_event_id(
-                &ctx.device_id,
-                &EventSource::File {
-                    file: &ctx.source_file,
-                    byte_offset: offset,
-                },
-            );
+            let event_id = record_event_id(ctx, &obj, session_id.as_deref(), offset);
             let slug = guess_repo_slug_from_path(cwd.as_deref());
             let (excerpt, content_bytes) = match extract_excerpt(&content) {
                 Some((text, chars)) => (Some(text), Some(chars)),
@@ -471,13 +488,7 @@ fn parse_inner(
             sink.push(unknown_record_event(UnknownRecord {
                 seq: Some(raw_lines),
                 kind: role,
-                source_event_id: source_event_id(
-                    &ctx.device_id,
-                    &EventSource::File {
-                        file: &ctx.source_file,
-                        byte_offset: offset,
-                    },
-                ),
+                source_event_id: record_event_id(ctx, &obj, session_id.as_deref(), offset),
                 agent: "pi",
                 provider: &provider_of(last_provider.as_deref()),
                 session_id: session_id.clone().unwrap(),
@@ -508,13 +519,7 @@ fn parse_inner(
             seq: Some(raw_lines),
             started_at: None,
             first_token_at: None,
-            source_event_id: source_event_id(
-                &ctx.device_id,
-                &EventSource::File {
-                    file: &ctx.source_file,
-                    byte_offset: offset,
-                },
-            ),
+            source_event_id: record_event_id(ctx, &obj, session_id.as_deref(), offset),
             ts: ml_timestamp.to_string(),
             kind: "user_message".to_string(),
             agent: "pi".to_string(),
@@ -586,6 +591,65 @@ mod tests {
             writeln!(f, "{line}").unwrap();
         }
         (path, TempDirGuard(dir))
+    }
+
+    /// The prod defect, in one file. pi rewrites a transcript in place, which
+    /// moves every byte offset below the edit; a record keyed by its offset then
+    /// ships again under a fresh id and the same call is billed twice (31,227
+    /// pi events on the server, 2026-09-04). A record's id survives the rewrite.
+    #[test]
+    fn a_record_keeps_its_id_when_the_bytes_above_it_move() {
+        let sid = "01a01aab-0b4a-7000-a51c-8308b2980527";
+        let header = r#"{"type":"session","version":3,"id":"01a01aab-0b4a-7000-a51c-8308b2980527","timestamp":"2026-08-19T15:36:52.299Z","cwd":"/Users/dev/projects/acme"}"#;
+        let user = r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-08-19T15:38:34.634Z","message":{"role":"user","content":[{"type":"text","text":"ok?"}],"timestamp":1787153914593}}"#;
+        let asst = r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-19T15:38:40.738Z","message":{"role":"assistant","content":[{"type":"text","text":"Yes."}],"provider":"xai-oauth","model":"grok-4.6","usage":{"input":10,"output":2}}}"#;
+        // The same session, re-written with a longer header: every offset below
+        // it has moved.
+        let longer = r#"{"type":"session","version":3,"id":"01a01aab-0b4a-7000-a51c-8308b2980527","timestamp":"2026-08-19T15:36:52.299Z","cwd":"/Users/dev/projects/acme-renamed-after-the-fact"}"#;
+        let name = format!("2026-08-19T15-36-52-299Z_{sid}.jsonl");
+        let (p1, _g1) = write_session(&name, &[header, user, asst]);
+        let (p2, _g2) = write_session(&name, &[longer, user, asst]);
+        let a = parse_pi_session(&ParserContext::new("dev_1", p1.to_string_lossy())).unwrap();
+        let b = parse_pi_session(&ParserContext::new("dev_1", p2.to_string_lossy())).unwrap();
+        assert_eq!(a.events.len(), 2);
+        assert_ne!(
+            a.events[1].source_byte_offset, b.events[1].source_byte_offset,
+            "the bytes did move"
+        );
+        assert_eq!(
+            a.events
+                .iter()
+                .map(|e| &e.source_event_id)
+                .collect::<Vec<_>>(),
+            b.events
+                .iter()
+                .map(|e| &e.source_event_id)
+                .collect::<Vec<_>>(),
+            "and the ids did not"
+        );
+    }
+
+    /// A record that states no `id` has only its position to be named by.
+    #[test]
+    fn a_record_without_an_id_is_named_by_its_position() {
+        let sid = "01a01aab-0b4a-7000-a51c-8308b2980527";
+        let header = r#"{"type":"session","version":3,"id":"01a01aab-0b4a-7000-a51c-8308b2980527","timestamp":"2026-08-19T15:36:52.299Z","cwd":"/Users/dev/projects/acme"}"#;
+        let noid = r#"{"type":"message","parentId":null,"timestamp":"2026-08-19T15:38:34.634Z","message":{"role":"user","content":[{"type":"text","text":"ok?"}],"timestamp":1787153914593}}"#;
+        let name = format!("2026-08-19T15-36-52-299Z_{sid}.jsonl");
+        let (p, _g) = write_session(&name, &[header, noid]);
+        let r = parse_pi_session(&ParserContext::new("dev_1", p.to_string_lossy())).unwrap();
+        assert_eq!(r.events.len(), 1);
+        let offset = r.events[0].source_byte_offset.expect("stated");
+        assert_eq!(
+            r.events[0].source_event_id,
+            source_event_id(
+                "dev_1",
+                &EventSource::File {
+                    file: &p.to_string_lossy(),
+                    byte_offset: offset,
+                },
+            )
+        );
     }
 
     #[test]
