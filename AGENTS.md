@@ -305,6 +305,15 @@ recomputes the same version, and one that died after it skips entirely. The
 Homebrew tap bump no-ops when `HOMEBREW_TAP_DISPATCH_TOKEN` is absent — a
 missing tap update with a green run usually means that.
 
+## Finished worktrees are removed
+
+A branch's worktree is finished the moment its PR is merged or closed. Remove
+it — build caches, the worktree, the local branch — with the shared script
+from the core repo: `../core/scripts/worktree-clean.sh --repo . --yes`
+(dry-run without `--yes`; it refuses dirty trees, open PRs, `main`, and the
+worktree you run it from). A merged worktree left behind keeps its `target/`
+and `node_modules/`; 75 of them once filled a 1.8 TB disk.
+
 ## CRITICAL — read last (repeated from the top)
 
 Nobody uses this service yet — there's no data or behaviour to preserve. Every change lands as the **final, canonical version**, as if the code had always been written that way:
