@@ -87,3 +87,31 @@ test("TS schemas accept the Rust-emitted wire fixtures (TS accepts Rust wire)", 
   assert.equal(hb.timezone, "America/Los_Angeles");
   assert.equal(hb.utc_offset_minutes, -420);
 });
+
+test("tool input uses the full-message UTF-8 byte guard", () => {
+  const fixture = JSON.parse(readFileSync(join(WIRE_DIR, "tool_call.json"), "utf8"));
+  fixture.action.input_redacted = "x".repeat(24_173);
+  assert.doesNotThrow(() => ToolCallWire.parse(fixture));
+
+  fixture.action.input_redacted = "€".repeat(100_000);
+  assert.throws(() => ToolCallWire.parse(fixture));
+
+  fixture.action.input_redacted = "safe";
+  fixture.action.command_redacted = "x".repeat(24_173);
+  assert.doesNotThrow(() => ToolCallWire.parse(fixture));
+  fixture.action.command_redacted = "€".repeat(100_000);
+  assert.throws(() => ToolCallWire.parse(fixture));
+});
+
+test("tool input evidence rejects invalid pairs and formats", () => {
+  const fixture = JSON.parse(readFileSync(join(WIRE_DIR, "tool_call.json"), "utf8"));
+  for (const [input, format] of [
+    ["code", null],
+    [null, "text"],
+    ["code", "yaml"],
+  ]) {
+    fixture.action.input_redacted = input;
+    fixture.action.input_format = format;
+    assert.throws(() => ToolCallWire.parse(fixture));
+  }
+});

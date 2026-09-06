@@ -91,7 +91,62 @@ fn tool_call_and_action_accept_and_roundtrip() {
     let action = tc.action.expect("action present");
     assert_eq!(action.surface, "shell");
     assert_eq!(action.executable.as_deref(), Some("kubectl"));
+    assert_eq!(action.input_format.as_deref(), Some("json"));
+    assert!(!action.input_truncated);
+    assert!(action
+        .input_redacted
+        .as_deref()
+        .unwrap()
+        .contains("kubectl"));
     assert_eq!(action.extractor, "shell.v3");
+}
+
+#[test]
+fn tool_input_evidence_rejects_invalid_pairs_and_formats() {
+    let fixture: serde_json::Value = serde_json::from_str(&read("tool_call.json")).unwrap();
+    for (input, format) in [
+        (serde_json::json!("code"), serde_json::Value::Null),
+        (serde_json::Value::Null, serde_json::json!("text")),
+        (serde_json::json!("code"), serde_json::json!("yaml")),
+    ] {
+        let mut invalid = fixture.clone();
+        invalid["action"]["input_redacted"] = input;
+        invalid["action"]["input_format"] = format;
+        assert!(serde_json::from_value::<ToolCallWire>(invalid).is_err());
+    }
+}
+
+#[test]
+fn tool_input_clamp_marks_content_loss() {
+    let mut tc: ToolCallWire = roundtrip("tool_call.json");
+    let action = tc.action.as_mut().expect("action present");
+    action.input_redacted = Some("€".repeat(modelstat_wire::caps::CONTENT_EXCERPT_MAX));
+    action.input_truncated = false;
+
+    action.clamp();
+
+    assert!(
+        action.input_redacted.as_ref().unwrap().len() <= modelstat_wire::caps::CONTENT_EXCERPT_MAX
+    );
+    assert!(action.input_redacted.as_ref().unwrap().ends_with('€'));
+    assert!(action.input_truncated);
+}
+
+#[test]
+fn tool_command_clamp_marks_content_loss() {
+    let mut tc: ToolCallWire = roundtrip("tool_call.json");
+    let action = tc.action.as_mut().expect("action present");
+    action.command_redacted = Some("€".repeat(modelstat_wire::caps::CONTENT_EXCERPT_MAX));
+    action.input_truncated = false;
+
+    action.clamp();
+
+    assert!(
+        action.command_redacted.as_ref().unwrap().len()
+            <= modelstat_wire::caps::CONTENT_EXCERPT_MAX
+    );
+    assert!(action.command_redacted.as_ref().unwrap().ends_with('€'));
+    assert!(action.input_truncated);
 }
 
 #[test]

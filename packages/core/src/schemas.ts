@@ -319,8 +319,7 @@ export type Segment = z.infer<typeof Segment>;
  * the top-level ToolCallWire stays stable as attributes grow. Bit-aligned with
  * the backend's Rust wire schema: the field set, caps, and defaults must match
  * exactly. Privacy: only governed tokens, the value-masked `param_shape`, and
- * the compliance-redacted command (PII/secrets stripped) ride this —
- * un-redacted raw never does. Produced on-device.
+ * compliance-redacted invocation input ride this. Un-redacted raw never does.
  */
 export const ToolAction = z
   .object({
@@ -347,7 +346,21 @@ export const ToolAction = z
     /** The compliance-redacted command text — PII/secrets stripped on-device
      * (SOC2/GDPR), org-internal infra intact; the server derives semantics from
      * it. Un-redacted raw never ships. (tier 0, post-redaction) */
-    command_redacted: z.string().max(16_384).nullable().default(null),
+    command_redacted: z
+      .string()
+      .refine((value) => new TextEncoder().encode(value).length <= 262_144)
+      .nullable()
+      .default(null),
+    /** Complete original invocation input after the privacy pipeline. */
+    input_redacted: z
+      .string()
+      .refine((value) => new TextEncoder().encode(value).length <= 262_144)
+      .nullable()
+      .default(null),
+    /** Original representation: text string or serialized JSON value. */
+    input_format: z.enum(["text", "json"]).nullable().default(null),
+    /** True when the full-message byte guard removed command or input content. */
+    input_truncated: z.boolean().default(false),
     /** Per-script content abstracts for any script/bash FILES the command runs
      * — summarized on-device by the local model, then redacted. Ordered by
      * appearance; `token` is the script's token exactly as it appears in
@@ -362,7 +375,15 @@ export const ToolAction = z
     /** Provenance of the extraction, e.g. `shell.v3`. */
     extractor: z.string().max(40),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if ((value.input_redacted === null) !== (value.input_format === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "input_redacted and input_format must be present together",
+      });
+    }
+  });
 export type ToolAction = z.infer<typeof ToolAction>;
 
 /**

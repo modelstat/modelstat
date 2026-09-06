@@ -26,6 +26,10 @@ a package named `modelstat` from this repo.
 modelstat.ai) is a separate private service (closed-source) and is out of scope
 for this repo.
 
+`ToolAction.input_redacted` retains the original invocation after every privacy
+stage. `command_redacted` remains the derived shell projection; input content
+never changes `surface` or implies execution.
+
 ## Design principle: the weakest sufficient hypothesis
 
 Among all designs that **exactly fit the cases actually observed**, prefer the

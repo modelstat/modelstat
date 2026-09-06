@@ -103,6 +103,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": "npm test",
+        "input_redacted": "{\"command\":\"npm test\"}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "shell.v3"

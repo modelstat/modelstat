@@ -696,6 +696,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "{\"query\":\"select:mcp__mcp-registry__search_mcp_registry,mcp__mcp-registry__suggest_connectors\",\"max_results\":5}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "builtin.v1"
@@ -728,6 +731,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "{}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "mcp.v1"
@@ -760,6 +766,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "{}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "mcp.v1"
@@ -792,6 +801,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "{\"keywords\":[\"slack\",\"messages\",\"chat\"]}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "mcp.v1"
@@ -824,6 +836,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "{\"keywords\":[\"groundcover\",\"observability\",\"monitoring\"]}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "mcp.v1"
@@ -856,6 +871,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "{\"uuids\":[\"597f662f-36de-437e-836e-5a81013cbfbe\"],\"keywords\":[\"messages\"]}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "mcp.v1"

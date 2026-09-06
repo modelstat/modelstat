@@ -110,6 +110,10 @@ const toolAction = {
   executable: "kubectl",
   param_shape: "§ § § -n §",
   command_redacted: "kubectl rollout restart deploy/payments-api -n prod",
+  input_redacted:
+    '{"command":"kubectl rollout restart deploy/payments-api -n prod","description":"Restart the example deployment"}',
+  input_format: "json",
+  input_truncated: false,
   extractor: "shell.v3",
 };
 

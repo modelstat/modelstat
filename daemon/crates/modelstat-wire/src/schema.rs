@@ -517,7 +517,7 @@ pub struct ScriptSummary {
 /// On-device action decomposition of a tool call — strict (unknown keys
 /// rejected, mirroring Zod `.strict()`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ToolActionUnchecked", deny_unknown_fields)]
 pub struct ToolAction {
     pub surface: String,
     #[serde(default)]
@@ -536,11 +536,87 @@ pub struct ToolAction {
     pub r#abstract: Option<String>,
     #[serde(default)]
     pub command_redacted: Option<String>,
+    /// The complete original invocation input after the privacy pipeline. A
+    /// string stays text; every other supplied JSON value is serialized once.
+    #[serde(default)]
+    pub input_redacted: Option<String>,
+    /// `text` for an original string, `json` for any other supplied value.
+    #[serde(default)]
+    pub input_format: Option<String>,
+    /// True when the full-message guard removed command or input content.
+    #[serde(default)]
+    pub input_truncated: bool,
     #[serde(default)]
     pub scripts: Vec<ScriptSummary>,
     #[serde(default)]
     pub confidence: f64,
     pub extractor: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolActionUnchecked {
+    surface: String,
+    #[serde(default)]
+    executable: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    object: Option<String>,
+    #[serde(default)]
+    qualifiers: Vec<String>,
+    #[serde(default)]
+    param_shape: Option<String>,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    r#abstract: Option<String>,
+    #[serde(default)]
+    command_redacted: Option<String>,
+    #[serde(default)]
+    input_redacted: Option<String>,
+    #[serde(default)]
+    input_format: Option<String>,
+    #[serde(default)]
+    input_truncated: bool,
+    #[serde(default)]
+    scripts: Vec<ScriptSummary>,
+    #[serde(default)]
+    confidence: f64,
+    extractor: String,
+}
+
+impl TryFrom<ToolActionUnchecked> for ToolAction {
+    type Error = String;
+
+    fn try_from(value: ToolActionUnchecked) -> Result<Self, Self::Error> {
+        match (&value.input_redacted, value.input_format.as_deref()) {
+            (None, None) | (Some(_), Some("text" | "json")) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                return Err("input_redacted and input_format must be present together".into());
+            }
+            (Some(_), Some(format)) => {
+                return Err(format!("input_format must be text or json, got {format}"));
+            }
+        }
+        Ok(Self {
+            surface: value.surface,
+            executable: value.executable,
+            action: value.action,
+            object: value.object,
+            qualifiers: value.qualifiers,
+            param_shape: value.param_shape,
+            keywords: value.keywords,
+            r#abstract: value.r#abstract,
+            command_redacted: value.command_redacted,
+            input_redacted: value.input_redacted,
+            input_format: value.input_format,
+            input_truncated: value.input_truncated,
+            scripts: value.scripts,
+            confidence: value.confidence,
+            extractor: value.extractor,
+        })
+    }
 }
 
 impl ToolAction {
@@ -559,7 +635,16 @@ impl ToolAction {
         }
         self.keywords.truncate(caps::TA_KEYWORDS_COUNT_MAX);
         clamp_opt(&mut self.r#abstract, caps::TA_ABSTRACT_MAX);
-        clamp_opt(&mut self.command_redacted, caps::TA_COMMAND_REDACTED_MAX);
+        let command_len = self.command_redacted.as_ref().map(String::len);
+        clamp_opt(&mut self.command_redacted, caps::CONTENT_EXCERPT_MAX);
+        let input_len = self.input_redacted.as_ref().map(String::len);
+        clamp_opt(&mut self.input_redacted, caps::CONTENT_EXCERPT_MAX);
+        if self.command_redacted.as_ref().map(String::len) != command_len
+            || self.input_redacted.as_ref().map(String::len) != input_len
+        {
+            self.input_truncated = true;
+        }
+        clamp_opt(&mut self.input_format, caps::TA_INPUT_FORMAT_MAX);
         for s in &mut self.scripts {
             clamp_in_place(&mut s.token, caps::TA_SCRIPT_TOKEN_MAX);
             clamp_in_place(&mut s.summary, caps::TA_SCRIPT_SUMMARY_MAX);

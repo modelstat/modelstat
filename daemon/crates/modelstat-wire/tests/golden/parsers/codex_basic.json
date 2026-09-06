@@ -195,6 +195,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "const r = await tools.exec_command({\"cmd\":\"sed -n '1,240p' uploader.js\",\"workdir\":\"/private/tmp/modelstat-fixture-gen/api\",\"yield_time_ms\":10000,\"max_output_tokens\":12000});\ntext(r.output);\n",
+        "input_format": "text",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "builtin.v1"
@@ -227,6 +230,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "{\"query\":\"widget upload endpoint\"}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "mcp.v1"

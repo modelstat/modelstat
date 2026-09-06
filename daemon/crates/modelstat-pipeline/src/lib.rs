@@ -17,8 +17,8 @@ pub mod segment;
 pub mod session_metadata;
 
 pub use batch::{
-    attach_segment_ids, attach_segment_ids_by_map, batch_id, deep_redact_tool_commands,
-    enrich_tool_call_redaction, prepare_cloud_raw_events, ulid,
+    attach_segment_ids, attach_segment_ids_by_map, batch_id, deep_redact_tool_inputs,
+    enrich_tool_input_redaction, prepare_cloud_raw_events, ulid,
 };
 pub use build::{build_for_one_session, build_session_titles, BuildOutcome};
 pub use embed::{embed_turns, l2_normalize, mean_pool, Embedder, NoEmbedder, EMBED_DIM};

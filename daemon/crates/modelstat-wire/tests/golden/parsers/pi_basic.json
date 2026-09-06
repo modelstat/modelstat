@@ -92,6 +92,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": null,
+        "input_redacted": "{\"path\":\"src/x.ts\"}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0.0,
         "extractor": "builtin.v1"

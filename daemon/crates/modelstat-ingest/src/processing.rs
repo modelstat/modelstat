@@ -250,6 +250,13 @@ const CAPTURE: &[Semantics] = &[
     //       found nothing; it now walks from the path. Cross-parser, and a
     //       re-read is again the only way a shipped session gains the repo.
     Semantics::Semantic,
+    // v31 — tool actions retain the complete invocation input after the same
+    //       privacy stages as shell commands, and both fields use the existing
+    //       full-message byte guard. Earlier batches kept only a shell projection
+    //       and cut long commands, so MCP arguments, freeform code and command
+    //       tails were unavailable downstream. Re-reading is the only recovery
+    //       path. Cross-parser, because every parser emits tool actions.
+    Semantics::Semantic,
 ];
 
 /// `redaction` — the other cross-parser aspect: a bump re-reads EVERY parser's

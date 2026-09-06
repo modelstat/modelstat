@@ -24,7 +24,7 @@ use modelstat_parsers::{
 };
 use modelstat_pipeline::{
     attach_segment_ids_by_map, batch_id, build_for_one_session, build_session_metadata,
-    build_session_titles, deep_redact_tool_commands, enrich_tool_call_redaction,
+    build_session_titles, deep_redact_tool_inputs, enrich_tool_input_redaction,
     prepare_cloud_raw_events, BuildOutcome, Embedder, LinkExtractor, ResilientSummarizer,
     Summarizer,
 };
@@ -459,13 +459,13 @@ where
     let session_titles = build_session_titles(&title_input, resilient.engine()).await;
     let session_metadata = build_session_metadata(&title_input, &events, git, extract_links).await;
 
-    // Deep-redact the SHIPPED tool commands before attribution: L2 (the PII detector, always
-    // on-device) + L3 (LLM backstop, LOCAL mode only — §21.13, never crosses the
-    // machine boundary). Both fail-safe: a down detector/engine leaves the L1-floored
-    // command unchanged. The cloud path already ran L2 inside prepare_cloud_raw_events.
-    enrich_tool_call_redaction(&mut drafts, redactor);
+    // Deep-redact retained tool input before attribution: L2 always runs on-device
+    // and holds the flush when unavailable. L3 is the local-mode backstop.
+    if !enrich_tool_input_redaction(&mut drafts, redactor) {
+        return FlushOutcome::Held;
+    }
     if mode == "local" {
-        deep_redact_tool_commands(&mut drafts, resilient.engine()).await;
+        deep_redact_tool_inputs(&mut drafts, resilient.engine()).await;
     }
 
     // Attribute each buffered call to the segment covering its source event,
@@ -1121,6 +1121,71 @@ mod tests {
             None,
             &mut acc,
             &mut ev_acc,
+            &SessionActors::new(),
+            &ScanGeneration::default(),
+            &Accounts::new(),
+        )
+        .await;
+        assert!(matches!(out, FlushOutcome::Held));
+    }
+
+    #[tokio::test]
+    async fn local_mode_holds_when_tool_input_cannot_be_redacted() {
+        let resilient = ResilientSummarizer::with_cooldown(
+            Fake {
+                reply: "x".into(),
+                failing: false,
+            },
+            Duration::ZERO,
+        );
+        let draft = ToolCallDraft {
+            external_call_id: "call_example".into(),
+            session_id: "session_example".into(),
+            source_event_id: "event_example".into(),
+            agent: "codex_cli".into(),
+            server: "builtin".into(),
+            name: "annotate".into(),
+            turn_index: None,
+            call_index: 0,
+            started_at: "2026-09-06T10:00:00Z".into(),
+            ended_at: None,
+            status: "unknown".into(),
+            args_hash: "hash".into(),
+            signature_hash: "none".into(),
+            args_bytes: 20,
+            result_bytes: 0,
+            model: None,
+            action: Some(modelstat_wire::ToolAction {
+                surface: "builtin".into(),
+                executable: Some("annotate".into()),
+                action: None,
+                object: None,
+                qualifiers: Vec::new(),
+                param_shape: None,
+                keywords: Vec::new(),
+                r#abstract: None,
+                command_redacted: None,
+                input_redacted: Some("Katherine Johnson".into()),
+                input_format: Some("text".into()),
+                input_truncated: false,
+                scripts: Vec::new(),
+                confidence: 0.0,
+                extractor: "builtin.v1".into(),
+            }),
+        };
+        let out = build_flush_batches(
+            "dev1",
+            "9.9.9",
+            "local",
+            Vec::new(),
+            vec![draft],
+            &resilient,
+            &NoEmbedder,
+            &UnavailableRedactor,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &mut BTreeMap::new(),
             &SessionActors::new(),
             &ScanGeneration::default(),
             &Accounts::new(),
