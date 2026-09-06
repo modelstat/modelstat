@@ -102,3 +102,16 @@ test("tool input uses the full-message UTF-8 byte guard", () => {
   fixture.action.command_redacted = "€".repeat(100_000);
   assert.throws(() => ToolCallWire.parse(fixture));
 });
+
+test("tool input evidence rejects invalid pairs and formats", () => {
+  const fixture = JSON.parse(readFileSync(join(WIRE_DIR, "tool_call.json"), "utf8"));
+  for (const [input, format] of [
+    ["code", null],
+    [null, "text"],
+    ["code", "yaml"],
+  ]) {
+    fixture.action.input_redacted = input;
+    fixture.action.input_format = format;
+    assert.throws(() => ToolCallWire.parse(fixture));
+  }
+});

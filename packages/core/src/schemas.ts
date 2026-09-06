@@ -375,7 +375,15 @@ export const ToolAction = z
     /** Provenance of the extraction, e.g. `shell.v3`. */
     extractor: z.string().max(40),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if ((value.input_redacted === null) !== (value.input_format === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "input_redacted and input_format must be present together",
+      });
+    }
+  });
 export type ToolAction = z.infer<typeof ToolAction>;
 
 /**

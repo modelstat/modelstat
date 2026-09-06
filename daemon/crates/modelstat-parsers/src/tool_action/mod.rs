@@ -19,8 +19,7 @@ use modelstat_redact::redact;
 use modelstat_wire::{clamp_utf8_bytes, param_shape, ToolAction};
 use serde_json::Value;
 
-/// Malicious-size guard, mirrored from the backend
-/// (`MAX_TOOL_ACTION_PARAM_SHAPE_CHARS` / `MAX_TOOL_ACTION_COMMAND_CHARS`).
+/// Derived param-shape guard, mirrored from the backend.
 const MAX_FIELD_CHARS: usize = 16_384;
 
 /// Truncate to at most `max` Unicode code points (matches the backend's
@@ -107,7 +106,7 @@ pub fn extract_tool_action(call: &ToolActionInput) -> ToolAction {
 
 /// Retain the complete invocation input without interpreting it. `null` means
 /// no supplied input; strings remain text and every other JSON value is encoded
-/// once. The privacy floor runs before the scalar guard.
+/// once. The privacy floor runs before the UTF-8 byte guard.
 fn retain_input(input: &Value, cwd: Option<&str>) -> (Option<String>, Option<String>, bool) {
     let (raw, format) = match input {
         Value::Null => return (None, None, false),

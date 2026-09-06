@@ -102,6 +102,21 @@ fn tool_call_and_action_accept_and_roundtrip() {
 }
 
 #[test]
+fn tool_input_evidence_rejects_invalid_pairs_and_formats() {
+    let fixture: serde_json::Value = serde_json::from_str(&read("tool_call.json")).unwrap();
+    for (input, format) in [
+        (serde_json::json!("code"), serde_json::Value::Null),
+        (serde_json::Value::Null, serde_json::json!("text")),
+        (serde_json::json!("code"), serde_json::json!("yaml")),
+    ] {
+        let mut invalid = fixture.clone();
+        invalid["action"]["input_redacted"] = input;
+        invalid["action"]["input_format"] = format;
+        assert!(serde_json::from_value::<ToolCallWire>(invalid).is_err());
+    }
+}
+
+#[test]
 fn tool_input_clamp_marks_content_loss() {
     let mut tc: ToolCallWire = roundtrip("tool_call.json");
     let action = tc.action.as_mut().expect("action present");
