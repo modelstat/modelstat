@@ -132,6 +132,9 @@ Things to know:
   for local error/notice messages is passed through as-is (the server
   decides what to hide; the daemon never drops data). The one exception:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
+- A tool call is shell only when its input object states `command` or `cmd` as
+  a string or argv array. A raw string is the builtin tool's own input; source
+  text and tool names never infer the surface.
 - **Every event carries `seq`** — its 1-based position in the source log it was
   read from (the line ordinal in a transcript, the record ordinal within a
   conversation for Cursor's key/value store). `ts` cannot order a log: parsers

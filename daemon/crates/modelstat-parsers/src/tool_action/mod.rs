@@ -114,11 +114,10 @@ pub fn extract_local_tool_context(call: &ToolActionInput) -> Option<(String, Opt
 }
 
 /// The shell command string inside a tool input, or None when this isn't a
-/// shell-style call. Generic: a string input, or a string/argv `command`/`cmd`
-/// field — no tool-name allowlist.
+/// shell-style call. An observed object `command`/`cmd` field is the evidence;
+/// its value may be a string or argv array. Tool names and source text are not.
 fn shell_command_of(input: &Value) -> Option<String> {
     match input {
-        Value::String(s) => nonempty(s),
         Value::Object(map) => {
             // `input.command ?? input.cmd` — nullish coalescing: command wins
             // unless absent or JSON null.
@@ -188,6 +187,51 @@ mod tests {
         assert_eq!(ta.param_shape, None);
         assert_eq!(ta.command_redacted, None);
         assert_eq!(ta.extractor, "builtin.v1");
+    }
+
+    #[test]
+    fn raw_string_inputs_remain_builtins_without_local_context() {
+        for (name, raw) in [
+            ("javascript", "const widgetCount = 3;"),
+            (
+                "freeform_patch",
+                "*** Begin Patch\n*** Add File: example.txt\n+hello\n*** End Patch",
+            ),
+            ("annotate", "Summarize the fictional widget record"),
+        ] {
+            let input = json!(raw);
+            let call = ToolActionInput {
+                server: "builtin",
+                name,
+                input: &input,
+                cwd: None,
+            };
+            let action = extract_tool_action(&call);
+            assert_eq!(action.surface, "builtin", "{name}");
+            assert_eq!(action.executable.as_deref(), Some(name), "{name}");
+            assert_eq!(action.command_redacted, None, "{name}");
+            assert_eq!(action.extractor, "builtin.v1", "{name}");
+            assert_eq!(extract_local_tool_context(&call), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn structured_command_fields_are_shell_evidence() {
+        for input in [
+            json!({ "command": "printf widget" }),
+            json!({ "cmd": ["printf", "widget"] }),
+        ] {
+            let call = ToolActionInput {
+                server: "builtin",
+                name: "run",
+                input: &input,
+                cwd: None,
+            };
+            let action = extract_tool_action(&call);
+            assert_eq!(action.surface, "shell");
+            assert_eq!(action.executable.as_deref(), Some("printf"));
+            assert!(extract_local_tool_context(&call).is_some());
+        }
     }
 
     #[test]

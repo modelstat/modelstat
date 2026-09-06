@@ -2775,6 +2775,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 
+    #[test]
+    fn custom_tool_call_strings_stay_builtin_and_keep_their_argument_hashes() {
+        let inputs = [
+            ("javascript", "const widgetCount = 3;"),
+            (
+                "freeform_patch",
+                "*** Begin Patch\n*** Add File: example.txt\n+hello\n*** End Patch",
+            ),
+            ("annotate", "Summarize the fictional widget record"),
+        ];
+        let mut lines = vec![plain_meta(
+            "2026-08-05T11:58:57.508Z",
+            "019fd1ca-816d-7af2-9332-a6db0bfc4d25",
+        )];
+        for (index, (name, input)) in inputs.iter().enumerate() {
+            lines.push(json!({
+                "timestamp": format!("2026-08-05T11:59:0{index}.000Z"),
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": format!("call_examplefake000000000{index}"),
+                    "name": name,
+                    "input": input,
+                }
+            }));
+        }
+
+        let path = rollout(&lines);
+        let res = parse_codex_rollout(&ParserContext::new("dev_1", &path)).unwrap();
+        assert_eq!(res.tool_calls.len(), inputs.len(), "every call survives");
+        assert!(
+            res.script_contexts.is_empty(),
+            "free-form tool input is not local shell context"
+        );
+        for (call, (name, input)) in res.tool_calls.iter().zip(inputs) {
+            let expected = hash_args(&Value::String(input.to_string()));
+            assert_eq!(call.name, name);
+            assert_eq!(call.args_hash, expected.args_hash, "{name}");
+            assert_eq!(call.signature_hash, expected.signature_hash, "{name}");
+            let action = call.action.as_ref().expect("structural action");
+            assert_eq!(action.surface, "builtin", "{name}");
+            assert_eq!(action.executable.as_deref(), Some(name), "{name}");
+            assert_eq!(action.command_redacted, None, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
     /// A begin/end pair is ONE call: the begin opens the draft at its own
     /// instant, the end closes it — dating it, sizing its result, and stating
     /// its outcome (an `Err` wrapper is codex saying the call failed).
