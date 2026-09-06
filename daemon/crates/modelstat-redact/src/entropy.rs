@@ -1,6 +1,6 @@
 //! Entropy pass — port of the `redact.ts` generic high-entropy catcher. Runs on
-//! unbroken word tokens of ≥32 chars from `[A-Za-z0-9/+=_-]`, after the named
-//! patterns so it never double-counts.
+//! tokens of ≥32 chars from `[A-Za-z0-9/+=_-]`, then checks slash-delimited
+//! components when the whole token is not sensitive.
 //!
 //! Two faithfulness points:
 //!   * The candidate class is pure ASCII, so code points == UTF-16 units ==
@@ -40,42 +40,55 @@ fn token_candidate() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"[A-Za-z0-9/+=_-]{32,}").unwrap())
 }
 
+fn classify(candidate: &str) -> Option<&'static str> {
+    if candidate.len() < 32 {
+        return None;
+    }
+    if candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some("[REDACTED:hash]");
+    }
+    if candidate
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return None;
+    }
+    if (candidate.ends_with('=') || candidate.contains('+')) && entropy(candidate) >= 3.5 {
+        return Some("[REDACTED:base64]");
+    }
+    let has_digit = candidate.chars().any(|c| c.is_ascii_digit());
+    let has_upper = candidate.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = candidate.chars().any(|c| c.is_ascii_lowercase());
+    if has_digit && has_upper && has_lower && entropy(candidate) >= 3.6 {
+        return Some("[REDACTED:hi-entropy]");
+    }
+    None
+}
+
+fn redact_candidate(candidate: &str, counts: &mut RedactionCounts) -> String {
+    if let Some(replacement) = classify(candidate) {
+        counts.secrets_found += 1;
+        return replacement.to_string();
+    }
+    let mut out = String::with_capacity(candidate.len());
+    for (index, component) in candidate.split('/').enumerate() {
+        if index > 0 {
+            out.push('/');
+        }
+        if let Some(replacement) = classify(component) {
+            counts.secrets_found += 1;
+            out.push_str(replacement);
+        } else {
+            out.push_str(component);
+        }
+    }
+    out
+}
+
 /// Apply the entropy pass in place over `out`, updating `counts.secrets_found`.
 pub(crate) fn apply(out: &str, counts: &mut RedactionCounts) -> String {
     token_candidate()
-        .replace_all(out, |caps: &Captures| {
-            let m = &caps[0];
-            // Long pure hex = digest / git SHA / hash — collapse it.
-            if m.chars().all(|c| c.is_ascii_hexdigit()) {
-                counts.secrets_found += 1;
-                return "[REDACTED:hash]".to_string();
-            }
-            // SCREAMING_SNAKE constant names are not secrets.
-            if m.chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-            {
-                return m.to_string();
-            }
-            // Base64 / base64url blobs: trailing `=` or an embedded `+` are strong
-            // binary-payload signals (`/` alone is a path separator, NOT a signal).
-            let ends_eq_or_plus = m.ends_with('=') || m.contains('+');
-            if ends_eq_or_plus && entropy(m) >= 3.5 {
-                counts.secrets_found += 1;
-                return "[REDACTED:base64]".to_string();
-            }
-            // Generic high-entropy token — an API key with no explicit pattern.
-            let has_digit = m.chars().any(|c| c.is_ascii_digit());
-            let has_upper = m.chars().any(|c| c.is_ascii_uppercase());
-            let has_lower = m.chars().any(|c| c.is_ascii_lowercase());
-            if !(has_digit && has_upper && has_lower) {
-                return m.to_string();
-            }
-            if entropy(m) < 3.6 {
-                return m.to_string();
-            }
-            counts.secrets_found += 1;
-            "[REDACTED:hi-entropy]".to_string()
-        })
+        .replace_all(out, |caps: &Captures| redact_candidate(&caps[0], counts))
         .into_owned()
 }
 

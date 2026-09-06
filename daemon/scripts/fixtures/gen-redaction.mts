@@ -74,7 +74,19 @@ const CASES: Case[] = [
     input: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
   },
   { name: "entropy_base64", input: "echo aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=" },
+  {
+    name: "entropy_base64_with_slash",
+    input: "payload AbCdEfGhIjKlMnOpQrStUvWxYz012345/6789+=",
+  },
   { name: "entropy_hi_entropy", input: "id Zx9Kd2Lm7Qp4Rt6Vw8Yc1Df3Gh5Jk0Sabcde" },
+  {
+    name: "entropy_hash_url_path",
+    input: "GET https://api.example.test/v2/0123456789abcdef0123456789abcdef01234567",
+  },
+  {
+    name: "entropy_hash_relative_path",
+    input: "open artifacts/0123456789abcdef0123456789abcdef01234567/result.json",
+  },
 
   // --- non-redaction guarantees (must survive; counts all zero) ---
   { name: "keep_screaming_snake", input: "export MAX_TOOL_ACTION_PARAM_SHAPE_CHARS_LIMIT" },

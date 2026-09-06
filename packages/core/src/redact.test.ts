@@ -45,6 +45,24 @@ test("collapses hashes / digests", () => {
   );
 });
 
+test("collapses hashes inside URL paths", () => {
+  const hash = "0123456789abcdef0123456789abcdef01234567";
+  const r = redact(`GET https://api.example.test/v2/${hash}`);
+  assert.equal(r.text, "GET https://api.example.test/v2/[REDACTED:hash]");
+  assert.equal(r.counts.secrets_found, 1);
+
+  const path = redact(`open artifacts/${hash}/result.json`);
+  assert.equal(path.text, "open artifacts/[REDACTED:hash]/result.json");
+  assert.equal(path.counts.secrets_found, 1);
+});
+
+test("classifies slash-bearing base64 as one token", () => {
+  const blob = "AbCdEfGhIjKlMnOpQrStUvWxYz012345/6789+=";
+  const r = redact(`payload ${blob}`);
+  assert.equal(r.text, "payload [REDACTED:base64]");
+  assert.equal(r.counts.secrets_found, 1);
+});
+
 test("collapses base64 blobs but leaves paths and constants intact", () => {
   assert.match(redact("echo aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=").text, /\[REDACTED:base64\]/);
   // A long relative path uses `/` (a path separator, not a base64 signal) and

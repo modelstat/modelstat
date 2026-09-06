@@ -228,10 +228,37 @@
       "paths_redacted_absolute": 0
     },
     {
+      "name": "entropy_base64_with_slash",
+      "input": "payload AbCdEfGhIjKlMnOpQrStUvWxYz012345/6789+=",
+      "repo_root": null,
+      "text": "payload [REDACTED:base64]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
       "name": "entropy_hi_entropy",
       "input": "id Zx9Kd2Lm7Qp4Rt6Vw8Yc1Df3Gh5Jk0Sabcde",
       "repo_root": null,
       "text": "id [REDACTED:hi-entropy]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "entropy_hash_url_path",
+      "input": "GET https://api.example.test/v2/0123456789abcdef0123456789abcdef01234567",
+      "repo_root": null,
+      "text": "GET https://api.example.test/v2/[REDACTED:hash]",
+      "secrets_found": 1,
+      "emails_redacted": 0,
+      "paths_redacted_absolute": 0
+    },
+    {
+      "name": "entropy_hash_relative_path",
+      "input": "open artifacts/0123456789abcdef0123456789abcdef01234567/result.json",
+      "repo_root": null,
+      "text": "open artifacts/[REDACTED:hash]/result.json",
       "secrets_found": 1,
       "emails_redacted": 0,
       "paths_redacted_absolute": 0
