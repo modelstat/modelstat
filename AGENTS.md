@@ -157,6 +157,26 @@ Things to know:
   `git`/`git_guess` repo-ref split) never takes an unmarked slug on faith. The
   one exception is evidence: a context carrying a real `remote_url` is verified
   even without the marker, because no guess path has ever written one.
+- **A repo is reached through a CANDIDATE DIRECTORY, and Cursor had none.**
+  `resolve_authoritative_git` probes, most specific first, the parent of every
+  path a turn's tool calls named (`tool_paths`), then `cwd`. Cursor supplies
+  neither: its bubbles carry no tool data, and its store — one global key/value
+  DB — names no folder, so the parser shipped `cwd: None` for its whole life.
+  It was the only source with both hands empty, which is why making the repo a
+  fact about the files a turn touched (2026-08-24) moved every other agent and
+  left this one with no repository at all, on any device, ever. `cursor_workspace` closes that by
+  reading Cursor's OWN workspace index (`workspaceStorage/<hash>/`:
+  `workspace.json` names the folder, its `state.vscdb` names the conversations
+  that folder holds) — never a directory name, a path shape, or a word of any
+  message. A conversation two folders both claim gets NO folder rather than a
+  guessed one, and every read reports what it could not decide so a store this
+  build can no longer parse never passes for a machine with nothing in it.
+  The grain is one folder per CONVERSATION, not per message: Cursor's index
+  records the folder a window was opened on, and nothing in its store says where
+  an individual message went (the per-bubble file/folder fields are empty on
+  every bubble of a real store). A Cursor session that spanned two repositories
+  is therefore attributed to one, unlike the transcript parsers, which state a
+  cwd per line and fill `repo_ids` honestly.
 - **The device's time zone** is stated by `modelstat-ingest::timezone`: the IANA
   NAME plus the current UTC offset ride the heartbeat, and the offset alone is
   stamped on every `IngestBatch` **at build time** (not at upload — a spooled

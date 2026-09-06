@@ -27,7 +27,7 @@
 //! Per plan D6 we open a byte-snapshot COPY read-only (read file → temp → open),
 //! never the live file, so we never lock a DB Cursor has open.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -80,6 +80,24 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             .then_with(|| a.bubble_id.cmp(&b.bubble_id))
     });
 
+    // WHERE each conversation happened. The chat store names no folder; Cursor's
+    // workspace index does (see `crate::cursor_workspace`), and `cwd` is the one
+    // input `resolve_authoritative_git` needs before it will probe anything for a
+    // remote. Read once per parse, ahead of the loop, because the map is keyed on
+    // the conversation and every bubble of one conversation shares the answer.
+    let folders = crate::cursor_workspace::read(&ctx.source_file);
+    // Reported against the store's OWN conversation count: an index that placed
+    // none of a non-empty store is a schema move, and only this side knows the
+    // store's half of that comparison.
+    folders.report(
+        &ctx.source_file,
+        bubbles
+            .iter()
+            .map(|b| b.composer_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len() as u64,
+    );
+
     let mut events: Vec<RawEvent> = Vec::new();
     let mut skips = SkipLedger::default();
     let mut current_composer = String::new();
@@ -106,6 +124,9 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             seq = 0;
         }
         seq += 1;
+        // Absent whenever Cursor's index does not place this conversation — an
+        // honest "not known", never a stand-in.
+        let cwd = folders.folder(&b.composer_id).map(str::to_string);
         let kind = match b.kind {
             BUBBLE_TYPE_USER => "user_message",
             BUBBLE_TYPE_ASSISTANT => "assistant_message",
@@ -118,7 +139,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
                 let observed = other.to_string();
                 skips.drop_record(&ctx.source_file, &observed);
                 if !b.composer_id.is_empty() && !b.created_at.is_empty() {
-                    events.push(unknown_record_event(UnknownRecord {
+                    let mut unknown = unknown_record_event(UnknownRecord {
                         kind: &observed,
                         source_event_id: source_event_id(
                             &ctx.device_id,
@@ -137,7 +158,13 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
                         source_file: &ctx.source_file,
                         source_byte_offset: None,
                         seq: Some(seq),
-                    }));
+                    });
+                    // The record is unmodelled, not unplaced: it happened in the
+                    // same folder as its neighbours. The shared builder carries
+                    // no cwd because most sources state one per LINE, not per
+                    // conversation.
+                    unknown.cwd = cwd;
+                    events.push(unknown);
                 }
                 continue;
             }
@@ -195,7 +222,7 @@ pub fn parse_cursor_tracking_db(ctx: &ParserContext) -> std::io::Result<ParseRes
             recipient_actor_id: None,
             turn_index: Some(turn_index),
             parent_event_id: None,
-            cwd: None,
+            cwd,
             git: None,
             // Every observed bubble reports `{input:0, output:0}` — state no
             // usage rather than record zeros as fact.
@@ -634,5 +661,111 @@ mod since_floor_tests {
             "not renumbered to 0 by the floor"
         );
         std::fs::remove_file(path).ok();
+    }
+}
+
+/// The parser end of `crate::cursor_workspace`: a Cursor event now STATES the
+/// folder its conversation was held in — the only candidate directory this
+/// source can offer the daemon's authoritative-git pass, which otherwise
+/// prefers the paths a turn's tool calls named and gets none from a bubble.
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// A Cursor data directory holding both halves the editor writes: the global
+    /// chat store, and the per-folder index beside it.
+    fn install(tag: &str, conversations: &[&str], indexed: &[(&str, &str)]) -> String {
+        let root = std::env::temp_dir().join(format!(
+            "modelstat-cursor-e2e-{tag}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("User/globalStorage")).unwrap();
+
+        let store = root.join("User/globalStorage/state.vscdb");
+        let c = Connection::open(&store).unwrap();
+        c.execute(
+            "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+            [],
+        )
+        .unwrap();
+        for id in conversations {
+            c.execute(
+                "INSERT INTO cursorDiskKV VALUES (?,?)",
+                rusqlite::params![
+                    format!("bubbleId:{id}:b1"),
+                    r#"{"type":1,"text":"do the thing","createdAt":"2026-08-20T10:00:00.000Z"}"#
+                ],
+            )
+            .unwrap();
+        }
+        drop(c);
+
+        for (i, (conversation, folder)) in indexed.iter().enumerate() {
+            let ws = root.join("User/workspaceStorage").join(format!("w{i}"));
+            fs::create_dir_all(&ws).unwrap();
+            fs::write(
+                ws.join("workspace.json"),
+                format!(r#"{{"folder": "file://{folder}"}}"#),
+            )
+            .unwrap();
+            let c = Connection::open(ws.join("state.vscdb")).unwrap();
+            c.execute(
+                "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)",
+                [],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+                rusqlite::params![
+                    "composer.composerData",
+                    format!(r#"{{"allComposers":[{{"composerId":"{conversation}"}}]}}"#)
+                ],
+            )
+            .unwrap();
+        }
+        store.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn an_indexed_conversation_states_the_folder_it_ran_in() {
+        let store = install(
+            "placed",
+            &["comp-placed", "comp-unplaced"],
+            &[("comp-placed", "/src/api")],
+        );
+        let out = parse_cursor_tracking_db(&ParserContext::new("dev-1", &store)).unwrap();
+
+        let placed: Vec<_> = out
+            .events
+            .iter()
+            .filter(|e| e.session_id == "comp-placed")
+            .collect();
+        assert_eq!(placed.len(), 1);
+        // Before this, EVERY Cursor event shipped `cwd: None` and no Cursor
+        // session ever reached the server with a repository on it.
+        assert_eq!(placed[0].cwd.as_deref(), Some("/src/api"));
+
+        let unplaced: Vec<_> = out
+            .events
+            .iter()
+            .filter(|e| e.session_id == "comp-unplaced")
+            .collect();
+        assert_eq!(unplaced.len(), 1);
+        // The index does not place it, so the event says nothing — an honest
+        // absence, and exactly what it shipped before. Never a stand-in.
+        assert_eq!(unplaced[0].cwd, None);
+    }
+
+    #[test]
+    fn the_parser_states_no_folder_when_cursor_kept_no_index() {
+        // The chat store alone, with no `workspaceStorage` beside it: every
+        // conversation is unplaced and the parse is otherwise untouched.
+        let store = install("no-index", &["comp-1"], &[]);
+        let out = parse_cursor_tracking_db(&ParserContext::new("dev-1", &store)).unwrap();
+        assert_eq!(out.events.len(), 1);
+        assert_eq!(out.events[0].cwd, None);
     }
 }
