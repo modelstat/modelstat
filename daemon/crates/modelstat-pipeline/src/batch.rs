@@ -1,7 +1,7 @@
 //! Batch-assembly primitives — the pure pieces the scan loop (M4 Part 3)
 //! composes into an `IngestBatch`. Ports `core/ids.ts::batchId` and the
 //! retired TypeScript daemon's `attachSegmentIds`; cloud raw-event preparation and
-//! tool-call redaction enrichment are owned here.
+//! retained tool-input redaction enrichment are owned here.
 //!
 //! Kept here (not in the daemon) because they're pure + testable and operate on
 //! pipeline/parsers outputs: the ULID batch id, tool-call → segment attribution,
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use modelstat_parsers::ToolCallDraft;
 use modelstat_redact::{pii_redact_checked_many, redact, redactor_active, PiiModel};
-use modelstat_wire::{RawEvent, Segment, ToolCallWire};
+use modelstat_wire::{RawEvent, Segment, ToolAction, ToolCallWire};
 
 /// Crockford base32 — the ULID alphabet.
 const ULID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -97,31 +97,44 @@ pub fn attach_segment_ids_by_map(
         .collect()
 }
 
-/// Deep-redact each draft's `command_redacted` with the PII pass (layer 2) — the
-/// shipped command is the most sensitive field, previously regex-floor only.
-/// Deduped per distinct command, best-effort, mutates drafts in place. Port of
-/// `enrichToolCallRedaction` (here the redactor is the PII Privacy Filter).
-/// Returns `false` when the redactor could not classify some command, so the
-/// caller can hold. A tool command is shipped text like any other — a command line
-/// carries paths, hostnames and the occasional pasted token — so "could not read
-/// it" cannot mean "send it as-is".
-pub fn enrich_tool_call_redaction<N: PiiModel>(drafts: &mut [ToolCallDraft], redactor: &N) -> bool {
-    // Distinct commands first, classified as ONE batch: a repeated command is
-    // classified once (as before), and a remote redactor sees one request per
-    // flush instead of one per command.
+fn retained_tool_texts(action: &ToolAction) -> impl Iterator<Item = &str> {
+    [
+        action.command_redacted.as_deref(),
+        action.input_redacted.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|text| !text.is_empty())
+}
+
+fn replace_retained_tool_texts(action: &mut ToolAction, replacements: &HashMap<&str, &str>) {
+    for slot in [&mut action.command_redacted, &mut action.input_redacted] {
+        if let Some(hit) = slot
+            .as_deref()
+            .and_then(|text| replacements.get(text).copied())
+        {
+            *slot = Some(hit.to_string());
+        }
+    }
+}
+
+/// Run every retained tool input through the PII pass (layer 2). The command
+/// projection and complete invocation share one traversal, one dedupe, and one
+/// fail-closed result: if any text cannot be classified, nothing is mutated.
+pub fn enrich_tool_input_redaction<N: PiiModel>(
+    drafts: &mut [ToolCallDraft],
+    redactor: &N,
+) -> bool {
     let mut distinct: Vec<String> = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
     for draft in drafts.iter() {
-        let Some(cmd) = draft
-            .action
-            .as_ref()
-            .and_then(|a| a.command_redacted.as_deref())
-            .filter(|c| !c.is_empty())
-        else {
+        let Some(action) = draft.action.as_ref() else {
             continue;
         };
-        if seen.insert(cmd.to_string(), ()).is_none() {
-            distinct.push(cmd.to_string());
+        for text in retained_tool_texts(action) {
+            if seen.insert(text.to_string(), ()).is_none() {
+                distinct.push(text.to_string());
+            }
         }
     }
     if distinct.is_empty() {
@@ -129,7 +142,7 @@ pub fn enrich_tool_call_redaction<N: PiiModel>(drafts: &mut [ToolCallDraft], red
     }
     let Some(passes) = pii_redact_checked_many(redactor, &distinct) else {
         modelstat_log::log_warn!(
-            "redactor could not classify {} distinct tool commands — holding",
+            "redactor could not classify {} distinct tool inputs — holding",
             distinct.len()
         );
         return false;
@@ -140,28 +153,20 @@ pub fn enrich_tool_call_redaction<N: PiiModel>(drafts: &mut [ToolCallDraft], red
         .map(|(cmd, pass)| (cmd.as_str(), pass.text.as_str()))
         .collect();
     for draft in drafts.iter_mut() {
-        let Some(action) = draft.action.as_mut() else {
-            continue;
-        };
-        if let Some(hit) = action
-            .command_redacted
-            .as_deref()
-            .and_then(|c| deep.get(c).copied())
-        {
-            action.command_redacted = Some(hit.to_string());
+        if let Some(action) = draft.action.as_mut() {
+            replace_retained_tool_texts(action, &deep);
         }
     }
     true
 }
 
-/// LAYER-3 deep redaction of the SHIPPED tool commands (§9.5/§21.13) — LOCAL mode
-/// only. Runs the LLM backstop ([`crate::passes::redact_backstop`]) over each
-/// draft's `command_redacted` on top of the floor (L1) + PII (L2), deduped per
-/// distinct command. Fail-safe: a model error / prefilter miss leaves the command
+/// LAYER-3 deep redaction of retained tool input (§9.5/§21.13) — LOCAL mode
+/// only. Runs the LLM backstop over the command projection and complete input,
+/// deduped together. Fail-safe: a model error / prefilter miss leaves the text
 /// UNCHANGED, and the backstop can only ever ADD a redaction of a substring that
 /// genuinely appears — never reword, invent, or leak. The caller gates this to
 /// `mode == "local"` so the deep pass never crosses the machine boundary.
-pub async fn deep_redact_tool_commands<S: crate::Summarizer>(
+pub async fn deep_redact_tool_inputs<S: crate::Summarizer>(
     drafts: &mut [ToolCallDraft],
     engine: &S,
 ) {
@@ -170,19 +175,21 @@ pub async fn deep_redact_tool_commands<S: crate::Summarizer>(
         let Some(action) = draft.action.as_mut() else {
             continue;
         };
-        let cmd = match action.command_redacted.as_deref().filter(|c| !c.is_empty()) {
-            Some(c) => c.to_string(),
-            None => continue,
-        };
-        let deep = match cache.get(&cmd) {
-            Some(hit) => hit.clone(),
-            None => {
-                let (redacted, _n) = crate::passes::redact_backstop(engine, &cmd).await;
-                cache.insert(cmd, redacted.clone());
-                redacted
-            }
-        };
-        action.command_redacted = Some(deep);
+        for slot in [&mut action.command_redacted, &mut action.input_redacted] {
+            let Some(text) = slot.as_deref().filter(|text| !text.is_empty()) else {
+                continue;
+            };
+            let deep = match cache.get(text) {
+                Some(hit) => hit.clone(),
+                None => {
+                    let source = text.to_string();
+                    let (redacted, _n) = crate::passes::redact_backstop(engine, &source).await;
+                    cache.insert(source, redacted.clone());
+                    redacted
+                }
+            };
+            *slot = Some(deep);
+        }
     }
 }
 
@@ -227,11 +234,11 @@ enum TurnText {
 }
 
 /// Prepare a Cloud-mode raw batch: run the FULL redaction (regex floor + the
-/// PII-model pass) over every event excerpt AND tool-call command before
+/// PII-model pass) over every event excerpt and retained tool input before
 /// they leave the machine. FAIL-CLOSED — returns `None` when PII is unavailable,
 /// so the caller keeps data local rather than shipping floor-only turns off the
-/// box (§9.5/§21.5). Mutates `drafts` (their `command_redacted` gets the PII
-/// pass). Port of `prepareCloudRawEvents`.
+/// box (§9.5/§21.5). Mutates `drafts` after every retained tool field passes.
+/// Port of `prepareCloudRawEvents`.
 pub fn prepare_cloud_raw_events<N: PiiModel>(
     events: &[RawEvent],
     drafts: &mut [ToolCallDraft],
@@ -311,7 +318,7 @@ pub fn prepare_cloud_raw_events<N: PiiModel>(
             *redacted[i].redactions.entry(key).or_insert(0) += n;
         }
     }
-    if !drafts.is_empty() && !enrich_tool_call_redaction(drafts, redactor) {
+    if !drafts.is_empty() && !enrich_tool_input_redaction(drafts, redactor) {
         return None; // hold — a command went unscrubbed
     }
     Some(redacted)
@@ -372,6 +379,9 @@ mod tests {
                 keywords: Vec::new(),
                 r#abstract: None,
                 command_redacted: Some(c.into()),
+                input_redacted: None,
+                input_format: None,
+                input_truncated: false,
                 scripts: Vec::new(),
                 confidence: 0.0,
                 extractor: String::new(),
@@ -556,13 +566,15 @@ mod tests {
     }
 
     #[test]
-    fn cloud_raw_events_ner_scrub_excerpts_and_commands() {
+    fn cloud_raw_events_ner_scrub_excerpts_and_tool_inputs() {
         let events = vec![
             ev("e1", Some("Escalate to Katherine Johnson now")),
             ev("e2", Some("no entities here")),
             ev("e3", None),
         ];
         let mut drafts = vec![draft("c1", "e1", Some("mail Katherine Johnson"))];
+        drafts[0].action.as_mut().unwrap().input_redacted =
+            Some(r#"{"recipient":"Katherine Johnson"}"#.into());
         let out =
             prepare_cloud_raw_events(&events, &mut drafts, &FakeRedactor).expect("redactor active");
         assert_eq!(
@@ -582,10 +594,27 @@ mod tests {
                 .as_deref(),
             Some("mail [REDACTED:PER]")
         );
+        assert_eq!(
+            drafts[0].action.as_ref().unwrap().input_redacted.as_deref(),
+            Some(r#"{"recipient":"[REDACTED:PER]"}"#)
+        );
+    }
+
+    #[test]
+    fn tool_input_redaction_fails_closed_without_mutation() {
+        let mut drafts = vec![draft("c1", "e1", Some("printf safe"))];
+        drafts[0].action.as_mut().unwrap().input_redacted =
+            Some(r#"{"text":"Katherine Johnson"}"#.into());
+        let before = drafts.clone();
+        assert!(!enrich_tool_input_redaction(
+            &mut drafts,
+            &UnavailableRedactor
+        ));
+        assert_eq!(drafts, before);
     }
 
     #[tokio::test]
-    async fn deep_redact_replaces_named_secrets_in_local_commands() {
+    async fn deep_redact_replaces_named_secrets_in_all_local_tool_input() {
         // A Fake engine that NAMES the secret substring to strip (L3 backstop).
         struct FakeEngine;
         impl crate::Summarizer for FakeEngine {
@@ -601,19 +630,17 @@ mod tests {
             "e1",
             Some("curl -H 'Authorization: Bearer sk_live_abcdef123456' https://x"),
         )];
-        deep_redact_tool_commands(&mut drafts, &FakeEngine).await;
-        let cmd = drafts[0]
-            .action
-            .as_ref()
-            .unwrap()
-            .command_redacted
-            .as_deref()
-            .unwrap();
-        assert!(
-            cmd.contains("[REDACTED:llm]"),
-            "L3 must redact the named secret: {cmd}"
-        );
-        assert!(!cmd.contains("sk_live_abcdef123456"));
+        drafts[0].action.as_mut().unwrap().input_redacted =
+            Some(r#"{"authorization":"Bearer sk_live_abcdef123456"}"#.into());
+        deep_redact_tool_inputs(&mut drafts, &FakeEngine).await;
+        let action = drafts[0].action.as_ref().unwrap();
+        for text in [
+            action.command_redacted.as_deref().unwrap(),
+            action.input_redacted.as_deref().unwrap(),
+        ] {
+            assert!(text.contains("[REDACTED:llm]"), "{text}");
+            assert!(!text.contains("sk_live_abcdef123456"));
+        }
     }
 
     /// A model that answers for short text and FAILS on long text — the real

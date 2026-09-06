@@ -536,6 +536,16 @@ pub struct ToolAction {
     pub r#abstract: Option<String>,
     #[serde(default)]
     pub command_redacted: Option<String>,
+    /// The complete original invocation input after the privacy pipeline. A
+    /// string stays text; every other supplied JSON value is serialized once.
+    #[serde(default)]
+    pub input_redacted: Option<String>,
+    /// `text` for an original string, `json` for any other supplied value.
+    #[serde(default)]
+    pub input_format: Option<String>,
+    /// True when the full-message guard removed command or input content.
+    #[serde(default)]
+    pub input_truncated: bool,
     #[serde(default)]
     pub scripts: Vec<ScriptSummary>,
     #[serde(default)]
@@ -559,7 +569,16 @@ impl ToolAction {
         }
         self.keywords.truncate(caps::TA_KEYWORDS_COUNT_MAX);
         clamp_opt(&mut self.r#abstract, caps::TA_ABSTRACT_MAX);
-        clamp_opt(&mut self.command_redacted, caps::TA_COMMAND_REDACTED_MAX);
+        let command_len = self.command_redacted.as_ref().map(String::len);
+        clamp_opt(&mut self.command_redacted, caps::CONTENT_EXCERPT_MAX);
+        let input_len = self.input_redacted.as_ref().map(String::len);
+        clamp_opt(&mut self.input_redacted, caps::CONTENT_EXCERPT_MAX);
+        if self.command_redacted.as_ref().map(String::len) != command_len
+            || self.input_redacted.as_ref().map(String::len) != input_len
+        {
+            self.input_truncated = true;
+        }
+        clamp_opt(&mut self.input_format, caps::TA_INPUT_FORMAT_MAX);
         for s in &mut self.scripts {
             clamp_in_place(&mut s.token, caps::TA_SCRIPT_TOKEN_MAX);
             clamp_in_place(&mut s.summary, caps::TA_SCRIPT_SUMMARY_MAX);

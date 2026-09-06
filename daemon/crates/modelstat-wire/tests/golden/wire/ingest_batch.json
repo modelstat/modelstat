@@ -179,6 +179,9 @@
         "keywords": [],
         "abstract": null,
         "command_redacted": "kubectl rollout restart deploy/payments-api -n prod",
+        "input_redacted": "{\"command\":\"kubectl rollout restart deploy/payments-api -n prod\",\"description\":\"Restart the example deployment\"}",
+        "input_format": "json",
+        "input_truncated": false,
         "scripts": [],
         "confidence": 0,
         "extractor": "shell.v3"
