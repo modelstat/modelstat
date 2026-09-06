@@ -15,7 +15,7 @@ fn main() {
 #[cfg(feature = "candle")]
 #[tokio::main]
 async fn main() {
-    use modelstat_download::{download_hf_model, TtyProgress, BGE_SMALL};
+    use modelstat_download::{download_hf_model, RetryPolicy, TtyProgress, BGE_SMALL};
     use modelstat_pipeline::embed::{CandleEmbedder, Embedder};
 
     let models_dir = std::env::temp_dir().join("modelstat-candle-verify");
@@ -30,6 +30,8 @@ async fn main() {
             &BGE_SMALL,
             &models_dir,
             &TtyProgress::new("bge-small"),
+            // A human is watching this run: bounded tries, same as `connect`.
+            &RetryPolicy::interactive(),
         )
         .await
         .map_err(|e| format!("download: {e}"))?;
