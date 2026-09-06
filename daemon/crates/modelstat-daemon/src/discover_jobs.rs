@@ -78,6 +78,23 @@ fn is_rollout_jsonl(p: &Path) -> bool {
             .unwrap_or(false)
 }
 
+/// Collect Codex rollouts by their file shape under one bounded store root.
+fn collect_codex_rollouts(dir: &Path, depth_left: usize, jobs: &mut Vec<ScanJob>) {
+    for path in child_paths(dir) {
+        if is_rollout_jsonl(&path) {
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+            jobs.push(ScanJob {
+                path: canonical.to_string_lossy().into_owned(),
+                kind: ParserKind::Codex,
+                since_ms: None,
+                agent_label: None,
+            });
+        } else if depth_left > 0 && path.is_dir() {
+            collect_codex_rollouts(&path, depth_left - 1, jobs);
+        }
+    }
+}
+
 /// How deep to hunt for a `.claude/projects` tree under a search root. Claude
 /// Desktop nests it four levels down (`local-agent-mode-sessions/<a>/<b>/
 /// local_<c>/.claude`); the cap keeps an unlucky root — a multi-GB app-data
@@ -303,23 +320,14 @@ pub fn discover_jobs_in_with(home: &Path, process_dirs: &[(String, String)]) -> 
     });
     jobs.dedup_by(|a, b| a.path == b.path);
 
-    // Codex — <data-dir>/sessions/<y>/<m>/<d>/rollout-*.jsonl.
+    // Codex — active and archived rollouts under every discovered data home.
+    // `sessions` currently nests by date; `archived_sessions` is currently flat.
+    // The same bounded shape walk handles both without committing to either
+    // directory depth as permanent format.
     for data_dir in data_dir_candidates_from(home, "codex_cli", process_dirs) {
-        for y in child_paths(&PathBuf::from(&data_dir).join("sessions")) {
-            for m in child_paths(&y) {
-                for d in child_paths(&m) {
-                    for f in child_paths(&d) {
-                        if is_rollout_jsonl(&f) {
-                            jobs.push(ScanJob {
-                                path: f.to_string_lossy().into_owned(),
-                                kind: ParserKind::Codex,
-                                since_ms: None,
-                                agent_label: None,
-                            });
-                        }
-                    }
-                }
-            }
+        let data_dir = PathBuf::from(data_dir);
+        for root in ["sessions", "archived_sessions"] {
+            collect_codex_rollouts(&data_dir.join(root), 3, &mut jobs);
         }
     }
 
@@ -659,6 +667,44 @@ mod tests {
             1,
             "CODEX_HOME is in the source registry — the scan must read the same registry"
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_active_and_archived_rollouts_are_discovered_once_by_canonical_path() {
+        let home =
+            std::env::temp_dir().join(format!("modelstat-codex-roots-{}", std::process::id()));
+        let codex_home = home.join(".codex");
+        let _ = std::fs::remove_dir_all(&home);
+        for path in [
+            codex_home.join("sessions/2026/07/16/rollout-active.jsonl"),
+            codex_home.join("archived_sessions/rollout-archived.jsonl"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"{}").unwrap();
+        }
+
+        // The process probe names the same home through a distinct lexical path.
+        let alias = codex_home.join(".").to_string_lossy().into_owned();
+        let _g = env_lock();
+        let jobs = discover_jobs_in_with(&home, &[("codex_cli".into(), alias)]);
+        let codex: Vec<&ScanJob> = jobs
+            .iter()
+            .filter(|job| job.kind == ParserKind::Codex)
+            .collect();
+        assert_eq!(codex.len(), 2, "one active and one archived rollout");
+        assert!(codex
+            .iter()
+            .any(|job| job.path.ends_with("rollout-active.jsonl")));
+        assert!(codex
+            .iter()
+            .any(|job| job.path.ends_with("rollout-archived.jsonl")));
+        assert!(codex.iter().all(|job| {
+            std::fs::canonicalize(&job.path)
+                .map(|path| path.to_string_lossy() == job.path)
+                .unwrap_or(false)
+        }));
+
         let _ = std::fs::remove_dir_all(&home);
     }
 

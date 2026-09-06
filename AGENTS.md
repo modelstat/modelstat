@@ -136,6 +136,9 @@ Things to know:
   for local error/notice messages is passed through as-is (the server
   decides what to hide; the daemon never drops data). The one exception:
   `<synthetic>` must not update the parser's `lastModel` attribution state.
+- Codex discovery scans both `sessions` and `archived_sessions` under every
+  discovered data home. It canonicalizes rollout paths before deduplication;
+  identity probing reads `auth.json` from the same data-home candidates.
 - A tool call is shell only when its input object states `command` or `cmd` as
   a string or argv array. A raw string is the builtin tool's own input; source
   text and tool names never infer the surface.
