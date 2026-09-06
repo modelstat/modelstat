@@ -160,6 +160,26 @@ mod tests {
     }
 
     #[test]
+    fn collapses_hashes_inside_url_paths() {
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        let r = redact(&format!("GET https://api.example.test/v2/{hash}"), None);
+        assert_eq!(r.text, "GET https://api.example.test/v2/[REDACTED:hash]");
+        assert_eq!(r.counts.secrets_found, 1);
+
+        let r = redact(&format!("open artifacts/{hash}/result.json"), None);
+        assert_eq!(r.text, "open artifacts/[REDACTED:hash]/result.json");
+        assert_eq!(r.counts.secrets_found, 1);
+    }
+
+    #[test]
+    fn classifies_slash_bearing_base64_as_one_token() {
+        let blob = "AbCdEfGhIjKlMnOpQrStUvWxYz012345/6789+=";
+        let r = redact(&format!("payload {blob}"), None);
+        assert_eq!(r.text, "payload [REDACTED:base64]");
+        assert_eq!(r.counts.secrets_found, 1);
+    }
+
+    #[test]
     fn env_secret_catches_bare_keywords() {
         let r = redact("PASSWORD=hunter2hunter2hunter2", None);
         assert!(!r.text.contains("hunter2hunter2hunter2"));

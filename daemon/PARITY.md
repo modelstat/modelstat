@@ -25,7 +25,7 @@ divergences, a line in feature §23) rather than leaving a silent choice.
 | **Byte clamp** | `clamp_utf8_bytes` iterates code points (`chars()`), matching JS `for…of`; astral chars kept/dropped atomically. Drives off declared caps, not a hand-listed field set (the field-by-field version shipped the CJK-400 bug). |
 | **Redaction floor** | `regex` crate with `(?-u:\b)` for ASCII word boundaries and ASCII classes spelled out (`\d`→`0-9`, `\w`→`A-Za-z0-9_`) to match JS semantics. The wire floor replaces the **whole match** with `[REDACTED:<name>]` (the catalogue's replacement templates are for the SDK-side redactor, ported in M3). |
 | **`aws_secret_key`** | JS uses lookaround (`(?<!…){40}(?!…)`) the `regex` crate can't express. Implemented as an exact-length run scan — provably equivalent (a lookaround-bounded run matches iff a maximal class run is exactly 40 chars). |
-| **Entropy pass** | Shannon entropy sums floats in **first-occurrence order** (JS `Map` insertion order) so the running total is bit-identical and a threshold decision can't flip on float non-associativity. Candidates are pure ASCII, so `chars().count()` == JS `s.length`. |
+| **Entropy pass** | Shannon entropy sums floats in **first-occurrence order** (JS `Map` insertion order) so the running total is bit-identical and a threshold decision can't flip on float non-associativity. Candidates are pure ASCII, so `chars().count()` == JS `s.length`. Each whole token is classified first; if it survives, slash-delimited components receive the same classification while separators stay intact. |
 
 ## Intentional additions / divergences (also noted in feature §23 where applicable)
 

@@ -210,7 +210,9 @@ Things to know:
   bundle can only ever add patterns, never remove or weaken them. The compiled
   augment is installed process-wide in `modelstat-redact` rather than passed to
   each caller, so every floor call site gets it and no new one can miss it by
-  omission.
+  omission. The entropy pass classifies each whole token first, preserving
+  slash-bearing base64, then checks slash-delimited components so hashes inside
+  paths cannot hide behind surrounding path text.
 - **Server-delivered config** rides `modelstat-ingest::remote_config`: fetch
   `GET {api}/v1/config/{kind}` → shape-validate with the kind's own validator →
   version-gate (strictly newer only, so nothing can roll a device back) →

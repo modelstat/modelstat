@@ -31,8 +31,8 @@ const ABSOLUTE_PATH_LINUX = /\/home\/[^\s"'`)]+/g;
 /** Entropy-based catcher for generic high-entropy tokens (API keys we don't
  * have explicit patterns for) plus large random blobs — digests / git SHAs /
  * other hashes and base64 payloads. These carry no analytic value, can leak
- * secrets, and bloat the wire, so they are collapsed to a marker. Operates on
- * unbroken word tokens of ≥32 chars; see {@link redact} for the rules. */
+ * secrets, and bloat the wire, so they are collapsed to a marker. Checks each
+ * whole token first, then slash-delimited components when the whole survives. */
 function entropy(s: string): number {
   const freq = new Map<string, number>();
   for (const c of s) freq.set(c, (freq.get(c) ?? 0) + 1);
@@ -45,6 +45,22 @@ function entropy(s: string): number {
 }
 
 const TOKEN_CANDIDATE = /[A-Za-z0-9/+=_-]{32,}/g;
+
+function classifyEntropyToken(candidate: string): string | undefined {
+  if (candidate.length < 32) return undefined;
+  if (/^[a-fA-F0-9]{32,}$/.test(candidate)) return "[REDACTED:hash]";
+  if (/^[A-Z0-9_]+$/.test(candidate)) return undefined;
+  if (/=$|\+/.test(candidate) && entropy(candidate) >= 3.5) {
+    return "[REDACTED:base64]";
+  }
+  const hasDigit = /\d/.test(candidate);
+  const hasUpper = /[A-Z]/.test(candidate);
+  const hasLower = /[a-z]/.test(candidate);
+  if (hasDigit && hasUpper && hasLower && entropy(candidate) >= 3.6) {
+    return "[REDACTED:hi-entropy]";
+  }
+  return undefined;
+}
 
 export function redact(text: string, repoRootAbs?: string): RedactionResult {
   let out = text;
@@ -64,30 +80,19 @@ export function redact(text: string, repoRootAbs?: string): RedactionResult {
 
   // Entropy pass — after named patterns, so it won't double-count.
   out = out.replace(TOKEN_CANDIDATE, (match) => {
-    // Long pure-hex = a digest / git SHA / content hash — collapse it (privacy
-    // + payload size). Hex shorter than 32 chars never reaches here.
-    if (/^[a-fA-F0-9]{32,}$/.test(match)) {
+    const whole = classifyEntropyToken(match);
+    if (whole) {
       counts.secrets_found += 1;
-      return "[REDACTED:hash]";
+      return whole;
     }
-    // SCREAMING_SNAKE / all-caps-or-digit constant names — not secrets.
-    if (/^[A-Z0-9_]+$/.test(match)) return match;
-    // Base64 / base64url blobs: trailing `=` padding or an embedded `+` are
-    // strong binary-payload signals that code and paths almost never carry.
-    // (`/` alone is a path separator, so it is deliberately NOT a signal —
-    // redacting paths would break command readability + script-token zipping.)
-    if (/=$|\+/.test(match) && entropy(match) >= 3.5) {
-      counts.secrets_found += 1;
-      return "[REDACTED:base64]";
-    }
-    // Generic high-entropy token — an API key we have no explicit pattern for.
-    const hasDigit = /\d/.test(match);
-    const hasUpper = /[A-Z]/.test(match);
-    const hasLower = /[a-z]/.test(match);
-    if (!(hasDigit && hasUpper && hasLower)) return match;
-    if (entropy(match) < 3.6) return match;
-    counts.secrets_found += 1;
-    return "[REDACTED:hi-entropy]";
+    return match
+      .split("/")
+      .map((component) => {
+        const replacement = classifyEntropyToken(component);
+        if (replacement) counts.secrets_found += 1;
+        return replacement ?? component;
+      })
+      .join("/");
   });
 
   out = out.replace(EMAIL_PATTERN, () => {
