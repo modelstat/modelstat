@@ -186,18 +186,18 @@
       "result_bytes": 209,
       "model": "gpt-5.6-terra",
       "action": {
-        "surface": "shell",
-        "executable": "const",
+        "surface": "builtin",
+        "executable": "exec",
         "action": null,
         "object": null,
         "qualifiers": [],
-        "param_shape": "§ § § § -n § § §",
+        "param_shape": null,
         "keywords": [],
         "abstract": null,
-        "command_redacted": "const r = await tools.exec_command({\"cmd\":\"sed -n '1,240p' uploader.js\",\"workdir\":\"/private/tmp/modelstat-fixture-gen/api\",\"yield_time_ms\":10000,\"max_output_tokens\":12000});\ntext(r.output);\n",
+        "command_redacted": null,
         "scripts": [],
         "confidence": 0.0,
-        "extractor": "shell.v3"
+        "extractor": "builtin.v1"
       }
     },
     {
@@ -233,13 +233,7 @@
       }
     }
   ],
-  "scriptContexts": [
-    {
-      "external_call_id": "call_mqV5UTEptgHbhQ0ivRwonitC",
-      "command": "const r = await tools.exec_command({\"cmd\":\"sed -n '1,240p' uploader.js\",\"workdir\":\"/private/tmp/modelstat-fixture-gen/api\",\"yield_time_ms\":10000,\"max_output_tokens\":12000});\ntext(r.output);\n",
-      "cwd": "/private/tmp/modelstat-fixture-gen/api"
-    }
-  ],
+  "scriptContexts": [],
   "stats": {
     "rawLines": 22,
     "emittedEvents": 7,

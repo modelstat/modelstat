@@ -418,6 +418,17 @@ const CODEX: &[Semantics] = &[
     // history; the events the old key already landed are the server's to
     // tombstone.
     Semantics::Semantic,
+    // v30 — a free-form custom tool input is not shell evidence. Codex writes
+    // JavaScript and patch bodies as `custom_tool_call.input: String`; the
+    // shared extractor accepted every raw string as a command, so these calls
+    // became shell actions named after their first source token and entered the
+    // command classifier. Shell calls state an object `command` or `cmd` field;
+    // only that observed structure now selects the shell surface. The raw input
+    // still hashes unchanged and the tool call still ships under its stated
+    // name. Re-reading Codex history repairs the derived surface and removes the
+    // false local script contexts; no other parser emits this custom string
+    // record shape.
+    Semantics::Semantic,
 ];
 
 /// `cursor` — a parser-scoped aspect: a bump re-reads only Cursor's bubble
