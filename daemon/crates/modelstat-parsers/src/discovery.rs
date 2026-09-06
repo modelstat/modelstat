@@ -1183,6 +1183,64 @@ fn read_json(path: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+fn probe_codex_identities(home: &Path, process_dirs: &[(String, String)]) -> Vec<DetectedIdentity> {
+    let mut ids = Vec::new();
+    for data_dir in data_dir_candidates_from(home, "codex_cli", process_dirs) {
+        let Some(obj) = read_json(&Path::new(&data_dir).join("auth.json").to_string_lossy()) else {
+            continue;
+        };
+        let tokens = obj.get("tokens");
+        let jwt = tokens
+            .and_then(|t| t.get("id_token"))
+            .and_then(|v| v.as_str());
+        let mut email = None;
+        let mut sub = None;
+        let mut name = None;
+        let mut org = None;
+        if let Some(jwt) = jwt {
+            if let Some(claims) = decode_jwt_claims(jwt) {
+                email = claims
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                sub = claims
+                    .get("sub")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                name = claims
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                if let Some(oai) = claims.get("https://api.openai.com/auth") {
+                    org = oai
+                        .get("organization_id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| oai.get("chatgpt_plan_type").and_then(|v| v.as_str()))
+                        .map(str::to_string);
+                }
+            }
+        }
+        let account_id = tokens
+            .and_then(|t| t.get("account_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let pid = account_id.or_else(|| sub.clone()).or_else(|| email.clone());
+        if let Some(pid) = pid {
+            ids.push(DetectedIdentity {
+                provider: "openai".into(),
+                provider_account_id: pid,
+                provider_account_label: email.clone(),
+                account_email: email,
+                account_org: org,
+                display_name: name,
+                owner_scope: "unassigned".into(),
+                detection_source: "codex_auth_json".into(),
+            });
+        }
+    }
+    ids
+}
+
 /// The `oauthAccount` fields from `~/.claude.json` a keychain hit can adopt.
 #[derive(Default, Clone)]
 struct ClaudeJsonAccount {
@@ -1336,63 +1394,11 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
         }
     }
 
-    // Codex auth.json — JWT id_token → email/sub/name/org.
-    for candidate in [
-        format!("{home}/.codex/auth.json"),
-        format!("{home}/.config/codex/auth.json"),
-    ] {
-        let Some(obj) = read_json(&candidate) else {
-            continue;
-        };
-        let tokens = obj.get("tokens");
-        let jwt = tokens
-            .and_then(|t| t.get("id_token"))
-            .and_then(|v| v.as_str());
-        let mut email = None;
-        let mut sub = None;
-        let mut name = None;
-        let mut org = None;
-        if let Some(jwt) = jwt {
-            if let Some(claims) = decode_jwt_claims(jwt) {
-                email = claims
-                    .get("email")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                sub = claims
-                    .get("sub")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                name = claims
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                if let Some(oai) = claims.get("https://api.openai.com/auth") {
-                    org = oai
-                        .get("organization_id")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| oai.get("chatgpt_plan_type").and_then(|v| v.as_str()))
-                        .map(str::to_string);
-                }
-            }
-        }
-        let account_id = tokens
-            .and_then(|t| t.get("account_id"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let pid = account_id.or_else(|| sub.clone()).or_else(|| email.clone());
-        if let Some(pid) = pid {
-            ids.push(DetectedIdentity {
-                provider: "openai".into(),
-                provider_account_id: pid,
-                provider_account_label: email.clone(),
-                account_email: email,
-                account_org: org,
-                display_name: name,
-                owner_scope: "unassigned".into(),
-                detection_source: "codex_auth_json".into(),
-            });
-        }
-    }
+    // Codex auth.json — JWT id_token → email/sub/name/org. Read from the same
+    // candidate homes as transcript discovery, including CODEX_HOME and a
+    // running process's explicit data directory.
+    let process_dirs = agent_data_dirs_from_processes();
+    ids.extend(probe_codex_identities(Path::new(&home), &process_dirs));
 
     // Gemini oauth_creds.json — email as id.
     for candidate in [
@@ -1947,6 +1953,35 @@ mod tests {
         let claims = decode_jwt_claims(&jwt).unwrap();
         assert_eq!(claims["email"], "a@b.com");
         assert_eq!(claims["sub"], "user_1");
+    }
+
+    #[test]
+    fn codex_identity_comes_from_a_relocated_data_home() {
+        let home = std::env::temp_dir().join(format!(
+            "modelstat-codex-identity-home-{}",
+            std::process::id()
+        ));
+        let relocated = home.join("elsewhere/codex-data");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&relocated).unwrap();
+        std::fs::write(
+            relocated.join("auth.json"),
+            r#"{"tokens":{"account_id":"acct_examplefake"}}"#,
+        )
+        .unwrap();
+
+        let process_dirs = vec![(
+            "codex_cli".to_string(),
+            relocated.to_string_lossy().into_owned(),
+        )];
+        let identities = probe_codex_identities(&home, &process_dirs);
+        assert!(identities.iter().any(|identity| {
+            identity.provider == "openai"
+                && identity.provider_account_id == "acct_examplefake"
+                && identity.detection_source == "codex_auth_json"
+        }));
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

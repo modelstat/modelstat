@@ -2,8 +2,9 @@
 //!
 //! Tool calls come from `response_item` payloads and become drafts (never
 //! events); the aggregate identity→count map attaches to the next emitted
-//! assistant event. Token accounting stores DISJOINT buckets (input excl. cache,
-//! output excl. reasoning) — the double-billing fix (feature §7.1).
+//! assistant event. Token accounting stores DISJOINT buckets (input excl. cache
+//! reads + writes, output excl. reasoning) — the double-billing fix (feature
+//! §7.1).
 //!
 //! Token counters live at `payload.info.last_token_usage` — see
 //! [`codex_last_token_usage`] for why that exact path, and why a counter that
@@ -352,15 +353,24 @@ fn codex_last_token_usage(p: &Value) -> CodexUsage {
     ) else {
         return CodexUsage::Drift(numeric_leaves(info));
     };
+    // Older rollouts predate this counter and stated no cache-write bucket. Once
+    // present, it is part of the schema: a non-number means the shape moved and
+    // must take the visible Drift path rather than silently becoming zero.
+    let cache_write = match last.get("cache_write_input_tokens") {
+        None => 0,
+        Some(value) => match value.as_u64() {
+            Some(value) => value,
+            None => return CodexUsage::Drift(numeric_leaves(info)),
+        },
+    };
     CodexUsage::Mapped(TokenUsage {
-        // Codex counts cached input INSIDE `input_tokens` and reasoning INSIDE
-        // `output_tokens` (upstream's `non_cached_input()` subtracts the former).
-        // Our buckets are DISJOINT, so split them out rather than double-bill.
-        input: input_tokens.saturating_sub(cached),
+        // Codex counts both cache buckets INSIDE `input_tokens` and reasoning
+        // INSIDE `output_tokens`. Our buckets are disjoint.
+        input: input_tokens
+            .saturating_sub(cached)
+            .saturating_sub(cache_write),
         output: output_tokens.saturating_sub(reasoning),
-        // Codex discards cache-write counts before they reach the rollout JSONL
-        // (openai/codex#32479), so 0 is the true value here, not a default.
-        cache_creation: 0,
+        cache_creation: cache_write,
         cache_read: cached,
         reasoning,
     })
@@ -2475,6 +2485,72 @@ mod tests {
         // Totals are preserved against codex's inclusive counters.
         assert_eq!(t.input + t.cache_read, 100);
         assert_eq!(t.output + t.reasoning, 1000);
+    }
+
+    #[test]
+    fn cache_write_tokens_are_a_disjoint_bucket_when_codex_states_them() {
+        let p = json!({
+            "type": "token_count",
+            "info": { "last_token_usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 30,
+                "cache_write_input_tokens": 20,
+                "output_tokens": 80,
+                "reasoning_output_tokens": 25,
+                "total_tokens": 180
+            }}
+        });
+        let CodexUsage::Mapped(t) = codex_last_token_usage(&p) else {
+            panic!("complete stated usage must map");
+        };
+        assert_eq!(t.input, 50, "input excludes cache reads and writes");
+        assert_eq!(t.cache_read, 30);
+        assert_eq!(t.cache_creation, 20);
+        assert_eq!(t.output, 55, "output excludes reasoning");
+        assert_eq!(t.reasoning, 25);
+
+        let cumulative_identity = json!({ "info": { "total_token_usage": {
+            "input_tokens": 900,
+            "cached_input_tokens": 300,
+            "cache_write_input_tokens": 200,
+            "output_tokens": 700,
+            "reasoning_output_tokens": 250
+        }}});
+        assert_eq!(
+            codex_total_token_usage(&cumulative_identity),
+            Some([900, 300, 700, 250]),
+            "the added accounting bucket must not change existing event identities"
+        );
+
+        let historical = json!({
+            "type": "token_count",
+            "info": { "last_token_usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 30,
+                "output_tokens": 80,
+                "reasoning_output_tokens": 25
+            }}
+        });
+        let CodexUsage::Mapped(t) = codex_last_token_usage(&historical) else {
+            panic!("the historical shape remains readable");
+        };
+        assert_eq!(t.input, 70);
+        assert_eq!(t.cache_creation, 0);
+
+        let malformed = json!({
+            "type": "token_count",
+            "info": { "last_token_usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 30,
+                "cache_write_input_tokens": "20",
+                "output_tokens": 80,
+                "reasoning_output_tokens": 25
+            }}
+        });
+        assert!(
+            matches!(codex_last_token_usage(&malformed), CodexUsage::Drift(_)),
+            "a present malformed cache-write counter is schema drift"
+        );
     }
 
     #[test]
