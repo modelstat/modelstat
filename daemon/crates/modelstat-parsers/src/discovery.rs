@@ -194,34 +194,26 @@ fn sources() -> &'static [SourceSpec] {
     ]
 }
 
-/// Human label for an agent key from the source registry above. Unknown keys
-/// pass through verbatim, so a new source renders before its label lands here.
-pub fn display_label(agent: &str) -> &str {
-    match agent {
-        "claude_code" => "Claude Code",
-        "codex_cli" => "Codex CLI",
-        "claude_desktop" => "Claude Desktop",
-        "cursor" => "Cursor",
-        "windsurf" => "Windsurf",
-        "zed" => "Zed",
-        "gemini_cli" => "Gemini CLI",
-        "aider" => "Aider",
-        "ollama" => "Ollama",
-        "pi" => "pi",
-        "bb" => "bb",
-        "openclaw" => "OpenClaw",
-        other => other,
-    }
+/// Whether an agent key is one of the registry's known sources. The menu shows
+/// only these: the file-signature strategy deliberately reports transcript-
+/// SHAPED directories it cannot identify (`.erpc-integrity-watch/catch.jsonl`,
+/// an updater's history log), which are leads for parser authors — not agents
+/// the scanner watches, and showing them as agents is the wrongness to fix at
+/// the source registry, not one name at a time.
+pub fn is_known_agent(agent: &str) -> bool {
+    sources().iter().any(|s| s.agent == agent)
 }
 
-/// Sorted, deduped display names for detected installations — the tray/CLI
-/// "Agents" row. Pure: the heartbeat owns the probe cadence, this only shapes
-/// the reading it already holds.
+/// Sorted, deduped MACHINE names for detected installations — the tray/CLI
+/// "Agents" row. Raw keys, known sources only, no humanized labels: a mixed
+/// row of display names and directory spellings answers nothing twice.
+/// Pure: the heartbeat owns the probe cadence, this only shapes the reading
+/// it already holds.
 pub fn detected_agent_names(installations: &[DetectedInstallation]) -> Vec<String> {
     let mut names: BTreeSet<&str> = BTreeSet::new();
     for i in installations {
-        if !i.agent.is_empty() {
-            names.insert(display_label(&i.agent));
+        if !i.agent.is_empty() && is_known_agent(&i.agent) {
+            names.insert(i.agent.as_str());
         }
     }
     names.into_iter().map(str::to_string).collect()
@@ -282,6 +274,9 @@ pub const SKIP_DIRS: &[&str] = &[
     "Knowledge",
     "MobileSync",
     "icdd",
+    // Ourselves: the daemon's own home holds jsonl-shaped files (eval picks,
+    // spool, logs) and must never be reported as a third-party agent install.
+    ".modelstat",
 ];
 
 /// Which children of a scan root the signature probe may open.
@@ -1853,7 +1848,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detected_installations_fold_into_a_sorted_unique_label_row() {
+    fn detected_installations_fold_into_a_sorted_unique_machine_name_row() {
         let inst = |agent: &str| DetectedInstallation {
             agent: agent.to_string(),
             install_method: "manual".to_string(),
@@ -1867,12 +1862,12 @@ mod tests {
             inst("claude_code"),
             inst("cursor"),
             inst("codex_cli"),
-            inst("something_new"),
+            // A transcript-shaped directory no source claims: a lead for the
+            // server, never a menu agent.
+            inst("erpc-integrity-watch"),
+            inst(""),
         ]);
-        assert_eq!(
-            names,
-            vec!["Claude Code", "Codex CLI", "Cursor", "something_new"]
-        );
+        assert_eq!(names, vec!["claude_code", "codex_cli", "cursor"]);
     }
 
     /// The `FileSignatures` strategy was declared in [`Strategy`] and
@@ -1964,6 +1959,25 @@ mod tests {
             "an application-data root keeps its visible children"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The daemon's own home holds jsonl-shaped files (eval picks, spool) and
+    /// must never be reported as a third-party agent install.
+    #[test]
+    fn our_own_data_dir_is_never_a_detected_agent() {
+        let root = std::env::temp_dir().join(format!("modelstat-self-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"{}").unwrap();
+        };
+        mk(".modelstat/llm-eval/20260904-231303/picks.jsonl");
+        mk(".realagent/sessions/a.jsonl");
+        let found = file_signature_installs(&root, Children::Hidden, &BTreeSet::new());
+        let agents: Vec<&str> = found.iter().map(|i| i.agent.as_str()).collect();
+        assert_eq!(agents, ["realagent"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
