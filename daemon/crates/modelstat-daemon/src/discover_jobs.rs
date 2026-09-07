@@ -728,9 +728,13 @@ mod tests {
         assert!(jobs
             .iter()
             .any(|j| j.kind == ParserKind::Pi && j.path.ends_with("c.jsonl")));
-        assert!(jobs.iter().any(|j| j.kind == ParserKind::Muse
-            && j.path
-                .ends_with("0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl")));
+        // Separator-agnostic: on Windows the walked path carries `\`.
+        assert!(jobs.iter().any(|j| {
+            j.kind == ParserKind::Muse
+                && j.path.ends_with("session.jsonl")
+                && modelstat_parsers::muse::derive_session_id_from_muse_path(&j.path).as_deref()
+                    == Some("0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a")
+        }));
 
         let _ = std::fs::remove_dir_all(&home);
     }

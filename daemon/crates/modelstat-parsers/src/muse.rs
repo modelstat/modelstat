@@ -80,7 +80,10 @@ pub fn derive_session_id_from_muse_path(path: &str) -> Option<String> {
         )
         .unwrap()
     });
-    re.captures(path)
+    // The walk hands out native paths: on Windows the separators are `\`.
+    // Flatten first so one expression names the session on every platform.
+    let flat = path.replace('\\', "/");
+    re.captures(&flat)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
 }
@@ -817,6 +820,13 @@ mod tests {
         assert_eq!(
             derive_session_id_from_muse_path(
                 "/Users/dev/.local/share/muse/sessions/2026/09/07/01a07b86-0612-7f61-ba7b-46aded41c21e/session.jsonl"
+            ),
+            Some("01a07b86-0612-7f61-ba7b-46aded41c21e".to_string())
+        );
+        // Windows separators name the session too.
+        assert_eq!(
+            derive_session_id_from_muse_path(
+                "C:\\Users\\dev\\.local\\share\\muse\\sessions\\2026\\09\\07\\01a07b86-0612-7f61-ba7b-46aded41c21e\\session.jsonl"
             ),
             Some("01a07b86-0612-7f61-ba7b-46aded41c21e".to_string())
         );
