@@ -148,6 +148,9 @@ struct UpdateInfo: Decodable {
 /// that number, and a row for each turned the menu into a debug dump.
 struct LocalStatsCounters: Decodable {
   let events_uploaded: Int?
+  /// Display names of detected agent installs, shaped by the daemon
+  /// (`detected_agents` stat) — rendered verbatim, newest daemons only.
+  let detected_agents: [String]?
 }
 
 @MainActor
@@ -194,6 +197,10 @@ final class TrayController: NSObject {
   private let workMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   /// The one total: everything this device has measured, ever.
   private let totalsMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+  /// Detected agent installs, verbatim from the daemon — identity, not a
+  /// fifth number: it answers "what is being watched", none of the four
+  /// work rows do, and it hides itself on older daemons that don't report it.
+  private let agentsMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let deviceMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let claimMI = NSMenuItem(title: "Open device page", action: #selector(openDashboard), keyEquivalent: "o")
   private let copyClaimMI = NSMenuItem(title: "Copy claim URL", action: #selector(copyClaimUrl), keyEquivalent: "c")
@@ -288,7 +295,7 @@ final class TrayController: NSObject {
 
   /// The non-clickable info rows at the top of the menu, in order.
   private var infoItems: [NSMenuItem] {
-    [statusMI, workMI, totalsMI, deviceMI]
+    [statusMI, workMI, totalsMI, agentsMI, deviceMI]
   }
 
   /// Set an info row's title, hiding the row when the title is empty.
@@ -533,7 +540,7 @@ final class TrayController: NSObject {
     let local = localLatest ?? s.local
     if s.paired == false {
       setInfo(statusMI, "Not paired — run `npx modelstat@latest`")
-      for mi in [workMI, totalsMI, deviceMI] {
+      for mi in [workMI, totalsMI, agentsMI, deviceMI] {
         setInfo(mi, "")
       }
       claimMI.title = "Open modelstat.ai"
@@ -629,6 +636,14 @@ final class TrayController: NSObject {
       setInfo(totalsMI, "\(fmtCount(events)) events analyzed")
     } else {
       setInfo(totalsMI, "")
+    }
+
+    // Detected agents — which installs the daemon is watching, verbatim from
+    // the mirror. Hidden when the daemon is too old to report it (or none).
+    if let agents = local?.stats?.detected_agents, !agents.isEmpty {
+      setInfo(agentsMI, "Agents: \(agents.joined(separator: ", "))")
+    } else {
+      setInfo(agentsMI, "")
     }
   }
 
