@@ -9,10 +9,10 @@
 //! module used to hard-code `~/.codex` while the registry honoured `CODEX_HOME`,
 //! so a relocated codex was reported as installed and never read.
 //!
-//! Four agents are walked: Claude Code, Codex, pi/omp, and Cursor. Cursor is the
-//! odd one — its conversations live in ONE global key/value DB rather than
-//! per-session transcript files, so its floor is a timestamp watermark rather
-//! than a byte offset (see `ScanJob::since_ms`).
+//! Five agents are walked: Claude Code, Codex, pi/omp, Cursor, and Muse. Cursor
+//! is the odd one — its conversations live in ONE global key/value DB rather
+//! than per-session transcript files, so its floor is a timestamp watermark
+//! rather than a byte offset (see `ScanJob::since_ms`).
 
 use std::path::{Path, PathBuf};
 
@@ -21,8 +21,9 @@ use modelstat_parsers::discovery::{
 };
 use modelstat_parsers::{
     parse_claude_code_jsonl, parse_claude_code_jsonl_streaming, parse_codex_rollout,
-    parse_codex_rollout_streaming, parse_cursor_tracking_db, parse_pi_session,
-    parse_pi_session_streaming, ParseResult, ParserContext,
+    parse_codex_rollout_streaming, parse_cursor_tracking_db, parse_muse_session,
+    parse_muse_session_streaming, parse_pi_session, parse_pi_session_streaming, ParseResult,
+    ParserContext,
 };
 use modelstat_wire::RawEvent;
 
@@ -33,6 +34,7 @@ pub enum ParserKind {
     Codex,
     Pi,
     Cursor,
+    Muse,
 }
 
 /// One transcript to scan.
@@ -346,6 +348,34 @@ pub fn discover_jobs_in_with(home: &Path, process_dirs: &[(String, String)]) -> 
         }
     }
 
+    // Muse — <data-dir>/sessions/<Y>/<M>/<D>/<session-uuid>/session.jsonl.
+    // One directory per session, one append-only transcript per directory, so
+    // the walk is strict four levels plus the fixed filename: a loose `*.jsonl`
+    // would swallow the `tool-outputs/` spools and `cli-*.log` files that sit
+    // beside the transcript in the same session directory.
+    for data_dir in data_dir_candidates_from(home, "muse_code", process_dirs) {
+        for y in child_paths(&PathBuf::from(&data_dir).join("sessions")) {
+            for m in child_paths(&y) {
+                for d in child_paths(&m) {
+                    for s in child_paths(&d) {
+                        if !s.is_dir() {
+                            continue;
+                        }
+                        let f = s.join("session.jsonl");
+                        if f.is_file() {
+                            jobs.push(ScanJob {
+                                agent_label: None,
+                                since_ms: None,
+                                path: f.to_string_lossy().into_owned(),
+                                kind: ParserKind::Muse,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Cursor — the chat store is ONE global key/value DB, not a directory of
     // per-session transcripts: `<data-dir>/User/globalStorage/state.vscdb`.
     // Workspace DBs hold no conversations.
@@ -399,6 +429,7 @@ fn job_session_id(job: &ScanJob) -> Option<String> {
         }
         ParserKind::Pi => modelstat_parsers::pi::derive_session_id_from_pi_path(&job.path),
         ParserKind::Cursor => None,
+        ParserKind::Muse => modelstat_parsers::muse::derive_session_id_from_muse_path(&job.path),
     }
 }
 
@@ -510,6 +541,7 @@ pub fn parse_job(device_id: &str, job: &ScanJob) -> std::io::Result<ParseResult>
         ParserKind::Codex => parse_codex_rollout(&ctx),
         ParserKind::Pi => parse_pi_session(&ctx),
         ParserKind::Cursor => parse_cursor_tracking_db(&ctx),
+        ParserKind::Muse => parse_muse_session(&ctx),
     }
 }
 
@@ -531,6 +563,7 @@ pub fn parse_job_streaming(
         ParserKind::ClaudeCode => parse_claude_code_jsonl_streaming(&ctx, emit),
         ParserKind::Codex => parse_codex_rollout_streaming(&ctx, emit),
         ParserKind::Pi => parse_pi_session_streaming(&ctx, emit),
+        ParserKind::Muse => parse_muse_session_streaming(&ctx, emit),
         // A key/value store has no streaming shape: it is read whole (bounded by
         // the since-floor) and handed over as one chunk.
         ParserKind::Cursor => {
@@ -677,9 +710,12 @@ mod tests {
         mk(".codex/sessions/2026/07/16/other.jsonl"); // ignored (not rollout-)
         mk(".pi/agent/sessions/p/b.jsonl");
         mk(".omp/agent/sessions/p/c.jsonl");
+        mk(".local/share/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl");
+        mk(".local/share/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/tool-outputs/call_1-bash.txt"); // ignored (not session.jsonl)
+        mk(".local/share/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/cli-x.log"); // ignored (not session.jsonl)
 
         let jobs = jobs_in(&home);
-        assert_eq!(jobs.len(), 4);
+        assert_eq!(jobs.len(), 5);
         assert!(jobs
             .iter()
             .any(|j| j.kind == ParserKind::ClaudeCode && j.path.ends_with("a.jsonl")));
@@ -692,6 +728,13 @@ mod tests {
         assert!(jobs
             .iter()
             .any(|j| j.kind == ParserKind::Pi && j.path.ends_with("c.jsonl")));
+        // Separator-agnostic: on Windows the walked path carries `\`.
+        assert!(jobs.iter().any(|j| {
+            j.kind == ParserKind::Muse
+                && j.path.ends_with("session.jsonl")
+                && modelstat_parsers::muse::derive_session_id_from_muse_path(&j.path).as_deref()
+                    == Some("0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a")
+        }));
 
         let _ = std::fs::remove_dir_all(&home);
     }

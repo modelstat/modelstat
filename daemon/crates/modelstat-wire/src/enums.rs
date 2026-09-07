@@ -7,11 +7,11 @@
 //! server knows but this build doesn't), so validation is an explicit pass, not
 //! a deserialize-time hard fail — mirroring the TS Zod `z.enum(...)`.
 //!
-//! Parity note: the TS `AGENTS` array has **33** entries. feature §4 prose says
+//! Parity note: the TS `AGENTS` array has **34** entries. feature §4 prose says
 //! "34-enum"; per the spec's own rule ("where docs and code disagree, code is
 //! authoritative", §23) the code count wins and this list matches it exactly.
 
-/// AI clients (`agent` field). 33 entries — see the parity note above.
+/// AI clients (`agent` field). 34 entries — see the parity note above.
 pub const AGENTS: &[&str] = &[
     "claude_code",
     "claude_desktop",
@@ -36,6 +36,7 @@ pub const AGENTS: &[&str] = &[
     "kimi",
     "pi",
     "openclaw",
+    "muse_code",
     "hermes",
     "ollama",
     "raw_sdk_anthropic",
@@ -48,7 +49,7 @@ pub const AGENTS: &[&str] = &[
     "unknown",
 ];
 
-/// Model providers (`provider` field). 11 entries.
+/// Model providers (`provider` field). 12 entries.
 pub const PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
@@ -58,6 +59,7 @@ pub const PROVIDERS: &[&str] = &[
     "deepseek",
     "moonshot",
     "mistral",
+    "meta",
     "xai",
     "ollama_local",
     "unknown",
@@ -176,8 +178,8 @@ mod tests {
     #[test]
     fn counts_match_ts_code() {
         // The numbers the golden enums.json (generated from TS) must also show.
-        assert_eq!(AGENTS.len(), 33);
-        assert_eq!(PROVIDERS.len(), 11);
+        assert_eq!(AGENTS.len(), 34);
+        assert_eq!(PROVIDERS.len(), 12);
         assert_eq!(EVENT_KINDS.len(), 5);
         assert_eq!(TOOL_CALL_STATUSES.len(), 5);
         assert_eq!(OS_FAMILIES.len(), 4);

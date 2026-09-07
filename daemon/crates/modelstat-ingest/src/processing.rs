@@ -442,6 +442,12 @@ const CODEX: &[Semantics] = &[
 /// store.
 const CURSOR: &[Semantics] = &[];
 
+/// `muse` — a parser-scoped aspect: a bump re-reads only Muse's transcripts.
+/// A new parser's files have no cursors to wipe, so it seeds with no
+/// generations: the version is the legacy floor, nothing re-reads, and the
+/// first scan settles it (the cursor precedent).
+const MUSE: &[Semantics] = &[];
+
 /// `pi` — a parser-scoped aspect: a bump re-reads only pi's transcripts.
 const PI: &[Semantics] = &[
     // v24 — a record's identity is the id it states, not where it sat. Every
@@ -491,6 +497,7 @@ pub const ASPECT_DERIVATIONS: &[(&str, &[Semantics])] = &[
     ("codex", CODEX),
     ("cursor", CURSOR),
     ("pi", PI),
+    ("muse", MUSE),
 ];
 
 /// An aspect's compiled version: the legacy base plus every generation it has

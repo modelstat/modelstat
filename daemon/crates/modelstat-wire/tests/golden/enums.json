@@ -23,6 +23,7 @@
     "kimi",
     "pi",
     "openclaw",
+    "muse_code",
     "hermes",
     "ollama",
     "raw_sdk_anthropic",
@@ -43,6 +44,7 @@
     "deepseek",
     "moonshot",
     "mistral",
+    "meta",
     "xai",
     "ollama_local",
     "unknown"
