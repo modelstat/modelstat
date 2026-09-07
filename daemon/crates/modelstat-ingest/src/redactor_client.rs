@@ -16,6 +16,9 @@
 //! (see `privacy_filter::label_window` for the precedent and the crash-loop
 //! that taught it).
 
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use modelstat_redact::remote::{
@@ -35,6 +38,13 @@ fn backoff(attempt: usize) -> Duration {
 /// Longest server-suggested wait we honor inline; anything larger means "come
 /// back next flush", which is what `None` already does.
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
+
+/// How many classify chunks may be in flight at once. One chunk is seconds of
+/// model time and a backlog flush carries hundreds of them, so one-at-a-time
+/// turns any single failure in that long window into a held flush. Four lanes
+/// cut the window ~4x with the same requests and the same fail-closed answers;
+/// the server's own 429/Retry-After still paces us when it is hot.
+const CHUNK_CONCURRENCY: usize = 4;
 
 /// Soft byte budget per request body. Chunks aim under this; one oversize text
 /// still ships alone (the hard cap [`MAX_REQUEST_BYTES`] is sized to fit it).
@@ -69,6 +79,10 @@ fn request_timeout() -> Duration {
         .map(Duration::from_millis)
         .unwrap_or(DEFAULT_REQUEST_TIMEOUT)
 }
+
+/// A chunk's classified slots, or `()` when the endpoint failed.
+type BisectOut = Result<Vec<Option<Vec<PiiToken>>>, ()>;
+type BisectFut = std::pin::Pin<Box<dyn std::future::Future<Output = BisectOut> + Send>>;
 
 /// Why one classify request failed — the split that decides whether asking
 /// again with less can help.
@@ -161,7 +175,12 @@ impl RemoteRedactor {
     /// nothing, stop; [`ChunkError::Refused`] (any other non-2xx: the server
     /// looked at THIS request and said no) — the content is implicated, so the
     /// caller bisects rather than letting one poison text hold the rest.
-    async fn classify_chunk(&self, texts: &[String]) -> Result<Vec<Vec<PiiToken>>, ChunkError> {
+    async fn classify_chunk(
+        http: &reqwest::Client,
+        base: &str,
+        bearer: &Option<String>,
+        texts: &[String],
+    ) -> Result<Vec<Vec<PiiToken>>, ChunkError> {
         let body = ClassifyRequest {
             protocol: REDACT_PROTOCOL,
             texts: texts.to_vec(),
@@ -170,8 +189,8 @@ impl RemoteRedactor {
             if attempt > 0 {
                 tokio::time::sleep(jitter(backoff(attempt - 1))).await;
             }
-            let mut req = self.http.post(self.url("/v1/redact/classify")).json(&body);
-            if let Some(b) = &self.bearer {
+            let mut req = http.post(format!("{base}/v1/redact/classify")).json(&body);
+            if let Some(b) = bearer {
                 req = req.bearer_auth(b);
             }
             let resp = match req.send().await {
@@ -254,40 +273,40 @@ impl RemoteRedactor {
     }
 
     /// Classify one wire-sized chunk, isolating failures per text: an answered
-    /// chunk fills its texts' slots; a refused chunk is halved and each half
+    /// chunk returns its texts' slots; a refused chunk is halved and each half
     /// retried (as its own smaller batch) until the unanswerable text stands
     /// alone, so it fails exactly as a single-text request always has — its
     /// slot `None`, its 63 batch-mates answered. `Err` means the ENDPOINT
-    /// failed: this chunk's remaining slots are filled with `None` and the
-    /// caller should stop asking.
-    fn bisect<'a>(
-        &'a self,
-        texts: &'a [String],
-        out: &'a mut Vec<Option<Vec<PiiToken>>>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ()>> + Send + 'a>> {
+    /// failed: the caller fills this chunk's slots with `None` and stops
+    /// starting new ones. Owned inputs so chunk tasks are `'static`.
+    fn bisect(
+        http: reqwest::Client,
+        base: String,
+        bearer: Option<String>,
+        texts: Vec<String>,
+    ) -> BisectFut {
         Box::pin(async move {
-            match self.classify_chunk(texts).await {
-                Ok(answers) => {
-                    out.extend(answers.into_iter().map(Some));
-                    Ok(())
-                }
-                Err(ChunkError::Endpoint) => {
-                    out.extend(texts.iter().map(|_| None));
-                    Err(())
-                }
+            match Self::classify_chunk(&http, &base, &bearer, &texts).await {
+                Ok(answers) => Ok(answers.into_iter().map(Some).collect()),
+                Err(ChunkError::Endpoint) => Err(()),
                 Err(ChunkError::Refused) if texts.len() == 1 => {
                     modelstat_log::log_warn!(
                         "remote redactor cannot classify one text of {} bytes — \
                          holding it (isolated; the rest of its batch is unaffected)",
                         texts[0].len()
                     );
-                    out.push(None);
-                    Ok(())
+                    Ok(vec![None])
                 }
                 Err(ChunkError::Refused) => {
+                    // The rare poison path, kept sequential: bisection is
+                    // failure isolation, not throughput — no reason to fan out
+                    // a tree that exists to quarantine one text.
                     let mid = texts.len() / 2;
-                    self.bisect(&texts[..mid], out).await?;
-                    self.bisect(&texts[mid..], out).await
+                    let (head, tail) = (texts[..mid].to_vec(), texts[mid..].to_vec());
+                    let mut out =
+                        Self::bisect(http.clone(), base.clone(), bearer.clone(), head).await?;
+                    out.extend(Self::bisect(http, base, bearer, tail).await?);
+                    Ok(out)
                 }
             }
         })
@@ -331,16 +350,59 @@ impl PiiModel for RemoteRedactor {
             texts.iter().all(|t| t.len() < MAX_REQUEST_BYTES / 2),
             "a text exceeding the wire cap cannot be classified remotely"
         );
-        self.block_on(async {
+        // Owned per-task inputs: JoinSet tasks are `'static`, and the clones
+        // are cheap (the HTTP client is an Arc inside; two small strings).
+        let http = self.http.clone();
+        let base = self.base.clone();
+        let bearer = self.bearer.clone();
+        let chunks: Vec<Vec<String>> = Self::chunks(texts)
+            .into_iter()
+            .map(|c| c.to_vec())
+            .collect();
+        let lens: Vec<usize> = chunks.iter().map(Vec::len).collect();
+        self.block_on(async move {
+            // Bounded lanes, ordered assembly. A chunk that never starts after
+            // a sibling proved the endpoint down reads unanswered — the same
+            // fail-closed tail the sequential loop produced, only narrower:
+            // chunks already in flight still land their answers.
+            let down = Arc::new(AtomicBool::new(false));
+            let sem = Arc::new(tokio::sync::Semaphore::new(CHUNK_CONCURRENCY));
+            let mut set = tokio::task::JoinSet::new();
+            for (idx, chunk) in chunks.into_iter().enumerate() {
+                let (http, base, bearer, down, sem) = (
+                    http.clone(),
+                    base.clone(),
+                    bearer.clone(),
+                    down.clone(),
+                    sem.clone(),
+                );
+                set.spawn(async move {
+                    let _permit = sem.acquire_owned().await.ok()?;
+                    if down.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    match Self::bisect(http, base, bearer, chunk).await {
+                        Ok(ans) => Some((idx, ans)),
+                        Err(()) => {
+                            down.store(true, Ordering::SeqCst);
+                            None
+                        }
+                    }
+                });
+            }
+            let mut by_idx: BTreeMap<usize, Vec<Option<Vec<PiiToken>>>> = BTreeMap::new();
+            while let Some(joined) = set.join_next().await {
+                // A panicked lane reads unanswered like any other failure —
+                // its slots are None-filled below by index.
+                if let Ok(Some((idx, ans))) = joined {
+                    by_idx.insert(idx, ans);
+                }
+            }
             let mut out: Vec<Option<Vec<PiiToken>>> = Vec::with_capacity(texts.len());
-            let mut endpoint_down = false;
-            for chunk in Self::chunks(texts) {
-                let filled_before = out.len();
-                if endpoint_down || self.bisect(chunk, &mut out).await.is_err() {
-                    // A dead endpoint answers nothing else this call — every
-                    // slot the bisection never reached reads "unanswered".
-                    endpoint_down = true;
-                    out.resize(filled_before + chunk.len(), None);
+            for (idx, len) in lens.into_iter().enumerate() {
+                match by_idx.remove(&idx) {
+                    Some(ans) => out.extend(ans),
+                    None => out.extend(std::iter::repeat_with(|| None).take(len)),
                 }
             }
             debug_assert_eq!(out.len(), texts.len(), "one slot per text, always");
@@ -429,6 +491,135 @@ mod tests {
 
     fn ok_body(results: &str) -> String {
         format!(r#"{{"protocol":1,"model":"privacy-filter@abc123def456","results":{results}}}"#)
+    }
+
+    /// Content-aware mock: answers every request from its own texts (one echo
+    /// token per text), so concurrent chunks cannot steal each other's canned
+    /// responses. Holds each connection `hold_ms` while counting, proving
+    /// overlap. Serves exactly `expect` requests, then stops accepting.
+    struct EchoMock {
+        addr: String,
+        seen: Arc<Mutex<usize>>,
+        peak: Arc<Mutex<usize>>,
+        /// Texts per request, in arrival order — the chunk-size assertions.
+        counts: Arc<Mutex<Vec<usize>>>,
+    }
+
+    fn echo_mock(expect: usize, hold_ms: u64) -> EchoMock {
+        echo_mock_routed(expect, hold_ms, None)
+    }
+
+    fn echo_mock_routed(expect: usize, hold_ms: u64, fail_when: Option<String>) -> EchoMock {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(0usize));
+        let peak = Arc::new(Mutex::new(0usize));
+        let counts = Arc::new(Mutex::new(Vec::new()));
+        let live = Arc::new(AtomicUsize::new(0));
+        let fail = fail_when.clone();
+        let out_seen = seen.clone();
+        let out_peak = peak.clone();
+        let out_counts = counts.clone();
+        std::thread::spawn(move || {
+            for _ in 0..expect {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let seen = seen.clone();
+                let peak = peak.clone();
+                let counts = counts.clone();
+                let live = live.clone();
+                let fail = fail.clone();
+                std::thread::spawn(move || {
+                    let mut buf = vec![0u8; 1 << 20];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = sock.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        req.extend_from_slice(&buf[..n]);
+                        if let Some(head_end) = find(&req, b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&req[..head_end]).to_string();
+                            let want: usize = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if req.len() >= head_end + 4 + want {
+                                break;
+                            }
+                        }
+                    }
+                    let cur = live.fetch_add(1, Ordering::SeqCst) + 1;
+                    {
+                        let mut p = peak.lock().unwrap();
+                        *p = (*p).max(cur);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+                    let body = &req[req
+                        .windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .map(|i| i + 4)
+                        .unwrap_or(req.len())..];
+                    let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+                    let texts: Vec<String> = v["texts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|t| t.as_str().unwrap().to_string())
+                        .collect();
+                    counts.lock().unwrap().push(texts.len());
+                    let failed = fail
+                        .as_ref()
+                        .is_some_and(|f| texts.iter().any(|t| t.contains(f)));
+                    let (status, out) = if failed {
+                        (
+                            "503 Service Unavailable",
+                            r#"{"error":"redactor_unavailable"}"#.to_string(),
+                        )
+                    } else {
+                        let results: Vec<serde_json::Value> = texts
+                            .iter()
+                            .map(|s| {
+                                serde_json::json!([{
+                                    "entity": "S-private_person",
+                                    "word": s,
+                                    "start": 0,
+                                    "end": s.chars().count(),
+                                }])
+                            })
+                            .collect();
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "protocol": 1,
+                                "model": "privacy-filter@abc123def456",
+                                "results": results,
+                            })
+                            .to_string(),
+                        )
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nRetry-After: 0\r\n\r\n{out}",
+                        out.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes());
+                    live.fetch_sub(1, Ordering::SeqCst);
+                    *seen.lock().unwrap() += 1;
+                });
+            }
+        });
+        EchoMock {
+            addr,
+            seen: out_seen,
+            peak: out_peak,
+            counts: out_counts,
+        }
     }
 
     /// `results` for `n` texts none of which carried any entity.
@@ -542,38 +733,31 @@ mod tests {
 
     /// The reason batching exists: a flush of many texts must ride FEW requests
     /// — at most [`MAX_TEXTS_PER_REQUEST`] texts each — and every answer must
-    /// land back on its own text, across the chunk boundary included.
+    /// land back on its own text, across the chunk boundary included. The mock
+    /// echoes each request's own texts (not canned bodies in accept order), so
+    /// concurrent chunks cannot steal each other's answers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn many_texts_ride_few_requests_and_answers_keep_their_order() {
-        // Distinguishable answers at the chunk seam: the 64th text (last of
-        // request 1) and the 65th (first of request 2).
-        let last_of_first = r#"[{"entity":"S-secret","word":"m63"}]"#;
-        let first_of_second = r#"[{"entity":"S-secret","word":"m64"}]"#;
-        let m = mock(vec![
-            (
-                200,
-                "",
-                ok_body(&format!("[{},{last_of_first}]", ["[]"; 63].join(","))),
-            ),
-            (
-                200,
-                "",
-                ok_body(&format!("[{first_of_second},{}]", ["[]"; 5].join(","))),
-            ),
-        ]);
-        let r = RemoteRedactor::new(&m.addr, None);
         let texts: Vec<String> = (0..70).map(|i| format!("t{i}")).collect();
+        let m = echo_mock(2, 0);
+        let r = RemoteRedactor::new(&m.addr, None);
         let out = r.classify_many(&texts).expect("healthy server answers");
         assert_eq!(out.len(), 70, "one answer per text");
-        assert_eq!(out[63][0].word, "m63");
-        assert_eq!(out[64][0].word, "m64");
-        assert!(out[0].is_empty() && out[69].is_empty());
-        let seen = m.seen.lock().unwrap();
-        assert_eq!(seen.len(), 2, "70 texts are 2 requests, not 70");
-        assert_eq!(texts_sent(&seen[0]).len(), MAX_TEXTS_PER_REQUEST);
-        assert_eq!(texts_sent(&seen[1]).len(), 6);
-        assert_eq!(texts_sent(&seen[0])[63], "t63");
-        assert_eq!(texts_sent(&seen[1])[0], "t64");
+        // The chunk seam: last text of request 1 and first of request 2 each
+        // carry their own echo — order holds across the boundary.
+        assert_eq!(out[63][0].word, "t63");
+        assert_eq!(out[64][0].word, "t64");
+        for (i, toks) in out.iter().enumerate() {
+            assert_eq!(toks.len(), 1);
+            assert_eq!(toks[0].word, texts[i]);
+        }
+        let mut sizes = m.counts.lock().unwrap().clone();
+        sizes.sort_unstable();
+        assert_eq!(
+            sizes,
+            vec![6, MAX_TEXTS_PER_REQUEST],
+            "70 texts are 2 requests (64+6), not 70"
+        );
     }
 
     /// One unclassifiable text must not hold its batch-mates hostage: a refused
@@ -627,21 +811,12 @@ mod tests {
 
     /// An endpoint that dies mid-call: the chunks already answered keep their
     /// answers (the span cache upstream will remember them), the rest hold.
+    /// Failure is routed by request CONTENT (any text of the second chunk),
+    /// so the verdict does not depend on which chunk arrives first.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_endpoint_failure_mid_call_keeps_the_answers_already_won() {
-        let unavailable = || {
-            (
-                503,
-                "Retry-After: 0\r\n",
-                r#"{"error":"redactor_unavailable"}"#.to_string(),
-            )
-        };
-        let m = mock(vec![
-            (200, "", ok_body(&empties(64))),
-            unavailable(),
-            unavailable(),
-            unavailable(),
-        ]);
+        // 70 texts are 2 chunks (64+6); the second chunk fails 3 attempts.
+        let m = echo_mock_routed(1 + 3, 0, Some("t64".to_string()));
         let r = RemoteRedactor::new(&m.addr, None);
         let texts: Vec<String> = (0..70).map(|i| format!("t{i}")).collect();
         let each = r.classify_each(&texts);
@@ -708,5 +883,29 @@ mod tests {
     fn empty_input_needs_no_server_at_all() {
         let r = RemoteRedactor::new("http://127.0.0.1:1", None);
         assert_eq!(r.classify_many(&[]), Some(Vec::new()));
+    }
+
+    /// A backlog flush carries thousands of texts (≈150 sequential chunk
+    /// requests): at one-at-a-time, any single failure in that long window
+    /// holds the whole flush. Chunks must fly concurrently — same requests,
+    /// same fail-closed answers, a fraction of the window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn chunks_fly_concurrently_and_answers_keep_request_order() {
+        let texts: Vec<String> = (0..130).map(|i| format!("concurrent text {i}")).collect();
+        let expect = RemoteRedactor::chunks(&texts).len();
+        assert!(expect > 1, "the test needs more than one chunk");
+        let m = echo_mock(expect, 300);
+        let r = RemoteRedactor::new(&m.addr, None);
+        let out = r.classify_many(&texts).expect("healthy server answers");
+        assert_eq!(out.len(), texts.len(), "one answer per text");
+        for (i, toks) in out.iter().enumerate() {
+            assert_eq!(toks.len(), 1, "one echo token per text");
+            assert_eq!(toks[0].word, texts[i], "answers follow request order");
+        }
+        assert_eq!(*m.seen.lock().unwrap(), expect, "one request per chunk");
+        assert!(
+            *m.peak.lock().unwrap() >= 2,
+            "chunks overlap in flight instead of queueing one-at-a-time"
+        );
     }
 }
