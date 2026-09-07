@@ -197,10 +197,13 @@ final class TrayController: NSObject {
   private let workMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   /// The one total: everything this device has measured, ever.
   private let totalsMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-  /// Detected agent installs, verbatim from the daemon — identity, not a
-  /// fifth number: it answers "what is being watched", none of the four
-  /// work rows do, and it hides itself on older daemons that don't report it.
+  /// Detected agent installs, verbatim machine names from the daemon — one row
+  /// per agent in a submenu, so thirteen installs never become one unreadable
+  /// line. Registry-known sources only (the daemon filters signature-only
+  /// leads out); hidden entirely on older daemons that don't report it.
   private let agentsMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+  private let agentsSubmenu = NSMenu()
+  private var lastAgents: [String] = []
   private let deviceMI = NSMenuItem(title: "", action: nil, keyEquivalent: "")
   private let claimMI = NSMenuItem(title: "Open device page", action: #selector(openDashboard), keyEquivalent: "o")
   private let copyClaimMI = NSMenuItem(title: "Copy claim URL", action: #selector(copyClaimUrl), keyEquivalent: "c")
@@ -330,6 +333,7 @@ final class TrayController: NSObject {
     summariserSubmenu.addItem(modeSelfHostedMI)
     summariserMI.submenu = summariserSubmenu
     menu.addItem(summariserMI)
+    agentsMI.submenu = agentsSubmenu
     // Redactor mode — the summariser submenu's twin.
     redactorCloudMI.target = self
     redactorLocalMI.target = self
@@ -639,11 +643,24 @@ final class TrayController: NSObject {
     }
 
     // Detected agents — which installs the daemon is watching, verbatim from
-    // the mirror. Hidden when the daemon is too old to report it (or none).
-    if let agents = local?.stats?.detected_agents, !agents.isEmpty {
-      setInfo(agentsMI, "Agents: \(agents.joined(separator: ", "))")
+    // the mirror, one row each. Hidden when the daemon is too old to report
+    // them (or none). Children rebuild only when the set changes, so the
+    // 1s tick doesn't churn the menu under the user's cursor.
+    let agents = local?.stats?.detected_agents ?? []
+    agentsMI.isHidden = agents.isEmpty
+    if !agents.isEmpty {
+      agentsMI.title = "Agents (\(agents.count))"
+      if agents != lastAgents {
+        lastAgents = agents
+        agentsSubmenu.removeAllItems()
+        for a in agents {
+          let mi = NSMenuItem(title: a, action: nil, keyEquivalent: "")
+          mi.isEnabled = false
+          agentsSubmenu.addItem(mi)
+        }
+      }
     } else {
-      setInfo(agentsMI, "")
+      lastAgents = []
     }
   }
 
