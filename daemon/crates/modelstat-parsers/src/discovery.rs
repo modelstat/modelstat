@@ -183,6 +183,14 @@ fn sources() -> &'static [SourceSpec] {
             data_dir_env: &[],
             binaries: &["openclaw", "claw", "clawdbot", "moltbot"],
         },
+        SourceSpec {
+            agent: "muse_code",
+            macos: &["~/.local/share/muse"],
+            linux: &["$XDG_DATA_HOME/muse", "~/.local/share/muse"],
+            windows: &["~/.local/share/muse"],
+            data_dir_env: &[],
+            binaries: &["muse"],
+        },
     ]
 }
 
@@ -1510,7 +1518,102 @@ fn probe_identities(os: Os) -> Vec<DetectedIdentity> {
     // probe. Only a fingerprint of the key travels.
     ids.extend(probe_provider_key_identities(&home));
 
+    // Muse — Meta account (OIDC device flow via auth.meta.com) or API key.
+    // The launcher's credential store (`$MUSE_AUTH_PATH`, else
+    // `$XDG_CONFIG_HOME/muse/auth.json`, else `~/.config/muse/auth.json`) is
+    // `{ providers: { meta: { mechanism, access_token, expires_at } } }`:
+    // tokens, never an account id. So the probe first tries a JWT decode of
+    // the access token (sub/email), and only when the token is opaque falls
+    // back to the key fingerprint — the `provider_key_fingerprint`
+    // precedent: a SHA-256 prefix plus the last four characters travels, the
+    // key itself never leaves this function. Rotating the login reads as a
+    // new account, which is the honest outcome: nothing on the machine ties
+    // the old token to the new one. (Keychain-held logins, which Muse
+    // reports as `credential_backend: "keychain"`, have no documented
+    // service name to probe — those sessions stay unattributed until Meta
+    // documents one.)
+    {
+        let mut candidates: Vec<String> = Vec::new();
+        if let Ok(p) = std::env::var("MUSE_AUTH_PATH") {
+            if !p.trim().is_empty() {
+                candidates.push(p);
+            }
+        }
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            if !xdg.trim().is_empty() {
+                candidates.push(format!("{}/muse/auth.json", xdg.trim_end_matches('/')));
+            }
+        }
+        candidates.push(format!("{home}/.config/muse/auth.json"));
+        ids.extend(probe_muse_auth_identity(&candidates));
+    }
+
     ids
+}
+
+/// Muse credential stores to read, in order. Extracted so tests can point it
+/// at fixtures: [`probe_identities`] builds the real list from
+/// `$MUSE_AUTH_PATH` / `$XDG_CONFIG_HOME` / the home directory.
+fn probe_muse_auth_identity(candidates: &[String]) -> Vec<DetectedIdentity> {
+    for candidate in candidates {
+        let Some(obj) = read_json(candidate) else {
+            continue;
+        };
+        let token = obj
+            .get("providers")
+            .and_then(|p| p.get("meta"))
+            .and_then(|m| m.get("access_token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(token) = token else { continue };
+        let mut email = None;
+        let mut sub = None;
+        if let Some(claims) = decode_jwt_claims(token) {
+            email = claims
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            sub = claims
+                .get("sub")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        }
+        if let Some(pid) = sub.clone().or_else(|| email.clone()) {
+            return vec![DetectedIdentity {
+                provider: "meta".into(),
+                provider_account_id: pid,
+                provider_account_label: email.clone(),
+                account_email: email,
+                account_org: None,
+                display_name: None,
+                owner_scope: "unassigned".into(),
+                detection_source: "muse_auth_json".into(),
+            }];
+        }
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(token.as_bytes());
+        let fingerprint = format!("{digest:x}")[..24].to_string();
+        let last4: String = token
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        return vec![DetectedIdentity {
+            provider: "meta".into(),
+            provider_account_id: format!("key:{fingerprint}"),
+            provider_account_label: Some(format!("key ••••{last4}")),
+            account_email: None,
+            account_org: None,
+            display_name: None,
+            owner_scope: "unassigned".into(),
+            detection_source: "muse_auth_json".into(),
+        }];
+    }
+    Vec::new()
 }
 
 /// Providers whose account is an opaque API KEY rather than an OAuth login, as
@@ -2298,5 +2401,88 @@ mod provider_key_tests {
         assert_eq!(out[0].handle, "a@x.com");
         assert_eq!(out[0].display_name.as_deref(), Some("A"));
         assert_eq!(out[0].detection_source, "git_config");
+    }
+}
+
+#[cfg(test)]
+mod muse_identity_tests {
+    use super::*;
+
+    fn write_auth(name: &str, body: &str) -> String {
+        let dir =
+            std::env::temp_dir().join(format!("modelstat-muse-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        std::fs::write(&path, body).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A JWT access token names its account (sub, else email) — the stable id,
+    /// not a fingerprint of a rotating token.
+    #[test]
+    fn a_jwt_login_resolves_to_its_subject() {
+        // `{"sub":"meta-sub-1","email":"dev@example.com"}`, base64url, alg none.
+        // Synthetic fixture, not a credential.
+        let jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJtZXRhLXN1Yi0xIiwiZW1haWwiOiJkZXZAZXhhbXBsZS5jb20ifQ.sig";
+        let path = write_auth(
+            "jwt",
+            &format!(
+                r#"{{"providers":{{"meta":{{"mechanism":"oauth","access_token":"{jwt}"}}}}}}"#
+            ),
+        );
+        let ids = probe_muse_auth_identity(std::slice::from_ref(&path));
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].provider, "meta");
+        assert_eq!(ids[0].provider_account_id, "meta-sub-1");
+        assert_eq!(
+            ids[0].provider_account_label.as_deref(),
+            Some("dev@example.com")
+        );
+        assert_eq!(ids[0].detection_source, "muse_auth_json");
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
+    }
+
+    /// An opaque access token carries no account: only the fingerprint
+    /// travels, and the token itself never leaves the probe.
+    #[test]
+    fn an_opaque_token_becomes_a_fingerprint() {
+        const TOKEN: &str = "opaque-token-abcdef1234567890wxyz";
+        let path = write_auth(
+            "opaque",
+            &format!(
+                r#"{{"providers":{{"meta":{{"mechanism":"oauth","access_token":"{TOKEN}"}}}}}}"#
+            ),
+        );
+        let ids = probe_muse_auth_identity(std::slice::from_ref(&path));
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].provider, "meta");
+        assert_eq!(ids[0].provider_account_id, "key:6a42482a34763238e07c33ed");
+        assert_eq!(
+            ids[0].provider_account_label.as_deref(),
+            Some("key ••••wxyz")
+        );
+        let dumped = format!("{ids:?}");
+        assert!(!dumped.contains(TOKEN), "the token leaked: {dumped}");
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_missing_or_tokenless_store_is_silent() {
+        assert!(probe_muse_auth_identity(&["/no/such/auth.json".to_string()]).is_empty());
+        // Parses but names no token: skipped, and the next candidate is tried.
+        let empty = write_auth("empty", r#"{"providers":{"meta":{"mechanism":"oauth"}}}"#);
+        let jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJtZXRhLXN1Yi0xIiwiZW1haWwiOiJkZXZAZXhhbXBsZS5jb20ifQ.sig";
+        let full = write_auth(
+            "full",
+            &format!(
+                r#"{{"providers":{{"meta":{{"mechanism":"oauth","access_token":"{jwt}"}}}}}}"#
+            ),
+        );
+        let ids = probe_muse_auth_identity(&[empty.clone(), full.clone()]);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].provider_account_id, "meta-sub-1");
+        for p in [empty, full] {
+            std::fs::remove_dir_all(std::path::Path::new(&p).parent().unwrap()).ok();
+        }
     }
 }

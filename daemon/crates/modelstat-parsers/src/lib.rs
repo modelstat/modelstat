@@ -1,4 +1,4 @@
-//! Session-log parsers (claude-code / codex / pi / cursor), discovery,
+//! Session-log parsers (claude-code / codex / pi / cursor / muse), discovery,
 //! tool-action/shell.v3, tool-hash, references, and git helpers
 //! (see core/specs/daemon/plan.md §5, feature §7).
 //!
@@ -27,6 +27,7 @@ pub mod git_outcome;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor;
+pub mod muse;
 pub mod pi;
 
 pub mod discovery;
@@ -53,6 +54,9 @@ pub use claude_code::{
 };
 pub use codex::{parse_codex_rollout, parse_codex_rollout_streaming};
 pub use cursor::parse_cursor_tracking_db;
+pub use muse::{
+    derive_session_id_from_muse_path, parse_muse_session, parse_muse_session_streaming, AGENT_MUSE,
+};
 pub use pi::{parse_pi_session, parse_pi_session_streaming};
 
 pub use discovery::{

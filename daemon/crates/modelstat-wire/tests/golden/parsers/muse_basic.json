@@ -1,0 +1,219 @@
+{
+  "deviceId": "dev_1",
+  "sourceFile": "/tmp/modelstat-fixtures/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl",
+  "events": [
+    {
+      "source_event_id": "evt_3sk3ptdzekhy8",
+      "seq": 3,
+      "ts": "2026-09-07T11:00:00.200Z",
+      "kind": "user_message",
+      "agent": "muse_code",
+      "provider": "meta",
+      "model": "muse-spark-1.3-contributor",
+      "session_id": "0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": "/Users/dev/projects/acme/web",
+      "git": {
+        "remote_url": null,
+        "remote_host": null,
+        "remote_slug": "acme/web",
+        "branch": null,
+        "slug_source": "path_shape"
+      },
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "content_excerpt": "Fix the login redirect, see acme/web#42",
+      "content_bytes": 39,
+      "references": {
+        "repos": [],
+        "pull_requests": [],
+        "issues": [
+          {
+            "provider": "github",
+            "key": "42",
+            "slug": "acme/web",
+            "url": null,
+            "source": "content",
+            "confidence": 0.8,
+            "ambiguous": true
+          }
+        ]
+      },
+      "source_file": "/tmp/modelstat-fixtures/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl",
+      "source_byte_offset": 1003
+    },
+    {
+      "source_event_id": "evt_3sk3ptdzejoma",
+      "seq": 12,
+      "ts": "2026-09-07T11:00:03.300Z",
+      "kind": "assistant_message",
+      "agent": "muse_code",
+      "provider": "meta",
+      "model": "muse-spark-1.3-contributor",
+      "session_id": "0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": "/Users/dev/projects/acme/web",
+      "git": {
+        "remote_url": null,
+        "remote_host": null,
+        "remote_slug": "acme/web",
+        "branch": null,
+        "slug_source": "path_shape"
+      },
+      "tokens": {
+        "input": 1286,
+        "output": 104,
+        "cache_creation": 0,
+        "cache_read": 30065,
+        "reasoning": 28
+      },
+      "duration_ms": 2332,
+      "tool_calls": {
+        "bash": 1,
+        "read_file": 1
+      },
+      "files_touched": [],
+      "tool_paths": [
+        "src/main.ts"
+      ],
+      "source_file": "/tmp/modelstat-fixtures/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl",
+      "source_byte_offset": 6431
+    },
+    {
+      "source_event_id": "evt_3sk3ptdzeqm6j",
+      "seq": 17,
+      "ts": "2026-09-07T11:00:03.700Z",
+      "kind": "runtime.session.gadget",
+      "agent": "muse_code",
+      "provider": "meta",
+      "model": null,
+      "session_id": "0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a",
+      "turn_index": 0,
+      "parent_event_id": null,
+      "cwd": null,
+      "git": null,
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "source_file": "/tmp/modelstat-fixtures/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl",
+      "source_byte_offset": 9275
+    },
+    {
+      "source_event_id": "evt_lmxqzw03hhjn",
+      "seq": 19,
+      "ts": "2026-09-07T11:00:03.900Z",
+      "kind": "user_message",
+      "agent": "muse_code",
+      "provider": "meta",
+      "model": "muse-spark-1.3-contributor",
+      "session_id": "0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a",
+      "turn_index": 1,
+      "parent_event_id": null,
+      "cwd": "/Users/dev/projects/acme/web",
+      "git": {
+        "remote_url": null,
+        "remote_host": null,
+        "remote_slug": "acme/web",
+        "branch": null,
+        "slug_source": "path_shape"
+      },
+      "tokens": null,
+      "duration_ms": null,
+      "tool_calls": {},
+      "files_touched": [],
+      "content_excerpt": "Also update the changelog",
+      "content_bytes": 25,
+      "source_file": "/tmp/modelstat-fixtures/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl",
+      "source_byte_offset": 10257
+    }
+  ],
+  "toolCalls": [
+    {
+      "external_call_id": "call_1",
+      "session_id": "0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a",
+      "source_event_id": "evt_3sk3ptdzeiyiv",
+      "agent": "muse_code",
+      "server": "builtin",
+      "name": "bash",
+      "turn_index": 0,
+      "call_index": 0,
+      "started_at": "2026-09-07T11:00:02.832Z",
+      "ended_at": "2026-09-07T11:00:03.200Z",
+      "status": "success",
+      "args_hash": "3eeff6603da3143a3aaeecf1dfbd11ce85946c16c75cffcfda23f553dac2e24e",
+      "signature_hash": "fd279e58fe8e0d3209cf512e6f85e751ce08a8ed8597ccbef81f06e22a92b47e",
+      "args_bytes": 59,
+      "result_bytes": 135,
+      "model": "muse-spark-1.3-contributor",
+      "action": {
+        "surface": "shell",
+        "executable": "git",
+        "action": null,
+        "object": null,
+        "qualifiers": [],
+        "param_shape": "§ --short",
+        "keywords": [],
+        "abstract": null,
+        "command_redacted": "git status --short",
+        "input_redacted": "{\"command\":\"git status --short\",\"description\":\"check tree\"}",
+        "input_format": "json",
+        "input_truncated": false,
+        "scripts": [],
+        "confidence": 0.0,
+        "extractor": "shell.v3"
+      }
+    },
+    {
+      "external_call_id": "call_2",
+      "session_id": "0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a",
+      "source_event_id": "evt_3sk3ptdzeiyiv",
+      "agent": "muse_code",
+      "server": "builtin",
+      "name": "read_file",
+      "turn_index": 0,
+      "call_index": 1,
+      "started_at": "2026-09-07T11:00:02.832Z",
+      "ended_at": null,
+      "status": "unknown",
+      "args_hash": "bd299a52e88149b4dd260b1eef4ca452f4cb81585c7663198eae4d0ebeecc9eb",
+      "signature_hash": "a0af9f865bf637e6736817f4ce552e4cdf7b8c36ea75bc254c1d1f0af744b5bf",
+      "args_bytes": 22,
+      "result_bytes": 0,
+      "model": "muse-spark-1.3-contributor",
+      "action": {
+        "surface": "builtin",
+        "executable": "read_file",
+        "action": null,
+        "object": null,
+        "qualifiers": [],
+        "param_shape": null,
+        "keywords": [],
+        "abstract": null,
+        "command_redacted": null,
+        "input_redacted": "{\"path\":\"src/main.ts\"}",
+        "input_format": "json",
+        "input_truncated": false,
+        "scripts": [],
+        "confidence": 0.0,
+        "extractor": "builtin.v1"
+      }
+    }
+  ],
+  "scriptContexts": [
+    {
+      "external_call_id": "call_1",
+      "command": "git status --short",
+      "cwd": "/Users/dev/projects/acme/web"
+    }
+  ],
+  "stats": {
+    "rawLines": 22,
+    "emittedEvents": 4,
+    "skipped": 3
+  }
+}

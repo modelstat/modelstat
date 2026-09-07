@@ -19,8 +19,8 @@ use std::path::Path;
 
 use modelstat_parsers::types::{ParseStats, ToolCallDraft};
 use modelstat_parsers::{
-    parse_claude_code_jsonl, parse_codex_rollout, parse_cursor_tracking_db, parse_pi_session,
-    ParserContext,
+    parse_claude_code_jsonl, parse_codex_rollout, parse_cursor_tracking_db, parse_muse_session,
+    parse_pi_session, ParserContext,
 };
 use modelstat_wire::RawEvent;
 use serde::Deserialize;
@@ -386,12 +386,38 @@ fn parser_golden_parity() {
         assert!(res.tool_calls.is_empty(), "cursor toolCalls empty");
     }
 
-    // 7. Streaming-mode equivalence (M2 AC): each line-based parser must produce
+    // 7. Muse — typed prompts, disjoint usage buckets, tool drafts paired by
+    //    call_id, assistant events excerpt-free (prose is live-only).
+    {
+        let file = format!(
+            "{BASE}/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl"
+        );
+        let res = parse_muse_session(&ctx(&file)).unwrap();
+        let g = golden("muse_basic.json");
+        assert_eq!(res.events, events_of(&g), "muse events");
+        assert_eq!(res.tool_calls, tool_calls_of(&g), "muse toolCalls");
+        // Two prompts (turns 0 and 1), one usage-bearing step, one unknown
+        // record shipped verbatim; the permission frame and the restated
+        // records (prompt, counters, task lifecycle) decline silently.
+        assert_eq!(
+            res.skipped_kinds,
+            [
+                ("omitted/task_tool_delta_v1".to_string(), 1),
+                ("runtime.session.gadget".to_string(), 1),
+            ]
+            .into_iter()
+            .collect(),
+            "muse skipped_kinds"
+        );
+    }
+
+    // 8. Streaming-mode equivalence (M2 AC): each line-based parser must produce
     //    byte-identical events/tool_calls/stats whether it collects or streams in
     //    bounded chunks. Cursor is a row-set (not streamed) and is exempt.
     {
         use modelstat_parsers::claude_code::parse_claude_code_jsonl_streaming;
         use modelstat_parsers::codex::parse_codex_rollout_streaming;
+        use modelstat_parsers::muse::parse_muse_session_streaming;
         use modelstat_parsers::pi::parse_pi_session_streaming;
 
         let claude = format!("{BASE}/claude/11111111-1111-1111-1111-111111111111.jsonl");
@@ -417,6 +443,15 @@ fn parser_golden_parity() {
             parse_pi_session(&ctx_api(&pi)).unwrap(),
             |emit| parse_pi_session_streaming(&ctx_api(&pi), emit).unwrap(),
             "pi",
+        );
+
+        let muse = format!(
+            "{BASE}/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl"
+        );
+        assert_stream_matches(
+            parse_muse_session(&ctx(&muse)).unwrap(),
+            |emit| parse_muse_session_streaming(&ctx(&muse), emit).unwrap(),
+            "muse",
         );
     }
 }
@@ -625,6 +660,13 @@ fn regen_goldens() {
     dump(
         "cursor_basic.json",
         &parse_cursor_tracking_db(&ctx(&format!("{BASE}/cursor/state.vscdb"))).unwrap(),
+    );
+    dump(
+        "muse_basic.json",
+        &parse_muse_session(&ctx(&format!(
+            "{BASE}/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl"
+        )))
+        .unwrap(),
     );
 }
 

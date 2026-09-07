@@ -83,6 +83,7 @@ impl crate::discover_jobs::ParserKind {
             crate::discover_jobs::ParserKind::Codex => "codex",
             crate::discover_jobs::ParserKind::Pi => "pi",
             crate::discover_jobs::ParserKind::Cursor => "cursor",
+            crate::discover_jobs::ParserKind::Muse => "muse",
         }
     }
 }
@@ -540,7 +541,7 @@ mod tests {
     #[test]
     fn every_parser_has_an_aspect_entry() {
         use crate::discover_jobs::ParserKind::*;
-        for kind in [ClaudeCode, Codex, Pi, Cursor] {
+        for kind in [ClaudeCode, Codex, Pi, Cursor, Muse] {
             assert!(
                 ASPECT_DERIVATIONS.iter().any(|(a, _)| *a == kind.aspect()),
                 "parser {kind:?} has no aspect version — its fixes could never re-scan"

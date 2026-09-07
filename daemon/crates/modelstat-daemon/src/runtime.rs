@@ -447,6 +447,10 @@ fn kind_for_path(path: &str) -> ParserKind {
         ParserKind::Codex
     } else if path.contains("/.pi/agent/sessions/") || path.contains("/.omp/agent/sessions/") {
         ParserKind::Pi
+    } else if modelstat_parsers::muse::derive_session_id_from_muse_path(path).is_some() {
+        // The strict date-partitioned shape, not a substring: a repo that
+        // merely has `muse/sessions/` in its path must not route here.
+        ParserKind::Muse
     } else {
         ParserKind::ClaudeCode
     }
@@ -459,6 +463,9 @@ fn kind_for_path(path: &str) -> ParserKind {
 fn session_id_for_path(path: &str) -> Option<String> {
     if path.contains("/.pi/agent/sessions/") || path.contains("/.omp/agent/sessions/") {
         return modelstat_parsers::pi::derive_session_id_from_pi_path(path);
+    }
+    if let sid @ Some(_) = modelstat_parsers::muse::derive_session_id_from_muse_path(path) {
+        return sid;
     }
     modelstat_parsers::claude_code::derive_session_id_from_filename(path)
         .or_else(|| modelstat_parsers::codex::derive_session_id_from_rollout_path(path))
@@ -868,6 +875,16 @@ mod tests {
         );
         assert_eq!(
             kind_for_path("/h/.claude/projects/p/x.jsonl"),
+            ParserKind::ClaudeCode
+        );
+        assert_eq!(
+            kind_for_path("/h/.local/share/muse/sessions/2026/09/07/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a/session.jsonl"),
+            ParserKind::Muse
+        );
+        // A muse sidecar is not a transcript — the strict filename keeps it
+        // on ClaudeCode's fallback rather than misrouting it to the parser.
+        assert_eq!(
+            kind_for_path("/h/.local/share/muse/sessions/2026/09/07/sid/cli-x.log"),
             ParserKind::ClaudeCode
         );
     }
