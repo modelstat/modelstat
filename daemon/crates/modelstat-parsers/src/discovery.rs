@@ -186,6 +186,39 @@ fn sources() -> &'static [SourceSpec] {
     ]
 }
 
+/// Human label for an agent key from the source registry above. Unknown keys
+/// pass through verbatim, so a new source renders before its label lands here.
+pub fn display_label(agent: &str) -> &str {
+    match agent {
+        "claude_code" => "Claude Code",
+        "codex_cli" => "Codex CLI",
+        "claude_desktop" => "Claude Desktop",
+        "cursor" => "Cursor",
+        "windsurf" => "Windsurf",
+        "zed" => "Zed",
+        "gemini_cli" => "Gemini CLI",
+        "aider" => "Aider",
+        "ollama" => "Ollama",
+        "pi" => "pi",
+        "bb" => "bb",
+        "openclaw" => "OpenClaw",
+        other => other,
+    }
+}
+
+/// Sorted, deduped display names for detected installations — the tray/CLI
+/// "Agents" row. Pure: the heartbeat owns the probe cadence, this only shapes
+/// the reading it already holds.
+pub fn detected_agent_names(installations: &[DetectedInstallation]) -> Vec<String> {
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    for i in installations {
+        if !i.agent.is_empty() {
+            names.insert(display_label(&i.agent));
+        }
+    }
+    names.into_iter().map(str::to_string).collect()
+}
+
 /// Which strategies to skip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
@@ -1715,6 +1748,29 @@ fn dedupe_identities(list: Vec<DetectedIdentity>) -> Vec<DetectedIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detected_installations_fold_into_a_sorted_unique_label_row() {
+        let inst = |agent: &str| DetectedInstallation {
+            agent: agent.to_string(),
+            install_method: "manual".to_string(),
+            binary_path: None,
+            data_dir: None,
+            version: None,
+            detected_via: vec![],
+        };
+        let names = detected_agent_names(&[
+            inst("cursor"),
+            inst("claude_code"),
+            inst("cursor"),
+            inst("codex_cli"),
+            inst("something_new"),
+        ]);
+        assert_eq!(
+            names,
+            vec!["Claude Code", "Codex CLI", "Cursor", "something_new"]
+        );
+    }
 
     /// The `FileSignatures` strategy was declared in [`Strategy`] and
     /// implemented nowhere — `discover()` never consulted it, so the enum

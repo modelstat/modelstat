@@ -310,6 +310,21 @@ pub async fn cmd_status(api: &DeviceApi, args: &[String]) -> ExitCode {
         ""
     };
     println!("redactor: {rd_mode}{rd_endpoint}{rd_env} — change with `modelstat redactor`");
+    if let Some(names) = local
+        .as_ref()
+        .and_then(|l| l.get("stats"))
+        .and_then(|s| s.get("detected_agents"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.is_empty())
+    {
+        println!("agents:  {names}");
+    }
     println!("on-device models:");
     print_models(&config);
     println!(

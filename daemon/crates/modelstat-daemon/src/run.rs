@@ -23,8 +23,8 @@ use modelstat_ingest::accounts;
 use modelstat_ingest::state::save_state;
 use modelstat_ingest::{home_path, Config};
 use modelstat_parsers::discovery::{
-    discover, discover_identities, DetectedHandle, DetectedInstallation, DiscoveryOptions,
-    DiscoveryOutput,
+    detected_agent_names, discover, discover_identities, DetectedHandle, DetectedInstallation,
+    DiscoveryOptions, DiscoveryOutput,
 };
 use modelstat_receiver::{
     drain_local_queue, start_local_ingest_receiver, ControlScanHandler, ControlTarget, QueueStore,
@@ -528,6 +528,13 @@ async fn heartbeat_loop(daemon: Arc<Daemon>) {
             daemon.with_status(|s| {
                 s.set_stat("installations_detected", json!(installations.len()));
                 s.set_stat("identities_detected", json!(identities.len()));
+                // The tray/CLI "Agents" row reads this off the status mirror —
+                // names, not just the count. Shaped from the reading this loop
+                // already holds: no extra probe, same 5-min install cadence.
+                s.set_stat(
+                    "detected_agents",
+                    json!(detected_agent_names(&installations)),
+                );
             });
             let key =
                 serde_json::to_string(&(&installations, &identities, &handles)).unwrap_or_default();
