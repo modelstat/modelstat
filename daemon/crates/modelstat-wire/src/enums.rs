@@ -178,8 +178,8 @@ mod tests {
     #[test]
     fn counts_match_ts_code() {
         // The numbers the golden enums.json (generated from TS) must also show.
-        assert_eq!(AGENTS.len(), 33);
-        assert_eq!(PROVIDERS.len(), 11);
+        assert_eq!(AGENTS.len(), 34);
+        assert_eq!(PROVIDERS.len(), 12);
         assert_eq!(EVENT_KINDS.len(), 5);
         assert_eq!(TOOL_CALL_STATUSES.len(), 5);
         assert_eq!(OS_FAMILIES.len(), 4);
