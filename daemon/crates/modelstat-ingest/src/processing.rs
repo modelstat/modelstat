@@ -436,6 +436,11 @@ const CODEX: &[Semantics] = &[
     // false local script contexts; no other parser emits this custom string
     // record shape.
     Semantics::Semantic,
+    // v31 — Codex now states cache-write input beside cache-read input. Earlier
+    // builds hardcoded that bucket to zero and left those tokens inside ordinary
+    // input. Re-reading is the only way to recover the stated cache creation and
+    // make all input buckets disjoint; Codex event identities remain unchanged.
+    Semantics::Semantic,
 ];
 
 /// `cursor` — a parser-scoped aspect: a bump re-reads only Cursor's bubble
