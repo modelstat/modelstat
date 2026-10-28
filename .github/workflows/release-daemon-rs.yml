@@ -475,9 +475,10 @@ jobs:
       # keeps naming the last release (a local `cargo build` then reports the
       # right number, and the seed path above has something to read).
       #
-      # This can't re-trigger the workflow: pushes made with GITHUB_TOKEN don't
-      # start new runs, and `[skip ci]` says so a second time. Skipped entirely on
-      # a tag push or manual dispatch, which don't own main's contents.
+      # This can't re-trigger the workflow: the push uses the built-in
+      # GITHUB_TOKEN (checkout above has no `token:`), and GitHub starts no run for
+      # a GITHUB_TOKEN push. Skipped entirely on a tag push or manual dispatch,
+      # which don't own main's contents.
       - name: Commit the version bump back to main
         id: bump
         if: github.event_name == 'push' && github.ref_type == 'branch'
@@ -503,7 +504,7 @@ jobs:
           fi
 
           git add daemon/Cargo.toml daemon/Cargo.lock
-          git commit -m "release: daemon v$VERSION [skip ci]"
+          git commit -m "release: daemon v$VERSION"
 
           # Rebase-retry: another merge can land while the six targets build.
           pushed=0
